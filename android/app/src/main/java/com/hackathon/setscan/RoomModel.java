@@ -28,6 +28,7 @@ final class RoomModel {
     static final class Box {
         float x0, z0, x1, z1, y0, y1;
         String label;
+        volatile String name; // what the photo recognition thinks it is (null until labelled)
     }
 
     static final class Light {

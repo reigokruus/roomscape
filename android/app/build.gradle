@@ -8,6 +8,7 @@ android {
         targetSdk 35
         versionCode((project.findProperty('buildNumber') ?: '1') as Integer)
         versionName "0.1.${project.findProperty('buildNumber') ?: '0'}"
+        ndk { abiFilters 'arm64-v8a' } // all current phones; keeps the ML Kit libraries from tripling the APK size
     }
     signingConfigs {
         // Shared debug key (committed on purpose) so builds from CI and any laptop can update each other.
@@ -23,4 +24,8 @@ android {
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
-dependencies { implementation 'com.google.ar:core:1.57.0' }
+dependencies {
+    implementation 'com.google.ar:core:1.57.0'
+    // on-device image labelling (bundled model, works offline) to name furniture from the scan photos
+    implementation 'com.google.mlkit:image-labeling:17.0.9'
+}

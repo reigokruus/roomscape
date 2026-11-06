@@ -229,7 +229,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private void finishStatus() {
-        activity.updateStatus((roomReady ? room.summary + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
+        StringBuilder objs = new StringBuilder();
+        if (roomReady) for (RoomModel.Box bx : room.boxes) if (bx.name != null) objs.append(objs.length() > 0 ? ", " : "").append(bx.name);
+        activity.updateStatus((roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
     }
 
     private java.util.List<RoomModel.PlaneData> lastPlanes = new java.util.ArrayList<>();
@@ -339,6 +341,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("photos: " + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
                     + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
         } catch (Throwable e) { logError("photos", new RuntimeException(e)); }
+        try {
+            java.util.List<ObjectNamer.Job> jobs = ObjectNamer.prepare(room, photos, width, height);
+            if (!jobs.isEmpty()) {
+                log("naming " + jobs.size() + " furniture blocks from photos");
+                ObjectNamer.label(jobs, () -> {
+                    StringBuilder b = new StringBuilder();
+                    for (RoomModel.Box bx : room.boxes) if (bx.name != null) b.append(b.length() > 0 ? ", " : "").append(bx.name);
+                    log("objects: " + (b.length() > 0 ? b : "none recognised"));
+                    finishStatus();
+                });
+            }
+        } catch (Throwable e) { logError("objects", new RuntimeException(e)); }
     }
 
     /** Export the whole scan as a zip (GL thread part), then write it in the background and hand back a share uri. */
@@ -501,7 +515,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
                 "    if ((dot(r, uDir) > uCutD && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
                 "      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; } }" +
-                "  gl_Position = uMvp * aPos; gl_PointSize = clamp(uSize / max(gl_Position.w, 0.05), 2.0, 96.0); vColor = aColor; }",
+                // splats shrink in world size when you get close (w < 1.5 m), so near surfaces stay detailed instead of blobby
+                "  gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
+                "  gl_PointSize = clamp(uSize / w * clamp(w / 1.5, 0.3, 1.0), 1.5, 48.0); vColor = aColor; }",
                 // uPass: 0 = splat core (opaque, writes depth), 1 = splat halo (soft gaussian, blended), 2 = plain
                 "precision mediump float; varying vec4 vColor; uniform float uPass;" +
                 "void main(){" +
