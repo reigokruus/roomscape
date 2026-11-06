@@ -28,6 +28,21 @@ import java.util.Locale;
 final class ClaudeHelper {
 
     static final String MODEL = "claude-opus-5-5";
+    /** Estimated spend since the app started, in US dollars (Claude Opus 5.5 list price: $4 in / $20 out per million tokens). */
+    static volatile double sessionUsd;
+    static volatile int sessionCalls;
+
+    private static void count(BetaMessage msg) {
+        com.anthropic.models.beta.messages.BetaUsage u = msg.usage();
+        long in = u.inputTokens() + u.cacheCreationInputTokens().orElse(0L), cached = u.cacheReadInputTokens().orElse(0L);
+        sessionUsd += (in * 4.0 + cached * 0.2 + u.outputTokens() * 20.0) / 1_000_000.0;
+        sessionCalls++;
+    }
+
+    static String costLine() {
+        return sessionCalls == 0 ? "" : String.format(Locale.US, "Claude: %d call%s, about $%.2f this session", sessionCalls, sessionCalls == 1 ? "" : "s", sessionUsd);
+    }
+
     /** Categories the app has a simple cartoon model for. */
     static final String KINDS = "table, desk, chair, stool, bed, sofa, shelf, cabinet, wardrobe, shoe, bottle, can, cup, vase, lamp, plant, bag, screen, box, pole, other, noise";
 
@@ -89,6 +104,7 @@ final class ClaudeHelper {
                     .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
                     .build();
             BetaMessage msg = client.beta().messages().create(params);
+            count(msg);
             if (msg.stopReason().isPresent() && msg.stopReason().get().equals(BetaStopReason.REFUSAL))
                 throw new IllegalStateException("Claude declined this request");
             StringBuilder text = new StringBuilder();
@@ -124,6 +140,7 @@ final class ClaudeHelper {
                     .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
                     .build();
             BetaMessage msg = client.beta().messages().create(params);
+            count(msg);
             if (msg.stopReason().isPresent() && msg.stopReason().get().equals(BetaStopReason.REFUSAL))
                 throw new IllegalStateException("Claude declined this request");
             StringBuilder text = new StringBuilder();

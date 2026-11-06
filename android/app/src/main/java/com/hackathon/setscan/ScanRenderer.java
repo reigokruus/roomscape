@@ -301,7 +301,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             objs.append(objs.length() > 0 ? ", " : "").append(bx.title());
             if (bx.parent != null) objs.append(" (on ").append(bx.parent.title()).append(")");
         }
-        activity.updateStatus((claudeAdvice != null ? claudeAdvice : "") + (roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. You're standing in the middle of the room: drag to look around, pinch out to see it from outside, two fingers to move. Yellow line = your walking path.");
+        activity.updateStatus((claudeAdvice != null ? claudeAdvice : "") + (ClaudeHelper.sessionCalls > 0 ? "💰 " + ClaudeHelper.costLine() + "\n" : "") + (roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. You're standing in the middle of the room: drag to look around, pinch out to see it from outside, two fingers to move. Yellow line = your walking path.");
     }
 
     private java.util.List<RoomModel.PlaneData> lastPlanes = new java.util.ArrayList<>();
@@ -1407,7 +1407,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + "[tracking " + ts + ", reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + "]\n"
                         + diagnostics();
             } else {
-                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "") + (claudeLiveKey != null && claudeLine != null ? "\n" + claudeLine : "")
+                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "") + (claudeLiveKey != null && claudeLine != null ? "\n" + claudeLine : "") + (ClaudeHelper.sessionCalls > 0 ? "\n💰 " + ClaudeHelper.costLine() : "")
                         + "\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n" + diagnostics();
             }
             activity.updateStatus(s);
