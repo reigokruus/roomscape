@@ -21,7 +21,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - name: Build APK
         working-directory: android
         run: ./gradlew assembleDebug -PbuildNumber=${{ github.run_number }} --no-daemon
