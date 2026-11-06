@@ -325,7 +325,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     float sx = (float) DepthNet.IW / iw, sy = (float) DepthNet.IH / ih;
                     // 1) scale fit: nearest ARCore point per 8 px cell vs the net's disparity there
                     int cw = iw / 8 + 1, chh = ih / 8 + 1;
-                    float[] cd = new float[cw * chh], cr = new float[cw * chh];
+                    float[] cd = new float[cw * chh], cr = new float[cw * chh], cuu = new float[cw * chh], cvv = new float[cw * chh];
                     float[] vm = k.view, pt = new float[2];
                     for (int i = 0; i < refN; i++) {
                         float x = ref[i * 3], y = ref[i * 3 + 1], z = ref[i * 3 + 2];
@@ -338,11 +338,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int X = (int) pt[0], Y = (int) pt[1];
                         if (X < 0 || Y < 0 || X >= iw || Y >= ih) continue;
                         int c = (Y / 8) * cw + X / 8;
-                        if (cd[c] == 0 || d < cd[c]) { cd[c] = d; cr[c] = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))]; }
+                        if (cd[c] == 0 || d < cd[c]) { cd[c] = d; cuu[c] = (float) X / iw - 0.5f; cvv[c] = (float) Y / ih - 0.5f; cr[c] = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))]; }
                     }
-                    float[] ab = fitInverseDepth(cd, cr);
+                    float[] ab = fitInverseDepth(cd, cr, cuu, cvv);
                     if (ab == null) { log("depth AI: photo " + ki + " skipped (too few ARCore points to scale it)"); continue; }
-                    errSum += ab[2]; done++;
+                    errSum += ab[4]; done++;
                     // 2) back-project a 192x108 grid of the photo with the fitted depth
                     final int GU = 192, GV = 108;
                     float[] gd = new float[GU * GV]; int[] gc = new int[GU * GV];
@@ -351,7 +351,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         map.mapPoints(pt);
                         int X = Math.min(iw - 1, Math.max(0, (int) pt[0])), Y = Math.min(ih - 1, Math.max(0, (int) pt[1]));
                         float r = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))];
-                        float inv = ab[0] * r + ab[1];
+                        float inv = ab[0] * r + ab[1] + ab[2] * ((float) X / iw - 0.5f) + ab[3] * ((float) Y / ih - 0.5f);
                         gd[gv * GU + gu] = inv > 0.15f ? 1f / inv : 0;
                         gc[gv * GU + gu] = pix[Y * iw + X];
                     }
@@ -394,32 +394,62 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return "Stop depth AI";
     }
 
-    /** Robust fit of 1/depth = a * disparity + b over the filled cells. Returns {a, b, median relative error} or null. */
-    static float[] fitInverseDepth(float[] cd, float[] cr) {
+    /**
+     * Robust fit of 1/depth = a * disparity + b + c * x + d * y over the filled cells (x, y = photo position, -0.5..0.5).
+     * The x/y terms take out the slight tilt the net puts into some photos (7.6 % -> 6.1 % median error on scan10).
+     * Returns {a, b, c, d, median relative error} or null.
+     */
+    static float[] fitInverseDepth(float[] cd, float[] cr, float[] cu, float[] cv) {
         int n = 0;
         for (float d : cd) if (d > 0) n++;
         if (n < 40) return null;
-        double[] x = new double[n], y = new double[n], w = new double[n];
+        int k = n >= 150 ? 4 : 2;
+        double[][] f = new double[n][];
+        double[] y = new double[n], w = new double[n], e = new double[n];
         int j = 0;
-        for (int i = 0; i < cd.length; i++) if (cd[i] > 0) { x[j] = cr[i]; y[j] = 1.0 / cd[i]; w[j] = 1; j++; }
-        double a = 0, b = 0;
-        double[] e = new double[n];
+        for (int i = 0; i < cd.length; i++) if (cd[i] > 0) {
+            f[j] = k == 4 ? new double[]{cr[i], 1, cu[i], cv[i]} : new double[]{cr[i], 1};
+            y[j] = 1.0 / cd[i]; w[j] = 1; j++;
+        }
+        double[] sol = null;
         for (int iter = 0; iter < 12; iter++) {
-            double sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
-            for (int i = 0; i < n; i++) { sw += w[i]; sx += w[i] * x[i]; sy += w[i] * y[i]; sxx += w[i] * x[i] * x[i]; sxy += w[i] * x[i] * y[i]; }
-            double det = sw * sxx - sx * sx;
-            if (Math.abs(det) < 1e-12) return null;
-            a = (sw * sxy - sx * sy) / det; b = (sy - a * sx) / sw;
-            for (int i = 0; i < n; i++) e[i] = Math.abs(a * x[i] + b - y[i]);
+            double[][] h = new double[k][k + 1];
+            for (int i = 0; i < n; i++) for (int p = 0; p < k; p++) {
+                for (int q = 0; q < k; q++) h[p][q] += w[i] * f[i][p] * f[i][q];
+                h[p][k] += w[i] * f[i][p] * y[i];
+            }
+            sol = solve(h, k);
+            if (sol == null) return null;
+            for (int i = 0; i < n; i++) { double p = 0; for (int q = 0; q < k; q++) p += sol[q] * f[i][q]; e[i] = Math.abs(p - y[i]); }
             double[] s = e.clone(); java.util.Arrays.sort(s);
             double sc = s[n / 2] * 1.5 + 1e-6;
             for (int i = 0; i < n; i++) w[i] = 1.0 / Math.max(1, e[i] / sc);
         }
-        if (a <= 0) return null; // the net's disparity must grow as things get closer
+        if (sol[0] <= 0) return null; // the net's disparity must grow as things get closer
         double[] rel = new double[n];
-        for (int i = 0; i < n; i++) { double p = a * x[i] + b; rel[i] = p > 1e-3 ? Math.abs(1 / p - 1 / y[i]) * y[i] : 1; }
+        for (int i = 0; i < n; i++) {
+            double p = 0; for (int q = 0; q < k; q++) p += sol[q] * f[i][q];
+            rel[i] = p > 1e-3 ? Math.abs(1 / p - 1 / y[i]) * y[i] : 1;
+        }
         java.util.Arrays.sort(rel);
-        return new float[]{(float) a, (float) b, (float) rel[n / 2]};
+        return new float[]{(float) sol[0], (float) sol[1], k == 4 ? (float) sol[2] : 0, k == 4 ? (float) sol[3] : 0, (float) rel[n / 2]};
+    }
+
+    /** Gaussian elimination with partial pivoting on an augmented k x (k+1) matrix. */
+    private static double[] solve(double[][] h, int k) {
+        for (int c = 0; c < k; c++) {
+            int p = c;
+            for (int r = c + 1; r < k; r++) if (Math.abs(h[r][c]) > Math.abs(h[p][c])) p = r;
+            if (Math.abs(h[p][c]) < 1e-12) return null;
+            double[] t = h[c]; h[c] = h[p]; h[p] = t;
+            for (int r = 0; r < k; r++) if (r != c) {
+                double m = h[r][c] / h[c][c];
+                for (int q = c; q <= k; q++) h[r][q] -= m * h[c][q];
+            }
+        }
+        double[] x = new double[k];
+        for (int c = 0; c < k; c++) x[c] = h[c][k] / h[c][c];
+        return x;
     }
 
     /** GL thread: merge one photo's depth points into the scan (2 cm dedupe) and the surface. */
