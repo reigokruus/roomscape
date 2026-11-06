@@ -44,6 +44,30 @@ final class ScanExport {
     static final int MAX_RECS = 1500;
     static final int MAX_EXPORT_FRAMES = 300;
 
+    /**
+     * Keep only depth frames that add a new viewpoint (moved 8 cm or turned 6° from every kept one), so a long scan
+     * of the same spot doesn't bloat the file; then thin evenly to MAX_EXPORT_FRAMES if it's still too many.
+     */
+    static List<Rec> novelFrames(List<Rec> recs) {
+        List<Rec> kept = new ArrayList<>();
+        for (Rec r : recs) {
+            boolean novel = true;
+            for (int i = kept.size() - 1; i >= 0 && i >= kept.size() - 400; i--) {
+                float[] a = kept.get(i).pose, b = r.pose;
+                float dx = a[12] - b[12], dy = a[13] - b[13], dz = a[14] - b[14];
+                float dot = a[8] * b[8] + a[9] * b[9] + a[10] * b[10];
+                if (dx * dx + dy * dy + dz * dz < 0.08f * 0.08f && dot > 0.9945f) { novel = false; break; }
+            }
+            if (novel) kept.add(r);
+        }
+        if (kept.size() > MAX_EXPORT_FRAMES) {
+            List<Rec> thin = new ArrayList<>();
+            for (int i = 0; i < MAX_EXPORT_FRAMES; i++) thin.add(kept.get((int) ((long) i * kept.size() / MAX_EXPORT_FRAMES)));
+            kept = thin;
+        }
+        return kept;
+    }
+
     /** Reads keyframe textures back as JPEG bytes. Must run on the GL thread. */
     static List<byte[]> readKeyframes(PhotoRoom photos, int screenW, int screenH) {
         List<byte[]> out = new ArrayList<>();
@@ -90,11 +114,7 @@ final class ScanExport {
             os = new FileOutputStream(f);
         }
         // Keep the zip under the chat upload limit: at most MAX_EXPORT_FRAMES depth frames, evenly spread.
-        if (recs.size() > MAX_EXPORT_FRAMES) {
-            List<Rec> thin = new ArrayList<>();
-            for (int i = 0; i < MAX_EXPORT_FRAMES; i++) thin.add(recs.get((int) ((long) i * recs.size() / MAX_EXPORT_FRAMES)));
-            recs = thin;
-        }
+        recs = novelFrames(recs);
         try (ZipOutputStream z = new ZipOutputStream(os)) {
             z.setLevel(9);
             StringBuilder csv = new StringBuilder("idx,timestamp_ns,w,h,fx,fy,cx,cy");

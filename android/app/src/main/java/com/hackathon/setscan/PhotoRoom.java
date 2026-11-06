@@ -27,6 +27,7 @@ final class PhotoRoom {
         short[] depth; int dw, dh; float dfx, dfy, dcx, dcy; // depth image for occlusion checks (mm)
         float px, py, pz;              // camera position
         float[] fwd = new float[3];    // viewing direction
+        boolean closeUp;               // taken near a detail zone (never replaced)
     }
 
     final List<Keyframe> keyframes = new ArrayList<>();
@@ -81,7 +82,7 @@ final class PhotoRoom {
 
     /** Should we keep this frame? Far enough (30 cm or 15°) from every keyframe so far, and the phone is steady. */
     boolean wants(float[] pose, float moveSinceLastFrame, float turnSinceLastFrameDeg, boolean nearDetail) {
-        if (keyframes.size() >= MAX_KEYFRAMES) return false;
+        if (keyframes.size() >= MAX_KEYFRAMES && !nearDetail) return false; // full: only close-ups may replace a wide shot
         if (!nearDetail && keyframes.size() >= MAX_KEYFRAMES - 15) return false; // keep room for close-ups of detail zones
         float minMove = nearDetail ? 0.1f : 0.3f, maxDot = nearDetail ? 0.985f : 0.966f;
         if (moveSinceLastFrame > 0.012f || turnSinceLastFrameDeg > 1.2f) return false; // blur risk
@@ -94,12 +95,38 @@ final class PhotoRoom {
         return true;
     }
 
+    /** The wide shot whose nearest other photo is most similar (position + direction): the cheapest one to lose. */
+    private int mostRedundant() {
+        int best = -1; float bestD = Float.MAX_VALUE;
+        for (int i = 0; i < keyframes.size(); i++) {
+            Keyframe a = keyframes.get(i);
+            if (a.closeUp) continue;
+            float nearest = Float.MAX_VALUE;
+            for (int j = 0; j < keyframes.size(); j++) {
+                if (j == i) continue;
+                Keyframe b = keyframes.get(j);
+                float dx = a.px - b.px, dy = a.py - b.py, dz = a.pz - b.pz;
+                float ang = 1f - (a.fwd[0] * b.fwd[0] + a.fwd[1] * b.fwd[1] + a.fwd[2] * b.fwd[2]);
+                nearest = Math.min(nearest, (float) Math.sqrt(dx * dx + dy * dy + dz * dz) + ang * 3f);
+            }
+            if (nearest < bestD) { bestD = nearest; best = i; }
+        }
+        return best;
+    }
+
     /** Copies the live camera texture into a new keyframe texture. */
-    void capture(int cameraTex, float[] pose, float[] texIntr, short[] depth, int dw, int dh, float[] depIntr, float gain, int screenW, int screenH) {
+    void capture(int cameraTex, float[] pose, float[] texIntr, short[] depth, int dw, int dh, float[] depIntr, float gain, int screenW, int screenH, boolean closeUp) {
         int[] t = new int[1];
-        GLES20.glGenTextures(1, t, 0);
+        int replace = -1;
+        if (keyframes.size() >= MAX_KEYFRAMES) {
+            replace = mostRedundant();
+            if (replace < 0) return;
+            t[0] = keyframes.get(replace).tex; // reuse its texture
+        } else {
+            GLES20.glGenTextures(1, t, 0);
+        }
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, t[0]);
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, TEX_W, TEX_H, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+        if (replace < 0) GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, TEX_W, TEX_H, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
@@ -141,7 +168,8 @@ final class PhotoRoom {
         if (depIntr != null) { k.dfx = depIntr[0]; k.dfy = depIntr[1]; k.dcx = depIntr[2]; k.dcy = depIntr[3]; }
         k.px = pose[12]; k.py = pose[13]; k.pz = pose[14];
         k.fwd[0] = -pose[8]; k.fwd[1] = -pose[9]; k.fwd[2] = -pose[10];
-        keyframes.add(k);
+        k.closeUp = closeUp;
+        if (replace >= 0) keyframes.set(replace, k); else keyframes.add(k);
     }
 
     /** Picks the best photo for every triangle of the mesh (triangle soup), and builds per-photo draw groups. */

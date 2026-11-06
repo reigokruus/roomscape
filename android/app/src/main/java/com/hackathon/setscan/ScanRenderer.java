@@ -48,6 +48,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final Tsdf detail = new Tsdf(1_000_000, 0.012f, 0.04f, 0.2f);
     private final java.util.ArrayList<float[]> zones = new java.util.ArrayList<>(); // x, y, z, radius
     private static final float VOXEL_FINE = 0.008f;
+    private int depthPixelsFrame, nearPixelsFrame, closeFrames;
+    private final float[] nearSum = new float[3];
 
     private boolean inZone(float x, float y, float z) {
         for (int i = 0; i < zones.size(); i++) {
@@ -905,6 +907,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
             int[] rgb = new int[3];
+            depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
             // Record the raw frame for export (replaying the scan off the phone).
             if (recs.size() < ScanExport.MAX_RECS) {
                 ScanExport.Rec r = new ScanExport.Rec();
@@ -943,6 +946,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     float wx = m[0] * xc + m[4] * yc + m[8] * zc + m[12];
                     float wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13];
                     float wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
+                    depthPixelsFrame++;
+                    if (d < 0.8f) { nearPixelsFrame++; nearSum[0] += wx; nearSum[1] += wy; nearSum[2] += wz; }
                     boolean fine = !zones.isEmpty() && inZone(wx, wy, wz);
                     long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
                     int hit = voxels.get(vk);
@@ -957,12 +962,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
-            if (photos.wants(m, frameMove, frameTurn, lookingAtZone(m))) {
+            // Close-up held for a moment: make it a detail zone automatically.
+            if (depthPixelsFrame > 500 && nearPixelsFrame > depthPixelsFrame / 2) closeFrames++; else closeFrames = 0;
+            if (closeFrames >= 4 && nearPixelsFrame > 0) {
+                closeFrames = 0;
+                float zx = nearSum[0] / nearPixelsFrame, zy = nearSum[1] / nearPixelsFrame, zz = nearSum[2] / nearPixelsFrame;
+                if (!inZone(zx, zy, zz) && zones.size() < 24) {
+                    zones.add(new float[]{zx, zy, zz, 0.3f});
+                    log(String.format(java.util.Locale.US, "auto detail zone %d at (%.2f, %.2f, %.2f)", zones.size(), zx, zy, zz));
+                    activity.toast("Close-up: adding detail here");
+                }
+            }
+            boolean near = lookingAtZone(m);
+            if (photos.wants(m, frameMove, frameTurn, near)) {
                 short[] dcopy = new short[dw * dh];
                 for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) dcopy[v * dw + u] = dbuf.get(v * dRow + u * dPix);
                 int[] td = ti.getImageDimensions();
                 float[] tIntr = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
-                photos.capture(bgTex, m, tIntr, dcopy, dw, dh, new float[]{fx, fy, cx, cy}, colorGain, width, height);
+                photos.capture(bgTex, m, tIntr, dcopy, dw, dh, new float[]{fx, fy, cx, cy}, colorGain, width, height, near);
                 if (photos.keyframes.size() == 1) log("first photo keyframe (texture " + td[0] + "x" + td[1] + ")");
             }
         } catch (NotYetAvailableException e) {
