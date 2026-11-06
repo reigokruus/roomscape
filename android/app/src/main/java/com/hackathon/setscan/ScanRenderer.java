@@ -162,8 +162,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
             }
             target[0] = (minX + maxX) / 2; target[1] = (minY + maxY) / 2; target[2] = (minZ + maxZ) / 2;
+            boxHalfX = (maxX - minX) / 2; boxHalfZ = (maxZ - minZ) / 2; boxMinY = minY; boxMaxY = maxY;
             float ext = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
             dist = Math.max(1f, ext * 1.2f);
+            roomCenter[0] = target[0]; roomCenter[1] = target[1]; roomCenter[2] = target[2];
         }
         yaw = 0.6f; pitch = 0.6f;
         activity.updateStatus(diagnostics() + "\n" + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
@@ -231,6 +233,30 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         replan();
     }
 
+    private float boxHalfX, boxHalfZ, boxMinY, boxMaxY;
+    private final float[] roomCenter = new float[3];
+    private volatile boolean cutaway = true;
+    private boolean cutActive;
+    private float cutDirX, cutDirZ, cutD, cutFloor, cutCeil;
+
+    boolean toggleCutaway() { cutaway = !cutaway; return cutaway; }
+
+    /** Work out which wall faces the viewer (eye position) and what to hide. */
+    private void updateCutaway(float ex, float ez, boolean top) {
+        cutActive = viewing && cutaway;
+        if (!cutActive) return;
+        cutFloor = planner.isReady() ? planner.floorY : boxMinY;
+        float roomH = boxMaxY - cutFloor;
+        cutCeil = roomH > 1.9f ? boxMaxY - 0.3f : 1e9f;
+        if (top) { cutDirX = 0; cutDirZ = 0; cutD = 1e9f; return; }
+        float dx = ex - roomCenter[0], dz = ez - roomCenter[2];
+        float l = (float) Math.sqrt(dx * dx + dz * dz);
+        if (l < 1e-3f) { cutDirX = 0; cutDirZ = 0; cutD = 1e9f; return; }
+        cutDirX = dx / l; cutDirZ = dz / l;
+        float halfExt = Math.abs(cutDirX) * boxHalfX + Math.abs(cutDirZ) * boxHalfZ;
+        cutD = Math.max(0.3f, halfExt - 0.6f); // drop the outer 60 cm band on the viewer's side
+    }
+
     boolean toggleTopView() { topView = !topView; return topView; }
 
     void orbit(float dx, float dy) {
@@ -280,7 +306,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "void main(){ gl_FragColor = texture2D(uTex, vUv); }");
         ptProg = program(
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
-                "void main(){ gl_Position = uMvp * aPos; gl_PointSize = clamp(uSize / max(gl_Position.w, 0.05), 2.0, 96.0); vColor = aColor; }",
+                // Dollhouse cutaway: hide the wall band facing the viewer and the ceiling.
+                "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform float uFloor; uniform float uCeil;" +
+                "void main(){" +
+                "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
+                "    if ((dot(r, uDir) > uCutD && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
+                "      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; } }" +
+                "  gl_Position = uMvp * aPos; gl_PointSize = clamp(uSize / max(gl_Position.w, 0.05), 2.0, 96.0); vColor = aColor; }",
                 // uPass: 0 = splat core (opaque, writes depth), 1 = splat halo (soft gaussian, blended), 2 = plain
                 "precision mediump float; varying vec4 vColor; uniform float uPass;" +
                 "void main(){" +
@@ -613,6 +645,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float pxPerMeter = height / (2f * (float) Math.tan(Math.toRadians(30)));
         int uSize = GLES20.glGetUniformLocation(ptProg, "uSize");
         int uPass = GLES20.glGetUniformLocation(ptProg, "uPass");
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCut"), cutActive ? 1f : 0f);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(ptProg, "uCenter"), roomCenter[0], roomCenter[1], roomCenter[2]);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(ptProg, "uDir"), cutDirX, cutDirZ);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCutD"), cutD);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uFloor"), cutFloor);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCeil"), cutCeil);
         if (!splats) {
             GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 1.4f * sizeScale);
             GLES20.glUniform1f(uPass, 2f);
@@ -655,6 +693,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uSize"), 4f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uPass"), 2f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCut"), 0f);
         int aPos = GLES20.glGetAttribLocation(ptProg, "aPos");
         int aCol = GLES20.glGetAttribLocation(ptProg, "aColor");
         path.position(0);
@@ -679,8 +718,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (topView) Matrix.setLookAtM(view, 0, target[0], target[1] + dist, target[2], target[0], target[1], target[2], 0, 0, -1);
         else Matrix.setLookAtM(view, 0, ex, ey, ez, target[0], target[1], target[2], 0, 1, 0);
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
+        updateCutaway(ex, ez, topView);
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         drawPoints(mvp, 1f);
+        cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         drawPath(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);

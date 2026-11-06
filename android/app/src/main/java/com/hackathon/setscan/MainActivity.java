@@ -30,7 +30,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button mainButton, topButton, splatButton, planButton;
+    private Button mainButton, topButton, splatButton, planButton, cutButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
@@ -104,7 +104,16 @@ public class MainActivity extends Activity {
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.setGravity(Gravity.CENTER);
         bar.removeView(logButton);
+        Button cutButton = new Button(this);
+        cutButton.setText("Show walls");
+        cutButton.setVisibility(View.GONE);
+        cutButton.setOnClickListener(v -> {
+            boolean on = renderer.toggleCutaway();
+            cutButton.setText(on ? "Show walls" : "Cut walls");
+        });
+        this.cutButton = cutButton;
         row2.addView(planButton);
+        row2.addView(cutButton);
         row2.addView(logButton);
         LinearLayout bars = new LinearLayout(this);
         bars.setOrientation(LinearLayout.VERTICAL);
@@ -163,6 +172,7 @@ public class MainActivity extends Activity {
             topButton.setVisibility(View.GONE);
             topButton.setText("Top view");
             planButton.setVisibility(View.GONE);
+            cutButton.setVisibility(View.GONE);
             planButton.setText("Plan shot");
             resumeSession();
         } else {
@@ -173,6 +183,7 @@ public class MainActivity extends Activity {
                     mainButton.setText("Rescan");
                     topButton.setVisibility(View.VISIBLE);
                     planButton.setVisibility(View.VISIBLE);
+                    cutButton.setVisibility(View.VISIBLE);
                 });
             });
         }
