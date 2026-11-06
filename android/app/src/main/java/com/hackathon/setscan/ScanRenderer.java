@@ -74,6 +74,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean everTracked;
     private String modeLabel = "";
     private TrackingState lastTs;
+    private long lastCamTs = -1, camTsChangedAt, lostSince;
+    private boolean stallLogged;
+    private int recoveries;
     private final StringBuilder log = new StringBuilder();
     private final long t0 = System.currentTimeMillis();
     private final java.util.Set<String> loggedErrors = new java.util.HashSet<>();
@@ -101,7 +104,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Exception e) { r.append("ARCore version: unknown\n"); }
         r.append("Modes tried: ").append(modes).append(", current ").append(modeLabel).append('\n');
         r.append("Tracking: ").append(lastTs).append(", ever tracked ").append(everTracked)
-                .append(", frames ").append(frameNo).append(", update errors ").append(updateErrors).append('\n');
+                .append(", frames ").append(frameNo).append(", update errors ").append(updateErrors).append(", session restarts ").append(recoveries).append('\n');
         r.append("Points: ").append(count).append(", path samples ").append(pathCount).append('\n');
         r.append(diagnostics()).append("\n\nEvent log:\n").append(log);
         return r.toString();
@@ -164,7 +167,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
-        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthNotYet = 0; lastError = "";
+        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         viewing = false;
     }
@@ -261,6 +264,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             return;
         }
         Camera camera = frame.getCamera();
+        long nowMs = System.currentTimeMillis();
+        if (frame.getTimestamp() != lastCamTs) {
+            if (stallLogged) log("camera frames resumed after " + (nowMs - camTsChangedAt) + " ms");
+            lastCamTs = frame.getTimestamp(); camTsChangedAt = nowMs; stallLogged = false;
+        } else if (!stallLogged && nowMs - camTsChangedAt > 1000) {
+            log("camera frames STALLED (same image for 1s)");
+            stallLogged = true;
+        }
         if (frame.hasDisplayGeometryChanged() || frameNo == 0) {
             frame.transformCoordinates2d(Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES, quad,
                     Coordinates2d.TEXTURE_NORMALIZED, quadUv);
@@ -276,6 +287,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (ts == TrackingState.TRACKING) {
             everTracked = true;
             notTrackingSince = 0;
+            lostSince = 0;
+        } else if (everTracked) {
+            // Lost tracking after it worked: if it doesn't come back by itself, restart the AR session.
+            if (lostSince == 0) lostSince = nowMs;
+            else if (nowMs - lostSince > 3000 && recoveries < 10) {
+                recoveries++;
+                lostSince = 0;
+                log("tracking lost for 3s, restarting AR session (attempt " + recoveries + ")");
+                activity.restartSession();
+            }
         } else if (!everTracked) {
             long now = System.currentTimeMillis();
             if (notTrackingSince == 0) notTrackingSince = now;

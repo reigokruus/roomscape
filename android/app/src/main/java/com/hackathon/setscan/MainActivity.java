@@ -181,6 +181,15 @@ public class MainActivity extends Activity {
         glView.onResume();
     }
 
+    /** Called from the GL thread when tracking is stuck: pause and resume the AR session. */
+    void restartSession() {
+        runOnUiThread(() -> {
+            if (session == null || renderer.isViewing()) return;
+            session.pause();
+            resumeSession();
+        });
+    }
+
     private void resumeSession() {
         if (session == null) return;
         try {
