@@ -928,6 +928,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private static final float[] FLOOR_COL = {0.55f, 0.6f, 0.68f, 0.55f};
     private static final float[] WALL_COL = {0.85f, 0.88f, 0.95f, 0.35f};
     private static final float[] WALL_EDGE = {0.95f, 0.97f, 1f, 0.9f};
+    private static final float[] WALL_GUESS = {0.85f, 0.88f, 0.95f, 0.12f};
+    private static final float[] WALL_GUESS_EDGE = {0.95f, 0.97f, 1f, 0.35f};
     private static final float[] TABLE_COL = {0.75f, 0.5f, 0.3f, 0.75f};
     private static final float[] BOX_COL = {1f, 0.6f, 0.2f, 0.28f};
     private static final float[] BOX_EDGE = {1f, 0.65f, 0.25f, 0.95f};
@@ -958,12 +960,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         for (RoomModel.Surface sf : room.surfaces) {
             float[] fill;
             if (sf.kind == RoomModel.Surface.Kind.WALL) {
+                if (room.hasLayout) continue; // the fitted layout replaces ARCore's wall patches
                 if (cutActive && ((sf.cx - roomCenter[0]) * cutDirX + (sf.cz - roomCenter[2]) * cutDirZ) > cutD * 0.5f) continue;
                 fill = WALL_COL;
             } else if (sf.kind == RoomModel.Surface.Kind.TABLE) fill = TABLE_COL;
             else continue;
             planDraw(m, sf.poly, GLES20.GL_TRIANGLE_FAN, fill, 1);
             planDraw(m, sf.poly, GLES20.GL_LINE_LOOP, sf.kind == RoomModel.Surface.Kind.WALL ? WALL_EDGE : TABLE_COL, 1);
+        }
+        // fitted room layout: 4 straight walls; guessed ones are fainter. The wall facing the viewer is cut away.
+        if (room.hasLayout) {
+            float y0 = room.floorY, y1 = room.topY;
+            float[] outline = new float[room.layout.size() * 3];
+            int k = 0;
+            for (RoomModel.Wall w : room.layout) {
+                outline[k++] = w.x0; outline[k++] = y0 + 0.012f; outline[k++] = w.z0;
+                if (cutActive && w.nx * cutDirX + w.nz * cutDirZ > 0.45f) continue;
+                float[] quad = {w.x0, y0, w.z0, w.x1, y0, w.z1, w.x1, y1, w.z1, w.x0, y0, w.z0, w.x1, y1, w.z1, w.x0, y1, w.z0};
+                planDraw(m, quad, GLES20.GL_TRIANGLES, w.seen ? WALL_COL : WALL_GUESS, 1);
+                planDraw(m, new float[]{w.x0, y0, w.z0, w.x0, y1, w.z0, w.x1, y0, w.z1, w.x1, y1, w.z1,
+                        w.x0, y1, w.z0, w.x1, y1, w.z1}, GLES20.GL_LINES, w.seen ? WALL_EDGE : WALL_GUESS_EDGE, 1);
+            }
+            planDraw(m, outline, GLES20.GL_LINE_LOOP, WALL_EDGE, 1);
         }
         // furniture blocks
         for (RoomModel.Box b : room.boxes) {

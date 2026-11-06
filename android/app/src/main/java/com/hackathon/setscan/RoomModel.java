@@ -36,6 +36,13 @@ final class RoomModel {
         String label;
     }
 
+    /** One side of the fitted rectangular room. Normal points out of the room. */
+    static final class Wall {
+        float x0, z0, x1, z1;  // floor-level end points
+        float nx, nz;          // outward normal
+        boolean seen;          // true = backed by scanned points, false = guessed from the scan's edge
+    }
+
     /** Raw plane data captured on the GL thread before the AR session pauses. */
     static final class PlaneData {
         int type; // 0 = horizontal up, 1 = horizontal down, 2 = vertical
@@ -49,6 +56,10 @@ final class RoomModel {
     final List<Light> lights = new ArrayList<>();
     float floorY, ceilingY, sizeX, sizeZ;
     boolean hasCeiling;
+    /** Fitted room layout: a rectangle of 4 walls aligned to the dominant wall direction. */
+    final List<Wall> layout = new ArrayList<>();
+    boolean hasLayout;
+    float layoutAngle, roomW, roomD, topY;
     String summary = "";
 
     void build(List<PlaneData> planes, ShotPlanner grid, FloatBuffer pos, ByteBuffer col, int count) {
@@ -87,6 +98,9 @@ final class RoomModel {
         ceilingY = maxY;
         for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING) { ceilingY = s.cy; hasCeiling = true; }
         if (!hasCeiling && maxY - floorY > 2.0f && maxY - floorY < 4f) hasCeiling = true;
+
+        topY = hasCeiling ? ceilingY : Math.max(floorY + 2.4f, Math.min(maxY, floorY + 3f));
+        fitLayout(pos, count);
 
         // 3) Furniture: connected blocked cells in the floor grid that aren't thin wall strips.
         int nx = grid.nx, nz = grid.nz;
@@ -175,16 +189,126 @@ final class RoomModel {
             if (s.kind == Surface.Kind.FLOOR) floor = true;
         }
         StringBuilder sb = new StringBuilder("Room: ");
-        if (sizeX > 0) sb.append(String.format(Locale.US, "about %.1f × %.1f m", sizeX, sizeZ));
+        if (hasLayout) sb.append(String.format(Locale.US, "about %.1f × %.1f m", roomW, roomD));
+        else if (sizeX > 0) sb.append(String.format(Locale.US, "about %.1f × %.1f m", sizeX, sizeZ));
         if (hasCeiling) sb.append(String.format(Locale.US, ", ceiling %.1f m", ceilingY - floorY));
         sb.append('\n');
         sb.append(floor || grid.isReady() ? "Floor found" : "Floor not found");
+        int seenWalls = 0;
+        for (Wall w : layout) if (w.seen) seenWalls++;
+        if (hasLayout) walls = seenWalls;
         sb.append(" · ").append(walls).append(walls == 1 ? " wall" : " walls");
+        if (hasLayout && seenWalls < 4) sb.append(" (").append(4 - seenWalls).append(" guessed)");
         sb.append(" · ").append(tables).append(tables == 1 ? " table surface" : " table surfaces");
         sb.append(" · ").append(boxes.size()).append(boxes.size() == 1 ? " furniture block" : " furniture blocks");
         sb.append(" · ").append(lights.size()).append(lights.size() == 1 ? " light source" : " light sources");
         for (Light l : lights) sb.append(String.format(Locale.US, "\n💡 %s, %.1f m up", l.label, l.y - floorY));
         summary = sb.toString();
+    }
+
+    /**
+     * Layout fitting (Manhattan-world assumption, like RoomPlan): walls are flat, vertical and at right angles.
+     * 1) find the rotation where wall-height points pile up into the sharpest lines (peaky histograms);
+     * 2) on each axis, the outermost strong peak on each side is a wall;
+     * 3) a side with no peak gets a guessed wall at the scan's edge.
+     */
+    private void fitLayout(FloatBuffer pos, int count) {
+        layout.clear(); hasLayout = false;
+        float lo = floorY + 0.3f, hi = topY - 0.15f;
+        if (hi - lo < 0.5f) hi = lo + 1.5f;
+        int step = Math.max(1, count / 80000);
+        float[] xs = new float[count / step + 1], zs = new float[xs.length];
+        int n = 0;
+        for (int i = 0; i < count; i += step) {
+            float y = pos.get(i * 3 + 1);
+            if (y < lo || y > hi) continue;
+            xs[n] = pos.get(i * 3); zs[n] = pos.get(i * 3 + 2); n++;
+        }
+        if (n < 500) return;
+        // ARCore wall planes give good candidate angles; the histogram search covers the rest.
+        float best = 0; double bestScore = -1;
+        for (int a = 0; a < 90; a++) {
+            double sc = alignScore(xs, zs, n, (float) Math.toRadians(a));
+            if (sc > bestScore) { bestScore = sc; best = a; }
+        }
+        for (Surface s : surfaces) {
+            if (s.kind != Surface.Kind.WALL) continue;
+            float a = (float) Math.toDegrees(Math.atan2(s.nz, s.nx));
+            a = ((a % 90) + 90) % 90;
+            double sc = alignScore(xs, zs, n, (float) Math.toRadians(a));
+            if (sc > bestScore) { bestScore = sc; best = a; }
+        }
+        for (float a = best - 1f; a <= best + 1f; a += 0.1f) {
+            double sc = alignScore(xs, zs, n, (float) Math.toRadians(a));
+            if (sc > bestScore) { bestScore = sc; best = a; }
+        }
+        layoutAngle = best;
+        float th = (float) Math.toRadians(best), c = (float) Math.cos(th), sn = (float) Math.sin(th);
+        float[] us = new float[n], vs = new float[n];
+        for (int i = 0; i < n; i++) { us[i] = xs[i] * c + zs[i] * sn; vs[i] = -xs[i] * sn + zs[i] * c; }
+        float[] ub = walls1D(us, n), vb = walls1D(vs, n);
+        if (ub == null || vb == null) return;
+        roomW = ub[1] - ub[0]; roomD = vb[1] - vb[0];
+        if (roomW < 1f || roomD < 1f || roomW > 20f || roomD > 20f) return;
+        // corners in (u,v), back to world (x,z): x = u*c - v*sn, z = u*sn + v*c
+        float[][] uv = {{ub[0], vb[0]}, {ub[1], vb[0]}, {ub[1], vb[1]}, {ub[0], vb[1]}};
+        float[][] out = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}}; // outward normal of side k (from corner k to k+1) in (u,v)
+        boolean[] seen = {vb[2] > 0, ub[3] > 0, vb[3] > 0, ub[2] > 0};
+        for (int k = 0; k < 4; k++) {
+            float[] p0 = uv[k], p1 = uv[(k + 1) % 4];
+            Wall w = new Wall();
+            w.x0 = p0[0] * c - p0[1] * sn; w.z0 = p0[0] * sn + p0[1] * c;
+            w.x1 = p1[0] * c - p1[1] * sn; w.z1 = p1[0] * sn + p1[1] * c;
+            w.nx = out[k][0] * c - out[k][1] * sn; w.nz = out[k][0] * sn + out[k][1] * c;
+            w.seen = seen[k];
+            layout.add(w);
+        }
+        hasLayout = true;
+    }
+
+    /** Sum of squared 5 cm histogram counts along both rotated axes: highest when walls line up with the bins. */
+    private static double alignScore(float[] xs, float[] zs, int n, float th) {
+        float c = (float) Math.cos(th), s = (float) Math.sin(th);
+        java.util.HashMap<Integer, int[]> hu = new java.util.HashMap<>(), hv = new java.util.HashMap<>();
+        int step = Math.max(1, n / 20000);
+        for (int i = 0; i < n; i += step) {
+            int bu = (int) Math.floor((xs[i] * c + zs[i] * s) / 0.05f), bv = (int) Math.floor((-xs[i] * s + zs[i] * c) / 0.05f);
+            int[] a = hu.get(bu); if (a == null) hu.put(bu, new int[]{1}); else a[0]++;
+            int[] b = hv.get(bv); if (b == null) hv.put(bv, new int[]{1}); else b[0]++;
+        }
+        double sc = 0;
+        for (int[] a : hu.values()) sc += (double) a[0] * a[0];
+        for (int[] b : hv.values()) sc += (double) b[0] * b[0];
+        return sc;
+    }
+
+    /** Returns {low wall, high wall, lowSeen(1/0), highSeen(1/0)} along one axis, or null. */
+    private static float[] walls1D(float[] v, int n) {
+        float[] sorted = java.util.Arrays.copyOf(v, n);
+        java.util.Arrays.sort(sorted);
+        float p1 = sorted[(int) (n * 0.01f)], p99 = sorted[(int) (n * 0.99f) - 1];
+        float bin = 0.05f, lo = sorted[0] - 2 * bin; // pad so a wall at the very edge can still be a peak
+        int nb = (int) ((sorted[n - 1] - lo) / bin) + 5;
+        if (nb > 2000) { lo = p1 - 0.5f; nb = (int) ((p99 + 0.5f - lo) / bin) + 5; }
+        int[] h = new int[nb];
+        for (int i = 0; i < n; i++) { int b = (int) ((v[i] - lo) / bin); if (b >= 0 && b < nb) h[b]++; }
+        float[] sm = new float[nb];
+        float mx = 0;
+        for (int b = 0; b < nb; b++) {
+            sm[b] = h[b] + (b > 0 ? h[b - 1] : 0) * 0.5f + (b < nb - 1 ? h[b + 1] : 0) * 0.5f;
+            mx = Math.max(mx, sm[b]);
+        }
+        // A wall is a peak that stands well above its surroundings and holds a fair share of points.
+        float thr = Math.max(mx * 0.18f, n * 0.004f);
+        int lowB = -1, highB = -1;
+        for (int b = 1; b < nb - 1; b++) if (sm[b] >= thr && sm[b] >= sm[b - 1] && sm[b] >= sm[b + 1]) { lowB = b; break; }
+        for (int b = nb - 2; b > 0; b--) if (sm[b] >= thr && sm[b] >= sm[b - 1] && sm[b] >= sm[b + 1]) { highB = b; break; }
+        float a = p1, z = p99, aSeen = 0, zSeen = 0;
+        float mid = (p1 + p99) / 2;
+        if (lowB >= 0) { float w = lo + (lowB + 0.5f) * bin; if (w < mid) { a = w; aSeen = 1; } }
+        if (highB >= 0) { float w = lo + (highB + 0.5f) * bin; if (w > mid) { z = w; zSeen = 1; } }
+        if (z - a < 0.5f) return null;
+        return new float[]{a, z, aSeen, zSeen};
     }
 
     private boolean nearWall(float x, float y, float z) {
@@ -195,6 +319,12 @@ final class RoomModel {
             if (Math.abs(d) < 0.3f && lateral < 3f) return true;
         }
         return false;
+    }
+
+    private String seenMask() {
+        StringBuilder b = new StringBuilder();
+        for (Wall w : layout) b.append(w.seen ? '1' : '0');
+        return b.toString();
     }
 
     private static float polygonArea(float[] p, float[] n) {
@@ -211,8 +341,9 @@ final class RoomModel {
     }
 
     String logLine() {
-        return String.format(Locale.US, "room: floorY=%.2f ceiling=%s size=%.1fx%.1f surfaces=%d boxes=%d lights=%d",
+        return String.format(Locale.US, "room: floorY=%.2f ceiling=%s size=%.1fx%.1f layout=%s surfaces=%d boxes=%d lights=%d",
                 floorY, hasCeiling ? String.format(Locale.US, "%.2f", ceilingY - floorY) : "none", sizeX, sizeZ,
+                hasLayout ? String.format(Locale.US, "%.1fx%.1f@%.1fdeg seen=%s", roomW, roomD, layoutAngle, seenMask()) : "none",
                 surfaces.size(), boxes.size(), lights.size());
     }
 }
