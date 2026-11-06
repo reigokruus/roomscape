@@ -1,8 +1,13 @@
 import SwiftUI
 import RoomPlan
 
+struct ScanStats: Equatable {
+    var walls = 0, floors = 0, ceilings = 0, doors = 0, windows = 0, objects = 0
+    var isEmpty: Bool { walls + floors + ceilings + doors + windows + objects == 0 }
+}
+
 /// Drives RoomPlan's RoomCaptureView: live scan, then processing, then saving the result.
-final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate {
+final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate, RoomCaptureSessionDelegate {
     enum Phase: Equatable {
         case scanning
         case processing
@@ -12,6 +17,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
 
     @Published var phase: Phase = .scanning
     @Published var saved: SavedScan?
+    @Published var scanStats = ScanStats()
     let captureView: RoomCaptureView
     private var started = false
 
@@ -19,6 +25,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         captureView = RoomCaptureView(frame: .zero)
         super.init()
         captureView.delegate = self
+        captureView.captureSession.delegate = self
     }
 
     required init?(coder: NSCoder) {
@@ -40,6 +47,21 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
 
     func cancel() {
         if phase == .scanning { captureView.captureSession.stop() }
+    }
+
+    // MARK: RoomCaptureSessionDelegate
+
+    func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
+        DispatchQueue.main.async {
+            self.scanStats = ScanStats(
+                walls: room.walls.count,
+                floors: room.floors.count,
+                ceilings: room.ceilings.count,
+                doors: room.doors.count,
+                windows: room.windows.count,
+                objects: room.objects.count
+            )
+        }
     }
 
     // MARK: RoomCaptureViewDelegate
@@ -64,6 +86,34 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     }
 }
 
+private struct ScanStatsHUD: View {
+    let stats: ScanStats
+
+    var body: some View {
+        if !stats.isEmpty {
+            HStack(spacing: 14) {
+                if stats.walls > 0 {
+                    Label("^[\(stats.walls) wall](inflect: true)", systemImage: "rectangle.portrait")
+                }
+                if stats.doors > 0 {
+                    Label("^[\(stats.doors) door](inflect: true)", systemImage: "door.left.hand.open")
+                }
+                if stats.windows > 0 {
+                    Label("^[\(stats.windows) window](inflect: true)", systemImage: "rectangle.inset.filled")
+                }
+                if stats.objects > 0 {
+                    Label("^[\(stats.objects) object](inflect: true)", systemImage: "cube")
+                }
+            }
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: Capsule())
+            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+        }
+    }
+}
+
 private struct RoomCaptureRepresentable: UIViewRepresentable {
     let controller: ScanController
 
@@ -84,6 +134,13 @@ struct ScannerScreen: View {
             RoomCaptureRepresentable(controller: controller)
                 .ignoresSafeArea()
                 .onAppear { controller.start() }
+
+            if controller.phase == .scanning {
+                ScanStatsHUD(stats: controller.scanStats)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 60)
+                    .animation(.easeInOut(duration: 0.25), value: controller.scanStats)
+            }
 
             VStack(spacing: 12) {
                 switch controller.phase {
