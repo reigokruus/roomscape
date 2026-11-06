@@ -46,6 +46,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final Tsdf tsdf = new Tsdf(1_500_000, 0.04f, 0.12f, 0.6f);
     /** Fine surface for the detail zones the user tapped (shoes, the table top...). */
     private final Tsdf detail = new Tsdf(1_000_000, 0.012f, 0.04f, 0.2f);
+    { tsdf.minW = 3; tsdf.minComponent = 200; detail.minComponent = 60; } // fewer one-off and floating flakes
     private final java.util.ArrayList<float[]> zones = new java.util.ArrayList<>(); // x, y, z, radius
     private static final float VOXEL_FINE = 0.008f;
     private int depthPixelsFrame, nearPixelsFrame, closeFrames;
@@ -65,6 +66,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float frameMove = 1f, frameTurn = 90f;
     private int meshTris;
     private final java.util.ArrayList<ScanExport.Rec> recs = new java.util.ArrayList<>();
+    private final ScanExport.PoseLog poseLog = new ScanExport.PoseLog();
+    private final float[] poseTq = new float[7];
     private final byte[] obs = new byte[MAX_POINTS]; // how many times each point was seen (capped)
     private int refineCursor; private boolean refined; private int refinedTotal, droppedNoise;
     private final FloatBuffer path = ByteBuffer.allocateDirect(MAX_PATH * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -552,7 +555,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final int n = count;
         final String name = "cinex-scan-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(new java.util.Date()) + ".zip";
         new Thread(() -> {
-            try { done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log)); }
+            try { done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log, poseLog)); }
             catch (Throwable e) { fail.accept(String.valueOf(e)); }
         }).start();
     }
@@ -564,7 +567,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -773,6 +776,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (frame.getTimestamp() != 0) drawBackground();
 
         TrackingState ts = camera.getTrackingState();
+        if (!viewing && frame.getTimestamp() != 0) {
+            com.google.ar.core.Pose cp = camera.getPose();
+            cp.getTranslation(poseTq, 0); cp.getRotationQuaternion(poseTq, 3);
+            poseLog.add(frame.getTimestamp(), poseTq, ts.ordinal(), camera.getTrackingFailureReason().ordinal());
+        }
         if (ts != lastTs) {
             log("tracking " + lastTs + " -> " + ts + " (reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + ")");
             lastTs = ts;
@@ -919,6 +927,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     r.conf = new byte[dw * dh];
                     for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) r.conf[v * dw + u] = cbuf.get(v * cRow + u * cPix);
                 }
+                if (cpuImage != null) { // small greyscale copy of the camera's Y plane
+                    Image.Plane yp = cpuImage.getPlanes()[0];
+                    ByteBuffer yb = yp.getBuffer();
+                    int iw = cpuImage.getWidth(), ih = cpuImage.getHeight(), step = Math.max(1, iw / 160);
+                    int gw = iw / step, gh = ih / step, yRow = yp.getRowStride(), yPix = yp.getPixelStride();
+                    r.gray = new byte[gw * gh]; r.gw = gw; r.gh = gh;
+                    for (int v = 0; v < gh; v++) for (int u = 0; u < gw; u++) r.gray[v * gw + u] = yb.get(v * step * yRow + u * step * yPix);
+                    float gs = (float) iw / ii.getImageDimensions()[0] / step;
+                    r.gfx = ifx * gs; r.gfy = ify * gs; r.gcx = icx * gs; r.gcy = icy * gs;
+                }
+                try (PointCloud fpc = frame.acquirePointCloud()) {
+                    java.nio.IntBuffer ids = fpc.getIds(); java.nio.FloatBuffer pts = fpc.getPoints();
+                    int nf = ids.remaining();
+                    r.fpId = new int[nf]; r.fp = new float[nf * 4];
+                    ids.get(r.fpId); pts.get(r.fp, 0, Math.min(r.fp.length, pts.remaining()));
+                } catch (Throwable ignored) { }
                 recs.add(r);
             }
             for (int v = 0; v < dh; v++) {
@@ -927,7 +951,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (mm < 200 || mm > 4000) { depthRejectedRange++; continue; }
                     depthPixels++;
                     int cv = cbuf != null ? cbuf.get(v * cRow + u * cPix) & 0xFF : 255;
-                    if (cv < 15) { depthRejectedConf++; continue; }
+                    if (cv < 40) { depthRejectedConf++; continue; } // below this the S24's raw depth is mostly noise (scan3 replay)
                     boolean weak = cv < 55; // too unsure for the point cloud, but the surface fusion averages it out
                     if (weak) depthRejectedConf++;
                     // Edge filter: depth jumps between neighbours create "flying pixel" streaks, so skip them.

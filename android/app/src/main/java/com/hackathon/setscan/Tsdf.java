@@ -16,7 +16,8 @@ final class Tsdf {
     final float trunc;   // truncation band (m)
     final float carve;   // how far in front of a surface free space erases old geometry (m)
     static final int MAX_W = 40;        // cap the weight so later looks can still change things
-    static final int MIN_W = 2;         // voxels seen fewer times are ignored for the mesh
+    int minW = 2;          // voxels seen fewer times are ignored for the mesh
+    int minComponent = 0;  // drop floating mesh pieces smaller than this many triangles (noise flakes)
 
     private final int cap;
     private final long[] keys;
@@ -141,7 +142,7 @@ final class Tsdf {
     private static final int[][] CORNER = {{0,0,0},{1,0,0},{0,1,0},{1,1,0},{0,0,1},{1,0,1},{0,1,1},{1,1,1}};
     private static final int[][] EDGE = {{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}};
 
-    private boolean good(int i) { return i >= 0 && w[i] >= MIN_W; }
+    private boolean good(int i) { return i >= 0 && w[i] >= minW; }
 
     /** Builds a shaded, coloured triangle soup. Returns the triangle count. */
     int extractMesh() {
@@ -221,6 +222,21 @@ final class Tsdf {
                 tris[nt * 3] = q[0]; tris[nt * 3 + 1] = q[3]; tris[nt * 3 + 2] = q[2]; nt++;
             }
         }
+        // 2b) drop small floating pieces: noisy depth leaves lots of little flakes hanging in the air
+        if (minComponent > 0 && nt > 0) {
+            int[] parent = new int[nv];
+            for (int i = 0; i < nv; i++) parent[i] = i;
+            for (int t = 0; t < nt; t++) { union(parent, tris[t * 3], tris[t * 3 + 1]); union(parent, tris[t * 3], tris[t * 3 + 2]); }
+            int[] size = new int[nv];
+            for (int t = 0; t < nt; t++) size[find(parent, tris[t * 3])]++;
+            int k = 0;
+            for (int t = 0; t < nt; t++) {
+                if (size[find(parent, tris[t * 3])] < minComponent) continue;
+                tris[k * 3] = tris[t * 3]; tris[k * 3 + 1] = tris[t * 3 + 1]; tris[k * 3 + 2] = tris[t * 3 + 2]; k++;
+            }
+            droppedTris = nt - k;
+            nt = k;
+        }
         // 3) flat-shaded triangle soup (lighting baked into the colour, two-sided)
         meshVerts = nt * 3;
         meshPos = ByteBuffer.allocateDirect(Math.max(1, meshVerts) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -242,6 +258,12 @@ final class Tsdf {
         meshPos.position(0); meshCol.position(0);
         return nt;
     }
+
+    int droppedTris;
+
+    private static int find(int[] p, int i) { while (p[i] != i) { p[i] = p[p[i]]; i = p[i]; } return i; }
+
+    private static void union(int[] p, int a, int b) { a = find(p, a); b = find(p, b); if (a != b) p[a] = b; }
 
     private static int cslot(long[] keys, int mask, long k) {
         long h = k * 0x9E3779B97F4A7C15L;

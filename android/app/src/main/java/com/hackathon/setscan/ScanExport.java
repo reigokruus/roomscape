@@ -26,6 +26,8 @@ import java.util.zip.ZipOutputStream;
  * Packs a full scan into one zip so it can be replayed off the phone:
  *  frames.csv + frames/NNNN.depth (uint16 mm, little endian) + frames/NNNN.conf (uint8) — every depth frame with its pose
  *  keyframes.csv + keyframes/NN.jpg — the HD photos (1024x576) with pose and intrinsics
+ *  frames/NNNN.pgm — 160x120-ish greyscale camera picture per depth frame, frames/NNNN.fp — ARCore feature points
+ *  poses.csv — every camera frame's pose + tracking state (state 0 tracking, 1 paused, 2 stopped)
  *  points.ply — the cleaned coloured point cloud, log.txt — the diagnostics report.
  * Poses are 4x4 column-major camera-to-world matrices (ARCore world, +Y up, metres; camera looks down -Z, +Y up).
  */
@@ -39,6 +41,24 @@ final class ScanExport {
         int w, h;
         short[] depth;
         byte[] conf;
+        // camera picture at the same moment, small greyscale (for checking drift / matching views offline)
+        byte[] gray; int gw, gh; float gfx, gfy, gcx, gcy;
+        // ARCore's own tracked feature points (stable ids across frames; world xyz + confidence)
+        int[] fpId; float[] fp;
+    }
+
+    /** Every camera frame's pose and tracking state (not just the recorded depth frames). */
+    static final class PoseLog {
+        static final int MAX = 40000;
+        final long[] ts = new long[MAX];
+        final float[] p = new float[MAX * 7]; // tx ty tz qx qy qz qw
+        final byte[] state = new byte[MAX], reason = new byte[MAX];
+        int n;
+        void add(long t, float[] tq, int st, int rs) {
+            if (n >= MAX) return;
+            ts[n] = t; System.arraycopy(tq, 0, p, n * 7, 7); state[n] = (byte) st; reason[n] = (byte) rs; n++;
+        }
+        void clear() { n = 0; }
     }
 
     static final int MAX_RECS = 1500;
@@ -97,7 +117,7 @@ final class ScanExport {
 
     /** Writes the zip to Downloads/CineX and returns a shareable uri (or a file uri on old Android). Background thread. */
     static Uri write(Context ctx, String name, List<Rec> recs, PhotoRoom photos, List<byte[]> jpgs,
-                     FloatBuffer pos, ByteBuffer col, int count, String log) throws Exception {
+                     FloatBuffer pos, ByteBuffer col, int count, String log, PoseLog poses) throws Exception {
         Uri uri;
         OutputStream os;
         if (Build.VERSION.SDK_INT >= 29) {
@@ -119,19 +139,42 @@ final class ScanExport {
             z.setLevel(9);
             StringBuilder csv = new StringBuilder("idx,timestamp_ns,w,h,fx,fy,cx,cy");
             for (int i = 0; i < 16; i++) csv.append(",m").append(i);
-            csv.append('\n');
+            csv.append(",gray_w,gray_h,gfx,gfy,gcx,gcy,feature_pts\n");
             for (int i = 0; i < recs.size(); i++) {
                 Rec r = recs.get(i);
                 csv.append(i).append(',').append(r.ts).append(',').append(r.w).append(',').append(r.h);
                 csv.append(String.format(Locale.US, ",%.4f,%.4f,%.4f,%.4f", r.fx, r.fy, r.cx, r.cy));
                 for (float v : r.pose) csv.append(String.format(Locale.US, ",%.6f", v));
+                csv.append(String.format(Locale.US, ",%d,%d,%.3f,%.3f,%.3f,%.3f,%d", r.gw, r.gh, r.gfx, r.gfy, r.gcx, r.gcy, r.fpId == null ? 0 : r.fpId.length));
                 csv.append('\n');
+                if (r.gray != null) {
+                    byte[] hd = ("P5\n" + r.gw + " " + r.gh + "\n255\n").getBytes("US-ASCII");
+                    byte[] pgm = new byte[hd.length + r.gray.length];
+                    System.arraycopy(hd, 0, pgm, 0, hd.length); System.arraycopy(r.gray, 0, pgm, hd.length, r.gray.length);
+                    put(z, String.format(Locale.US, "frames/%04d.pgm", i), pgm);
+                }
+                if (r.fpId != null && r.fpId.length > 0) { // int32 id, float x y z conf (little endian)
+                    ByteBuffer f = ByteBuffer.allocate(r.fpId.length * 20).order(ByteOrder.LITTLE_ENDIAN);
+                    for (int k = 0; k < r.fpId.length; k++)
+                        f.putInt(r.fpId[k]).putFloat(r.fp[k * 4]).putFloat(r.fp[k * 4 + 1]).putFloat(r.fp[k * 4 + 2]).putFloat(r.fp[k * 4 + 3]);
+                    put(z, String.format(Locale.US, "frames/%04d.fp", i), f.array());
+                }
                 ByteBuffer d = ByteBuffer.allocate(r.depth.length * 2).order(ByteOrder.LITTLE_ENDIAN);
                 for (short s : r.depth) d.putShort(s);
                 put(z, String.format(Locale.US, "frames/%04d.depth", i), d.array());
                 if (r.conf != null) put(z, String.format(Locale.US, "frames/%04d.conf", i), r.conf);
             }
             put(z, "frames.csv", csv.toString().getBytes("UTF-8"));
+
+            if (poses != null) {
+                StringBuilder pc = new StringBuilder("timestamp_ns,state,reason,tx,ty,tz,qx,qy,qz,qw\n");
+                for (int i = 0; i < poses.n; i++) {
+                    pc.append(poses.ts[i]).append(',').append(poses.state[i]).append(',').append(poses.reason[i]);
+                    for (int k = 0; k < 7; k++) pc.append(String.format(Locale.US, ",%.5f", poses.p[i * 7 + k]));
+                    pc.append('\n');
+                }
+                put(z, "poses.csv", pc.toString().getBytes("UTF-8"));
+            }
 
             StringBuilder kc = new StringBuilder("idx,file,jpg_w,jpg_h,cam_w,cam_h,fx,fy,cx,cy");
             for (int i = 0; i < 16; i++) kc.append(",m").append(i);

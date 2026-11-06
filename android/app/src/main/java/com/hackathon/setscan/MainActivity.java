@@ -80,17 +80,40 @@ public class MainActivity extends Activity {
         Toast.makeText(this, "Packing the scan (" + renderer.recordedFrames() + " depth frames)...", Toast.LENGTH_SHORT).show();
         glView.queueEvent(() -> renderer.exportScan(uri -> runOnUiThread(() -> {
             exportButton.setEnabled(true);
+            long size = -1;
+            try (android.content.res.AssetFileDescriptor fd = getContentResolver().openAssetFileDescriptor(uri, "r")) { if (fd != null) size = fd.getLength(); }
+            catch (Exception ignored) { }
+            if (size > 25L * 1024 * 1024) { bigExport(uri, size); return; }
             Toast.makeText(this, "Saved to Downloads/CineX. Pick Claude to send it.", Toast.LENGTH_LONG).show();
-            android.content.Intent send = new android.content.Intent(android.content.Intent.ACTION_SEND);
-            send.setType("application/zip");
-            send.putExtra(android.content.Intent.EXTRA_STREAM, uri);
-            send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            try { startActivity(android.content.Intent.createChooser(send, "Send CineX scan")); }
-            catch (Exception e) { Toast.makeText(this, "Saved, but sharing failed: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+            shareScan(uri);
         }), err -> runOnUiThread(() -> {
             exportButton.setEnabled(true);
             Toast.makeText(this, "Export failed: " + err, Toast.LENGTH_LONG).show();
         })));
+    }
+
+    /** Over the chat upload limit: offer GitHub's upload page (a private draft release) instead. */
+    private void bigExport(android.net.Uri uri, long size) {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(String.format(java.util.Locale.US, "Scan is %.0f MB", size / 1048576.0))
+                .setMessage("That's too big for chat. It's saved in Downloads/CineX. Open GitHub's upload page, "
+                        + "drop the zip into \"Attach binaries\" (not the description box) and press Save draft.")
+                .setPositiveButton("Open GitHub upload", (d, w) -> {
+                    try { startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(
+                            "https://github.com/reigokruus/shootlocal/releases/new?tag=scan-upload&title=Scan%20upload&prerelease=1"))); }
+                    catch (Exception e) { Toast.makeText(this, "No browser: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+                })
+                .setNegativeButton("Share anyway", (d, w) -> shareScan(uri))
+                .show();
+    }
+
+    private void shareScan(android.net.Uri uri) {
+        android.content.Intent send = new android.content.Intent(android.content.Intent.ACTION_SEND);
+        send.setType("application/zip");
+        send.putExtra(android.content.Intent.EXTRA_STREAM, uri);
+        send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try { startActivity(android.content.Intent.createChooser(send, "Send CineX scan")); }
+        catch (Exception e) { Toast.makeText(this, "Saved, but sharing failed: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
     }
 
     @Override
