@@ -25,10 +25,32 @@ final class RoomModel {
         float area;
     }
 
+    /** A scanned object as a simple shape: an oriented box or an upright cylinder (see ObjectFinder). */
     static final class Box {
-        float x0, z0, x1, z1, y0, y1;
+        float x0, z0, x1, z1, y0, y1; // world axis-aligned bounds (for photo cropping)
         String label;
         volatile String name; // what the photo recognition thinks it is (null until labelled)
+        float cx, cz, cosA = 1, sinA, hu, hv; // centre, heading and half sizes of the oriented footprint
+        boolean cyl;           // round footprint: drawn as a cylinder of radius hu
+        Box parent;            // what it stands on (null = floor or wall)
+        int depth, voxels;
+        String rel, generic;   // "on the table", and a size-based name until the photo names it
+
+        String where() { return parent != null ? "on the " + parent.title() : rel != null ? rel : ""; }
+
+        String title() { return name != null ? name.toLowerCase(Locale.US) : generic != null ? generic : "object"; }
+
+        void updateAabb() {
+            float ex = Math.abs(cosA) * hu + Math.abs(sinA) * hv, ez = Math.abs(sinA) * hu + Math.abs(cosA) * hv;
+            x0 = cx - ex; x1 = cx + ex; z0 = cz - ez; z1 = cz + ez;
+        }
+
+        /** Footprint corner k (0..3) or, for cylinders, point k of n around the rim. */
+        float[] rim(int k, int n) {
+            if (cyl) { double a = 2 * Math.PI * k / n; return new float[]{cx + hu * (float) Math.cos(a), cz + hu * (float) Math.sin(a)}; }
+            float su = (k == 1 || k == 2) ? 1 : -1, sv = k >= 2 ? 1 : -1;
+            return new float[]{cx + su * hu * cosA - sv * hv * sinA, cz + su * hu * sinA + sv * hv * cosA};
+        }
     }
 
     static final class Light {
@@ -130,69 +152,27 @@ final class RoomModel {
             floorCoverage = Math.min(1f, known * ShotPlanner.CELL * ShotPlanner.CELL / Math.max(0.01f, roomW * roomD));
         }
 
-        // 3) Furniture: connected blocked cells in the floor grid that aren't thin wall strips.
+        // 3) Objects: separate clusters of points, each as a box or cylinder, with what it stands on.
         int nx = grid.nx, nz = grid.nz;
-        boolean[] seen = new boolean[nx * nz];
-        int[] stack = new int[nx * nz];
         float cell = ShotPlanner.CELL;
-        // With a fitted layout, cells hugging a wall (or outside the room) are wall/doorway clutter, not furniture.
-        boolean[] furn = new boolean[nx * nz];
-        float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
-        float uMin = 0, uMax = 0, vMin = 0, vMax = 0;
+        float[] bounds = null;
         if (hasLayout) {
+            float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
             Wall w0 = layout.get(0), w2 = layout.get(2);
-            uMin = Math.min(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
-            uMax = Math.max(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
-            vMin = -w0.x0 * ls + w0.z0 * lc; vMax = -w2.x0 * ls + w2.z0 * lc;
+            float uMin = Math.min(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
+            float uMax = Math.max(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
+            float vMin = -w0.x0 * ls + w0.z0 * lc, vMax = -w2.x0 * ls + w2.z0 * lc;
             if (vMin > vMax) { float t = vMin; vMin = vMax; vMax = t; }
+            bounds = new float[]{uMin, uMax, vMin, vMax};
         }
-        for (int i = 0; i < nx * nz; i++) {
-            if (grid.blocked[i] <= ShotPlanner.BLOCKED) continue;
-            if (hasLayout) {
-                float x = grid.minX + (i % nx + 0.5f) * cell, z = grid.minZ + (i / nx + 0.5f) * cell;
-                float u = x * lc + z * ls, v = -x * ls + z * lc;
-                if (u < uMin + 0.25f || u > uMax - 0.25f || v < vMin + 0.25f || v > vMax - 0.25f) continue;
-            }
-            furn[i] = true;
-        }
+        boxes.addAll(ObjectFinder.find(pos, count, floorY, topY, hasLayout ? layoutAngle : 0, bounds, hasLayout ? roomW * roomD : 0));
+        for (Box bx : boxes) bx.label = bx.generic;
         float fx0 = Float.MAX_VALUE, fz0 = Float.MAX_VALUE, fx1 = -Float.MAX_VALUE, fz1 = -Float.MAX_VALUE;
         for (int i = 0; i < nx * nz; i++) {
             if (grid.floorKnown[i]) {
                 float x = grid.minX + (i % nx + 0.5f) * cell, z = grid.minZ + (i / nx + 0.5f) * cell;
                 fx0 = Math.min(fx0, x); fx1 = Math.max(fx1, x); fz0 = Math.min(fz0, z); fz1 = Math.max(fz1, z);
             }
-            if (seen[i] || !furn[i]) continue;
-            int sp = 0, n = 0;
-            stack[sp++] = i; seen[i] = true;
-            int ix0 = nx, iz0 = nz, ix1 = -1, iz1 = -1;
-            float top = 0;
-            while (sp > 0) {
-                int c = stack[--sp];
-                n++;
-                int cx = c % nx, cz = c / nx;
-                ix0 = Math.min(ix0, cx); ix1 = Math.max(ix1, cx); iz0 = Math.min(iz0, cz); iz1 = Math.max(iz1, cz);
-                top = Math.max(top, grid.cellTop[c]);
-                for (int dz = -1; dz <= 1; dz++)
-                    for (int dx = -1; dx <= 1; dx++) {
-                        int jx = cx + dx, jz = cz + dz;
-                        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
-                        int j = jz * nx + jx;
-                        if (!seen[j] && furn[j]) { seen[j] = true; stack[sp++] = j; }
-                    }
-            }
-            float w = (ix1 - ix0 + 1) * cell, d = (iz1 - iz0 + 1) * cell;
-            float area = n * cell * cell;
-            boolean thinStrip = Math.min(w, d) <= 0.3f && Math.max(w, d) > 1.2f; // probably a wall
-            boolean tallWall = top > 2.0f && Math.max(w, d) > 1.5f && area < 0.35f * w * d;
-            boolean huge = hasLayout && w * d > 0.5f * roomW * roomD;
-            if (area < 0.06f || area > 8f || thinStrip || tallWall || huge) continue;
-            Box b = new Box();
-            b.x0 = grid.minX + ix0 * cell; b.x1 = grid.minX + (ix1 + 1) * cell;
-            b.z0 = grid.minZ + iz0 * cell; b.z1 = grid.minZ + (iz1 + 1) * cell;
-            b.y0 = floorY; b.y1 = floorY + Math.max(0.2f, Math.min(top, 2.2f));
-            float h = b.y1 - b.y0;
-            b.label = h < 0.6f ? "low furniture (sofa, bed, bench)" : h < 1.2f ? "table / desk height" : "tall furniture (shelf, cabinet)";
-            boxes.add(b);
         }
         sizeX = fx1 > fx0 ? fx1 - fx0 + cell : 0;
         sizeZ = fz1 > fz0 ? fz1 - fz0 + cell : 0;
@@ -252,7 +232,10 @@ final class RoomModel {
         sb.append(" · ").append(walls).append(walls == 1 ? " wall" : " walls");
         if (hasLayout && seenWalls < 4) sb.append(" (").append(4 - seenWalls).append(" guessed)");
         sb.append(" · ").append(tables).append(tables == 1 ? " table surface" : " table surfaces");
-        sb.append(" · ").append(boxes.size()).append(boxes.size() == 1 ? " furniture block" : " furniture blocks");
+        int onTop = 0;
+        for (Box bx : boxes) if (bx.parent != null) onTop++;
+        sb.append(" · ").append(boxes.size()).append(boxes.size() == 1 ? " object" : " objects");
+        if (onTop > 0) sb.append(" (").append(onTop).append(" on other things)");
         sb.append(" · ").append(lights.size()).append(lights.size() == 1 ? " light source" : " light sources");
         for (Light l : lights) sb.append(String.format(Locale.US, "\n💡 %s, %.1f m up", l.label, l.y - floorY));
         summary = sb.toString();

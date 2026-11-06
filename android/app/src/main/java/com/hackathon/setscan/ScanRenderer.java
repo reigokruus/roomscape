@@ -256,7 +256,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private void finishStatus() {
         StringBuilder objs = new StringBuilder();
-        if (roomReady) for (RoomModel.Box bx : room.boxes) if (bx.name != null) objs.append(objs.length() > 0 ? ", " : "").append(bx.name);
+        if (roomReady) for (RoomModel.Box bx : room.boxes) {
+            if (bx.name == null && bx.depth == 0 && bx.voxels < 40) continue;
+            objs.append(objs.length() > 0 ? ", " : "").append(bx.title());
+            if (bx.parent != null) objs.append(" (on ").append(bx.parent.title()).append(")");
+        }
         activity.updateStatus((roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
     }
 
@@ -447,7 +451,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Draws the estimated room box over the camera view: solid teal for walls found, orange for guessed ones. */
     private void drawLiveRoom(float[] m) {
         RoomModel r = liveRoom;
-        if (r == null || !r.hasLayout) return;
+        if (r == null) return;
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        drawObjects(m, r.boxes, true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        if (!r.hasLayout) return;
         float dens = height / 1000f;
         GLES20.glLineWidth(4f * dens);
         float y0 = r.floorY, y1 = r.topY;
@@ -457,6 +466,146 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             planDraw(m, new float[]{w.x0, y1, w.z0, w.x1, y1, w.z1}, GLES20.GL_LINES, c, 1);
             planDraw(m, new float[]{w.x0, y0, w.z0, w.x0, y1, w.z0}, GLES20.GL_LINES, LIVE_SEEN, 1);
         }
+    }
+
+    private static final float[] ITEM_COL = {0.3f, 0.85f, 1f, 0.3f}, ITEM_EDGE = {0.35f, 0.9f, 1f, 1f};
+
+    /** Every object the scan found as a translucent box / cylinder with a name tag (furniture orange, things on it blue). */
+    private void drawObjects(float[] m, java.util.List<RoomModel.Box> boxes, boolean live) {
+        float dens = height / 1000f;
+        GLES20.glLineWidth((live ? 3f : 2.5f) * dens);
+        for (RoomModel.Box b : boxes) {
+            if (!live && cutHides(b)) continue;
+            boolean item = b.depth > 0;
+            planDraw(m, objTriangles(b), GLES20.GL_TRIANGLES, item ? ITEM_COL : BOX_COL, 1);
+            planDraw(m, objEdges(b), GLES20.GL_LINES, item ? ITEM_EDGE : BOX_EDGE, 1);
+        }
+        int labels = 0;
+        for (RoomModel.Box b : boxes) {
+            if (!live && cutHides(b)) continue;
+            if (labels++ > 40) break;
+            String where = b.where();
+            drawLabel(m, b.cx, b.y1 + 0.03f, b.cz, b.title() + (where.isEmpty() ? "" : "  ·  " + where), b.depth > 0);
+        }
+    }
+
+    /** Same rule as the shaders' dollhouse cut, for whole objects. */
+    private boolean cutHides(RoomModel.Box b) {
+        if (!cutActive) return false;
+        if (b.y1 > cutCeil + 0.2f) return false;
+        float rx = b.cx - roomCenter[0], rz = b.cz - roomCenter[2];
+        return b.y0 > cutFloor + 0.15f && (rx * cutDirX + rz * cutDirZ > cutD || rx * cutDir2X + rz * cutDir2Z > cutD2);
+    }
+
+    private static float[] objTriangles(RoomModel.Box b) {
+        int n = b.cyl ? 16 : 4;
+        float[] out = new float[n * 9 + n * 18];
+        int k = 0;
+        for (int i = 0; i < n; i++) {
+            float[] p = b.rim(i, n), q = b.rim((i + 1) % n, n);
+            // top fan
+            out[k++] = b.cx; out[k++] = b.y1; out[k++] = b.cz;
+            out[k++] = p[0]; out[k++] = b.y1; out[k++] = p[1];
+            out[k++] = q[0]; out[k++] = b.y1; out[k++] = q[1];
+            // side
+            float[] side = {p[0], b.y0, p[1], q[0], b.y0, q[1], q[0], b.y1, q[1], p[0], b.y0, p[1], q[0], b.y1, q[1], p[0], b.y1, p[1]};
+            System.arraycopy(side, 0, out, k, 18); k += 18;
+        }
+        return out;
+    }
+
+    private static float[] objEdges(RoomModel.Box b) {
+        int n = b.cyl ? 16 : 4, verticals = 4;
+        float[] out = new float[n * 12 + verticals * 6];
+        int k = 0;
+        for (int i = 0; i < n; i++) {
+            float[] p = b.rim(i, n), q = b.rim((i + 1) % n, n);
+            for (float y : new float[]{b.y0, b.y1}) {
+                out[k++] = p[0]; out[k++] = y; out[k++] = p[1];
+                out[k++] = q[0]; out[k++] = y; out[k++] = q[1];
+            }
+        }
+        for (int i = 0; i < verticals; i++) {
+            float[] p = b.rim(b.cyl ? i * n / 4 : i, n);
+            out[k++] = p[0]; out[k++] = b.y0; out[k++] = p[1];
+            out[k++] = p[0]; out[k++] = b.y1; out[k++] = p[1];
+        }
+        return out;
+    }
+
+    // ---- name tags: text drawn into small textures, shown as screen-facing quads ----
+    private int labelProg;
+    private final java.util.HashMap<String, int[]> labelTex = new java.util.HashMap<>();
+    private final float[] labelClip = new float[4];
+    private static final float[] QUAD = {-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1};
+    private FloatBuffer quadBuf;
+
+    private int[] labelTexture(String text, boolean item) {
+        String key = (item ? "1" : "0") + text;
+        int[] t = labelTex.get(key);
+        if (t != null) return t;
+        if (labelTex.size() > 300) {
+            for (int[] v : labelTex.values()) GLES20.glDeleteTextures(1, new int[]{v[0]}, 0);
+            labelTex.clear();
+        }
+        float sp = activity.getResources().getDisplayMetrics().scaledDensity;
+        android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        paint.setTextSize(13 * sp);
+        paint.setColor(0xFFFFFFFF);
+        int pad = (int) (5 * sp);
+        int w = (int) Math.ceil(paint.measureText(text)) + 2 * pad, h = (int) Math.ceil(paint.getFontSpacing()) + pad;
+        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas cv = new android.graphics.Canvas(bmp);
+        android.graphics.Paint bg = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        bg.setColor(item ? 0xD0105A78 : 0xD0804010);
+        cv.drawRoundRect(0, 0, w, h, h / 2f, h / 2f, bg);
+        cv.drawText(text, pad, h / 2f - (paint.ascent() + paint.descent()) / 2f, paint);
+        int[] id = new int[1];
+        GLES20.glGenTextures(1, id, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id[0]);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0);
+        bmp.recycle();
+        t = new int[]{id[0], w, h};
+        labelTex.put(key, t);
+        return t;
+    }
+
+    private void drawLabel(float[] m, float x, float y, float z, String text, boolean item) {
+        Matrix.multiplyMV(labelClip, 0, m, 0, new float[]{x, y, z, 1}, 0);
+        if (labelClip[3] < 0.05f) return; // behind the camera
+        if (labelProg == 0) {
+            labelProg = program(
+                    "uniform mat4 uMvp; uniform vec3 uAnchor; uniform vec2 uHalf; attribute vec2 aCorner; varying vec2 vUv;" +
+                    "void main(){ vec4 p = uMvp * vec4(uAnchor, 1.0); p.xy += (aCorner + vec2(0.0, 1.0)) * uHalf * p.w;" +
+                    "  gl_Position = p; vUv = vec2((aCorner.x + 1.0) * 0.5, (1.0 - aCorner.y) * 0.5); }",
+                    "precision mediump float; varying vec2 vUv; uniform sampler2D uTex;" +
+                    "void main(){ gl_FragColor = texture2D(uTex, vUv); }");
+            quadBuf = ByteBuffer.allocateDirect(QUAD.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            quadBuf.put(QUAD).position(0);
+        }
+        int[] t = labelTexture(text, item);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA); // bitmaps are premultiplied
+        GLES20.glUseProgram(labelProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(labelProg, "uMvp"), 1, false, m, 0);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(labelProg, "uAnchor"), x, y, z);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(labelProg, "uHalf"), (float) t[1] / width, (float) t[2] / height);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, t[0]);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(labelProg, "uTex"), 0);
+        int a = GLES20.glGetAttribLocation(labelProg, "aCorner");
+        quadBuf.position(0);
+        GLES20.glVertexAttribPointer(a, 2, GLES20.GL_FLOAT, false, 0, quadBuf);
+        GLES20.glEnableVertexAttribArray(a);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 6);
+        GLES20.glDisableVertexAttribArray(a);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
     }
 
     /** Planner, room model, layout proxies and photo texturing (re-run when the user enters a known room size). */
@@ -706,6 +855,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onSurfaceCreated(GL10 gl, EGLConfig config) {
+        labelTex.clear(); labelProg = 0; // old GL objects are gone with the old context
         GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
         int[] t = new int[1];
         GLES20.glGenTextures(1, t, 0);
@@ -1494,12 +1644,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             planDraw(m, outline, GLES20.GL_LINE_LOOP, WALL_EDGE, 1);
         }
-        // furniture blocks
-        for (RoomModel.Box b : room.boxes) {
-            float[] tri = boxTriangles(b);
-            planDraw(m, tri, GLES20.GL_TRIANGLES, BOX_COL, 1);
-            planDraw(m, boxEdges(b), GLES20.GL_LINES, BOX_EDGE, 1);
-        }
+        // objects: furniture and the things on it, as boxes and cylinders
+        drawObjects(m, room.boxes, false);
         GLES20.glDepthMask(true);
         GLES20.glDisable(GLES20.GL_BLEND);
         // light sources: glowing markers with a drop line to the floor
@@ -1507,26 +1653,6 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             planDraw(m, new float[]{l.x, room.floorY, l.z, l.x, l.y, l.z}, GLES20.GL_LINES, LIGHT_COL, 1);
             planDraw(m, new float[]{l.x, l.y, l.z}, GLES20.GL_POINTS, LIGHT_COL, 30 * dens);
         }
-    }
-
-    private static float[] boxTriangles(RoomModel.Box b) {
-        float x0 = b.x0, x1 = b.x1, y0 = b.y0, y1 = b.y1, z0 = b.z0, z1 = b.z1;
-        return new float[]{
-                // top
-                x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z0, x1, y1, z1, x0, y1, z1,
-                // sides
-                x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y0, z0, x1, y1, z0, x0, y1, z0,
-                x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y0, z1, x1, y1, z1, x0, y1, z1,
-                x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y0, z0, x0, y1, z1, x0, y1, z0,
-                x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y0, z0, x1, y1, z1, x1, y1, z0};
-    }
-
-    private static float[] boxEdges(RoomModel.Box b) {
-        float x0 = b.x0, x1 = b.x1, y0 = b.y0, y1 = b.y1, z0 = b.z0, z1 = b.z1;
-        return new float[]{
-                x0, y1, z0, x1, y1, z0, x1, y1, z0, x1, y1, z1, x1, y1, z1, x0, y1, z1, x0, y1, z1, x0, y1, z0,
-                x0, y0, z0, x0, y1, z0, x1, y0, z0, x1, y1, z0, x1, y0, z1, x1, y1, z1, x0, y0, z1, x0, y1, z1,
-                x0, y0, z0, x1, y0, z0, x1, y0, z0, x1, y0, z1, x1, y0, z1, x0, y0, z1, x0, y0, z1, x0, y0, z0};
     }
 
     /** Draws subject, camera (with its field of view) and lights on top of the scan. */
