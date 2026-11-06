@@ -2179,7 +2179,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } else if (style == 0 && photos.ready && meshTris > 0)
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
-        if (roomReady) drawRoom(mvp);
+        if (roomReady) drawRoom(mvp, simple);
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         drawPath(mvp);
@@ -2233,13 +2233,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private static final float[] LIGHT_COL = {1f, 0.95f, 0.4f, 1f};
 
     /** The "understood" room: floor, walls, table tops, furniture blocks and light sources. */
-    private void drawRoom(float[] m) {
+    /** simple: the photo room is showing, so draw only edges (no striped wall or floor fills over the photos). */
+    private void drawRoom(float[] m, boolean simple) {
         float dens = height / 1000f;
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glDepthMask(false);
         // floor
-        if (floorTris != null && floorTriVerts > 0) {
+        if (!simple && floorTris != null && floorTriVerts > 0) {
             GLES20.glUseProgram(planProg);
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(planProg, "uMvp"), 1, false, m, 0);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(planProg, "uRound"), 0f);
@@ -2274,7 +2275,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 outline[k++] = w.x0; outline[k++] = y0 + 0.012f; outline[k++] = w.z0;
                 if (cutActive && (w.nx * cutDirX + w.nz * cutDirZ > 0.45f || (cutD2 < 1e8f && w.nx * cutDir2X + w.nz * cutDir2Z > 0.45f))) continue;
                 float[] quad = {w.x0, y0, w.z0, w.x1, y0, w.z1, w.x1, y1, w.z1, w.x0, y0, w.z0, w.x1, y1, w.z1, w.x0, y1, w.z0};
-                planDraw(m, quad, GLES20.GL_TRIANGLES, w.seen ? WALL_COL : WALL_GUESS, 1);
+                if (!simple) planDraw(m, quad, GLES20.GL_TRIANGLES, w.seen ? WALL_COL : WALL_GUESS, 1);
                 planDraw(m, new float[]{w.x0, y0, w.z0, w.x0, y1, w.z0, w.x1, y0, w.z1, w.x1, y1, w.z1,
                         w.x0, y1, w.z0, w.x1, y1, w.z1}, GLES20.GL_LINES, w.seen ? WALL_EDGE : WALL_GUESS_EDGE, 1);
             }
