@@ -496,6 +496,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---------------- scanning ----------------
 
     private Image cpuImage;
+    private float colorGain = 1f; // brightens dark frames so the scan looks like the phone's photos
+
+    /** Mean brightness of the camera frame -> a gain (up to 2.6x) plus a gentle shadow lift. */
+    private void measureExposure() {
+        Image img = cpuImage;
+        if (img == null) return;
+        Image.Plane yp = img.getPlanes()[0];
+        java.nio.ByteBuffer yb = yp.getBuffer();
+        int w = img.getWidth(), h = img.getHeight(), rs = yp.getRowStride(), ps = yp.getPixelStride();
+        long sum = 0; int n = 0;
+        for (int v = 8; v < h; v += 16) for (int u = 8; u < w; u += 16) { sum += yb.get(v * rs + u * ps) & 0xFF; n++; }
+        float mean = n > 0 ? (float) sum / n : 128f;
+        float target = clamp(118f / Math.max(mean, 8f), 1f, 2.6f);
+        colorGain += (target - colorGain) * 0.3f; // smooth so colours don't flicker between frames
+    }
 
     private void integrate(Frame frame, Camera camera) {
         if (count >= MAX_POINTS) return;
@@ -510,6 +525,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             lastDepthTs = depth.getTimestamp();
             if (rawDepth) conf = frame.acquireRawDepthConfidenceImage();
             try { cpuImage = frame.acquireCameraImage(); } catch (NotYetAvailableException e) { cpuImage = null; }
+            measureExposure();
 
             int dw = depth.getWidth(), dh = depth.getHeight();
             depthFrames++;
@@ -547,7 +563,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
                     if (mm < 200 || mm > 4000) { depthRejectedRange++; continue; }
                     depthPixels++;
-                    if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 90) { depthRejectedConf++; continue; }
+                    if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) { depthRejectedConf++; continue; }
                     // Edge filter: depth jumps between neighbours create "flying pixel" streaks, so skip them.
                     if (u == 0 || v == 0 || u == dw - 1 || v == dh - 1) { depthRejectedEdge++; continue; }
                     int tol = mm / 25 + 20; // ~4% of distance + 2 cm
@@ -588,6 +604,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (pc.getTimestamp() == lastDepthTs) return;
             lastDepthTs = pc.getTimestamp();
             try { cpuImage = frame.acquireCameraImage(); } catch (NotYetAvailableException e) { cpuImage = null; }
+            measureExposure();
             CameraIntrinsics ii = camera.getImageIntrinsics();
             float ifx = ii.getFocalLength()[0], ify = ii.getFocalLength()[1];
             float icx = ii.getPrincipalPoint()[0], icy = ii.getPrincipalPoint()[1];
@@ -618,7 +635,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private String diagnostics() {
         return "[mode " + modeLabel + " " + depthSize + " | frames " + depthFrames
                 + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf + " | edges " + depthRejectedEdge
-                + " | not ready " + depthNotYet + " | refined " + refinedTotal + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
+                + " | not ready " + depthNotYet + " | refined " + refinedTotal + String.format(java.util.Locale.US, " | gain %.2f", colorGain) + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 
     private void sampleColor(float fu, float fv, int[] out) {
@@ -634,9 +651,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int uvOffV = (v / 2) * pl[2].getRowStride() + (u / 2) * pl[2].getPixelStride();
         int cb = (pl[1].getBuffer().get(uvOffU) & 0xFF) - 128;
         int cr = (pl[2].getBuffer().get(uvOffV) & 0xFF) - 128;
-        out[0] = clampI((int) (y + 1.402f * cr));
-        out[1] = clampI((int) (y - 0.344f * cb - 0.714f * cr));
-        out[2] = clampI((int) (y + 1.772f * cb));
+        float r = y + 1.402f * cr, g = y - 0.344f * cb - 0.714f * cr, b = y + 1.772f * cb;
+        if (colorGain > 1.02f) {
+            // gain, then a soft shoulder so bright spots (lamps, windows) don't clip to flat white
+            r = lift(r); g = lift(g); b = lift(b);
+        }
+        out[0] = clampI((int) r);
+        out[1] = clampI((int) g);
+        out[2] = clampI((int) b);
     }
 
     private void addPoint(float x, float y, float z, int[] rgb) {
@@ -1056,6 +1078,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private static float clamp(float v, float lo, float hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    private float lift(float c) {
+        float x = Math.min(1f, Math.max(0f, c) / 255f);
+        x = x * colorGain / (1f + (colorGain - 1f) * x); // shadows boosted by colorGain, white stays white (light detection still works)
+        return x * 255f;
+    }
 
     private static int clampI(int v) { return Math.max(0, Math.min(255, v)); }
 
