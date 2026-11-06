@@ -11,6 +11,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -273,13 +274,16 @@ public class MainActivity extends Activity {
         sizeButton.setOnClickListener(v -> askRoomSize());
         row2.addView(sizeButton);
         row2.addView(logButton);
-        LinearLayout bars = new LinearLayout(this);
-        bars.setOrientation(LinearLayout.VERTICAL);
-        android.widget.HorizontalScrollView row2Scroll = new android.widget.HorizontalScrollView(this);
-        row2Scroll.setHorizontalScrollBarEnabled(false);
-        row2Scroll.addView(row2);
-        bars.addView(row2Scroll);
-        bars.addView(bar);
+        FlowRow bars = new FlowRow(this, dp(4));
+        bars.setPadding(dp(6), dp(4), dp(6), dp(4));
+        for (Button bt : new Button[]{mainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+            ((ViewGroup) bt.getParent()).removeView(bt);
+            bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            bt.setAllCaps(false);
+            bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
+            bt.setPadding(dp(12), dp(8), dp(12), dp(8));
+            bars.addView(bt);
+        }
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
