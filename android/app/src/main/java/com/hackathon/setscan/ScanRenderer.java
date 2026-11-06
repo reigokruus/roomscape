@@ -316,6 +316,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 // uPass: 0 = splat core (opaque, writes depth), 1 = splat halo (soft gaussian, blended), 2 = plain
                 "precision mediump float; varying vec4 vColor; uniform float uPass;" +
                 "void main(){" +
+                "  if (uPass > 2.5) { vec2 q = gl_PointCoord * 2.0 - 1.0; if (dot(q, q) > 1.0) discard;" +
+                "    gl_FragColor = vec4(mix(vColor.rgb, vec3(0.1, 0.95, 0.8), 0.6) * 0.5, 0.5); return; }" +
                 "  if (uPass > 1.5) { gl_FragColor = vColor; return; }" +
                 "  vec2 d = gl_PointCoord * 2.0 - 1.0; float r2 = dot(d, d);" +
                 "  if (r2 > 1.0) discard;" +
@@ -416,7 +418,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
             uploadNew();
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-            drawPoints(mvp, 0.85f);
+            drawPaint(mvp);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         }
         if (frameNo % 15 == 0) {
@@ -667,6 +669,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glDepthMask(false);
         GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 3.2f * sizeScale);
         GLES20.glUniform1f(uPass, 1f);
+        drawPointArrays();
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    /** Live scan: tint everything captured so far, so the user sees which areas are done. */
+    private void drawPaint(float[] m) {
+        if (count == 0) return;
+        GLES20.glUseProgram(ptProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
+        float pxPerMeter = height / (2f * (float) Math.tan(Math.toRadians(30)));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uSize"), VOXEL * pxPerMeter * 2.2f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uPass"), 3f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCut"), 0f);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
         drawPointArrays();
         GLES20.glDepthMask(true);
         GLES20.glDisable(GLES20.GL_BLEND);
