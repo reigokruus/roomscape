@@ -35,4 +35,11 @@ Android has no equivalent of Apple's RoomPlan, so this version uses ARCore depth
 
 From the command line: `cd android && ./gradlew assembleDebug` (on Windows, `gradlew.bat assembleDebug`). The APK ends up in `android/app/build/outputs/apk/debug/`.
 
+### Get new builds on the phone automatically
+Every push that changes `android/` is built by GitHub and published as a release, so the phone can always download the newest build from **https://github.com/reigokruus/shootlocal/releases/latest/download/SetScan-android.apk**.
+
+For hands-free updates, install [Obtainium](https://github.com/ImranR98/Obtainium) on the phone and add `https://github.com/reigokruus/shootlocal`. It notifies you of each new build and installs it with one tap.
+
+All builds, whether from GitHub or from Android Studio, use the same signing key (`android/app/debug.keystore`, a debug key committed on purpose), so they install over each other. If Android refuses to install, uninstall the old SetScan once and try again.
+
 On first launch, the phone may ask to install or update **Google Play Services for AR**.

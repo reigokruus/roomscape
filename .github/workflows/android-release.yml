@@ -1,0 +1,36 @@
+name: Android build
+
+# Builds the Android app on every push that touches android/ and publishes it as a GitHub release.
+# Phone: install from https://github.com/reigokruus/shootlocal/releases/latest
+# (or track the repo in Obtainium for automatic updates).
+on:
+  push:
+    branches: [main]
+    paths: ['android/**', '.github/workflows/android-release.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug -PbuildNumber=${{ github.run_number }} --no-daemon
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk SetScan-android.apk
+          gh release create "android-v0.1.${{ github.run_number }}" SetScan-android.apk \
+            --title "Android build ${{ github.run_number }}" \
+            --notes "Automatic build of ${GITHUB_SHA::7}: $(git log -1 --pretty=%s)" \
+            --latest
