@@ -31,7 +31,25 @@ SetScan is a Swift / SwiftUI iPhone app built on **Apple RoomPlan** and **LiDAR*
 
 **Not in SetScan yet:** placing lights/cameras/props, lens FOV simulation (24/35/50 mm), shared crew shot plans, automatic lighting suggestions, photorealistic lighting, or importing the scan into the web prototype.
 
-The clickable web mockup (`ui_prototype.html` in the hackathon pitch folder) is labeled **prototype / next** for placement, illustrative lens crops and encoded plan links only.
+The single-file web planner ([`hackathon/ui_prototype.html`](hackathon/ui_prototype.html)) runs without external dependencies. It is a **browser prototype** using a sample room, not live SetScan data or on-device AR.
+
+---
+
+## Features — browser planning prototype
+
+Open [`hackathon/ui_prototype.html`](hackathon/ui_prototype.html) in a modern browser; no installation or external dependencies. [Desktop screenshot](hackathon/ui_prototype_v3.png).
+
+1. **Storyboard:** independent editable views retain camera position, 24/35/50 mm lens, placed items and notes. Save, duplicate or switch views; export the current frame as JSON or PNG, import frame/project JSON, or export/share the whole storyboard. Edits autosave in this browser when local storage is available. Legacy v1 shot-plan links still open.
+2. **Equipment & budget:** each kit/prop instance has an editable illustrative EUR rental/day rate. Each view lists its items and daily total; allocated days give a view subtotal. Project allocation sums view subtotals, **without deduplicating shared kit**; excludes crew, transport and tax.
+3. **Presets:** interview three-point lighting, product-tabletop lighting/camera kit (add a desk separately), and vlog starters. Save named equipment-only setups locally and apply them to any view in one click; furniture stays while equipment is replaced. Presets export/import as JSON too.
+4. **Detailed, scale-aware items:** 12 shaded top-down drawings, including Aputure 300d + stand, 90 cm softbox, C-stand, FX3 + tripod, boom, sofa, chair, desk, plant and rug. Uniform centimetre-based footprints; dimensions appear on hover/in the inspector. Dimensions, heights and rates are **representative planning estimates**, not verified manufacturer specifications or rental quotes.
+5. **Quick add:** searchable/category palette, recent items, one-tap placement at a low-overlap spot, drag/drop, floor-plane bounds, 10 cm grid and wall snapping. **D** duplicates, **R / Shift-R** rotates ±15°, **Delete/Backspace** removes, arrows move 10 cm (Shift: 1 cm), **Esc** deselects, **/** searches. Shortcuts do not fire while typing.
+
+**Limits:** detailed 2D illustrations, not photorealistic 3D assets; camera sketch is an illustrative lens crop and does not simulate camera pose, depth, collision or lighting. All items sit on the floor plane. JSON import is bounded (2 MB/file, 50 views/project, 100 items/view); importing adds views without overwriting existing ones. Browser-local saves are not cloud backup: export JSON before changing browser/device. Encoded links need a hosted copy and may exceed URL length limits; JSON is the portable fallback.
+
+### Prototype verification
+
+Run `node hackathon/verify_v3.mjs` with Google Chrome installed at `/usr/bin/google-chrome` (Node.js 22+; no npm dependencies). It checks real headless Chromium interactions, frame/project/preset JSON download/upload round-trips, PNG export, reload persistence, legacy links, invalid imports, responsive overflow and browser errors. The test writes its log/download artifacts beside the HTML; only its verification report and screenshots are checked in.
 
 ---
 
@@ -40,7 +58,7 @@ The clickable web mockup (`ui_prototype.html` in the hackathon pitch folder) is 
 | Stage | Status | Scope |
 | --- | --- | --- |
 | SetScan room capture + 3D review | **Works today** | RoomPlan + LiDAR, USDZ/JSON, SceneKit, object summary |
-| Planning layer (place kit, lens preview, share) | Prototype / next | Web concept; not wired to live SetScan data |
+| Planning layer (storyboard, kit budgets, presets, placement, share) | Interactive browser prototype | Sample room only; not wired to live SetScan data |
 | Sensor-aware framing in the scanned room | Planned | Match virtual frame to real photograph |
 | Permissioned crew shot-plan link | Planned | Hosted share with notes and kit layout |
 | Freemium product packaging | Hypothesis | Free one project / Pro ~€19 team/month — unvalidated |
@@ -97,14 +115,14 @@ Source of truth for the app: https://github.com/reigokruus/shootlocal
 
 ## Pitch materials (hackathon weekend)
 
-Local pitch pack (not necessarily in this git repo):
+Pitch pack in [`hackathon/`](hackathon/):
 
-- `pitch_deck.html` — 8-slide deck (← → / F fullscreen)
+- `pitch_deck.html` — 9-slide deck (← → / F fullscreen)
 - `pitch_script.md` — ~3-minute spoken script with SetScan live-demo cues
-- `ui_prototype.html` — placement / lens / share **prototype**
-- `README_shootlocal.md` — this file
+- `ui_prototype.html` — storyboard / equipment / presets / placement / share **prototype**
+- `ui_prototype_v3.png` — desktop planning screenshot
 
-Do not push pitch-only HTML into GitHub unless the team decides to; this README is written for the product repo narrative.
+Pitch materials are included with Marje’s approval. They do not change the native iOS feature status above.
 
 ---
 
