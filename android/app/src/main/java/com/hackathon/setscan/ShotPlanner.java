@@ -40,14 +40,16 @@ final class ShotPlanner {
         boolean cramped;
     }
 
-    private static final float CELL = 0.10f;
-    private static final int BLOCKED = 15; // points in a 10 cm column before we call it furniture/wall
+    static final float CELL = 0.10f;
+    static final int BLOCKED = 15; // points in a 10 cm column before we call it furniture/wall
 
     float floorY;
-    private float minX, minZ;
-    private int nx, nz;
-    private boolean[] floorKnown;
-    private int[] blocked;
+    // grid shared with RoomModel (package-private)
+    float minX, minZ;
+    int nx, nz;
+    boolean[] floorKnown;
+    int[] blocked;
+    float[] cellTop; // highest point above the floor in each cell (below 2.3 m)
     private boolean ready;
 
     boolean isReady() { return ready; }
@@ -81,12 +83,14 @@ final class ShotPlanner {
         nz = Math.min(400, (int) ((maxZ - minZ) / CELL) + 1);
         floorKnown = new boolean[nx * nz];
         blocked = new int[nx * nz];
+        cellTop = new float[nx * nz];
         for (int i = 0; i < count; i++) {
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1) - floorY, z = pos.get(i * 3 + 2);
             int c = cell(x, z);
             if (c < 0) continue;
             if (Math.abs(y) < 0.08f) floorKnown[c] = true;
             else if (y > 0.25f && y < 1.9f) blocked[c]++;
+            if (y > 0.1f && y < 2.3f && y > cellTop[c]) cellTop[c] = y;
         }
         ready = true;
     }

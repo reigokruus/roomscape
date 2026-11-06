@@ -8,6 +8,7 @@ import android.opengl.Matrix;
 
 import com.google.ar.core.Camera;
 import com.google.ar.core.Config;
+import com.google.ar.core.Plane;
 import com.google.ar.core.CameraIntrinsics;
 import com.google.ar.core.Coordinates2d;
 import com.google.ar.core.Frame;
@@ -41,7 +42,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final FloatBuffer pos = ByteBuffer.allocateDirect(MAX_POINTS * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
     private final ByteBuffer col = ByteBuffer.allocateDirect(MAX_POINTS * 4).order(ByteOrder.nativeOrder());
     private int count, uploaded;
-    private final LongSet voxels = new LongSet(1 << 22);
+    private final LongIntMap voxels = new LongIntMap(1 << 22);
+    private final byte[] obs = new byte[MAX_POINTS]; // how many times each point was seen (capped)
+    private int refineCursor; private boolean refined; private int refinedTotal, droppedNoise;
     private final FloatBuffer path = ByteBuffer.allocateDirect(MAX_PATH * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
     private int pathCount;
     private float lastPx = 1e9f, lastPy, lastPz;
@@ -133,6 +136,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         config.setDepthMode(m);
         config.setFocusMode(Config.FocusMode.AUTO);
         config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE);
+        config.setPlaneFindingMode(Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL);
         session.configure(config);
         depthSupported = m != Config.DepthMode.DISABLED;
         rawDepth = m == Config.DepthMode.RAW_DEPTH_ONLY;
@@ -145,13 +149,66 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     boolean isViewing() { return viewing; }
 
     // ---- called on GL thread via queueEvent ----
+    final RoomModel room = new RoomModel();
+    private boolean roomReady;
+    private int viewMode; // 0 = room + scan, 1 = room only, 2 = scan only
+    private FloatBuffer floorTris;
+    private int floorTriVerts;
+
+    private java.util.List<RoomModel.PlaneData> capturePlanes() {
+        java.util.List<RoomModel.PlaneData> out = new java.util.ArrayList<>();
+        if (session == null) return out;
+        try {
+            for (Plane pl : session.getAllTrackables(Plane.class)) {
+                if (pl.getTrackingState() != TrackingState.TRACKING || pl.getSubsumedBy() != null) continue;
+                FloatBuffer poly = pl.getPolygon();
+                poly.rewind();
+                int n = poly.remaining() / 2;
+                if (n < 3) continue;
+                Pose c = pl.getCenterPose();
+                RoomModel.PlaneData pd = new RoomModel.PlaneData();
+                pd.poly = new float[n * 3];
+                float[] in = new float[3], o = new float[3];
+                for (int i = 0; i < n; i++) {
+                    in[0] = poly.get(i * 2); in[1] = 0; in[2] = poly.get(i * 2 + 1);
+                    c.transformPoint(in, 0, o, 0);
+                    pd.poly[i * 3] = o[0]; pd.poly[i * 3 + 1] = o[1]; pd.poly[i * 3 + 2] = o[2];
+                }
+                pd.normal = c.getYAxis();
+                pd.center = new float[]{c.tx(), c.ty(), c.tz()};
+                Plane.Type t = pl.getType();
+                pd.type = t == Plane.Type.HORIZONTAL_UPWARD_FACING ? 0 : t == Plane.Type.HORIZONTAL_DOWNWARD_FACING ? 1 : 2;
+                out.add(pd);
+            }
+        } catch (Exception e) { logError("planes", e); }
+        return out;
+    }
+
+    String cycleViewMode() {
+        viewMode = (viewMode + 1) % 3;
+        return viewMode == 0 ? "View: both" : viewMode == 1 ? "View: room" : "View: scan";
+    }
+
     void finishScan() {
+        java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
         log("finish: " + count + " points, " + diagnostics());
+        dropNoise();
+        log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks, kept " + count);
         planner.analyse(pos, count);
         subjectPick = planner.isReady() ? planner.defaultSubject() : new float[]{target[0], target[1], target[2]};
         sceneIdx = 0; plan = null;
         log(planner.summary());
+        log("ARCore planes: " + planes.size());
+        roomReady = false;
+        if (planner.isReady()) {
+            try {
+                room.build(planes, planner, pos, col, count);
+                roomReady = true;
+                buildFloorMesh();
+                log(room.logLine());
+            } catch (Exception e) { logError("room", e); }
+        }
         topView = false;
         if (count > 0) {
             float minX = 1e9f, minY = 1e9f, minZ = 1e9f, maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
@@ -168,13 +225,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             roomCenter[0] = target[0]; roomCenter[1] = target[1]; roomCenter[2] = target[2];
         }
         yaw = 0.6f; pitch = 0.6f;
-        activity.updateStatus(diagnostics() + "\n" + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
+        activity.updateStatus((roomReady ? room.summary + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
     }
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
+        refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -245,7 +303,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void updateCutaway(float ex, float ez, boolean top) {
         cutActive = viewing && cutaway;
         if (!cutActive) return;
-        cutFloor = planner.isReady() ? planner.floorY : boxMinY;
+        cutFloor = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
         float roomH = boxMaxY - cutFloor;
         cutCeil = roomH > 1.9f ? boxMaxY - 0.3f : 1e9f;
         if (top) { cutDirX = 0; cutDirZ = 0; cutD = 1e9f; return; }
@@ -506,8 +564,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     float wx = m[0] * xc + m[4] * yc + m[8] * zc + m[12];
                     float wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13];
                     float wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
-                    if (!voxels.add(key(wx, wy, wz))) continue;
+                    long vk = key(wx, wy, wz);
+                    int hit = voxels.get(vk);
                     sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
+                    if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
+                    voxels.put(vk, count);
                     addPoint(wx, wy, wz, rgb);
                     if (count >= MAX_POINTS) return;
                 }
@@ -538,7 +599,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int i = 0; i < n; i++) {
                 w[0] = p.get(i * 4); w[1] = p.get(i * 4 + 1); w[2] = p.get(i * 4 + 2);
                 if (p.get(i * 4 + 3) < 0.3f) continue;
-                if (!voxels.add(key(w[0], w[1], w[2]))) continue;
+                long fk = key(w[0], w[1], w[2]);
+                if (voxels.get(fk) >= 0) continue;
+                voxels.put(fk, count);
                 inv.transformPoint(w, 0, c, 0);
                 if (c[2] < -0.05f) {
                     float d = -c[2];
@@ -555,7 +618,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private String diagnostics() {
         return "[mode " + modeLabel + " " + depthSize + " | frames " + depthFrames
                 + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf + " | edges " + depthRejectedEdge
-                + " | not ready " + depthNotYet + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
+                + " | not ready " + depthNotYet + " | refined " + refinedTotal + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 
     private void sampleColor(float fu, float fv, int[] out) {
@@ -581,7 +644,47 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         pos.put(i, x); pos.put(i + 1, y); pos.put(i + 2, z);
         int j = count * 4;
         col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) 255);
+        obs[count] = 1;
         count++;
+    }
+
+    /** A spot seen again: blend the new reading in, so repeated looks clean up a bad first one. */
+    private void refine(int idx, float x, float y, float z, int[] rgb) {
+        int n = obs[idx] & 0xFF;
+        if (n < 255) obs[idx] = (byte) (n + 1);
+        float w = 1f / (Math.min(n, 20) + 1);
+        int i = idx * 3;
+        pos.put(i, pos.get(i) + (x - pos.get(i)) * w);
+        pos.put(i + 1, pos.get(i + 1) + (y - pos.get(i + 1)) * w);
+        pos.put(i + 2, pos.get(i + 2) + (z - pos.get(i + 2)) * w);
+        int j = idx * 4;
+        for (int c = 0; c < 3; c++) {
+            int o = col.get(j + c) & 0xFF;
+            col.put(j + c, (byte) Math.round(o + (rgb[c] - o) * w));
+        }
+        refined = true; refinedTotal++;
+    }
+
+    /** Drop specks seen only once (noise, flying pixels), unless that would throw away most of a sparse scan. */
+    private void dropNoise() {
+        int keep = 0;
+        for (int i = 0; i < count; i++) if ((obs[i] & 0xFF) >= 2) keep++;
+        droppedNoise = 0;
+        if (count < 2000 || keep < count * 0.3f) return;
+        int k = 0;
+        for (int i = 0; i < count; i++) {
+            if ((obs[i] & 0xFF) < 2) continue;
+            if (k != i) {
+                pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
+                for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
+                obs[k] = obs[i];
+            }
+            k++;
+        }
+        droppedNoise = count - k;
+        count = k; uploaded = 0;
+        voxels.clear();
+        for (int i = 0; i < count; i++) voxels.put(key(pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2)), i);
     }
 
     private void recordPath(Pose p) {
@@ -603,6 +706,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---------------- drawing ----------------
 
     private void uploadNew() {
+        // Re-send a slice of already-uploaded points each frame so refined positions/colours show up.
+        if (refined && uploaded > 0) {
+            int slice = Math.min(uploaded, 40000);
+            if (refineCursor >= uploaded) refineCursor = 0;
+            int end = Math.min(uploaded, refineCursor + slice);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, posVbo);
+            pos.position(refineCursor * 3);
+            GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, refineCursor * 12, (end - refineCursor) * 12, pos);
+            pos.position(0);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
+            col.position(refineCursor * 4);
+            GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, refineCursor * 4, (end - refineCursor) * 4, col);
+            col.position(0);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+            refineCursor = end;
+            if (refineCursor >= uploaded) { refineCursor = 0; refined = false; }
+        }
         if (count <= uploaded) return;
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, posVbo);
         pos.position(uploaded * 3);
@@ -739,7 +859,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
         updateCutaway(ex, ez, topView);
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-        drawPoints(mvp, 1f);
+        if (viewMode != 1 || !roomReady) drawPoints(mvp, viewMode == 0 && roomReady ? 0.9f : 1f);
+        if (viewMode != 2 && roomReady) drawRoom(mvp);
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         drawPath(mvp);
@@ -747,7 +868,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (plan != null) drawPlan(mvp, plan);
     }
 
-    private final FloatBuffer scratch = ByteBuffer.allocateDirect(64 * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+    private FloatBuffer scratch = ByteBuffer.allocateDirect(4096 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
 
     private void planDraw(float[] m, float[] verts, int mode, float[] color, float px) {
         GLES20.glUseProgram(planProg);
@@ -756,12 +877,105 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(planProg, "uRound"), mode == GLES20.GL_POINTS ? 1f : 0f);
         GLES20.glUniform4fv(GLES20.glGetUniformLocation(planProg, "uColor"), 1, color, 0);
         int aPos = GLES20.glGetAttribLocation(planProg, "aPos");
+        if (verts.length > scratch.capacity())
+            scratch = ByteBuffer.allocateDirect(verts.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
         scratch.clear();
         scratch.put(verts).position(0);
         GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, scratch);
         GLES20.glEnableVertexAttribArray(aPos);
         GLES20.glDrawArrays(mode, 0, verts.length / 3);
         GLES20.glDisableVertexAttribArray(aPos);
+    }
+
+    /** Floor cells as a flat triangle mesh, built once per scan. */
+    private void buildFloorMesh() {
+        int n = 0;
+        for (boolean b : planner.floorKnown) if (b) n++;
+        floorTriVerts = n * 6;
+        floorTris = ByteBuffer.allocateDirect(Math.max(1, floorTriVerts) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        float c = ShotPlanner.CELL, y = room.floorY + 0.01f;
+        for (int i = 0; i < planner.floorKnown.length; i++) {
+            if (!planner.floorKnown[i]) continue;
+            float x0 = planner.minX + (i % planner.nx) * c, z0 = planner.minZ + (i / planner.nx) * c;
+            float x1 = x0 + c, z1 = z0 + c;
+            floorTris.put(new float[]{x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z0, x1, y, z1, x0, y, z1});
+        }
+        floorTris.position(0);
+    }
+
+    private static final float[] FLOOR_COL = {0.55f, 0.6f, 0.68f, 0.55f};
+    private static final float[] WALL_COL = {0.85f, 0.88f, 0.95f, 0.35f};
+    private static final float[] WALL_EDGE = {0.95f, 0.97f, 1f, 0.9f};
+    private static final float[] TABLE_COL = {0.75f, 0.5f, 0.3f, 0.75f};
+    private static final float[] BOX_COL = {1f, 0.6f, 0.2f, 0.28f};
+    private static final float[] BOX_EDGE = {1f, 0.65f, 0.25f, 0.95f};
+    private static final float[] LIGHT_COL = {1f, 0.95f, 0.4f, 1f};
+
+    /** The "understood" room: floor, walls, table tops, furniture blocks and light sources. */
+    private void drawRoom(float[] m) {
+        float dens = height / 1000f;
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        // floor
+        if (floorTris != null && floorTriVerts > 0) {
+            GLES20.glUseProgram(planProg);
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(planProg, "uMvp"), 1, false, m, 0);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(planProg, "uRound"), 0f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(planProg, "uPx"), 1f);
+            GLES20.glUniform4fv(GLES20.glGetUniformLocation(planProg, "uColor"), 1, FLOOR_COL, 0);
+            int aPos = GLES20.glGetAttribLocation(planProg, "aPos");
+            floorTris.position(0);
+            GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, floorTris);
+            GLES20.glEnableVertexAttribArray(aPos);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, floorTriVerts);
+            GLES20.glDisableVertexAttribArray(aPos);
+        }
+        // planes: walls and table tops (walls on the viewer's side are hidden in dollhouse mode)
+        GLES20.glLineWidth(3f * dens);
+        for (RoomModel.Surface sf : room.surfaces) {
+            float[] fill;
+            if (sf.kind == RoomModel.Surface.Kind.WALL) {
+                if (cutActive && ((sf.cx - roomCenter[0]) * cutDirX + (sf.cz - roomCenter[2]) * cutDirZ) > cutD * 0.5f) continue;
+                fill = WALL_COL;
+            } else if (sf.kind == RoomModel.Surface.Kind.TABLE) fill = TABLE_COL;
+            else continue;
+            planDraw(m, sf.poly, GLES20.GL_TRIANGLE_FAN, fill, 1);
+            planDraw(m, sf.poly, GLES20.GL_LINE_LOOP, sf.kind == RoomModel.Surface.Kind.WALL ? WALL_EDGE : TABLE_COL, 1);
+        }
+        // furniture blocks
+        for (RoomModel.Box b : room.boxes) {
+            float[] tri = boxTriangles(b);
+            planDraw(m, tri, GLES20.GL_TRIANGLES, BOX_COL, 1);
+            planDraw(m, boxEdges(b), GLES20.GL_LINES, BOX_EDGE, 1);
+        }
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        // light sources: glowing markers with a drop line to the floor
+        for (RoomModel.Light l : room.lights) {
+            planDraw(m, new float[]{l.x, room.floorY, l.z, l.x, l.y, l.z}, GLES20.GL_LINES, LIGHT_COL, 1);
+            planDraw(m, new float[]{l.x, l.y, l.z}, GLES20.GL_POINTS, LIGHT_COL, 30 * dens);
+        }
+    }
+
+    private static float[] boxTriangles(RoomModel.Box b) {
+        float x0 = b.x0, x1 = b.x1, y0 = b.y0, y1 = b.y1, z0 = b.z0, z1 = b.z1;
+        return new float[]{
+                // top
+                x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z0, x1, y1, z1, x0, y1, z1,
+                // sides
+                x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y0, z0, x1, y1, z0, x0, y1, z0,
+                x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y0, z1, x1, y1, z1, x0, y1, z1,
+                x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y0, z0, x0, y1, z1, x0, y1, z0,
+                x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y0, z0, x1, y1, z1, x1, y1, z0};
+    }
+
+    private static float[] boxEdges(RoomModel.Box b) {
+        float x0 = b.x0, x1 = b.x1, y0 = b.y0, y1 = b.y1, z0 = b.z0, z1 = b.z1;
+        return new float[]{
+                x0, y1, z0, x1, y1, z0, x1, y1, z0, x1, y1, z1, x1, y1, z1, x0, y1, z1, x0, y1, z1, x0, y1, z0,
+                x0, y0, z0, x0, y1, z0, x1, y0, z0, x1, y1, z0, x1, y0, z1, x1, y1, z1, x0, y0, z1, x0, y1, z1,
+                x0, y0, z0, x1, y0, z0, x1, y0, z0, x1, y0, z1, x1, y0, z1, x0, y0, z1, x0, y0, z1, x0, y0, z0};
     }
 
     /** Draws subject, camera (with its field of view) and lights on top of the scan. */
@@ -845,29 +1059,31 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private static int clampI(int v) { return Math.max(0, Math.min(255, v)); }
 
-    /** Open-addressing hash set of longs. */
-    static final class LongSet {
+    /** Open-addressing hash map long -> int (voxel key -> point index). */
+    static final class LongIntMap {
         private static final long EMPTY = Long.MIN_VALUE;
-        private final long[] table;
+        private final long[] keys;
+        private final int[] vals;
         private final int mask;
 
-        LongSet(int capacityPow2) {
-            table = new long[capacityPow2];
+        LongIntMap(int capacityPow2) {
+            keys = new long[capacityPow2];
+            vals = new int[capacityPow2];
             mask = capacityPow2 - 1;
             clear();
         }
 
-        void clear() { Arrays.fill(table, EMPTY); }
+        void clear() { Arrays.fill(keys, EMPTY); }
 
-        boolean add(long k) {
+        private int slot(long k) {
             long h = k * 0x9E3779B97F4A7C15L;
             int i = (int) (h ^ (h >>> 32)) & mask;
-            while (true) {
-                long t = table[i];
-                if (t == EMPTY) { table[i] = k; return true; }
-                if (t == k) return false;
-                i = (i + 1) & mask;
-            }
+            while (keys[i] != EMPTY && keys[i] != k) i = (i + 1) & mask;
+            return i;
         }
+
+        int get(long k) { int i = slot(k); return keys[i] == k ? vals[i] : -1; }
+
+        void put(long k, int v) { int i = slot(k); keys[i] = k; vals[i] = v; }
     }
 }

@@ -30,7 +30,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button mainButton, topButton, splatButton, planButton, cutButton;
+    private Button mainButton, topButton, splatButton, planButton, cutButton, viewButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
@@ -112,7 +112,16 @@ public class MainActivity extends Activity {
             cutButton.setText(on ? "Show walls" : "Cut walls");
         });
         this.cutButton = cutButton;
+        Button viewButton = new Button(this);
+        viewButton.setText("View: both");
+        viewButton.setVisibility(View.GONE);
+        viewButton.setOnClickListener(v -> glView.queueEvent(() -> {
+            String label = renderer.cycleViewMode();
+            runOnUiThread(() -> viewButton.setText(label));
+        }));
+        this.viewButton = viewButton;
         row2.addView(planButton);
+        row2.addView(viewButton);
         row2.addView(cutButton);
         row2.addView(logButton);
         LinearLayout bars = new LinearLayout(this);
@@ -173,6 +182,7 @@ public class MainActivity extends Activity {
             topButton.setText("Top view");
             planButton.setVisibility(View.GONE);
             cutButton.setVisibility(View.GONE);
+            viewButton.setVisibility(View.GONE);
             planButton.setText("Plan shot");
             resumeSession();
         } else {
@@ -184,6 +194,7 @@ public class MainActivity extends Activity {
                     topButton.setVisibility(View.VISIBLE);
                     planButton.setVisibility(View.VISIBLE);
                     cutButton.setVisibility(View.VISIBLE);
+                    viewButton.setVisibility(View.VISIBLE);
                 });
             });
         }
