@@ -336,6 +336,12 @@ final class RoomModel {
         float mid = (p1 + p99) / 2;
         if (lowB >= 0) { float w = lo + (lowB + 0.5f) * bin; if (w < mid) { a = w; aSeen = 1; } }
         if (highB >= 0) { float w = lo + (highB + 0.5f) * bin; if (w > mid) { z = w; zSeen = 1; } }
+        // A "wall" with lots of scanned stuff behind it is really furniture/stairs inside a bigger (partly scanned) room:
+        // push it out to the edge of the scan (the real wall is behind it).
+        int behindLo = 0, behindHi = 0;
+        for (int i = 0; i < n; i++) { if (v[i] < a - 0.15f) behindLo++; if (v[i] > z + 0.15f) behindHi++; }
+        if (behindLo > n * 0.05f) a = p1;
+        if (behindHi > n * 0.05f) z = p99;
         if (z - a < 0.5f) return null;
         return new float[]{a, z, aSeen, zSeen};
     }

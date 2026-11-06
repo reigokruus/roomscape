@@ -35,10 +35,10 @@ final class PhotoRoom {
     private final FloatBuffer quadUv = fb(new float[]{0, 0, 1, 0, 0, 1, 1, 1});
 
     // built mesh, grouped by keyframe (index = keyframe, last = untextured)
-    private final List<FloatBuffer> groupPos = new ArrayList<>();
-    private final List<FloatBuffer> groupUv = new ArrayList<>();
-    private final List<Integer> groupVerts = new ArrayList<>();
-    private FloatBuffer plainPos; private ByteBuffer plainCol; private int plainVerts;
+    final List<FloatBuffer> groupPos = new ArrayList<>();
+    final List<FloatBuffer> groupUv = new ArrayList<>();
+    final List<Integer> groupVerts = new ArrayList<>();
+    FloatBuffer plainPos; ByteBuffer plainCol; int plainVerts;
     boolean ready;
     int texturedTris, plainTris;
 
@@ -143,7 +143,8 @@ final class PhotoRoom {
     /**
      * proxyFrom: triangles from this vertex index on are room-layout planes (walls, floor). They only take a photo
      * whose depth confirms the wall/floor is really visible there (so a bed is never painted onto the wall), and
-     * they are dropped when no photo covers them.
+     * when no photo covers them they get the fallback colour in col (or are dropped if its alpha is 0).
+     * col holds 4 bytes per vertex for mesh and proxy vertices alike.
      */
     void build(FloatBuffer pos, ByteBuffer col, int verts, int proxyFrom) {
         groupPos.clear(); groupUv.clear(); groupVerts.clear();
@@ -177,7 +178,8 @@ final class PhotoRoom {
             }
             pick[t] = best;
             if (best >= 0) { perKf[best]++; texturedTris++; }
-            else if (t * 3 >= proxyFrom) pick[t] = -2; // uncovered wall/floor cell: leave it out
+            else if (t * 3 >= proxyFrom && col.get(t * 12 + 3) == 0) pick[t] = -2; // uncovered cell of a guessed wall: leave it out
+            else if (t * 3 >= proxyFrom) plainTris++; // uncovered wall/floor cell: filled with that surface's typical colour
             else plainTris++;
         }
         for (int k = 0; k < nk; k++) {
@@ -194,7 +196,7 @@ final class PhotoRoom {
             if (k == -2) continue;
             if (k < 0) {
                 plainPos.put(v);
-                for (int i = 0; i < 12; i++) plainCol.put(col.get(t * 12 + i));
+                for (int i = 0; i < 12; i++) plainCol.put(i % 4 == 3 ? (byte) 255 : col.get(t * 12 + i));
             } else {
                 project(keyframes.get(k), v, uv);
                 groupPos.get(k).put(v);

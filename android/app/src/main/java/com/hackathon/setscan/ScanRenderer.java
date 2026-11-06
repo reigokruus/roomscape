@@ -223,13 +223,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         try {
             long t1 = System.currentTimeMillis();
-            float[] proxy = roomReady && room.hasLayout ? layoutProxies() : new float[0];
+            RoomProxies rp = roomReady && room.hasLayout ? RoomProxies.build(room, pos, col, count) : new RoomProxies();
+            float[] proxy = rp.tris;
             int mv = tsdf.meshVerts, pv = proxy.length / 3;
             FloatBuffer all = ByteBuffer.allocateDirect(Math.max(1, mv + pv) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
             tsdf.meshPos.position(0);
             all.put(tsdf.meshPos).put(proxy).position(0);
             tsdf.meshPos.position(0);
-            photos.build(all, tsdf.meshCol, mv + pv, mv);
+            ByteBuffer allCol = ByteBuffer.allocateDirect(Math.max(4, (mv + pv) * 4)).order(ByteOrder.nativeOrder());
+            tsdf.meshCol.position(0);
+            allCol.put(tsdf.meshCol).put(rp.cols).position(0);
+            tsdf.meshCol.position(0);
+            photos.build(all, allCol, mv + pv, mv);
             log("photos: " + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
                     + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
         } catch (Throwable e) { logError("photos", new RuntimeException(e)); }
@@ -996,40 +1001,6 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnableVertexAttribArray(aPos);
         GLES20.glDrawArrays(mode, 0, verts.length / 3);
         GLES20.glDisableVertexAttribArray(aPos);
-    }
-
-    /** The fitted walls and floor as 8 cm cells, set 2 cm behind the real surface so the fused mesh wins where it exists. */
-    private float[] layoutProxies() {
-        final float C = 0.08f, BACK = 0.02f;
-        java.util.ArrayList<float[]> out = new java.util.ArrayList<>();
-        float y0 = room.floorY, y1 = room.topY;
-        for (RoomModel.Wall w : room.layout) {
-            float lx = w.x1 - w.x0, lz = w.z1 - w.z0, len = (float) Math.sqrt(lx * lx + lz * lz);
-            int nu = Math.max(1, Math.round(len / C)), nv = Math.max(1, Math.round((y1 - y0) / C));
-            float ox = w.nx * BACK, oz = w.nz * BACK;
-            for (int i = 0; i < nu; i++) for (int j = 0; j < nv; j++) {
-                float a0 = (float) i / nu, a1 = (float) (i + 1) / nu;
-                float xa = w.x0 + lx * a0 + ox, za = w.z0 + lz * a0 + oz, xb = w.x0 + lx * a1 + ox, zb = w.z0 + lz * a1 + oz;
-                float ya = y0 + (y1 - y0) * j / nv, yb = y0 + (y1 - y0) * (j + 1) / nv;
-                out.add(new float[]{xa, ya, za, xb, ya, zb, xb, yb, zb, xa, ya, za, xb, yb, zb, xa, yb, za});
-            }
-        }
-        // floor: the layout rectangle (corners 0..3 = start points of the 4 walls)
-        RoomModel.Wall w0 = room.layout.get(0), w1 = room.layout.get(1), w3 = room.layout.get(3);
-        float ax = w0.x0, az = w0.z0;
-        float ux = w0.x1 - w0.x0, uz = w0.z1 - w0.z0, vx = w3.x0 - w0.x0, vz = w3.z0 - w0.z0;
-        float lu = (float) Math.sqrt(ux * ux + uz * uz), lv = (float) Math.sqrt(vx * vx + vz * vz);
-        int nu = Math.max(1, Math.round(lu / C)), nv = Math.max(1, Math.round(lv / C));
-        float fy = y0 - BACK;
-        for (int i = 0; i < nu; i++) for (int j = 0; j < nv; j++) {
-            float a0 = (float) i / nu, a1 = (float) (i + 1) / nu, b0 = (float) j / nv, b1 = (float) (j + 1) / nv;
-            float[] p00 = {ax + ux * a0 + vx * b0, az + uz * a0 + vz * b0}, p10 = {ax + ux * a1 + vx * b0, az + uz * a1 + vz * b0};
-            float[] p11 = {ax + ux * a1 + vx * b1, az + uz * a1 + vz * b1}, p01 = {ax + ux * a0 + vx * b1, az + uz * a0 + vz * b1};
-            out.add(new float[]{p00[0], fy, p00[1], p10[0], fy, p10[1], p11[0], fy, p11[1], p00[0], fy, p00[1], p11[0], fy, p11[1], p01[0], fy, p01[1]});
-        }
-        float[] r = new float[out.size() * 18];
-        for (int i = 0; i < out.size(); i++) System.arraycopy(out.get(i), 0, r, i * 18, 18);
-        return r;
     }
 
     /** Floor cells as a flat triangle mesh, built once per scan. */
