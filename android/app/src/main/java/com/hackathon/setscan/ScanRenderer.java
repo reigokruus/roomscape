@@ -251,7 +251,39 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             roomCenter[0] = target[0]; roomCenter[1] = target[1]; roomCenter[2] = target[2];
         }
         yaw = 0.6f; pitch = 0.6f;
+        standInRoom();
         finishStatus();
+    }
+
+    /**
+     * Put the viewer in the middle of the room at the height the phone was held while scanning,
+     * so the first view after a scan looks like standing there. Pinch out to see the room from outside.
+     */
+    private void standInRoom() {
+        if (count == 0) return;
+        float cx = target[0], cz = target[2];
+        if (roomReady && room.hasLayout) {
+            cx = 0; cz = 0;
+            for (RoomModel.Wall w : room.layout) { cx += w.x0; cz += w.z0; }
+            cx /= room.layout.size(); cz /= room.layout.size();
+            roomCenter[0] = cx; roomCenter[2] = cz;
+        }
+        float eyeY = target[1];
+        if (pathCount > 0) { // median phone height while scanning
+            float[] ys = new float[pathCount];
+            for (int i = 0; i < pathCount; i++) ys[i] = path.get(i * 3 + 1);
+            java.util.Arrays.sort(ys);
+            eyeY = ys[pathCount / 2];
+        } else if (roomReady) eyeY = room.floorY + 1.5f;
+        // face the way the phone was pointing when the scan was finished (camera looks down its -Z)
+        int last = poseLog.n - 1;
+        if (last >= 0) {
+            float qx = poseLog.p[last * 7 + 3], qy = poseLog.p[last * 7 + 4], qz = poseLog.p[last * 7 + 5], qw = poseLog.p[last * 7 + 6];
+            float fx = -2 * (qx * qz + qw * qy), fz = -(1 - 2 * (qx * qx + qy * qy));
+            if (fx * fx + fz * fz > 1e-4f) yaw = (float) Math.atan2(-fx, -fz);
+        }
+        target[0] = cx; target[1] = eyeY; target[2] = cz;
+        dist = 0.05f; pitch = 0.12f; // eye just behind the target, looking slightly down
     }
 
     private void finishStatus() {
@@ -261,7 +293,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             objs.append(objs.length() > 0 ? ", " : "").append(bx.title());
             if (bx.parent != null) objs.append(" (on ").append(bx.parent.title()).append(")");
         }
-        activity.updateStatus((roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
+        activity.updateStatus((roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. You're standing in the middle of the room: drag to look around, pinch out to see it from outside, two fingers to move. Yellow line = your walking path.");
     }
 
     private java.util.List<RoomModel.PlaneData> lastPlanes = new java.util.ArrayList<>();
@@ -839,7 +871,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         pitch = clamp(pitch + dy * 0.008f, -1.5f, 1.55f);
     }
 
-    void zoom(float f) { dist = clamp(dist / f, 0.2f, 100f); }
+    void zoom(float f) { dist = clamp(dist / f, 0.05f, 100f); }
 
     void pan(float dx, float dy) {
         float s = dist * 0.0015f;
