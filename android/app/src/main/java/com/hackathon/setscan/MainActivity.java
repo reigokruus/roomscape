@@ -157,10 +157,8 @@ public class MainActivity extends Activity {
                 session = new Session(this);
                 Config config = new Config(session);
                 boolean depth = false;
-                if (session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
-                    config.setDepthMode(Config.DepthMode.RAW_DEPTH_ONLY);
-                    depth = true;
-                } else if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+                // Smoothed (AUTOMATIC) depth gives a value for every pixel, which is much denser than raw depth.
+                if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
                     config.setDepthMode(Config.DepthMode.AUTOMATIC);
                     depth = true;
                 }
@@ -168,7 +166,7 @@ public class MainActivity extends Activity {
                 config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE);
                 session.configure(config);
                 renderer.setSession(session, depth,
-                        config.getDepthMode() == Config.DepthMode.RAW_DEPTH_ONLY);
+                        false);
             } catch (Exception e) {
                 Toast.makeText(this, "ARCore error: " + e, Toast.LENGTH_LONG).show();
                 updateStatus("ARCore could not start: " + e.getMessage());

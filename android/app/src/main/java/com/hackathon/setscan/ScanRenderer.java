@@ -58,6 +58,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean topView;
     private long lastDepthTs = -1;
     private int frameNo;
+    // diagnostics shown on screen
+    private int depthFrames, depthPixels, depthRejectedRange, depthNotYet;
+    private String lastError = "", depthSize = "";
 
     private final float[] proj = new float[16], view = new float[16], mvp = new float[16];
 
@@ -86,11 +89,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             dist = Math.max(1f, ext * 1.2f);
         }
         yaw = 0.6f; pitch = 0.6f;
-        activity.updateStatus(count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
+        activity.updateStatus(diagnostics() + "\n" + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
     }
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
+        depthFrames = depthPixels = depthRejectedRange = depthNotYet = 0; lastError = "";
         voxels.clear();
         viewing = false;
     }
@@ -186,7 +190,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (ts == TrackingState.TRACKING) {
             try {
                 integrate(frame, camera);
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
             }
             recordPath(camera.getPose());
             camera.getProjectionMatrix(proj, 0, 0.05f, 100f);
@@ -202,8 +207,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (ts != TrackingState.TRACKING) {
                 s = "Move the phone slowly to start tracking...\n" + camera.getTrackingFailureReason();
             } else {
-                s = "Scanning: " + count + " points" + (depthSupported ? "" : " (no depth support, sparse mode)")
-                        + "\nWalk slowly around the room and point at walls, floor and furniture. Tap Finish when done.";
+                s = "Scanning: " + count + " points\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n"
+                        + diagnostics();
             }
             activity.updateStatus(s);
         }
@@ -228,6 +233,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { cpuImage = frame.acquireCameraImage(); } catch (NotYetAvailableException e) { cpuImage = null; }
 
             int dw = depth.getWidth(), dh = depth.getHeight();
+            depthFrames++;
+            depthSize = dw + "x" + dh;
             CameraIntrinsics ti = camera.getTextureIntrinsics();
             CameraIntrinsics ii = camera.getImageIntrinsics();
             int[] tDim = ti.getImageDimensions(), iDim = ii.getImageDimensions();
@@ -258,7 +265,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
-                    if (mm < 200 || mm > 5000) continue;
+                    if (mm < 200 || mm > 5000) { depthRejectedRange++; continue; }
+                    depthPixels++;
                     if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 110) continue;
                     float d = mm * 0.001f;
                     float xc = (u + 0.5f - cx) * d / fx;
@@ -274,6 +282,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
         } catch (NotYetAvailableException e) {
+            depthNotYet++;
             // no depth yet
         } finally {
             if (depth != null) depth.close();
@@ -310,6 +319,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } finally {
             if (cpuImage != null) { cpuImage.close(); cpuImage = null; }
         }
+    }
+
+    private String diagnostics() {
+        return "[depth " + (depthSupported ? "on " + depthSize : "NOT SUPPORTED") + " | frames " + depthFrames
+                + " | valid px " + depthPixels + " | out of range " + depthRejectedRange
+                + " | not ready " + depthNotYet + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 
     private void sampleColor(float fu, float fv, int[] out) {
