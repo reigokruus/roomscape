@@ -114,3 +114,7 @@ Do not push pitch-only HTML into GitHub unless the team decides to; this README 
 - **Claim:** Live placement of lights/cameras with accurate 3D lens simulation — **no; web mockup only, illustrative crops**.
 - **Claim:** Shared hosted shot plan for remote crew — **no; prototype encodes a sample plan in a link**.
 - **Claim:** Photorealistic or automatic lighting — **no**.
+
+## Competitor research
+
+See the [Shootlocal competitor research page](https://cursor.com/canvas/store-da409d30-ab83-48e7-b175-2e0183165750/65ee7be5-f0df-44b1-93ff-f27a3643bda4).
