@@ -47,6 +47,13 @@ struct HomeView: View {
             .navigationDestination(for: SavedScan.self) { scan in
                 ResultView(scan: scan)
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(destination: GearInventoryView()) {
+                        Label("My Gear", systemImage: "checklist")
+                    }
+                }
+            }
             .onAppear { scans = ScanStore.list() }
             .fullScreenCover(isPresented: $scanning) {
                 ScannerScreen(
