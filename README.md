@@ -1,4 +1,4 @@
-# SetScan
+# CineX
 
 **A set-up assistant for real rooms.** Scan your room with an iPhone, tell the app what gear you own, pick the kind of scene you want, and it tells you in plain language where to put the camera and lights. It's built for everyday creators, not film crews.
 
@@ -8,14 +8,14 @@
 **Next:** a gear inventory, scene presets, and suggestions for camera and light placement on the scanned room.
 
 ## Why not Previs Pro (or similar apps)?
-Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. SetScan starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. SetScan uses the scan to plan the shoot.
+Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. CineX starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. CineX uses the scan to plan the shoot.
 
 ## iPhone version (main)
-This is the `SetScan.swiftpm` folder. It requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
+This is the `CineX.swiftpm` folder. It requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
 
 ### Build and install on an iPhone
 1. Download this repo (green **Code** button › **Download ZIP**) and unzip it.
-2. Double-click **SetScan.swiftpm**. It opens in Xcode.
+2. Double-click **CineX.swiftpm**. It opens in Xcode.
 3. Connect the iPhone by cable and tap **Trust**. On the iPhone, turn on Settings › Privacy & Security › **Developer Mode** (the phone restarts).
 4. In Xcode, pick the iPhone as the run destination at the top. In the project's **Signing & Capabilities**, choose your Apple ID as the Team (add it under Xcode › Settings › Accounts first; a free Apple ID works).
 5. Press ▶︎ Run. The first time, approve the developer account on the iPhone under Settings › General › VPN & Device Management, then run again.
@@ -36,10 +36,12 @@ Android has no equivalent of Apple's RoomPlan, so this version uses ARCore depth
 From the command line: `cd android && ./gradlew assembleDebug` (on Windows, `gradlew.bat assembleDebug`). The APK ends up in `android/app/build/outputs/apk/debug/`.
 
 ### Get new builds on the phone automatically
-Every push that changes `android/` is built by GitHub and published as a release, so the phone can always download the newest build from **https://github.com/reigokruus/shootlocal/releases/latest/download/SetScan-android.apk**.
+Every push that changes `android/` is built by GitHub and published as a release, so the phone can always download the newest build from **https://github.com/reigokruus/shootlocal/releases/latest/download/CineX-android.apk**.
 
 For hands-free updates, install [Obtainium](https://github.com/ImranR98/Obtainium) on the phone and add `https://github.com/reigokruus/shootlocal`. It notifies you of each new build and installs it with one tap.
 
-All builds, whether from GitHub or from Android Studio, use the same signing key (`android/app/debug.keystore`, a debug key committed on purpose), so they install over each other. If Android refuses to install, uninstall the old SetScan once and try again.
+(The Android package ID stays `com.hackathon.setscan` on purpose so already-installed builds keep updating.)
+
+All builds, whether from GitHub or from Android Studio, use the same signing key (`android/app/debug.keystore`, a debug key committed on purpose), so they install over each other. If Android refuses to install, uninstall the old CineX once and try again.
 
 On first launch, the phone may ask to install or update **Google Play Services for AR**.

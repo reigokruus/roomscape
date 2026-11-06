@@ -28,8 +28,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk SetScan-android.apk
-          gh release create "android-v0.1.${{ github.run_number }}" SetScan-android.apk \
+          cp android/app/build/outputs/apk/debug/app-debug.apk CineX-android.apk
+          gh release create "android-v0.1.${{ github.run_number }}" CineX-android.apk \
             --title "Android build ${{ github.run_number }}" \
             --notes "Automatic build of ${GITHUB_SHA::7}: $(git log -1 --pretty=%s)" \
             --latest
