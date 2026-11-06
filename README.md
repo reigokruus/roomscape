@@ -1,6 +1,14 @@
 # SetScan
 
-An iPhone app that scans a room with Apple RoomPlan and shows it back as a 3D model, with windows (natural light), doors and furniture picked out. It's the first step toward a set-planning tool that suggests light and camera placement.
+**A set-up assistant for real rooms.** Scan your room with an iPhone, tell the app what gear you own, pick the kind of scene you want, and it tells you in plain language where to put the camera and lights. It's built for everyday creators, not film crews.
+
+## Status
+**v0.1 (hackathon prototype):** the scan works. Apple RoomPlan captures the room, and it comes back as a 3D model with windows (natural light), doors and furniture picked out, plus a room summary and a top-down view.
+
+**Next:** a gear inventory, scene presets, and suggestions for camera and light placement on the scanned room.
+
+## Why not Previs Pro (or similar apps)?
+Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. SetScan starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Photo Studio AR and Shot Designer.
 
 Requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
 
