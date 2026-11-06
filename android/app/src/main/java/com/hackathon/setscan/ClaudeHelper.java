@@ -151,6 +151,70 @@ final class ClaudeHelper {
         }
     }
 
+    /** One thing Claude found in the live photo: its name, kind and box in the photo (0..1, top-left origin). */
+    static final class Det { String name, kind; float x0, y0, x1, y1; }
+
+    /**
+     * Live detection: Claude finds the objects in the newest photo itself and boxes them; the app then lifts each box
+     * into 3D with the scan points behind it. This doesn't depend on the scan having split things up correctly.
+     */
+    static List<Det> detectLive(String apiKey, String photoB64) throws Exception {
+        AnthropicClient client = AnthropicOkHttpClient.builder().apiKey(apiKey).build();
+        try {
+            List<BetaContentBlockParam> content = new ArrayList<>();
+            content.add(image(photoB64));
+            content.add(BetaContentBlockParam.ofText(
+                    "A phone is 3D-scanning a room to plan a video shoot; this is its newest photo. "
+                    + "Find each distinct physical object in it that is at least half visible: furniture, things on furniture, things on the floor. "
+                    + "Skip walls, floor, ceiling, doors, windows, rugs, shadows, light patches, people and body parts.\n"
+                    + "Reply with only JSON, no other text:\n"
+                    + "{\"objects\": [{\"name\": \"1-3 word name\", \"kind\": \"one of: " + KINDS + "\", \"box\": [x0, y0, x1, y1]}]}\n"
+                    + "box is the tight bounding box in the photo in thousandths of the image width and height (0-1000, top-left origin). "
+                    + "At most 10 objects, biggest first. A pair of shoes side by side can be one object."));
+            MessageCreateParams params = MessageCreateParams.builder()
+                    .model(MODEL)
+                    .maxTokens(4000L)
+                    .outputConfig(com.anthropic.models.beta.messages.BetaOutputConfig.builder()
+                            .effort(com.anthropic.models.beta.messages.BetaOutputConfig.Effort.LOW).build())
+                    .addUserMessageOfContentBlockParams(content)
+                    .addBeta("server-side-fallback-2026-07-01")
+                    .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
+                    .build();
+            BetaMessage msg = client.beta().messages().create(params);
+            count(msg);
+            if (msg.stopReason().isPresent() && msg.stopReason().get().equals(BetaStopReason.REFUSAL))
+                throw new IllegalStateException("Claude declined this request");
+            StringBuilder text = new StringBuilder();
+            for (BetaContentBlock b : msg.content()) b.text().ifPresent(x -> text.append(x.text()));
+            return parseDetect(text.toString());
+        } finally {
+            client.close();
+        }
+    }
+
+    static List<Det> parseDetect(String text) throws Exception {
+        int a = text.indexOf('{'), b = text.lastIndexOf('}');
+        if (a < 0 || b <= a) throw new IllegalStateException("no JSON in the reply");
+        JSONArray objs = new JSONObject(text.substring(a, b + 1)).optJSONArray("objects");
+        List<Det> out = new ArrayList<>();
+        if (objs == null) return out;
+        for (int i = 0; i < objs.length(); i++) {
+            JSONObject o = objs.optJSONObject(i);
+            if (o == null) continue;
+            JSONArray bx = o.optJSONArray("box");
+            if (bx == null || bx.length() != 4) continue;
+            Det d = new Det();
+            d.name = o.optString("name", "").trim();
+            d.kind = o.optString("kind", "other").trim().toLowerCase(Locale.US);
+            float x0 = (float) bx.optDouble(0, -1), y0 = (float) bx.optDouble(1, -1), x1 = (float) bx.optDouble(2, -1), y1 = (float) bx.optDouble(3, -1);
+            d.x0 = Math.max(0, Math.min(x0, x1)) / 1000f; d.x1 = Math.min(1000, Math.max(x0, x1)) / 1000f;
+            d.y0 = Math.max(0, Math.min(y0, y1)) / 1000f; d.y1 = Math.min(1000, Math.max(y0, y1)) / 1000f;
+            if (d.name.isEmpty() || d.kind.equals("noise") || d.x1 - d.x0 < 0.01f || d.y1 - d.y0 < 0.01f) continue;
+            out.add(d);
+        }
+        return out;
+    }
+
     static Result parse(String text, int n) throws Exception {
         int a = text.indexOf('{'), b = text.lastIndexOf('}');
         if (a < 0 || b <= a) throw new IllegalStateException("no JSON in the reply");

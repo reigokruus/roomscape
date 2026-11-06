@@ -82,12 +82,14 @@ public class MainActivity extends Activity {
     private void toggleLiveClaude() {
         if (renderer.claudeLiveKey != null) {
             renderer.claudeLiveKey = null;
+            renderer.log("claude live off");
             liveClaudeButton.setText("Claude live: off");
             return;
         }
         String key = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
         if (key == null || key.isEmpty()) { askKey(this::toggleLiveClaude); return; }
         renderer.claudeLiveKey = key;
+        renderer.log("claude live on");
         liveClaudeButton.setText("Claude live: on");
         Toast.makeText(this, "Claude now looks at the scan every few seconds and names what it sees (needs internet).", Toast.LENGTH_LONG).show();
     }

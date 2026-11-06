@@ -467,6 +467,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     rm.knownH = h; rm.knownW = w; rm.knownD = d;
                     rm.build(new java.util.ArrayList<>(), sp, p, c, n);
                     applyLabels(rm.boxes);
+                    claudeObjs.mergeInto(rm.boxes);
                     liveRoom = rm;
                 }
             } catch (Throwable e) { /* a live estimate is best effort */ }
@@ -816,6 +817,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try {
                 room.build(planes, planner, pos, col, count);
                 applyLabels(room.boxes);
+                claudeObjs.mergeInto(room.boxes);
                 roomReady = true;
                 buildFloorMesh();
                 log(room.logLine());
@@ -988,71 +990,64 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    final ClaudeObjects claudeObjs = new ClaudeObjects();
+
     private void maybeAskClaudeLive(long nowMs) {
         String key = claudeLiveKey;
+        if (key == null) return;
         RoomModel r = liveRoom;
         PhotoRoom.Keyframe k = photos.last;
-        if (key == null || claudeBusy || r == null || k == null || nowMs - claudeLastMs < 7000) return;
+        if (claudeLine == null) claudeLine = "🤖 Claude: waiting for the first photo";
+        if (claudeBusy || r == null || k == null || nowMs - claudeLastMs < 7000) return;
         if (k == claudeLastKf && nowMs - claudeLastMs < 20000) return; // nothing new to show it
-        java.util.List<RoomModel.Box> cand = new java.util.ArrayList<>();
-        java.util.List<float[]> rects = new java.util.ArrayList<>();
-        java.util.List<RoomModel.Box> sorted = new java.util.ArrayList<>(r.boxes);
-        sorted.sort((a, b) -> b.voxels - a.voxels);
-        for (RoomModel.Box b : sorted) {
-            if (cand.size() >= 10) break;
-            float[] rc = ObjectNamer.rect(k, b);
-            if (rc == null) continue;
-            cand.add(b); rects.add(rc);
-        }
-        if (cand.isEmpty()) return;
         claudeLastMs = nowMs; claudeLastKf = k; claudeBusy = true;
-        final String b64; final java.util.List<String> info = new java.util.ArrayList<>();
-        final java.util.List<RoomModel.Box> sent = new java.util.ArrayList<>();
+        final String b64; final ClaudeObjects.Snapshot snap = new ClaudeObjects.Snapshot();
         try {
             android.graphics.Matrix map = new android.graphics.Matrix();
             android.graphics.Bitmap img = ObjectNamer.readUpright(k, width, height, map);
-            android.graphics.Bitmap draw = img.copy(android.graphics.Bitmap.Config.ARGB_8888, true);
+            float iw = img.getWidth(), ih = img.getHeight();
+            b64 = ClaudeHelper.jpegBase64(img, 1024);
             img.recycle();
-            android.graphics.Canvas cv = new android.graphics.Canvas(draw);
-            android.graphics.Paint box = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-            box.setStyle(android.graphics.Paint.Style.STROKE); box.setStrokeWidth(4); box.setColor(0xFFFFD000);
-            android.graphics.Paint txt = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-            txt.setTextSize(34); txt.setColor(0xFF000000); txt.setFakeBoldText(true);
-            android.graphics.Paint tag = new android.graphics.Paint(); tag.setColor(0xFFFFD000);
-            for (int i = 0; i < cand.size(); i++) {
-                float[] rc = rects.get(i);
-                android.graphics.RectF rf = new android.graphics.RectF(rc[0], rc[1], rc[2], rc[3]);
-                map.mapRect(rf);
-                cv.drawRect(rf, box);
-                cv.drawRect(rf.left, rf.top, rf.left + 30, rf.top + 38, tag);
-                cv.drawText(String.valueOf(i), rf.left + 6, rf.top + 32, txt);
-                RoomModel.Box b = cand.get(i);
-                info.add(String.format(java.util.Locale.US, "%.2f x %.2f m, %.2f m tall, %s", 2 * b.hu, 2 * b.hv, b.y1 - b.y0,
-                        b.where().isEmpty() ? "on the floor" : b.where()));
-                RoomModel.Box copy = new RoomModel.Box(); // the live model is rebuilt every 2 s; keep this geometry
-                copy.cx = b.cx; copy.cz = b.cz; copy.hu = b.hu; copy.hv = b.hv; copy.y0 = b.y0; copy.y1 = b.y1;
-                sent.add(copy);
+            // project the scan points into this photo (upright 0..1 coordinates)
+            float[] q = {0, 0, 1, 0};
+            map.mapPoints(q);
+            boolean swap = Math.abs(q[2] - q[0]) < Math.abs(q[3] - q[1]); // texture u runs along the photo's height
+            snap.radX = swap ? k.h / k.fy : k.w / k.fx; snap.radY = swap ? k.w / k.fx : k.h / k.fy;
+            snap.floorY = r.floorY;
+            int n = count, step = Math.max(1, n / 60000), cap = n / step + 1;
+            snap.u = new float[cap]; snap.v = new float[cap]; snap.d = new float[cap]; snap.x = new float[cap]; snap.y = new float[cap]; snap.z = new float[cap];
+            float[] vm = k.view, pt = new float[2];
+            int j = 0;
+            for (int i = 0; i < n; i += step) {
+                float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+                float cx = vm[0] * x + vm[4] * y + vm[8] * z + vm[12], cy = vm[1] * x + vm[5] * y + vm[9] * z + vm[13], cz = vm[2] * x + vm[6] * y + vm[10] * z + vm[14];
+                float d = -cz;
+                if (d < 0.15f || d > 6f) continue;
+                pt[0] = (k.fx * cx / d + k.cx) / k.w; pt[1] = (k.cy - k.fy * cy / d) / k.h;
+                if (pt[0] < 0 || pt[0] > 1 || pt[1] < 0 || pt[1] > 1) continue;
+                map.mapPoints(pt);
+                snap.u[j] = pt[0] / iw; snap.v[j] = pt[1] / ih; snap.d[j] = d; snap.x[j] = x; snap.y[j] = y; snap.z[j] = z; j++;
             }
-            b64 = ClaudeHelper.jpegBase64(draw, 1024);
-            draw.recycle();
+            snap.n = j;
         } catch (Throwable e) { claudeBusy = false; logError("claude live photo", new RuntimeException(e)); return; }
+        claudeLine = "🤖 Claude is looking...";
         new Thread(() -> {
             try {
-                ClaudeHelper.Result res = ClaudeHelper.askLive(key, b64, info);
-                StringBuilder seen = new StringBuilder();
-                for (int i = 0; i < sent.size(); i++) {
-                    RoomModel.Box b = sent.get(i);
-                    b.name = res.names.get(i); b.kind = res.kinds.get(i);
-                    remember(b);
-                    if (b.kind != null && !b.kind.equals("noise") && b.name != null) seen.append(seen.length() > 0 ? ", " : "").append(b.name);
+                java.util.List<ClaudeHelper.Det> dets = ClaudeHelper.detectLive(key, b64);
+                StringBuilder seen = new StringBuilder(), placed = new StringBuilder();
+                for (ClaudeHelper.Det d : dets) {
+                    seen.append(seen.length() > 0 ? ", " : "").append(d.name);
+                    RoomModel.Box b = ClaudeObjects.lift(snap, d);
+                    if (b == null) continue;
+                    claudeObjs.add(b);
+                    placed.append(placed.length() > 0 ? ", " : "").append(String.format(java.util.Locale.US, "%s %.2fx%.2fx%.2f", d.name, 2 * b.hu, 2 * b.hv, b.y1 - b.y0));
                 }
                 claudeCalls++;
-                claudeLine = "🤖 Claude sees: " + (seen.length() > 0 ? seen : "nothing new");
-                RoomModel lr = liveRoom;
-                if (lr != null) applyLabels(lr.boxes);
+                claudeLine = "🤖 Claude sees: " + (seen.length() > 0 ? seen : "nothing it can name") + (dets.size() > 0 && placed.length() == 0 ? " (not scanned enough yet to place)" : "");
+                log("claude live " + claudeCalls + ": " + dets.size() + " found, placed " + (placed.length() > 0 ? placed : "none") + " (" + snap.n + " points in view) " + ClaudeHelper.costLine());
             } catch (Throwable e) {
                 String m = String.valueOf(e.getMessage());
-                claudeLine = m.contains("401") ? "🤖 Claude: API key rejected (long-press Claude to change it)" : "🤖 Claude: " + m;
+                claudeLine = m.contains("401") ? "🤖 Claude: API key rejected (long-press Ask Claude to change it)" : "🤖 Claude: " + m;
                 logError("claude live", new RuntimeException(e));
             }
             claudeBusy = false;
@@ -1085,7 +1080,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
