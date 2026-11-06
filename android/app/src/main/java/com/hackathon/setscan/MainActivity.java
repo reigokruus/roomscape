@@ -78,11 +78,8 @@ public class MainActivity extends Activity {
             topButton.setText(top ? "3D view" : "Top view");
         });
         splatButton = new Button(this);
-        splatButton.setText("Dots");
-        splatButton.setOnClickListener(v -> {
-            boolean on = renderer.toggleSplats();
-            splatButton.setText(on ? "Dots" : "Splats");
-        });
+        splatButton.setText(renderer.styleLabel());
+        splatButton.setOnClickListener(v -> splatButton.setText(renderer.cycleStyle()));
         bar.addView(mainButton);
         bar.addView(topButton);
         bar.addView(splatButton);

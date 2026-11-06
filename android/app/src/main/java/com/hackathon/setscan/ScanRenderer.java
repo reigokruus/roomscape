@@ -43,6 +43,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final ByteBuffer col = ByteBuffer.allocateDirect(MAX_POINTS * 4).order(ByteOrder.nativeOrder());
     private int count, uploaded;
     private final LongIntMap voxels = new LongIntMap(1 << 22);
+    private final Tsdf tsdf = new Tsdf(1_500_000);
+    private final PhotoRoom photos = new PhotoRoom();
+    private final float[] prevPose = new float[16], curPose = new float[16];
+    private boolean havePrevPose;
+    private float frameMove = 1f, frameTurn = 90f;
+    private int meshTris;
     private final byte[] obs = new byte[MAX_POINTS]; // how many times each point was seen (capped)
     private int refineCursor; private boolean refined; private int refinedTotal, droppedNoise;
     private final FloatBuffer path = ByteBuffer.allocateDirect(MAX_PATH * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -195,6 +201,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log("finish: " + count + " points, " + diagnostics());
         dropNoise();
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks, kept " + count);
+        try {
+            long t0 = System.currentTimeMillis();
+            meshTris = tsdf.extractMesh();
+            long t1 = System.currentTimeMillis();
+            photos.build(tsdf.meshPos, tsdf.meshCol, tsdf.meshVerts);
+            log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (t1 - t0) + " ms), photos: "
+                    + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
+                    + " plain triangles (" + (System.currentTimeMillis() - t1) + " ms)");
+        } catch (Throwable e) { logError("surface", new RuntimeException(e)); }
         planner.analyse(pos, count);
         subjectPick = planner.isReady() ? planner.defaultSubject() : new float[]{target[0], target[1], target[2]};
         sceneIdx = 0; plan = null;
@@ -233,6 +248,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
+        tsdf.clear(); photos.clear(); meshTris = 0; havePrevPose = false;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -348,6 +364,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         textureSet = false;
+        photos.onSurfaceCreated();
 
         planProg = program(
                 "uniform mat4 uMvp; uniform float uPx; attribute vec4 aPos;" +
@@ -465,6 +482,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
         }
         if (ts == TrackingState.TRACKING) {
+            camera.getPose().toMatrix(curPose, 0);
+            if (havePrevPose) {
+                float dx = curPose[12] - prevPose[12], dy = curPose[13] - prevPose[13], dz = curPose[14] - prevPose[14];
+                frameMove = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+                float dot = curPose[8] * prevPose[8] + curPose[9] * prevPose[9] + curPose[10] * prevPose[10];
+                frameTurn = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, dot))));
+            }
+            System.arraycopy(curPose, 0, prevPose, 0, 16);
+            havePrevPose = true;
             try {
                 integrate(frame, camera);
             } catch (Exception e) {
@@ -583,11 +609,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     long vk = key(wx, wy, wz);
                     int hit = voxels.get(vk);
                     sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
+                    if ((u & 1) == 0 && (v & 1) == 0) tsdf.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
                     voxels.put(vk, count);
                     addPoint(wx, wy, wz, rgb);
                     if (count >= MAX_POINTS) return;
                 }
+            }
+            // Keep a sharp HD photo of this view (with its pose) for the photographic room.
+            if (photos.wants(m, frameMove, frameTurn)) {
+                short[] dcopy = new short[dw * dh];
+                for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) dcopy[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+                int[] td = ti.getImageDimensions();
+                float[] tIntr = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
+                photos.capture(bgTex, m, tIntr, dcopy, dw, dh, new float[]{fx, fy, cx, cy}, colorGain, width, height);
+                if (photos.keyframes.size() == 1) log("first photo keyframe (texture " + td[0] + "x" + td[1] + ")");
             }
         } catch (NotYetAvailableException e) {
             depthNotYet++;
@@ -635,7 +671,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private String diagnostics() {
         return "[mode " + modeLabel + " " + depthSize + " | frames " + depthFrames
                 + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf + " | edges " + depthRejectedEdge
-                + " | not ready " + depthNotYet + " | refined " + refinedTotal + String.format(java.util.Locale.US, " | gain %.2f", colorGain) + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
+                + " | not ready " + depthNotYet + " | refined " + refinedTotal + String.format(java.util.Locale.US, " | gain %.2f", colorGain) + " | photos " + photos.keyframes.size() + " | surface voxels " + tsdf.size() + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 
     private void sampleColor(float fu, float fv, int[] out) {
@@ -779,8 +815,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private volatile boolean splats = true;
+    private volatile int style = 0; // 0 = photo surface, 1 = splats, 2 = dots
 
-    boolean toggleSplats() { splats = !splats; return splats; }
+    String cycleStyle() {
+        style = (style + 1) % 3;
+        splats = style != 2;
+        return styleLabel();
+    }
+
+    String styleLabel() { return style == 0 ? "Style: photo" : style == 1 ? "Style: splats" : "Style: dots"; }
 
     private void drawPoints(float[] m, float sizeScale) {
         if (count == 0) return;
@@ -881,7 +924,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
         updateCutaway(ex, ez, topView);
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-        if (viewMode != 1 || !roomReady) drawPoints(mvp, viewMode == 0 && roomReady ? 0.9f : 1f);
+        if (viewMode != 1 || !roomReady) {
+            if (style == 0 && photos.ready && meshTris > 0)
+                photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutFloor, cutCeil);
+            else drawPoints(mvp, viewMode == 0 && roomReady ? 0.9f : 1f);
+        }
         if (viewMode != 2 && roomReady) drawRoom(mvp);
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
@@ -1070,7 +1117,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---------------- helpers ----------------
 
-    private static int program(String vs, String fs) {
+    static int program(String vs, String fs) {
         int v = shader(GLES20.GL_VERTEX_SHADER, vs), f = shader(GLES20.GL_FRAGMENT_SHADER, fs);
         int p = GLES20.glCreateProgram();
         GLES20.glAttachShader(p, v);
