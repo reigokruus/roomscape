@@ -138,7 +138,12 @@ final class PhotoRoom {
     }
 
     /** Picks the best photo for every triangle of the mesh (triangle soup), and builds per-photo draw groups. */
-    void build(FloatBuffer pos, ByteBuffer col, int verts) {
+    /**
+     * proxyFrom: triangles from this vertex index on are room-layout planes (walls, floor). They only take a photo
+     * whose depth confirms the wall/floor is really visible there (so a bed is never painted onto the wall), and
+     * they are dropped when no photo covers them.
+     */
+    void build(FloatBuffer pos, ByteBuffer col, int verts, int proxyFrom) {
         groupPos.clear(); groupUv.clear(); groupVerts.clear();
         int nk = keyframes.size(), nt = verts / 3;
         int[] pick = new int[nt];
@@ -165,11 +170,13 @@ final class PhotoRoom {
                 float score = cosA * cosA / dist;
                 if (score <= bestScore) continue;
                 if (!project(kf, v, uv)) continue;
-                if (occluded(kf, cx, cy, cz)) continue;
+                if (t * 3 >= proxyFrom ? !confirmed(kf, cx, cy, cz) : occluded(kf, cx, cy, cz)) continue;
                 best = k; bestScore = score;
             }
             pick[t] = best;
-            if (best >= 0) { perKf[best]++; texturedTris++; } else plainTris++;
+            if (best >= 0) { perKf[best]++; texturedTris++; }
+            else if (t * 3 >= proxyFrom) pick[t] = -2; // uncovered wall/floor cell: leave it out
+            else plainTris++;
         }
         for (int k = 0; k < nk; k++) {
             groupPos.add(perKf[k] == 0 ? null : fbAlloc(perKf[k] * 9));
@@ -182,6 +189,7 @@ final class PhotoRoom {
         for (int t = 0; t < nt; t++) {
             for (int i = 0; i < 9; i++) v[i] = pos.get(t * 9 + i);
             int k = pick[t];
+            if (k == -2) continue;
             if (k < 0) {
                 plainPos.put(v);
                 for (int i = 0; i < 12; i++) plainCol.put(col.get(t * 12 + i));
@@ -229,6 +237,28 @@ final class PhotoRoom {
         int mm = k.depth[v * k.dw + u] & 0xFFFF;
         if (mm == 0) return false;
         return d > mm * 0.001f + 0.1f + d * 0.04f;
+    }
+
+    /** The keyframe's depth saw a surface right here (within 12 cm + 5%), so this photo pixel belongs to it. */
+    private static boolean confirmed(Keyframe k, float x, float y, float z) {
+        if (k.depth == null || k.dfx == 0) return false;
+        float[] m = k.view;
+        float cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+        float cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+        float cz = m[2] * x + m[6] * y + m[10] * z + m[14];
+        float d = -cz;
+        if (d < 0.1f) return false;
+        int u = (int) (k.dfx * cx / d + k.dcx), v = (int) (k.dcy - k.dfy * cy / d);
+        int hits = 0, seen = 0;
+        for (int dv = -1; dv <= 1; dv++) for (int du = -1; du <= 1; du++) {
+            int uu = u + du, vv = v + dv;
+            if (uu < 0 || vv < 0 || uu >= k.dw || vv >= k.dh) continue;
+            int mm = k.depth[vv * k.dw + uu] & 0xFFFF;
+            if (mm == 0) continue;
+            seen++;
+            if (Math.abs(mm * 0.001f - d) < 0.12f + d * 0.05f) hits++;
+        }
+        return seen > 0 && hits * 2 >= seen;
     }
 
     void draw(float[] mvp, boolean cut, float[] center, float dirX, float dirZ, float cutD, float floorY, float ceilY) {

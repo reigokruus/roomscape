@@ -15,7 +15,7 @@ final class Tsdf {
     static final float VS = 0.04f;      // voxel size (m)
     static final float TRUNC = 0.12f;   // truncation band (m)
     static final int MAX_W = 40;        // cap the weight so later looks can still change things
-    static final int MIN_W = 3;         // voxels seen fewer times are ignored for the mesh
+    static final int MIN_W = 2;         // voxels seen fewer times are ignored for the mesh
 
     private final int cap;
     private final long[] keys;

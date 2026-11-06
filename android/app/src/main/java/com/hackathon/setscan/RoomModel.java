@@ -77,7 +77,7 @@ final class RoomModel {
             float h = s.cy - floorY;
             if (pd.type == 0) {
                 if (Math.abs(h) < 0.15f) s.kind = Surface.Kind.FLOOR;
-                else if (h > 0.3f && h < 1.3f) s.kind = Surface.Kind.TABLE;
+                else if (h > 0.3f && h < 1.3f && s.area > 0.15f) s.kind = Surface.Kind.TABLE;
                 else s.kind = Surface.Kind.OTHER;
             } else if (pd.type == 1) {
                 s.kind = h > 1.8f ? Surface.Kind.CEILING : Surface.Kind.OTHER;

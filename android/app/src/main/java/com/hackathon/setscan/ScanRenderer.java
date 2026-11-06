@@ -204,11 +204,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         try {
             long t0 = System.currentTimeMillis();
             meshTris = tsdf.extractMesh();
-            long t1 = System.currentTimeMillis();
-            photos.build(tsdf.meshPos, tsdf.meshCol, tsdf.meshVerts);
-            log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (t1 - t0) + " ms), photos: "
-                    + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
-                    + " plain triangles (" + (System.currentTimeMillis() - t1) + " ms)");
+            log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
         } catch (Throwable e) { logError("surface", new RuntimeException(e)); }
         planner.analyse(pos, count);
         subjectPick = planner.isReady() ? planner.defaultSubject() : new float[]{target[0], target[1], target[2]};
@@ -224,6 +220,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 log(room.logLine());
             } catch (Exception e) { logError("room", e); }
         }
+        try {
+            long t1 = System.currentTimeMillis();
+            float[] proxy = roomReady && room.hasLayout ? layoutProxies() : new float[0];
+            int mv = tsdf.meshVerts, pv = proxy.length / 3;
+            FloatBuffer all = ByteBuffer.allocateDirect(Math.max(1, mv + pv) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            tsdf.meshPos.position(0);
+            all.put(tsdf.meshPos).put(proxy).position(0);
+            tsdf.meshPos.position(0);
+            photos.build(all, tsdf.meshCol, mv + pv, mv);
+            log("photos: " + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
+                    + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
+        } catch (Throwable e) { logError("photos", new RuntimeException(e)); }
         topView = false;
         if (count > 0) {
             float minX = 1e9f, minY = 1e9f, minZ = 1e9f, maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
@@ -589,7 +597,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
                     if (mm < 200 || mm > 4000) { depthRejectedRange++; continue; }
                     depthPixels++;
-                    if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) { depthRejectedConf++; continue; }
+                    int cv = cbuf != null ? cbuf.get(v * cRow + u * cPix) & 0xFF : 255;
+                    if (cv < 15) { depthRejectedConf++; continue; }
+                    boolean weak = cv < 55; // too unsure for the point cloud, but the surface fusion averages it out
+                    if (weak) depthRejectedConf++;
                     // Edge filter: depth jumps between neighbours create "flying pixel" streaks, so skip them.
                     if (u == 0 || v == 0 || u == dw - 1 || v == dh - 1) { depthRejectedEdge++; continue; }
                     int tol = mm / 25 + 20; // ~4% of distance + 2 cm
@@ -609,7 +620,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     long vk = key(wx, wy, wz);
                     int hit = voxels.get(vk);
                     sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
-                    if ((u & 1) == 0 && (v & 1) == 0) tsdf.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
+                    tsdf.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
+                    if (weak) continue;
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
                     voxels.put(vk, count);
                     addPoint(wx, wy, wz, rgb);
@@ -954,6 +966,40 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnableVertexAttribArray(aPos);
         GLES20.glDrawArrays(mode, 0, verts.length / 3);
         GLES20.glDisableVertexAttribArray(aPos);
+    }
+
+    /** The fitted walls and floor as 8 cm cells, set 2 cm behind the real surface so the fused mesh wins where it exists. */
+    private float[] layoutProxies() {
+        final float C = 0.08f, BACK = 0.02f;
+        java.util.ArrayList<float[]> out = new java.util.ArrayList<>();
+        float y0 = room.floorY, y1 = room.topY;
+        for (RoomModel.Wall w : room.layout) {
+            float lx = w.x1 - w.x0, lz = w.z1 - w.z0, len = (float) Math.sqrt(lx * lx + lz * lz);
+            int nu = Math.max(1, Math.round(len / C)), nv = Math.max(1, Math.round((y1 - y0) / C));
+            float ox = w.nx * BACK, oz = w.nz * BACK;
+            for (int i = 0; i < nu; i++) for (int j = 0; j < nv; j++) {
+                float a0 = (float) i / nu, a1 = (float) (i + 1) / nu;
+                float xa = w.x0 + lx * a0 + ox, za = w.z0 + lz * a0 + oz, xb = w.x0 + lx * a1 + ox, zb = w.z0 + lz * a1 + oz;
+                float ya = y0 + (y1 - y0) * j / nv, yb = y0 + (y1 - y0) * (j + 1) / nv;
+                out.add(new float[]{xa, ya, za, xb, ya, zb, xb, yb, zb, xa, ya, za, xb, yb, zb, xa, yb, za});
+            }
+        }
+        // floor: the layout rectangle (corners 0..3 = start points of the 4 walls)
+        RoomModel.Wall w0 = room.layout.get(0), w1 = room.layout.get(1), w3 = room.layout.get(3);
+        float ax = w0.x0, az = w0.z0;
+        float ux = w0.x1 - w0.x0, uz = w0.z1 - w0.z0, vx = w3.x0 - w0.x0, vz = w3.z0 - w0.z0;
+        float lu = (float) Math.sqrt(ux * ux + uz * uz), lv = (float) Math.sqrt(vx * vx + vz * vz);
+        int nu = Math.max(1, Math.round(lu / C)), nv = Math.max(1, Math.round(lv / C));
+        float fy = y0 - BACK;
+        for (int i = 0; i < nu; i++) for (int j = 0; j < nv; j++) {
+            float a0 = (float) i / nu, a1 = (float) (i + 1) / nu, b0 = (float) j / nv, b1 = (float) (j + 1) / nv;
+            float[] p00 = {ax + ux * a0 + vx * b0, az + uz * a0 + vz * b0}, p10 = {ax + ux * a1 + vx * b0, az + uz * a1 + vz * b0};
+            float[] p11 = {ax + ux * a1 + vx * b1, az + uz * a1 + vz * b1}, p01 = {ax + ux * a0 + vx * b1, az + uz * a0 + vz * b1};
+            out.add(new float[]{p00[0], fy, p00[1], p10[0], fy, p10[1], p11[0], fy, p11[1], p00[0], fy, p00[1], p11[0], fy, p11[1], p01[0], fy, p01[1]});
+        }
+        float[] r = new float[out.size() * 18];
+        for (int i = 0; i < out.size(); i++) System.arraycopy(out.get(i), 0, r, i * 18, 18);
+        return r;
     }
 
     /** Floor cells as a flat triangle mesh, built once per scan. */
