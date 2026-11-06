@@ -152,6 +152,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     + ", fps " + cc.getFpsRange() + ", depth sensor " + cc.getDepthSensorUsage()
                     + ", facing " + cc.getFacingDirection());
         } catch (Exception e) { logError("cameraConfig", e); }
+        try { // which lenses ARCore offers on this phone (it decides; apps can only pick from this list)
+            com.google.ar.core.CameraConfigFilter f = new com.google.ar.core.CameraConfigFilter(s);
+            StringBuilder b = new StringBuilder();
+            for (com.google.ar.core.CameraConfig c : s.getSupportedCameraConfigs(f))
+                b.append(" [id ").append(c.getCameraId()).append(' ').append(c.getImageSize()).append(' ').append(c.getFpsRange()).append(']');
+            log("supported camera configs:" + b);
+        } catch (Throwable e) { logError("cameraConfigs", new RuntimeException(e)); }
         modeIndex = 0;
         applyMode();
     }
@@ -756,7 +763,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); guideTarget = null; guideText = null; poseJumps = 0; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -1006,9 +1013,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             notTrackingSince = 0;
             lostSince = 0;
         } else if (everTracked) {
-            // Lost tracking after it worked: if it doesn't come back by itself, restart the AR session.
+            // Lost tracking after it worked. ARCore usually recovers by itself once it sees something textured again;
+            // restarting only helps the S24's "paused for no reason" case, and a restart can shift the whole map.
             if (lostSince == 0) lostSince = nowMs;
-            else if (nowMs - lostSince > 3000 && recoveries < 10) {
+            else if (camera.getTrackingFailureReason() == com.google.ar.core.TrackingFailureReason.NONE
+                    && nowMs - lostSince > 3000 && recoveries < 10) {
                 recoveries++;
                 lostSince = 0;
                 log("tracking lost for 3s, restarting AR session (attempt " + recoveries + ")");
@@ -1023,6 +1032,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 try { applyMode(); } catch (Exception e) { logError("configure", e); }
             }
         }
+        if (ts == TrackingState.TRACKING && lastTrackState != TrackingState.TRACKING) settleUntil = nowMs + 1500;
+        lastTrackState = ts;
         if (ts == TrackingState.TRACKING) {
             camera.getPose().toMatrix(curPose, 0);
             if (havePrevPose) {
@@ -1031,13 +1042,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float dot = curPose[8] * prevPose[8] + curPose[9] * prevPose[9] + curPose[10] * prevPose[10];
                 frameTurn = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, dot))));
             }
+            // A sudden jump means ARCore just corrected its map: the next moment's poses can't be trusted yet.
+            if (havePrevPose && frameMove > 0.15f) { settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); }
             System.arraycopy(curPose, 0, prevPose, 0, 16);
             havePrevPose = true;
-            try {
-                integrate(frame, camera);
-            } catch (Exception e) {
-                logError("integrate", e);
+            if (nowMs >= settleUntil) {
+                try {
+                    integrate(frame, camera);
+                } catch (Exception e) {
+                    logError("integrate", e);
+                }
             }
+            updateGuide(camera, nowMs);
             recordPath(camera.getPose());
             camera.getProjectionMatrix(proj, 0, 0.05f, 100f);
             camera.getViewMatrix(view, 0);
@@ -1051,20 +1067,130 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             drawLiveRoom(mvp);
             drawRescanTarget(mvp, camera);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+            drawGuide(mvp);
         }
         if (frameNo % 15 == 0) {
             String s;
             if (ts != TrackingState.TRACKING) {
-                s = "Move the phone slowly, pointing at the floor or furniture...\n"
+                com.google.ar.core.TrackingFailureReason why = camera.getTrackingFailureReason();
+                String hint = why == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_FEATURES ? "Too close or a plain surface: step back and point at something with detail"
+                        : why == com.google.ar.core.TrackingFailureReason.EXCESSIVE_MOTION ? "Moving too fast: hold still for a second"
+                        : why == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_LIGHT ? "Too dark: turn on a light"
+                        : "Move the phone slowly, pointing at the floor or furniture...";
+                s = hint + (everTracked ? " (tracking lost, capture paused)" : "") + "\n"
                         + "[tracking " + ts + ", reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + "]\n"
                         + diagnostics();
             } else {
-                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine()
+                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (guideText != null ? "\n➜ " + guideText : "")
                         + "\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n" + diagnostics();
             }
             activity.updateStatus(s);
         }
     }
+
+    // ---------------- "scan over there" guide ----------------
+    private TrackingState lastTrackState;
+    private long settleUntil, guideLastMs;
+    private int poseJumps;
+    private volatile float[] guideTarget; // world x, y, z of the biggest unscanned area
+    private volatile String guideText;
+    private final float[] camPos = new float[3], camFwd = new float[3];
+
+    /**
+     * Twice a second: find the biggest part of the room that hasn't been seen yet (unscanned floor inside the
+     * fitted walls, and walls with no points), as seen from where the phone is now.
+     */
+    private void updateGuide(Camera camera, long nowMs) {
+        Pose p = camera.getPose();
+        camPos[0] = p.tx(); camPos[1] = p.ty(); camPos[2] = p.tz();
+        float[] z = p.getZAxis();
+        camFwd[0] = -z[0]; camFwd[1] = -z[1]; camFwd[2] = -z[2];
+        if (nowMs - guideLastMs < 500) return;
+        guideLastMs = nowMs;
+        RoomModel r = liveRoom;
+        if (r == null || r.grid == null || !r.hasLayout || r.bounds == null) { guideTarget = null; guideText = null; return; }
+        ShotPlanner g = r.grid;
+        float lc = (float) Math.cos(Math.toRadians(r.layoutAngle)), ls = (float) Math.sin(Math.toRadians(r.layoutAngle));
+        float[] bd = r.bounds;
+        // 12 compass sectors around the phone; each unscanned spot votes for its sector
+        float[] w = new float[12], sx = new float[12], sz = new float[12];
+        float cell = ShotPlanner.CELL;
+        for (float u = bd[0] + 0.15f; u < bd[1] - 0.15f; u += cell) {
+            for (float v = bd[2] + 0.15f; v < bd[3] - 0.15f; v += cell) {
+                float x = u * lc - v * ls, zz = u * ls + v * lc;
+                int ix = (int) ((x - g.minX) / cell), iz = (int) ((zz - g.minZ) / cell);
+                boolean known = ix >= 0 && iz >= 0 && ix < g.nx && iz < g.nz
+                        && (g.floorKnown[iz * g.nx + ix] || g.blocked[iz * g.nx + ix] > ShotPlanner.BLOCKED);
+                if (known) continue;
+                vote(w, sx, sz, x, zz, 1f);
+            }
+        }
+        for (RoomModel.Wall wl : r.layout) {
+            if (wl.seen) continue;
+            float len = (float) Math.hypot(wl.x1 - wl.x0, wl.z1 - wl.z0);
+            vote(w, sx, sz, (wl.x0 + wl.x1) / 2 - wl.nx * 0.2f, (wl.z0 + wl.z1) / 2 - wl.nz * 0.2f, len / cell * 2f);
+        }
+        int best = -1; float bw = 0;
+        for (int i = 0; i < 12; i++) if (w[i] > bw) { bw = w[i]; best = i; }
+        if (best < 0 || bw < 25) { guideTarget = null; guideText = r.floorCoverage > 0.85f ? "Room looks covered. Fill in details or tap Finish." : null; return; }
+        float tx = sx[best] / w[best], tz = sz[best] / w[best];
+        guideTarget = new float[]{tx, r.floorY + 0.3f, tz};
+        guideText = String.format(java.util.Locale.US, "Not scanned yet: about %.1f m², follow the arrow", bw * cell * cell);
+    }
+
+    private void vote(float[] w, float[] sx, float[] sz, float x, float z, float weight) {
+        double a = Math.atan2(x - camPos[0], z - camPos[2]);
+        int s = (int) Math.floor((a + Math.PI) / (2 * Math.PI) * 12) % 12;
+        w[s] += weight; sx[s] += x * weight; sz[s] += z * weight;
+    }
+
+    private static final float[] GUIDE_COL = {1f, 0.85f, 0.2f, 0.95f};
+    private final float[] guideClip = new float[4];
+
+    /** An arrow at the screen edge pointing to the unscanned area, or a marker on it when it's in view. */
+    private void drawGuide(float[] m) {
+        float[] t = guideTarget;
+        if (t == null) return;
+        Matrix.multiplyMV(guideClip, 0, m, 0, new float[]{t[0], t[1], t[2], 1}, 0);
+        float w = guideClip[3];
+        float nx = guideClip[0] / Math.abs(w), ny = guideClip[1] / Math.abs(w);
+        boolean inView = w > 0.05f && Math.abs(nx) < 0.85f && Math.abs(ny) < 0.85f;
+        float pulse = 0.75f + 0.25f * (float) Math.sin(System.currentTimeMillis() / 180.0);
+        float[] col = {GUIDE_COL[0], GUIDE_COL[1], GUIDE_COL[2], GUIDE_COL[3] * pulse};
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        if (inView) {
+            GLES20.glLineWidth(4f * height / 1000f);
+            int n = 24; float[] ring = new float[n * 3];
+            for (int i = 0; i < n; i++) {
+                double a = 2 * Math.PI * i / n;
+                ring[i * 3] = t[0] + 0.35f * (float) Math.cos(a); ring[i * 3 + 1] = t[1]; ring[i * 3 + 2] = t[2] + 0.35f * (float) Math.sin(a);
+            }
+            planDraw(m, ring, GLES20.GL_LINE_LOOP, col, 1);
+            planDraw(m, new float[]{t[0], t[1], t[2]}, GLES20.GL_POINTS, col, 26 * height / 1000f);
+        } else {
+            // direction on screen (behind the camera: flip it so the arrow points the way to turn)
+            float dx = nx, dy = ny;
+            if (w < 0) { dx = -dx; dy = -dy; }
+            float asp = (float) width / height;
+            float ax = dx * asp, ay = dy; // in screen-proportional units
+            float l = (float) Math.sqrt(ax * ax + ay * ay);
+            if (l < 1e-4f) { ax = 1; ay = 0; l = 1; }
+            ax /= l; ay /= l;
+            // place it at the edge: scale so the larger component hits 0.85
+            float kx = Math.abs(ax) > 1e-4f ? 0.85f * asp / Math.abs(ax) : 1e9f, ky = Math.abs(ay) > 1e-4f ? 0.85f / Math.abs(ay) : 1e9f;
+            float k = Math.min(kx, ky);
+            float px = ax * k, py = ay * k; // screen-proportional
+            float s = 0.09f; // arrow size
+            float[] tri = {px + ax * s, py + ay * s, px - ax * s * 0.6f - ay * s * 0.7f, py - ay * s * 0.6f + ax * s * 0.7f,
+                    px - ax * s * 0.6f + ay * s * 0.7f, py - ay * s * 0.6f - ax * s * 0.7f};
+            float[] v = new float[9];
+            for (int i = 0; i < 3; i++) { v[i * 3] = tri[i * 2] / asp; v[i * 3 + 1] = tri[i * 2 + 1]; v[i * 3 + 2] = 0; }
+            planDraw(IDENTITY, v, GLES20.GL_TRIANGLES, col, 1);
+        }
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
 
     // ---------------- scanning ----------------
 

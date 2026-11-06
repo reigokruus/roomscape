@@ -89,7 +89,11 @@ final class RoomModel {
     float floorCoverage;
     String summary = "";
 
+    ShotPlanner grid; // the floor grid this model was built from
+    float[] bounds;   // layout rectangle in layout axes {uMin, uMax, vMin, vMax}, or null
+
     void build(List<PlaneData> planes, ShotPlanner grid, FloatBuffer pos, ByteBuffer col, int count) {
+        this.grid = grid;
         surfaces.clear(); boxes.clear(); lights.clear();
         floorY = grid.floorY;
 
@@ -155,7 +159,7 @@ final class RoomModel {
         // 3) Objects: separate clusters of points, each as a box or cylinder, with what it stands on.
         int nx = grid.nx, nz = grid.nz;
         float cell = ShotPlanner.CELL;
-        float[] bounds = null;
+        float[] bounds = null; this.bounds = null;
         if (hasLayout) {
             float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
             Wall w0 = layout.get(0), w2 = layout.get(2);
@@ -164,6 +168,7 @@ final class RoomModel {
             float vMin = -w0.x0 * ls + w0.z0 * lc, vMax = -w2.x0 * ls + w2.z0 * lc;
             if (vMin > vMax) { float t = vMin; vMin = vMax; vMax = t; }
             bounds = new float[]{uMin, uMax, vMin, vMax};
+            this.bounds = bounds;
         }
         boxes.addAll(ObjectFinder.find(pos, count, floorY, topY, hasLayout ? layoutAngle : 0, bounds, hasLayout ? roomW * roomD : 0));
         for (Box bx : boxes) bx.label = bx.generic;
