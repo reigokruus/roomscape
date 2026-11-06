@@ -565,6 +565,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     int recordedFrames() { return recs.size(); }
 
+    /** Screen rotation relative to the phone's natural (portrait) orientation; the app is locked to landscape. */
+    private int displayRotation() {
+        try { return activity.getWindowManager().getDefaultDisplay().getRotation(); } catch (Throwable e) { return 1; }
+    }
+
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
@@ -740,7 +745,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     public void onSurfaceChanged(GL10 gl, int w, int h) {
         width = w; height = h;
         GLES20.glViewport(0, 0, w, h);
-        if (session != null) session.setDisplayGeometry(0, w, h);
+        if (session != null) session.setDisplayGeometry(displayRotation(), w, h);
         displaySet = session != null;
     }
 
@@ -751,7 +756,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
         if (viewing) { drawViewer(); return; }
         if (session == null) return;
-        if (!displaySet) { session.setDisplayGeometry(0, width, height); displaySet = true; }
+        if (!displaySet) { session.setDisplayGeometry(displayRotation(), width, height); displaySet = true; }
         if (!textureSet) { session.setCameraTextureName(bgTex); textureSet = true; }
         Frame frame;
         try {

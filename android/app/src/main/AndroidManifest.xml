@@ -9,7 +9,7 @@
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <meta-data android:name="com.google.ar.core" android:value="required" />
         <activity android:name=".MainActivity" android:exported="true"
-            android:screenOrientation="portrait"
+            android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
