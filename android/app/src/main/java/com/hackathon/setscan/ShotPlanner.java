@@ -207,7 +207,9 @@ final class ShotPlanner {
             }
             if (score > bestScore) { bestScore = score; bestTheta = theta; }
         }
-        p.cramped = bestScore < slots.size();
+        // Product lights sit on or around the table, so free floor doesn't matter there.
+        boolean onTable = scene == Scene.PRODUCT;
+        p.cramped = !onTable && bestScore < slots.size();
         for (Slot s : slots) {
             double a = bestTheta + Math.toRadians(s.angleDeg);
             s.e.x = p.sx + (float) Math.cos(a) * s.dist;
@@ -220,7 +222,7 @@ final class ShotPlanner {
         sb.append(scene.label).append(" plan (tap the scan to move the subject):\n");
         for (Element e : p.elements) {
             sb.append("• ").append(colorName(e.color)).append(' ').append(e.name).append(": ").append(e.role);
-            if (!free(e.x, e.z)) sb.append(" (no clear floor scanned here, check this spot)");
+            if (!onTable && !free(e.x, e.z)) sb.append(" (no clear floor scanned here, check this spot)");
             sb.append('\n');
         }
         if (p.cramped) sb.append("Tight space: scan more of the floor around the subject for a better layout.\n");

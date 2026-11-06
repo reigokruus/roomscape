@@ -30,7 +30,10 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button mainButton, topButton, splatButton;
+    private Button mainButton, topButton, splatButton, planButton;
+    private long downTime;
+    private float downX, downY;
+    private boolean multiTouch;
     private ScaleGestureDetector scaleDetector;
     private float lastX, lastY;
     private int lastPointerCount;
@@ -90,11 +93,27 @@ public class MainActivity extends Activity {
             cm.setPrimaryClip(android.content.ClipData.newPlainText("CineX log", renderer.report()));
             Toast.makeText(this, "Diagnostics copied. Paste them into the chat.", Toast.LENGTH_SHORT).show();
         });
-        bar.addView(logButton);
+        planButton = new Button(this);
+        planButton.setText("Plan shot");
+        planButton.setVisibility(View.GONE);
+        planButton.setOnClickListener(v -> glView.queueEvent(() -> {
+            String label = renderer.cyclePlan();
+            runOnUiThread(() -> planButton.setText(label));
+        }));
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setGravity(Gravity.CENTER);
+        bar.removeView(logButton);
+        row2.addView(planButton);
+        row2.addView(logButton);
+        LinearLayout bars = new LinearLayout(this);
+        bars.setOrientation(LinearLayout.VERTICAL);
+        bars.addView(row2);
+        bars.addView(bar);
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
-        root.addView(bar, blp);
+        root.addView(bars, blp);
 
         setContentView(root);
 
@@ -118,7 +137,19 @@ public class MainActivity extends Activity {
                 else renderer.pan(dx, dy);
             }
             lastX = x; lastY = y; lastPointerCount = pc;
-            if (e.getActionMasked() == MotionEvent.ACTION_UP) lastPointerCount = 0;
+            if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false;
+            }
+            if (pc > 1) multiTouch = true;
+            if (e.getActionMasked() == MotionEvent.ACTION_UP) {
+                lastPointerCount = 0;
+                // A quick tap (not a drag) places the subject for the shot plan.
+                if (!multiTouch && e.getEventTime() - downTime < 300
+                        && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
+                    float tx = e.getX(), ty = e.getY();
+                    glView.queueEvent(() -> renderer.pickSubject(tx, ty));
+                }
+            }
             return true;
         });
         updateStatus("Starting...");
@@ -131,6 +162,8 @@ public class MainActivity extends Activity {
             mainButton.setText("Finish scan");
             topButton.setVisibility(View.GONE);
             topButton.setText("Top view");
+            planButton.setVisibility(View.GONE);
+            planButton.setText("Plan shot");
             resumeSession();
         } else {
             glView.queueEvent(() -> {
@@ -139,6 +172,7 @@ public class MainActivity extends Activity {
                     if (session != null) session.pause();
                     mainButton.setText("Rescan");
                     topButton.setVisibility(View.VISIBLE);
+                    planButton.setVisibility(View.VISIBLE);
                 });
             });
         }

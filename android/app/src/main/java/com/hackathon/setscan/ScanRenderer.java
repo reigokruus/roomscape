@@ -148,6 +148,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void finishScan() {
         viewing = true;
         log("finish: " + count + " points, " + diagnostics());
+        planner.analyse(pos, count);
+        subjectPick = planner.isReady() ? planner.defaultSubject() : new float[]{target[0], target[1], target[2]};
+        sceneIdx = 0; plan = null;
+        log(planner.summary());
         topView = false;
         if (count > 0) {
             float minX = 1e9f, minY = 1e9f, minZ = 1e9f, maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
@@ -170,6 +174,60 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         viewing = false;
+        plan = null; sceneIdx = 0;
+    }
+
+    // ---- shot planning ----
+    private final ShotPlanner planner = new ShotPlanner();
+    private ShotPlanner.Plan plan;
+    private int sceneIdx; // 0 = off
+    private float[] subjectPick;
+    private final float[] viewMvp = new float[16];
+    private int planProg;
+
+    /** Cycles Off -> Interview -> Vlog -> Product -> Off. Returns the button label. */
+    String cyclePlan() {
+        if (!planner.isReady()) {
+            activity.updateStatus("Not enough of the scan to plan a shot. Rescan and capture more of the floor.");
+            return "Plan shot";
+        }
+        sceneIdx = (sceneIdx + 1) % (ShotPlanner.Scene.values().length + 1);
+        replan();
+        return sceneIdx == 0 ? "Plan shot" : "Plan: " + ShotPlanner.Scene.values()[sceneIdx - 1].label;
+    }
+
+    private void replan() {
+        if (sceneIdx == 0) {
+            plan = null;
+            activity.updateStatus(count + " points captured. Tap Plan shot to place a camera and lights.");
+            return;
+        }
+        plan = planner.plan(ShotPlanner.Scene.values()[sceneIdx - 1], subjectPick);
+        log("plan " + plan.scene + " subject (" + fmt(plan.sx) + ", " + fmt(plan.sz) + ") cramped=" + plan.cramped);
+        activity.updateStatus(plan.explanation);
+    }
+
+    private static String fmt(float f) { return String.format(java.util.Locale.US, "%.2f", f); }
+
+    /** Tap on the scan: move the subject to the nearest scanned point under the finger. */
+    void pickSubject(float tx, float ty) {
+        if (sceneIdx == 0 || count == 0) return;
+        float best = (40f * height / 1000f) * (40f * height / 1000f) + 400f, bestW = Float.MAX_VALUE;
+        int bestI = -1;
+        float[] m = viewMvp;
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+            if (cw <= 0.05f) continue;
+            float sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / cw + 1f) * 0.5f * width;
+            float sy = (1f - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw) * 0.5f * height;
+            float d = (sx - tx) * (sx - tx) + (sy - ty) * (sy - ty);
+            // prefer the closest point to the finger, then the one nearest the viewer
+            if (d < best - 25f || (d < best + 25f && cw < bestW)) { best = Math.min(best, d); bestW = cw; bestI = i; }
+        }
+        if (bestI < 0) return;
+        subjectPick = new float[]{pos.get(bestI * 3), pos.get(bestI * 3 + 1), pos.get(bestI * 3 + 2)};
+        replan();
     }
 
     boolean toggleTopView() { topView = !topView; return topView; }
@@ -206,6 +264,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         textureSet = false;
 
+        planProg = program(
+                "uniform mat4 uMvp; uniform float uPx; attribute vec4 aPos;" +
+                "void main(){ gl_Position = uMvp * aPos; gl_PointSize = uPx; }",
+                "precision mediump float; uniform vec4 uColor; uniform float uRound;" +
+                "void main(){ if (uRound > 0.5) { vec2 d = gl_PointCoord * 2.0 - 1.0; float r = dot(d, d);" +
+                "  if (r > 1.0) discard; if (r > 0.6) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; } }" +
+                "  gl_FragColor = uColor; }");
         bgProg = program(
                 "attribute vec4 aPos; attribute vec2 aUv; varying vec2 vUv;" +
                 "void main(){ gl_Position = aPos; vUv = aUv; }",
@@ -617,6 +682,75 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         drawPoints(mvp, 1f);
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         drawPath(mvp);
+        System.arraycopy(mvp, 0, viewMvp, 0, 16);
+        if (plan != null) drawPlan(mvp, plan);
+    }
+
+    private final FloatBuffer scratch = ByteBuffer.allocateDirect(64 * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+
+    private void planDraw(float[] m, float[] verts, int mode, float[] color, float px) {
+        GLES20.glUseProgram(planProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(planProg, "uMvp"), 1, false, m, 0);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(planProg, "uPx"), px);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(planProg, "uRound"), mode == GLES20.GL_POINTS ? 1f : 0f);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(planProg, "uColor"), 1, color, 0);
+        int aPos = GLES20.glGetAttribLocation(planProg, "aPos");
+        scratch.clear();
+        scratch.put(verts).position(0);
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, scratch);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glDrawArrays(mode, 0, verts.length / 3);
+        GLES20.glDisableVertexAttribArray(aPos);
+    }
+
+    /** Draws subject, camera (with its field of view) and lights on top of the scan. */
+    private void drawPlan(float[] m, ShotPlanner.Plan p) {
+        float dens = height / 1000f;
+        float[] white = {1f, 1f, 1f, 1f};
+        GLES20.glLineWidth(5f * dens);
+        // subject: a standing "pole" from the floor to eye height
+        planDraw(m, new float[]{p.sx, p.floorY, p.sz, p.sx, p.sy, p.sz}, GLES20.GL_LINES, white, 1);
+        planDraw(m, new float[]{p.sx, p.floorY, p.sz}, GLES20.GL_POINTS, white, 30 * dens);
+        for (ShotPlanner.Element e : p.elements) {
+            float[] dim = {e.color[0] * 0.6f, e.color[1] * 0.6f, e.color[2] * 0.6f, 1f};
+            GLES20.glLineWidth(3f * dens);
+            // stand from the floor, and aim line to the subject
+            planDraw(m, new float[]{e.x, p.floorY, e.z, e.x, e.y, e.z}, GLES20.GL_LINES, dim, 1);
+            if (!e.isCamera) planDraw(m, new float[]{e.x, e.y, e.z, p.sx, p.sy, p.sz}, GLES20.GL_LINES, e.color, 1);
+            if (e.isCamera) drawFrustum(m, e, p);
+            planDraw(m, new float[]{e.x, e.y, e.z}, GLES20.GL_POINTS, e.color, 44 * dens);
+        }
+        planDraw(m, new float[]{p.sx, p.sy, p.sz}, GLES20.GL_POINTS, white, 36 * dens);
+    }
+
+    private void drawFrustum(float[] m, ShotPlanner.Element c, ShotPlanner.Plan p) {
+        float fx = p.sx - c.x, fy = p.sy - c.y, fz = p.sz - c.z;
+        float d = (float) Math.sqrt(fx * fx + fy * fy + fz * fz);
+        if (d < 1e-3f) return;
+        fx /= d; fy /= d; fz /= d;
+        // right = f x up, up' = right x f
+        float rx = -fz, ry = 0, rz = fx;
+        float rl = (float) Math.sqrt(rx * rx + rz * rz);
+        if (rl < 1e-3f) return;
+        rx /= rl; rz /= rl;
+        float ux = ry * fz - rz * fy, uy = rz * fx - rx * fz, uz = rx * fy - ry * fx;
+        float hw = d * (float) Math.tan(Math.toRadians(30)), hh = hw * 9f / 16f;
+        float[][] k = new float[4][];
+        int[][] sg = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+        for (int i = 0; i < 4; i++)
+            k[i] = new float[]{p.sx + rx * hw * sg[i][0] + ux * hh * sg[i][1],
+                    p.sy + ry * hw * sg[i][0] + uy * hh * sg[i][1],
+                    p.sz + rz * hw * sg[i][0] + uz * hh * sg[i][1]};
+        float[] v = new float[16 * 3];
+        int n = 0;
+        for (int i = 0; i < 4; i++) {
+            v[n++] = c.x; v[n++] = c.y; v[n++] = c.z;
+            v[n++] = k[i][0]; v[n++] = k[i][1]; v[n++] = k[i][2];
+            v[n++] = k[i][0]; v[n++] = k[i][1]; v[n++] = k[i][2];
+            float[] q = k[(i + 1) % 4];
+            v[n++] = q[0]; v[n++] = q[1]; v[n++] = q[2];
+        }
+        planDraw(m, v, GLES20.GL_LINES, c.color, 1);
     }
 
     // ---------------- helpers ----------------
