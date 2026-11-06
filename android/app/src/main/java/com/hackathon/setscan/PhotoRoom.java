@@ -16,7 +16,7 @@ import java.util.List;
  * (closest, most head-on, not hidden behind something else). All GL calls run on the GL thread.
  */
 final class PhotoRoom {
-    static final int MAX_KEYFRAMES = 40;
+    static final int MAX_KEYFRAMES = 60;
     static final int TEX_W = 1024, TEX_H = 512; // power of two so we can mipmap; uv is normalized so the squash doesn't matter
 
     static final class Keyframe {
@@ -35,15 +35,16 @@ final class PhotoRoom {
     private final FloatBuffer quadUv = fb(new float[]{0, 0, 1, 0, 0, 1, 1, 1});
 
     // built mesh, grouped by keyframe (index = keyframe, last = untextured)
-    final List<FloatBuffer> groupPos = new ArrayList<>();
-    final List<FloatBuffer> groupUv = new ArrayList<>();
-    final List<Integer> groupVerts = new ArrayList<>();
+    // Built mesh. build() may run on a background thread: it fills new lists and swaps them in under the lock.
+    List<FloatBuffer> groupPos = new ArrayList<>();
+    List<FloatBuffer> groupUv = new ArrayList<>();
+    List<Integer> groupVerts = new ArrayList<>();
     FloatBuffer plainPos; ByteBuffer plainCol; int plainVerts;
-    boolean ready;
+    volatile boolean ready;
     int texturedTris, plainTris;
 
     void onSurfaceCreated() {
-        keyframes.clear(); groupPos.clear(); groupUv.clear(); groupVerts.clear(); ready = false;
+        keyframes.clear(); synchronized (this) { groupPos = new ArrayList<>(); groupUv = new ArrayList<>(); groupVerts = new ArrayList<>(); } ready = false;
         int[] b = new int[1];
         GLES20.glGenFramebuffers(1, b, 0);
         fbo = b[0];
@@ -71,20 +72,24 @@ final class PhotoRoom {
     void clear() {
         for (Keyframe k : keyframes) GLES20.glDeleteTextures(1, new int[]{k.tex}, 0);
         keyframes.clear();
-        groupPos.clear(); groupUv.clear(); groupVerts.clear();
-        plainPos = null; plainCol = null; plainVerts = 0;
+        synchronized (this) {
+            groupPos = new ArrayList<>(); groupUv = new ArrayList<>(); groupVerts = new ArrayList<>();
+            plainPos = null; plainCol = null; plainVerts = 0;
+        }
         ready = false; texturedTris = plainTris = 0;
     }
 
     /** Should we keep this frame? Far enough (30 cm or 15°) from every keyframe so far, and the phone is steady. */
-    boolean wants(float[] pose, float moveSinceLastFrame, float turnSinceLastFrameDeg) {
+    boolean wants(float[] pose, float moveSinceLastFrame, float turnSinceLastFrameDeg, boolean nearDetail) {
         if (keyframes.size() >= MAX_KEYFRAMES) return false;
+        if (!nearDetail && keyframes.size() >= MAX_KEYFRAMES - 15) return false; // keep room for close-ups of detail zones
+        float minMove = nearDetail ? 0.1f : 0.3f, maxDot = nearDetail ? 0.985f : 0.966f;
         if (moveSinceLastFrame > 0.012f || turnSinceLastFrameDeg > 1.2f) return false; // blur risk
         float fx = -pose[8], fy = -pose[9], fz = -pose[10];
         for (Keyframe k : keyframes) {
             float dx = pose[12] - k.px, dy = pose[13] - k.py, dz = pose[14] - k.pz;
             float dot = fx * k.fwd[0] + fy * k.fwd[1] + fz * k.fwd[2];
-            if (dx * dx + dy * dy + dz * dz < 0.3f * 0.3f && dot > 0.966f) return false;
+            if (dx * dx + dy * dy + dz * dz < minMove * minMove && dot > maxDot) return false;
         }
         return true;
     }
@@ -147,13 +152,15 @@ final class PhotoRoom {
      * col holds 4 bytes per vertex for mesh and proxy vertices alike.
      */
     void build(FloatBuffer pos, ByteBuffer col, int verts, int proxyFrom) {
-        groupPos.clear(); groupUv.clear(); groupVerts.clear();
+        List<FloatBuffer> groupPos = new ArrayList<>(), groupUv = new ArrayList<>();
+        List<Integer> groupVerts = new ArrayList<>();
+        List<Keyframe> keyframes = new ArrayList<>(this.keyframes);
+        int texturedTris = 0, plainTris = 0;
         int nk = keyframes.size(), nt = verts / 3;
         int[] pick = new int[nt];
         int[] perKf = new int[nk];
         float[] v = new float[9];
         float[] uv = new float[6];
-        texturedTris = 0; plainTris = 0;
         for (int t = 0; t < nt; t++) {
             for (int i = 0; i < 9; i++) v[i] = pos.get(t * 9 + i);
             float cx = (v[0] + v[3] + v[6]) / 3, cy = (v[1] + v[4] + v[7]) / 3, cz = (v[2] + v[5] + v[8]) / 3;
@@ -187,9 +194,9 @@ final class PhotoRoom {
             groupUv.add(perKf[k] == 0 ? null : fbAlloc(perKf[k] * 6));
             groupVerts.add(perKf[k] * 3);
         }
-        plainVerts = plainTris * 3;
-        plainPos = fbAlloc(Math.max(1, plainVerts * 3));
-        plainCol = ByteBuffer.allocateDirect(Math.max(4, plainVerts * 4)).order(ByteOrder.nativeOrder());
+        int plainVerts = plainTris * 3;
+        FloatBuffer plainPos = fbAlloc(Math.max(1, plainVerts * 3));
+        ByteBuffer plainCol = ByteBuffer.allocateDirect(Math.max(4, plainVerts * 4)).order(ByteOrder.nativeOrder());
         for (int t = 0; t < nt; t++) {
             for (int i = 0; i < 9; i++) v[i] = pos.get(t * 9 + i);
             int k = pick[t];
@@ -206,6 +213,11 @@ final class PhotoRoom {
         for (FloatBuffer b : groupPos) if (b != null) b.position(0);
         for (FloatBuffer b : groupUv) if (b != null) b.position(0);
         plainPos.position(0); plainCol.position(0);
+        synchronized (this) {
+            this.groupPos = groupPos; this.groupUv = groupUv; this.groupVerts = groupVerts;
+            this.plainPos = plainPos; this.plainCol = plainCol; this.plainVerts = plainVerts;
+            this.texturedTris = texturedTris; this.plainTris = plainTris;
+        }
         ready = true;
     }
 
@@ -267,6 +279,11 @@ final class PhotoRoom {
 
     void draw(float[] mvp, boolean cut, float[] center, float dirX, float dirZ, float cutD, float floorY, float ceilY) {
         if (!ready) return;
+        List<FloatBuffer> groupPos, groupUv; List<Integer> groupVerts; FloatBuffer plainPos; ByteBuffer plainCol; int plainVerts;
+        synchronized (this) {
+            groupPos = this.groupPos; groupUv = this.groupUv; groupVerts = this.groupVerts;
+            plainPos = this.plainPos; plainCol = this.plainCol; plainVerts = this.plainVerts;
+        }
         GLES20.glUseProgram(meshProg);
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(meshProg, "uMvp"), 1, false, mvp, 0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uCut"), cut ? 1f : 0f);

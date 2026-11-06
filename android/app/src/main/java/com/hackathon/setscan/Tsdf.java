@@ -12,8 +12,9 @@ import java.util.Arrays;
  * out of the grid with surface nets (one vertex per cell that the surface crosses).
  */
 final class Tsdf {
-    static final float VS = 0.04f;      // voxel size (m)
-    static final float TRUNC = 0.12f;   // truncation band (m)
+    final float vs;      // voxel size (m): 4 cm for the room, ~1.2 cm for detail zones
+    final float trunc;   // truncation band (m)
+    final float carve;   // how far in front of a surface free space erases old geometry (m)
     static final int MAX_W = 40;        // cap the weight so later looks can still change things
     static final int MIN_W = 2;         // voxels seen fewer times are ignored for the mesh
 
@@ -26,7 +27,8 @@ final class Tsdf {
     private final byte[] rgb;
     private int n;
 
-    Tsdf(int maxVoxels) {
+    Tsdf(int maxVoxels, float voxel, float truncation, float carveDist) {
+        vs = voxel; trunc = truncation; carve = carveDist;
         cap = maxVoxels;
         int tbl = Integer.highestOneBit(maxVoxels * 2 - 1) << 1;
         keys = new long[tbl];
@@ -69,6 +71,23 @@ final class Tsdf {
         return n++;
     }
 
+    /** Forget everything inside a sphere so it gets rebuilt from fresh looks. Returns voxels reset. */
+    int clearSphere(float x, float y, float z, float r) {
+        int cleared = 0;
+        for (int t = 0; t < keys.length; t++) {
+            long k = keys[t];
+            if (k == Long.MIN_VALUE) continue;
+            float vx = (((int) (k & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs - x;
+            float vy = (((int) ((k >>> 21) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs - y;
+            float vz = (((int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs - z;
+            if (vx * vx + vy * vy + vz * vz > r * r) continue;
+            int i = slots[t];
+            w[i] = 0; sdf[i] = 0;
+            cleared++;
+        }
+        return cleared;
+    }
+
     /** One depth sample: camera at o, surface point p. Updates the voxels along the ray within the band. */
     void integrate(float ox, float oy, float oz, float px, float py, float pz, int[] c) {
         float dx = px - ox, dy = py - oy, dz = pz - oz;
@@ -77,24 +96,24 @@ final class Tsdf {
         dx /= len; dy /= len; dz /= len;
         int lastX = Integer.MIN_VALUE, lastY = 0, lastZ = 0;
         // free space further in front (up to 60 cm) erases stale surfaces, existing voxels only
-        float farS = Math.min(0.6f, len - 0.15f);
-        for (float s = farS; s > TRUNC; s -= VS) {
-            int vx = (int) Math.floor((px - dx * s) / VS), vy = (int) Math.floor((py - dy * s) / VS), vz = (int) Math.floor((pz - dz * s) / VS);
+        float farS = Math.min(carve, len - 0.15f);
+        for (float s = farS; s > trunc; s -= vs) {
+            int vx = (int) Math.floor((px - dx * s) / vs), vy = (int) Math.floor((py - dy * s) / vs), vz = (int) Math.floor((pz - dz * s) / vs);
             int i = get(vx, vy, vz);
             if (i < 0) continue;
             int wi = w[i];
             sdf[i] = (sdf[i] * wi + 1f) / (wi + 1);
             if (wi < MAX_W) w[i] = (short) (wi + 1);
         }
-        for (float s = -TRUNC; s <= TRUNC + 1e-4f; s += VS * 0.5f) {
+        for (float s = -trunc; s <= trunc + 1e-4f; s += vs * 0.5f) {
             float qx = px + dx * s, qy = py + dy * s, qz = pz + dz * s;
-            int vx = (int) Math.floor(qx / VS), vy = (int) Math.floor(qy / VS), vz = (int) Math.floor(qz / VS);
+            int vx = (int) Math.floor(qx / vs), vy = (int) Math.floor(qy / vs), vz = (int) Math.floor(qz / vs);
             if (vx == lastX && vy == lastY && vz == lastZ) continue;
             lastX = vx; lastY = vy; lastZ = vz;
             // signed distance from the voxel centre to the surface, measured along the ray (+ = in front)
-            float cxv = (vx + 0.5f) * VS, cyv = (vy + 0.5f) * VS, czv = (vz + 0.5f) * VS;
+            float cxv = (vx + 0.5f) * vs, cyv = (vy + 0.5f) * vs, czv = (vz + 0.5f) * vs;
             float along = (cxv - ox) * dx + (cyv - oy) * dy + (czv - oz) * dz;
-            float d = (len - along) / TRUNC;
+            float d = (len - along) / trunc;
             if (d < -1f) continue;           // too far behind the surface: unknown, don't touch
             if (d > 1f) d = 1f;
             int i = d > 0.99f ? get(vx, vy, vz) : getOrCreate(vx, vy, vz); // free space only carves existing voxels
@@ -167,7 +186,7 @@ final class Tsdf {
             if (cnt == 0) continue;
             for (int c = 0; c < 8; c++) if (Math.abs(sdf[ci[c]]) < best) { best = Math.abs(sdf[ci[c]]); bestJ = ci[c]; }
             if (nv * 3 + 3 > vp.length) { vp = Arrays.copyOf(vp, vp.length * 2); vc = Arrays.copyOf(vc, vc.length * 2); }
-            vp[nv * 3] = (x + 0.5f + sx / cnt) * VS; vp[nv * 3 + 1] = (y + 0.5f + sy / cnt) * VS; vp[nv * 3 + 2] = (z + 0.5f + sz / cnt) * VS;
+            vp[nv * 3] = (x + 0.5f + sx / cnt) * vs; vp[nv * 3 + 1] = (y + 0.5f + sy / cnt) * vs; vp[nv * 3 + 2] = (z + 0.5f + sz / cnt) * vs;
             vc[nv * 3] = rgb[bestJ * 3]; vc[nv * 3 + 1] = rgb[bestJ * 3 + 1]; vc[nv * 3 + 2] = rgb[bestJ * 3 + 2];
             long ck = key(x, y, z);
             int s = cslot(cellKeys, cmask, ck);

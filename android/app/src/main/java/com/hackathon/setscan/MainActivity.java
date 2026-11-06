@@ -73,6 +73,8 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    void toast(String msg) { runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()); }
+
     private void exportScan() {
         exportButton.setEnabled(false);
         Toast.makeText(this, "Packing the scan (" + renderer.recordedFrames() + " depth frames)...", Toast.LENGTH_SHORT).show();
@@ -205,7 +207,17 @@ public class MainActivity extends Activity {
             }
         });
         glView.setOnTouchListener((v, e) -> {
-            if (!renderer.isViewing()) return false;
+            if (!renderer.isViewing()) {
+                // While scanning, a quick tap on a poorly scanned spot wipes it so it can be scanned again.
+                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false; }
+                if (e.getPointerCount() > 1) multiTouch = true;
+                if (e.getActionMasked() == MotionEvent.ACTION_UP && !multiTouch && e.getEventTime() - downTime < 300
+                        && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
+                    float tx = e.getX(), ty = e.getY();
+                    glView.queueEvent(() -> renderer.requestRescan(tx, ty));
+                }
+                return true;
+            }
             scaleDetector.onTouchEvent(e);
             int pc = e.getPointerCount();
             float x = 0, y = 0;

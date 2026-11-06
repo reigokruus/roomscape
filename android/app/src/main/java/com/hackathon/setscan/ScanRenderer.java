@@ -43,7 +43,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final ByteBuffer col = ByteBuffer.allocateDirect(MAX_POINTS * 4).order(ByteOrder.nativeOrder());
     private int count, uploaded;
     private final LongIntMap voxels = new LongIntMap(1 << 22);
-    private final Tsdf tsdf = new Tsdf(1_500_000);
+    private final Tsdf tsdf = new Tsdf(1_500_000, 0.04f, 0.12f, 0.6f);
+    /** Fine surface for the detail zones the user tapped (shoes, the table top...). */
+    private final Tsdf detail = new Tsdf(1_000_000, 0.012f, 0.04f, 0.2f);
+    private final java.util.ArrayList<float[]> zones = new java.util.ArrayList<>(); // x, y, z, radius
+    private static final float VOXEL_FINE = 0.008f;
+
+    private boolean inZone(float x, float y, float z) {
+        for (int i = 0; i < zones.size(); i++) {
+            float[] q = zones.get(i);
+            float dx = x - q[0], dy = y - q[1], dz = z - q[2];
+            if (dx * dx + dy * dy + dz * dz < q[3] * q[3]) return true;
+        }
+        return false;
+    }
     private final PhotoRoom photos = new PhotoRoom();
     private final float[] prevPose = new float[16], curPose = new float[16];
     private boolean havePrevPose;
@@ -206,6 +219,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             long t0 = System.currentTimeMillis();
             meshTris = tsdf.extractMesh();
             log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
+            if (!zones.isEmpty()) {
+                int dt = detail.extractMesh();
+                mergeDetail();
+                log("detail zones: " + zones.size() + ", " + detail.size() + " fine voxels -> " + dt + " triangles; merged mesh " + meshVerts / 3 + " triangles");
+            }
         } catch (Throwable e) { logError("surface", new RuntimeException(e)); }
         lastPlanes = planes;
         analyseRoom();
@@ -244,6 +262,133 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         knownH = h; knownW = w; knownD = d;
         log(String.format(java.util.Locale.US, "known room size: height %.2f width %.2f depth %.2f", h, w, d));
         if (viewing && count > 0) { analyseRoom(); finishStatus(); }
+    }
+
+    // ---- tap to rescan an area ----
+    private volatile float[] pendingTap;
+    private float[] rescanAt;      // centre of the area being redone
+    private int rescanFound;       // fresh points in it so far
+    private static final float RESCAN_R = 0.35f;
+
+    void requestRescan(float x, float y) { pendingTap = new float[]{x, y}; }
+
+    /** GL thread: find what was tapped, wipe the points and surface around it, and mark it until it's rescanned. */
+    private void handleRescanTap(Frame frame, Camera camera, float x, float y) {
+        float[] c = null;
+        try {
+            for (com.google.ar.core.HitResult h : frame.hitTest(x, y)) {
+                Pose p = h.getHitPose();
+                c = new float[]{p.tx(), p.ty(), p.tz()};
+                break;
+            }
+        } catch (Exception e) { logError("hitTest", e); }
+        if (c == null) c = nearestPointOnRay(camera, x, y);
+        if (c == null) { activity.toast("Nothing scanned there yet, just point the camera at it."); return; }
+        int removed = removePointsNear(c, RESCAN_R);
+        int vox = tsdf.clearSphere(c[0], c[1], c[2], RESCAN_R);
+        detail.clearSphere(c[0], c[1], c[2], RESCAN_R);
+        if (zones.size() < 12) zones.add(new float[]{c[0], c[1], c[2], RESCAN_R});
+        rescanAt = c; rescanFound = 0;
+        log(String.format(java.util.Locale.US, "rescan at (%.2f, %.2f, %.2f): removed %d points, reset %d surface voxels", c[0], c[1], c[2], removed, vox));
+        activity.toast("Detail zone added. Move close and scan the ring slowly from a few angles.");
+    }
+
+    /** A detail zone is within 1.5 m in front of the camera. */
+    private boolean lookingAtZone(float[] pose) {
+        for (float[] q : zones) {
+            float dx = q[0] - pose[12], dy = q[1] - pose[13], dz = q[2] - pose[14];
+            float d = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (d < 1.5f && d > 0.05f && -(dx * pose[8] + dy * pose[9] + dz * pose[10]) / d > 0.8f) return true;
+        }
+        return false;
+    }
+
+    /** Closest scanned point to the tapped screen ray (within 15 cm of it). */
+    private float[] nearestPointOnRay(Camera camera, float sx, float sy) {
+        float[] pv = new float[16], inv = new float[16];
+        Matrix.multiplyMM(pv, 0, proj, 0, view, 0);
+        if (!Matrix.invertM(inv, 0, pv, 0)) return null;
+        float nx = 2f * sx / width - 1f, ny = 1f - 2f * sy / height;
+        float[] a = new float[4], b = new float[4];
+        Matrix.multiplyMV(a, 0, inv, 0, new float[]{nx, ny, -1, 1}, 0);
+        Matrix.multiplyMV(b, 0, inv, 0, new float[]{nx, ny, 1, 1}, 0);
+        float ox = a[0] / a[3], oy = a[1] / a[3], oz = a[2] / a[3];
+        float dx = b[0] / b[3] - ox, dy = b[1] / b[3] - oy, dz = b[2] / b[3] - oz;
+        float l = (float) Math.sqrt(dx * dx + dy * dy + dz * dz); dx /= l; dy /= l; dz /= l;
+        float best = Float.MAX_VALUE; float[] hit = null;
+        for (int i = 0; i < count; i++) {
+            float px = pos.get(i * 3) - ox, py = pos.get(i * 3 + 1) - oy, pz = pos.get(i * 3 + 2) - oz;
+            float t = px * dx + py * dy + pz * dz;
+            if (t < 0.1f) continue;
+            float qx = px - dx * t, qy = py - dy * t, qz = pz - dz * t;
+            float off = qx * qx + qy * qy + qz * qz;
+            if (off > 0.15f * 0.15f) continue;
+            if (t < best) { best = t; hit = new float[]{pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2)}; }
+        }
+        return hit;
+    }
+
+    private int removePointsNear(float[] c, float r) {
+        int k = 0;
+        for (int i = 0; i < count; i++) {
+            float dx = pos.get(i * 3) - c[0], dy = pos.get(i * 3 + 1) - c[1], dz = pos.get(i * 3 + 2) - c[2];
+            if (dx * dx + dy * dy + dz * dz < r * r) continue;
+            if (k != i) {
+                pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
+                for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
+                obs[k] = obs[i];
+            }
+            k++;
+        }
+        int removed = count - k;
+        count = k; uploaded = 0; refineCursor = 0;
+        voxels.clear();
+        rebuildVoxelIndex();
+        return removed;
+    }
+
+    private void rebuildVoxelIndex() {
+        voxels.clear();
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            voxels.put(!zones.isEmpty() && inZone(x, y, z) ? fineKey(x, y, z) : key(x, y, z), i);
+        }
+    }
+
+    private static final float[] RING_TODO = {1f, 0.75f, 0.1f, 1f}, RING_DONE = {0.2f, 1f, 0.5f, 1f};
+
+    /** A ring facing the camera around the area being rescanned; turns green and goes away once it's filled in. */
+    private void drawRescanTarget(float[] m, Camera camera) {
+        float[] c = rescanAt;
+        if (c == null) return;
+        if (frameNo % 15 == 0) {
+            int n = 0;
+            for (int i = 0; i < count; i++) {
+                float dx = pos.get(i * 3) - c[0], dy = pos.get(i * 3 + 1) - c[1], dz = pos.get(i * 3 + 2) - c[2];
+                if (dx * dx + dy * dy + dz * dz < RESCAN_R * RESCAN_R) n++;
+            }
+            rescanFound = n;
+            if (n >= 600) {
+                log("rescan done: " + n + " fresh points");
+                activity.toast("Area rescanned ✓");
+                rescanAt = null;
+                return;
+            }
+        }
+        float[] pm = new float[16];
+        camera.getPose().toMatrix(pm, 0);
+        float rx = pm[0], ry = pm[1], rz = pm[2], ux = pm[4], uy = pm[5], uz = pm[6];
+        float[] ring = new float[48 * 3];
+        float pulse = RESCAN_R * (0.9f + 0.1f * (float) Math.sin(frameNo * 0.2f));
+        for (int i = 0; i < 48; i++) {
+            double a = i * Math.PI * 2 / 48;
+            float ca = (float) Math.cos(a) * pulse, sa = (float) Math.sin(a) * pulse;
+            ring[i * 3] = c[0] + rx * ca + ux * sa; ring[i * 3 + 1] = c[1] + ry * ca + uy * sa; ring[i * 3 + 2] = c[2] + rz * ca + uz * sa;
+        }
+        GLES20.glLineWidth(6f * height / 1000f);
+        float done = Math.min(1f, rescanFound / 600f);
+        float[] col4 = {RING_TODO[0] + (RING_DONE[0] - RING_TODO[0]) * done, RING_TODO[1] + (RING_DONE[1] - RING_TODO[1]) * done, RING_TODO[2] + (RING_DONE[2] - RING_TODO[2]) * done, 1f};
+        planDraw(m, ring, GLES20.GL_LINE_LOOP, col4, 1);
     }
 
     // ---- live room estimate while scanning ----
@@ -324,23 +469,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 log(room.logLine());
             } catch (Exception e) { logError("room", e); }
         }
-        try {
+        final RoomModel roomNow = room; final boolean ready = roomReady;
+        if (meshPosAll == null) { meshPosAll = tsdf.meshPos; meshColAll = tsdf.meshCol; meshVerts = tsdf.meshVerts; }
+        final FloatBuffer mp = meshPosAll; final ByteBuffer mc = meshColAll; final int mvAll = meshVerts;
+        photos.ready = false;
+        // Photo texturing takes a few seconds on the phone, so it runs in the background; the view shows points until it's done.
+        new Thread(() -> { try {
             long t1 = System.currentTimeMillis();
-            RoomProxies rp = roomReady && room.hasLayout ? RoomProxies.build(room, pos, col, count) : new RoomProxies();
+            RoomProxies rp = ready && roomNow.hasLayout ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
             float[] proxy = rp.tris;
-            int mv = tsdf.meshVerts, pv = proxy.length / 3;
+            int mv = mvAll, pv = proxy.length / 3;
             FloatBuffer all = ByteBuffer.allocateDirect(Math.max(1, mv + pv) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
-            tsdf.meshPos.position(0);
-            all.put(tsdf.meshPos).put(proxy).position(0);
-            tsdf.meshPos.position(0);
+            mp.position(0); mp.limit(mv * 3);
+            all.put(mp).put(proxy).position(0);
+            mp.limit(mp.capacity()); mp.position(0);
             ByteBuffer allCol = ByteBuffer.allocateDirect(Math.max(4, (mv + pv) * 4)).order(ByteOrder.nativeOrder());
-            tsdf.meshCol.position(0);
-            allCol.put(tsdf.meshCol).put(rp.cols).position(0);
-            tsdf.meshCol.position(0);
+            mc.position(0); mc.limit(mv * 4);
+            allCol.put(mc).put(rp.cols).position(0);
+            mc.limit(mc.capacity()); mc.position(0);
             photos.build(all, allCol, mv + pv, mv);
             log("photos: " + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
                     + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
-        } catch (Throwable e) { logError("photos", new RuntimeException(e)); }
+        } catch (Throwable e) { logError("photos", new RuntimeException(e)); } }).start();
         try {
             java.util.List<ObjectNamer.Job> jobs = ObjectNamer.prepare(room, photos, width, height);
             if (!jobs.isEmpty()) {
@@ -354,6 +504,42 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
         } catch (Throwable e) { logError("objects", new RuntimeException(e)); }
     }
+
+    private FloatBuffer meshPosAll; private ByteBuffer meshColAll; private int meshVerts;
+
+    /** Room mesh with the detail zones cut out, plus the fine mesh inside them. */
+    private void mergeDetail() {
+        java.util.ArrayList<Integer> keepC = new java.util.ArrayList<>(), keepD = new java.util.ArrayList<>();
+        for (int t = 0; t < tsdf.meshVerts / 3; t++) {
+            float x = 0, y = 0, z = 0;
+            for (int v = 0; v < 3; v++) { x += tsdf.meshPos.get(t * 9 + v * 3); y += tsdf.meshPos.get(t * 9 + v * 3 + 1); z += tsdf.meshPos.get(t * 9 + v * 3 + 2); }
+            if (!inZoneScaled(x / 3, y / 3, z / 3, 0.9f) || !hasDetailNear(x / 3, y / 3, z / 3)) keepC.add(t);
+        }
+        for (int t = 0; t < detail.meshVerts / 3; t++) {
+            float x = 0, y = 0, z = 0;
+            for (int v = 0; v < 3; v++) { x += detail.meshPos.get(t * 9 + v * 3); y += detail.meshPos.get(t * 9 + v * 3 + 1); z += detail.meshPos.get(t * 9 + v * 3 + 2); }
+            if (inZoneScaled(x / 3, y / 3, z / 3, 1f)) keepD.add(t);
+        }
+        int n = keepC.size() + keepD.size();
+        meshPosAll = ByteBuffer.allocateDirect(Math.max(1, n * 9) * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        meshColAll = ByteBuffer.allocateDirect(Math.max(1, n * 12)).order(ByteOrder.nativeOrder());
+        for (int t : keepC) { for (int i = 0; i < 9; i++) meshPosAll.put(tsdf.meshPos.get(t * 9 + i)); for (int i = 0; i < 12; i++) meshColAll.put(tsdf.meshCol.get(t * 12 + i)); }
+        for (int t : keepD) { for (int i = 0; i < 9; i++) meshPosAll.put(detail.meshPos.get(t * 9 + i)); for (int i = 0; i < 12; i++) meshColAll.put(detail.meshCol.get(t * 12 + i)); }
+        meshPosAll.position(0); meshColAll.position(0);
+        meshVerts = n * 3;
+        meshTris = n;
+    }
+
+    private boolean inZoneScaled(float x, float y, float z, float k) {
+        for (float[] q : zones) {
+            float dx = x - q[0], dy = y - q[1], dz = z - q[2], r = q[3] * k;
+            if (dx * dx + dy * dy + dz * dz < r * r) return true;
+        }
+        return false;
+    }
+
+    /** Only cut the room mesh where the fine scan actually produced something (so an unfinished zone isn't a hole). */
+    private boolean hasDetailNear(float x, float y, float z) { return detail.meshVerts > 300; }
 
     /** Export the whole scan as a zip (GL thread part), then write it in the background and hand back a share uri. */
     void exportScan(java.util.function.Consumer<android.net.Uri> done, java.util.function.Consumer<String> fail) {
@@ -376,7 +562,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); liveRoom = null; liveLastMs = 0;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -522,7 +708,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "precision mediump float; varying vec4 vColor; uniform float uPass;" +
                 "void main(){" +
                 "  if (uPass > 2.5) { vec2 q = gl_PointCoord * 2.0 - 1.0; if (dot(q, q) > 1.0) discard;" +
-                "    gl_FragColor = vec4(mix(vColor.rgb, vec3(0.1, 0.95, 0.8), 0.6) * 0.5, 0.5); return; }" +
+                "    gl_FragColor = vec4(0.0); return; }" +
                 "  if (uPass > 1.5) { gl_FragColor = vColor; return; }" +
                 "  vec2 d = gl_PointCoord * 2.0 - 1.0; float r2 = dot(d, d);" +
                 "  if (r2 > 1.0) discard;" +
@@ -633,8 +819,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             uploadNew();
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
+            float[] tap = pendingTap;
+            if (tap != null) { pendingTap = null; handleRescanTap(frame, camera, tap[0], tap[1]); }
             maybeStartLiveRoom(nowMs);
             drawLiveRoom(mvp);
+            drawRescanTarget(mvp, camera);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         }
         if (frameNo % 15 == 0) {
@@ -754,10 +943,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     float wx = m[0] * xc + m[4] * yc + m[8] * zc + m[12];
                     float wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13];
                     float wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
-                    long vk = key(wx, wy, wz);
+                    boolean fine = !zones.isEmpty() && inZone(wx, wy, wz);
+                    long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
                     int hit = voxels.get(vk);
                     sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
                     tsdf.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
+                    if (fine) detail.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
                     if (weak) continue;
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
                     voxels.put(vk, count);
@@ -766,7 +957,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
-            if (photos.wants(m, frameMove, frameTurn)) {
+            if (photos.wants(m, frameMove, frameTurn, lookingAtZone(m))) {
                 short[] dcopy = new short[dw * dh];
                 for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) dcopy[v * dw + u] = dbuf.get(v * dRow + u * dPix);
                 int[] td = ti.getImageDimensions();
@@ -890,8 +1081,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         droppedNoise = count - k;
         count = k; uploaded = 0;
-        voxels.clear();
-        for (int i = 0; i < count; i++) voxels.put(key(pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2)), i);
+        rebuildVoxelIndex();
     }
 
     private void recordPath(Pose p) {
@@ -901,6 +1091,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         path.put(pathCount * 3, x); path.put(pathCount * 3 + 1, y); path.put(pathCount * 3 + 2, z);
         pathCount++;
         lastPx = x; lastPy = y; lastPz = z;
+    }
+
+    /** Finer point dedupe inside detail zones; the top bit keeps these keys apart from the 2 cm ones. */
+    private static long fineKey(float x, float y, float z) {
+        long ix = (long) Math.floor(x / VOXEL_FINE) + (1 << 20);
+        long iy = (long) Math.floor(y / VOXEL_FINE) + (1 << 20);
+        long iz = (long) Math.floor(z / VOXEL_FINE) + (1 << 20);
+        return ((ix & 0x1FFFFF) | ((iy & 0x1FFFFF) << 21) | ((iz & 0x1FFFFF) << 42)) | Long.MIN_VALUE;
     }
 
     private static long key(float x, float y, float z) {
@@ -1009,20 +1207,42 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** Live scan: tint everything captured so far, so the user sees which areas are done. */
+    private static final float[] IDENTITY = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    private static final float[] SCREEN_QUAD = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0};
+    private static final float[] DIM_TINT = {0.03f, 0.04f, 0.08f, 1f};
+
+    /**
+     * Live coverage: what's already scanned shows the clear camera image, everything else is dimmed.
+     * The scanned points stamp a mask into the framebuffer's alpha, then one dark quad is blended by that mask.
+     */
     private void drawPaint(float[] m) {
-        if (count == 0) return;
-        GLES20.glUseProgram(ptProg);
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
-        float pxPerMeter = height / (2f * (float) Math.tan(Math.toRadians(30)));
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uSize"), VOXEL * pxPerMeter * 2.2f);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uPass"), 3f);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCut"), 0f);
+        // 1) alpha = 0.62 everywhere ("not scanned"), then scanned points punch it to 0
+        GLES20.glColorMask(false, false, false, true);
+        GLES20.glClearColor(0f, 0f, 0f, 0.62f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        if (count > 0) {
+            GLES20.glUseProgram(ptProg);
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
+            float pxPerMeter = height / (2f * (float) Math.tan(Math.toRadians(30)));
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uSize"), VOXEL * pxPerMeter * 3.4f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uPass"), 3f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCut"), 0f);
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+            drawPointArrays();
+        }
+        // 2) dark tint weighted by the mask: result = tint * a + camera * (1 - a)
+        GLES20.glColorMask(true, true, true, false);
         GLES20.glEnable(GLES20.GL_BLEND);
-        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        GLES20.glDepthMask(false);
-        drawPointArrays();
-        GLES20.glDepthMask(true);
+        GLES20.glBlendFunc(GLES20.GL_DST_ALPHA, GLES20.GL_ONE_MINUS_DST_ALPHA);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        planDraw(IDENTITY, SCREEN_QUAD, GLES20.GL_TRIANGLES, DIM_TINT, 1);
         GLES20.glDisable(GLES20.GL_BLEND);
+        // 3) restore an opaque alpha so the compositor never sees through the view
+        GLES20.glColorMask(false, false, false, true);
+        GLES20.glClearColor(0f, 0f, 0f, 1f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        GLES20.glColorMask(true, true, true, true);
+        GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
     }
 
     private void drawPointArrays() {
