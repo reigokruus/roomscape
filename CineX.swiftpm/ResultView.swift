@@ -40,6 +40,11 @@ struct ResultView: View {
         .navigationTitle(scan.date.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if let room {
+                NavigationLink(destination: ShootPlannerView(room: room)) {
+                    Label("Plan a Shoot", systemImage: "sparkles")
+                }
+            }
             ShareLink(item: scan.modelURL)
         }
         .task {
