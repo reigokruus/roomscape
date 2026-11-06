@@ -673,7 +673,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         new Thread(() -> { try {
             long t1 = System.currentTimeMillis();
             RoomProxies rp = ready && roomNow.hasLayout ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
-            float[] proxy = rp.tris;
+            float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
+            if (ready) {
+                ScenePriors.Fill f = ScenePriors.apply(mp, mvAll, roomNow, pos, col, count);
+                proxy = ScenePriors.concat(proxy, f.triArray()); proxyCol = ScenePriors.concat(proxyCol, f.colArray());
+                log(f.toString());
+            }
             int mv = mvAll, pv = proxy.length / 3;
             FloatBuffer all = ByteBuffer.allocateDirect(Math.max(1, mv + pv) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
             mp.position(0); mp.limit(mv * 3);
@@ -681,7 +686,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             mp.limit(mp.capacity()); mp.position(0);
             ByteBuffer allCol = ByteBuffer.allocateDirect(Math.max(4, (mv + pv) * 4)).order(ByteOrder.nativeOrder());
             mc.position(0); mc.limit(mv * 4);
-            allCol.put(mc).put(rp.cols).position(0);
+            allCol.put(mc).put(proxyCol).position(0);
             mc.limit(mc.capacity()); mc.position(0);
             photos.build(all, allCol, mv + pv, mv);
             log("photos: " + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
@@ -763,7 +768,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); guideTarget = null; guideText = null; poseJumps = 0; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -1068,6 +1073,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             drawRescanTarget(mvp, camera);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             drawGuide(mvp);
+            drawObjectHint(mvp);
         }
         if (frameNo % 15 == 0) {
             String s;
@@ -1081,7 +1087,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + "[tracking " + ts + ", reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + "]\n"
                         + diagnostics();
             } else {
-                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (guideText != null ? "\n➜ " + guideText : "")
+                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "")
                         + "\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n" + diagnostics();
             }
             activity.updateStatus(s);
@@ -1105,6 +1111,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         camPos[0] = p.tx(); camPos[1] = p.ty(); camPos[2] = p.tz();
         float[] z = p.getZAxis();
         camFwd[0] = -z[0]; camFwd[1] = -z[1]; camFwd[2] = -z[2];
+        if (frameNo % 3 == 0) updateObjectViews();
         if (nowMs - guideLastMs < 500) return;
         guideLastMs = nowMs;
         RoomModel r = liveRoom;
@@ -1142,6 +1149,83 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         double a = Math.atan2(x - camPos[0], z - camPos[2]);
         int s = (int) Math.floor((a + Math.PI) / (2 * Math.PI) * 12) % 12;
         w[s] += weight; sx[s] += x * weight; sz[s] += z * weight;
+    }
+
+    // ---- "look at this thing from another side" ----
+    /** Per 30 cm floor cell: which of 8 compass sides the camera has looked at it from (bits), and from above (bit 8). */
+    private final java.util.HashMap<Long, int[]> viewSides = new java.util.HashMap<>();
+    private volatile RoomModel.Box hintBox;
+    private volatile int hintDir; // 0 right, 1 left, 2 up (look down on it), 3 down (look from lower)
+    private volatile String hintText;
+
+    private static long sideKey(float x, float z) { return ((long) Math.floor(x / 0.3f) + 100000) * 1000003L + ((long) Math.floor(z / 0.3f) + 100000); }
+
+    private static int sector(float dx, float dz) {
+        double a = Math.atan2(dx, dz);
+        return (int) Math.floor((a + Math.PI) / (2 * Math.PI) * 8) & 7;
+    }
+
+    private void updateObjectViews() {
+        RoomModel r = liveRoom;
+        if (r == null) { hintBox = null; hintText = null; return; }
+        // camera right vector (horizontal)
+        float rx = -camFwd[2], rz = camFwd[0];
+        float rl = (float) Math.sqrt(rx * rx + rz * rz);
+        if (rl < 1e-3f) return;
+        rx /= rl; rz /= rl;
+        RoomModel.Box best = null; float bestAng = 0.5f; int bestDir = -1;
+        int n = 0;
+        for (RoomModel.Box b : r.boxes) {
+            if (n++ > 60) break;
+            float cy = (b.y0 + b.y1) / 2;
+            float dx = b.cx - camPos[0], dy = cy - camPos[1], dz = b.cz - camPos[2];
+            float d = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (d < 0.2f || d > 3f) continue;
+            float cosA = (dx * camFwd[0] + dy * camFwd[1] + dz * camFwd[2]) / d;
+            if (cosA < 0.87f) continue; // within ~30 degrees of where the phone points
+            long k = sideKey(b.cx, b.cz);
+            int[] m = viewSides.get(k);
+            if (m == null) { m = new int[1]; viewSides.put(k, m); }
+            m[0] |= 1 << sector(-dx, -dz);
+            if (camPos[1] > b.y1 + 0.25f && -dy / d > 0.35f) m[0] |= 1 << 8;
+            // what's still missing, as a move the person can make from here
+            int sides = Integer.bitCount(m[0] & 0xFF);
+            if (sides >= 3 && (m[0] & (1 << 8)) != 0) continue;
+            int dir;
+            if ((m[0] & (1 << sector(-dx + rx * 0.8f, -dz + rz * 0.8f))) == 0 && sides < 3) dir = 0;
+            else if ((m[0] & (1 << sector(-dx - rx * 0.8f, -dz - rz * 0.8f))) == 0 && sides < 3) dir = 1;
+            else if ((m[0] & (1 << 8)) == 0) dir = 2;
+            else continue;
+            float ang = (float) Math.acos(Math.min(1f, cosA));
+            if (ang < bestAng) { bestAng = ang; best = b; bestDir = dir; }
+        }
+        hintBox = best; hintDir = bestDir;
+        if (best == null) { hintText = null; return; }
+        String what = best.title();
+        hintText = bestDir == 0 ? "Step right around the " + what + ", keep it in view"
+                : bestDir == 1 ? "Step left around the " + what + ", keep it in view"
+                : "Raise the phone and look down at the " + what;
+    }
+
+    private void drawObjectHint(float[] m) {
+        RoomModel.Box b = hintBox;
+        if (b == null) return;
+        Matrix.multiplyMV(guideClip, 0, m, 0, new float[]{b.cx, b.y1 + 0.05f, b.cz, 1}, 0);
+        if (guideClip[3] < 0.05f) return;
+        float asp = (float) width / height;
+        float px = guideClip[0] / guideClip[3] * asp, py = guideClip[1] / guideClip[3];
+        float ax = hintDir == 0 ? 1 : hintDir == 1 ? -1 : 0, ay = hintDir == 2 ? 1 : hintDir == 3 ? -1 : 0;
+        px += ax * 0.14f; py += ay * 0.14f + (ay == 0 ? 0.06f : 0);
+        float s = 0.06f;
+        float pulse = 0.7f + 0.3f * (float) Math.sin(System.currentTimeMillis() / 150.0);
+        float[] tri = {px + ax * s, py + ay * s, px - ax * s * 0.6f - ay * s * 0.7f, py - ay * s * 0.6f + ax * s * 0.7f,
+                px - ax * s * 0.6f + ay * s * 0.7f, py - ay * s * 0.6f - ax * s * 0.7f};
+        float[] v = new float[9];
+        for (int i = 0; i < 3; i++) { v[i * 3] = tri[i * 2] / asp; v[i * 3 + 1] = tri[i * 2 + 1]; }
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        planDraw(IDENTITY, v, GLES20.GL_TRIANGLES, new float[]{0.35f, 0.9f, 1f, 0.95f * pulse}, 1);
+        GLES20.glDisable(GLES20.GL_BLEND);
     }
 
     private static final float[] GUIDE_COL = {1f, 0.85f, 0.2f, 0.95f};
