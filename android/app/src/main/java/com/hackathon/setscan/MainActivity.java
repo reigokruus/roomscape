@@ -273,7 +273,7 @@ public class MainActivity extends Activity {
         });
         this.cutButton = cutButton;
         Button viewButton = new Button(this);
-        viewButton.setText("View: photo room");
+        viewButton.setText(renderer.viewModeLabel());
         viewButton.setVisibility(View.GONE);
         viewButton.setOnClickListener(v -> glView.queueEvent(() -> {
             String label = renderer.cycleViewMode();

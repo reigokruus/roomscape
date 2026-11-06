@@ -77,6 +77,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // GL objects
     private int bgTex, bgProg, ptProg, posVbo, colVbo;
+    // surfel splats (see Surfels): built in the background after a scan, uploaded on the GL thread
+    private int surfProg, surfPosVbo, surfNrmVbo, surfCount;
+    private volatile Surfels surfPending, surfDone;
+    private volatile int surfGen;
     private int width = 1, height = 1;
     private boolean textureSet;
     private final FloatBuffer quad = fb(new float[]{-1, -1, 1, -1, -1, 1, 1, 1});
@@ -185,7 +189,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- called on GL thread via queueEvent ----
     final RoomModel room = new RoomModel();
     private boolean roomReady;
-    private int viewMode; // 0 = photo room, 1 = raw scan
+    private int viewMode = 1; // 0 = photo room, 1 = raw scan (surfel splats, the default again since v0.1.51)
     private FloatBuffer floorTris;
     private int floorTriVerts;
 
@@ -259,6 +263,89 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
 
+    /** Turn the current points into surfel splats in the background (a few seconds on the phone). */
+    private void buildSurfels() {
+        final int n = count, gen = ++surfGen;
+        if (n == 0) return;
+        final java.nio.FloatBuffer snap = java.nio.FloatBuffer.allocate(n * 3);
+        for (int i = 0; i < n * 3; i++) snap.put(i, pos.get(i));
+        surfDone = null;
+        new Thread(() -> { try {
+            long t0 = System.currentTimeMillis();
+            Surfels s = Surfels.build(snap, n);
+            if (gen != surfGen) return;
+            surfDone = s; surfPending = s;
+            log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
+                    + (System.currentTimeMillis() - t0) + " ms");
+        } catch (Throwable e) { logError("splats", new RuntimeException(e)); } }).start();
+    }
+
+    private void uploadSurfels() {
+        Surfels s = surfPending;
+        if (s == null) return;
+        surfPending = null;
+        if (s.n != count) { surfCount = 0; return; }
+        s.pos.position(0); s.nrm.position(0);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfPosVbo);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 12, s.pos, GLES20.GL_STATIC_DRAW);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfNrmVbo);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 16, s.nrm, GLES20.GL_STATIC_DRAW);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+        surfCount = s.n; surfShownAt = System.currentTimeMillis();
+    }
+    private long surfShownAt;
+
+    private void drawSurfels(float[] m) {
+        GLES20.glUseProgram(surfProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(surfProg, "uMvp"), 1, false, m, 0);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(surfProg, "uView"), 1, false, view, 0);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uPx"), height / (2f * (float) Math.tan(Math.toRadians(30))));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uCut"), cutActive ? 1f : 0f);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(surfProg, "uCenter"), roomCenter[0], roomCenter[1], roomCenter[2]);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(surfProg, "uDir"), cutDirX, cutDirZ);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uCutD"), cutD);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(surfProg, "uDir2"), cutDir2X, cutDir2Z);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uCutD2"), cutD2);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uFloor"), cutFloor);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uCeil"), cutCeil);
+        setHideUniforms(surfProg);
+        int aPos = GLES20.glGetAttribLocation(surfProg, "aPos");
+        int aCol = GLES20.glGetAttribLocation(surfProg, "aColor");
+        int aNrm = GLES20.glGetAttribLocation(surfProg, "aNrm");
+        int aRaw = GLES20.glGetAttribLocation(surfProg, "aRaw");
+        float t = Math.min(1f, (System.currentTimeMillis() - surfShownAt) / 2500f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uT"), t * t * (3 - 2 * t));
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfPosVbo);
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
+        GLES20.glVertexAttribPointer(aCol, 4, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
+        GLES20.glEnableVertexAttribArray(aCol);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, posVbo);
+        GLES20.glVertexAttribPointer(aRaw, 3, GLES20.GL_FLOAT, false, 0, 0);
+        GLES20.glEnableVertexAttribArray(aRaw);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfNrmVbo);
+        GLES20.glVertexAttribPointer(aNrm, 4, GLES20.GL_FLOAT, false, 0, 0);
+        GLES20.glEnableVertexAttribArray(aNrm);
+        int uScale = GLES20.glGetUniformLocation(surfProg, "uScale"), uPass = GLES20.glGetUniformLocation(surfProg, "uPass");
+        GLES20.glUniform1f(uScale, 1.6f);
+        GLES20.glUniform1f(uPass, 0f);
+        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, surfCount);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        GLES20.glUniform1f(uScale, 2.4f);
+        GLES20.glUniform1f(uPass, 1f);
+        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, surfCount);
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisableVertexAttribArray(aCol);
+        GLES20.glDisableVertexAttribArray(aNrm);
+        GLES20.glDisableVertexAttribArray(aRaw);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+    }
+
     void finishScan() {
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
@@ -277,6 +364,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
         } catch (Throwable e) { logError("surface", new RuntimeException(e)); }
         lastPlanes = planes;
+        buildSurfels();
         analyseRoom();
         topView = false;
         if (count > 0) {
@@ -686,6 +774,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = k; uploaded = 0; refineCursor = 0;
         voxels.clear();
         rebuildVoxelIndex();
+        surfCount = 0;
+        if (viewing && removed > 0) buildSurfels();
         return removed;
     }
 
@@ -1357,6 +1447,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
+        surfGen++; surfDone = null; surfPending = null; surfCount = 0;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
@@ -1542,6 +1633,36 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "  if (uPass < 0.5) { if (a < 0.6) discard; gl_FragColor = vec4(vColor.rgb, 1.0); }" +
                 "  else { gl_FragColor = vec4(vColor.rgb * a, a); }" +
                 "}");
+
+        surfProg = program(
+                "uniform mat4 uMvp; uniform mat4 uView; uniform float uPx; uniform float uScale; uniform float uT; attribute vec3 aRaw;" +
+                "attribute vec4 aPos; attribute vec4 aColor; attribute vec4 aNrm; varying vec4 vColor; varying vec3 vN;" +
+                "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
+                HIDE_DECL +
+                "void main(){ float hh = 0.0;" + HIDE_TEST.replace("HIDE", "hh = 1.0;") +
+                "  vColor = aColor; vN = vec3(0.0);" +
+                "  if (hh > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }" +
+                "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
+                "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
+                "      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; } }" +
+                // uT 0 -> 1: the splats settle from the raw noisy points onto their surfaces and grow into discs (shown live)
+                "  vec3 p = mix(aRaw, aPos.xyz, uT); gl_Position = uMvp * vec4(p, 1.0); float w = max(gl_Position.w, 0.05);" +
+                "  gl_PointSize = clamp(2.0 * aNrm.w * uScale * mix(0.45, 1.0, uT) * uPx / w, 1.5, 96.0);" +
+                "  vN = (uView * vec4(aNrm.xyz, 0.0)).xyz; }",
+                // Surfel: the point sprite becomes a disc lying on the surface (an ellipse on screen), with a gaussian falloff.
+                // uPass 0 = opaque core (writes depth), 1 = soft halo blended on top.
+                "precision mediump float; varying vec4 vColor; varying vec3 vN; uniform float uPass;" +
+                "void main(){ vec2 d = gl_PointCoord * 2.0 - 1.0; d.y = -d.y; float dz = 0.0;" +
+                "  if (dot(vN, vN) > 0.25) { float nz = vN.z; if (abs(nz) < 0.25) nz = nz < 0.0 ? -0.25 : 0.25;" +
+                "    dz = -(vN.x * d.x + vN.y * d.y) / nz; }" +
+                "  float r2 = dot(d, d) + dz * dz; if (r2 > 1.0) discard;" +
+                "  if (uPass < 0.5) { if (r2 > 0.45) discard; gl_FragColor = vec4(vColor.rgb, 1.0); }" +
+                "  else { float a = exp(-r2 * 2.5) * 0.85; gl_FragColor = vec4(vColor.rgb * a, a); }" +
+                "}");
+        int[] sb = new int[2];
+        GLES20.glGenBuffers(2, sb, 0);
+        surfPosVbo = sb[0]; surfNrmVbo = sb[1]; surfCount = 0;
+        if (surfDone != null) surfPending = surfDone; // GL context was recreated: upload again
 
         int[] b = new int[2];
         GLES20.glGenBuffers(2, b, 0);
@@ -2247,7 +2368,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private volatile boolean splats = true;
-    private volatile int style = 0; // 0 = photo surface, 1 = splats, 2 = dots
+    private volatile int style = 1; // 0 = photo surface, 1 = splats (surfels), 2 = dots
 
     String cycleStyle() {
         style = (style + 1) % 3;
@@ -2379,6 +2500,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private void drawViewer() {
         uploadNew();
+        uploadSurfels();
         float aspect = (float) width / height;
         Matrix.perspectiveM(proj, 0, 60f, aspect, 0.02f, 500f);
         float p = topView ? 1.5697f : pitch;
@@ -2397,6 +2519,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         } else if (style == 0 && photos.ready && meshTris > 0)
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
+        else if (style == 1 && surfCount > 0 && surfCount == count && uploaded == count) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         if (roomReady) drawRoom(mvp, simple);
         cutActive = false;
