@@ -4,3 +4,4 @@ local.properties
 .idea/
 *.iml
 .kotlin/
+app/src/main/assets/*.tflite*

@@ -283,6 +283,176 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Throwable e) { logError("splats", new RuntimeException(e)); } }).start();
     }
 
+    // ---- Depth AI: Depth Anything V2 on every keyframe photo, scaled by ARCore's points (see DepthNet) ----
+    private final java.util.concurrent.ConcurrentLinkedQueue<Runnable> glTasks = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private volatile boolean depthRunning;
+    private int depthAdded;
+
+    boolean isDepthRunning() { return depthRunning; }
+
+    /** GL thread: start or stop the depth AI pass. Returns the button label. */
+    String toggleDepthAI() {
+        if (depthRunning) { depthRunning = false; return "Depth AI"; }
+        final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
+        if (kfs.isEmpty()) { activity.updateStatus("No photos were saved during this scan, so there is nothing for the depth AI to look at."); return "Depth AI"; }
+        training = false;
+        // ARCore's measured points set the scale of each depth map
+        final int n = count, step = Math.max(1, n / 60000);
+        final float[] ref = new float[(n / step + 1) * 3];
+        int rn = 0;
+        for (int i = 0; i < n; i += step) { ref[rn * 3] = pos.get(i * 3); ref[rn * 3 + 1] = pos.get(i * 3 + 1); ref[rn * 3 + 2] = pos.get(i * 3 + 2); rn++; }
+        final int refN = rn, gen = surfGen;
+        depthRunning = true; depthAdded = 0;
+        new Thread(() -> {
+            DepthNet net = null;
+            try {
+                long tl = System.currentTimeMillis();
+                net = new DepthNet(activity);
+                log("depth AI: model loaded in " + (System.currentTimeMillis() - tl) + " ms, " + kfs.size() + " photos, " + refN + " ARCore points for scale");
+                long t0 = System.currentTimeMillis(); int done = 0; float errSum = 0;
+                for (int ki = 0; ki < kfs.size() && depthRunning && gen == surfGen; ki++) {
+                    final PhotoRoom.Keyframe k = kfs.get(ki);
+                    final android.graphics.Bitmap[] img = new android.graphics.Bitmap[1];
+                    final android.graphics.Matrix map = new android.graphics.Matrix();
+                    final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                    glTasks.add(() -> { try { img[0] = ObjectNamer.readUpright(k, width, height, map); } catch (Throwable e) { logError("depth read", new RuntimeException(e)); } finally { latch.countDown(); } });
+                    if (!latch.await(5, java.util.concurrent.TimeUnit.SECONDS) || img[0] == null) continue;
+                    float[] D = net.run(img[0]);
+                    int iw = img[0].getWidth(), ih = img[0].getHeight();
+                    int[] pix = new int[iw * ih];
+                    img[0].getPixels(pix, 0, iw, 0, 0, iw, ih);
+                    img[0].recycle();
+                    float sx = (float) DepthNet.IW / iw, sy = (float) DepthNet.IH / ih;
+                    // 1) scale fit: nearest ARCore point per 8 px cell vs the net's disparity there
+                    int cw = iw / 8 + 1, chh = ih / 8 + 1;
+                    float[] cd = new float[cw * chh], cr = new float[cw * chh];
+                    float[] vm = k.view, pt = new float[2];
+                    for (int i = 0; i < refN; i++) {
+                        float x = ref[i * 3], y = ref[i * 3 + 1], z = ref[i * 3 + 2];
+                        float xc = vm[0] * x + vm[4] * y + vm[8] * z + vm[12], yc = vm[1] * x + vm[5] * y + vm[9] * z + vm[13], zc = vm[2] * x + vm[6] * y + vm[10] * z + vm[14];
+                        float d = -zc;
+                        if (d < 0.15f || d > 8f) continue;
+                        pt[0] = (k.fx * xc / d + k.cx) / k.w; pt[1] = (k.cy - k.fy * yc / d) / k.h;
+                        if (pt[0] < 0 || pt[0] >= 1 || pt[1] < 0 || pt[1] >= 1) continue;
+                        map.mapPoints(pt);
+                        int X = (int) pt[0], Y = (int) pt[1];
+                        if (X < 0 || Y < 0 || X >= iw || Y >= ih) continue;
+                        int c = (Y / 8) * cw + X / 8;
+                        if (cd[c] == 0 || d < cd[c]) { cd[c] = d; cr[c] = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))]; }
+                    }
+                    float[] ab = fitInverseDepth(cd, cr);
+                    if (ab == null) { log("depth AI: photo " + ki + " skipped (too few ARCore points to scale it)"); continue; }
+                    errSum += ab[2]; done++;
+                    // 2) back-project a 192x108 grid of the photo with the fitted depth
+                    final int GU = 192, GV = 108;
+                    float[] gd = new float[GU * GV]; int[] gc = new int[GU * GV];
+                    for (int gv = 0; gv < GV; gv++) for (int gu = 0; gu < GU; gu++) {
+                        pt[0] = (gu + 0.5f) / GU; pt[1] = (gv + 0.5f) / GV;
+                        map.mapPoints(pt);
+                        int X = Math.min(iw - 1, Math.max(0, (int) pt[0])), Y = Math.min(ih - 1, Math.max(0, (int) pt[1]));
+                        float r = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))];
+                        float inv = ab[0] * r + ab[1];
+                        gd[gv * GU + gu] = inv > 0.15f ? 1f / inv : 0;
+                        gc[gv * GU + gu] = pix[Y * iw + X];
+                    }
+                    final float[] P = new float[GU * GV * 3]; final byte[] C = new byte[GU * GV * 3];
+                    int m = 0;
+                    float[] pm = k.pose;
+                    for (int gv = 1; gv < GV - 1; gv++) for (int gu = 1; gu < GU - 1; gu++) {
+                        int g = gv * GU + gu;
+                        float d = gd[g];
+                        if (d <= 0.2f || d > 6f) continue;
+                        // flying pixels at depth edges: drop where the neighbours disagree by more than 4 %
+                        float mx = Math.max(Math.max(Math.abs(gd[g - 1] - d), Math.abs(gd[g + 1] - d)), Math.max(Math.abs(gd[g - GU] - d), Math.abs(gd[g + GU] - d)));
+                        if (mx > 0.04f * d) continue;
+                        float u = (gu + 0.5f) / GU * k.w, v = (gv + 0.5f) / GV * k.h;
+                        float xc = (u - k.cx) * d / k.fx, yc = (k.cy - v) * d / k.fy, zc = -d;
+                        P[m * 3] = pm[0] * xc + pm[4] * yc + pm[8] * zc + pm[12];
+                        P[m * 3 + 1] = pm[1] * xc + pm[5] * yc + pm[9] * zc + pm[13];
+                        P[m * 3 + 2] = pm[2] * xc + pm[6] * yc + pm[10] * zc + pm[14];
+                        int c = gc[g];
+                        C[m * 3] = (byte) ((c >> 16) & 255); C[m * 3 + 1] = (byte) ((c >> 8) & 255); C[m * 3 + 2] = (byte) (c & 255);
+                        m++;
+                    }
+                    final int mm = m; final float camX = pm[12], camY = pm[13], camZ = pm[14];
+                    glTasks.add(() -> addDepthPoints(P, C, mm, camX, camY, camZ));
+                    float each = (System.currentTimeMillis() - t0) / 1000f / (ki + 1);
+                    activity.updateStatus(String.format(java.util.Locale.US,
+                            "Depth AI: photo %d of %d (%.1f s each). Each photo's depth is guessed by a neural net and scaled with ARCore's measurements (agrees to %.0f%%). %,d points so far.",
+                            ki + 1, kfs.size(), each, errSum / done * 100, depthAdded));
+                }
+                log("depth AI: " + done + " photos in " + (System.currentTimeMillis() - t0) + " ms, median disagreement with ARCore " + (done > 0 ? errSum / done : 0));
+                glTasks.add(() -> finishDepthAI(gen));
+            } catch (Throwable e) {
+                logError("depth AI", new RuntimeException(e));
+                activity.updateStatus("Depth AI failed: " + e);
+            } finally {
+                if (net != null) net.close();
+                depthRunning = false;
+            }
+        }).start();
+        return "Stop depth AI";
+    }
+
+    /** Robust fit of 1/depth = a * disparity + b over the filled cells. Returns {a, b, median relative error} or null. */
+    static float[] fitInverseDepth(float[] cd, float[] cr) {
+        int n = 0;
+        for (float d : cd) if (d > 0) n++;
+        if (n < 40) return null;
+        double[] x = new double[n], y = new double[n], w = new double[n];
+        int j = 0;
+        for (int i = 0; i < cd.length; i++) if (cd[i] > 0) { x[j] = cr[i]; y[j] = 1.0 / cd[i]; w[j] = 1; j++; }
+        double a = 0, b = 0;
+        double[] e = new double[n];
+        for (int iter = 0; iter < 12; iter++) {
+            double sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+            for (int i = 0; i < n; i++) { sw += w[i]; sx += w[i] * x[i]; sy += w[i] * y[i]; sxx += w[i] * x[i] * x[i]; sxy += w[i] * x[i] * y[i]; }
+            double det = sw * sxx - sx * sx;
+            if (Math.abs(det) < 1e-12) return null;
+            a = (sw * sxy - sx * sy) / det; b = (sy - a * sx) / sw;
+            for (int i = 0; i < n; i++) e[i] = Math.abs(a * x[i] + b - y[i]);
+            double[] s = e.clone(); java.util.Arrays.sort(s);
+            double sc = s[n / 2] * 1.5 + 1e-6;
+            for (int i = 0; i < n; i++) w[i] = 1.0 / Math.max(1, e[i] / sc);
+        }
+        if (a <= 0) return null; // the net's disparity must grow as things get closer
+        double[] rel = new double[n];
+        for (int i = 0; i < n; i++) { double p = a * x[i] + b; rel[i] = p > 1e-3 ? Math.abs(1 / p - 1 / y[i]) * y[i] : 1; }
+        java.util.Arrays.sort(rel);
+        return new float[]{(float) a, (float) b, (float) rel[n / 2]};
+    }
+
+    /** GL thread: merge one photo's depth points into the scan (2 cm dedupe) and the surface. */
+    private void addDepthPoints(float[] P, byte[] C, int m, float camX, float camY, float camZ) {
+        int[] rgb = new int[3];
+        for (int i = 0; i < m && count < MAX_POINTS; i++) {
+            float x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+            rgb[0] = C[i * 3] & 255; rgb[1] = C[i * 3 + 1] & 255; rgb[2] = C[i * 3 + 2] & 255;
+            tsdf.integrate(camX, camY, camZ, x, y, z, rgb);
+            long vk = key(x, y, z);
+            int hit = voxels.get(vk);
+            if (hit >= 0) { refine(hit, x, y, z, rgb); continue; }
+            voxels.put(vk, count);
+            addPoint(x, y, z, rgb);
+            obs[count - 1] = 2;
+            depthAdded++;
+        }
+    }
+
+    /** GL thread: rebuild the surface, the room and the splats from the denser scan. */
+    private void finishDepthAI(int gen) {
+        if (gen != surfGen) return;
+        try {
+            meshTris = tsdf.extractMesh();
+            meshPosAll = null;
+        } catch (Throwable e) { logError("depth surface", new RuntimeException(e)); }
+        analyseRoom();
+        buildSurfels();
+        activity.depthDone();
+        activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Building splats now (a few seconds), then you can Train splats.\n%s",
+                depthAdded, roomReady ? room.summary : ""));
+    }
+
     // ---- on-phone splat training (see Trainer) ----
     private volatile Surfels surfBase;
     private volatile Trainer trainer;
@@ -1543,6 +1713,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
+        depthRunning = false; glTasks.clear();
         surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
@@ -2598,6 +2769,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawViewer() {
+        for (Runnable r; (r = glTasks.poll()) != null; ) r.run();
         uploadNew();
         uploadSurfels();
         float aspect = (float) width / height;
@@ -2618,7 +2790,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         } else if (style == 0 && photos.ready && meshTris > 0)
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
-        else if (style == 1 && surfCount > 0) drawSurfels(mvp);
+        else if (style == 1 && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         if (roomReady) drawRoom(mvp, simple);
         cutActive = false;

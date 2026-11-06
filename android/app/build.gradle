@@ -22,6 +22,7 @@ android {
     buildTypes {
         debug { signingConfig signingConfigs.debug }
     }
+    androidResources { noCompress 'tflite' } // the depth model is memory-mapped straight from the APK
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
 dependencies {
@@ -32,4 +33,22 @@ dependencies {
     implementation 'com.anthropic:anthropic-java:3.3.0'
     // object scan: on-device subject cut-out per photo (model comes with Google Play services)
     implementation 'com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1'
+    // Depth AI: Depth Anything V2 Small (Apache-2.0) through LiteRT
+    implementation 'com.google.ai.edge.litert:litert:2.3.2'
 }
+
+// The depth model (28 MB) is downloaded at build time instead of living in git.
+def depthModel = file('src/main/assets/depth_anything_v2_small.tflite')
+tasks.register('fetchDepthModel') {
+    outputs.file(depthModel)
+    doLast {
+        if (!depthModel.exists() || depthModel.length() < 1000000) {
+            depthModel.parentFile.mkdirs()
+            def url = 'https://huggingface.co/litert-community/depth-anything-v2-small/resolve/main/tflite/depth_anything_v2_small_wi8_afp32.tflite'
+            def tmp = file(depthModel.path + '.part')
+            new URL(url).withInputStream { i -> tmp.withOutputStream { it << i } }
+            tmp.renameTo(depthModel)
+        }
+    }
+}
+preBuild.dependsOn fetchDepthModel

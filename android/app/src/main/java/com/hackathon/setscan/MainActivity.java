@@ -31,7 +31,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
+    private Button depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
@@ -227,6 +227,14 @@ public class MainActivity extends Activity {
         splatButton = new Button(this);
         splatButton.setText(renderer.styleLabel());
         splatButton.setOnClickListener(v -> splatButton.setText(renderer.cycleStyle()));
+        depthButton = new Button(this);
+        depthButton.setText("Depth AI");
+        depthButton.setVisibility(View.GONE);
+        depthButton.setOnClickListener(v -> glView.queueEvent(() -> {
+            String label = renderer.toggleDepthAI();
+            runOnUiThread(() -> depthButton.setText(label));
+        }));
+        bar.addView(depthButton);
         trainButton = new Button(this);
         trainButton.setText("Train splats");
         trainButton.setVisibility(View.GONE);
@@ -298,7 +306,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{mainButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{mainButton, depthButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
             ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -383,6 +391,8 @@ public class MainActivity extends Activity {
             claudeButton.setVisibility(View.GONE);
             trainButton.setVisibility(View.GONE);
             trainButton.setText("Train splats");
+            depthButton.setVisibility(View.GONE);
+            depthButton.setText("Depth AI");
             planButton.setText("Plan shot");
             resumeSession();
         } else {
@@ -398,6 +408,7 @@ public class MainActivity extends Activity {
                     exportButton.setVisibility(View.VISIBLE);
                     claudeButton.setVisibility(View.VISIBLE);
                     trainButton.setVisibility(View.VISIBLE);
+                    depthButton.setVisibility(View.VISIBLE);
                 });
             });
         }
@@ -405,6 +416,11 @@ public class MainActivity extends Activity {
 
     private int dp(int v) {
         return (int) (v * getResources().getDisplayMetrics().density);
+    }
+
+    /** Depth AI finished: reset its button and the training button (the splats are rebuilt). */
+    void depthDone() {
+        runOnUiThread(() -> { depthButton.setText("Depth AI"); trainButton.setText("Train splats"); });
     }
 
     void updateStatus(String s) {
