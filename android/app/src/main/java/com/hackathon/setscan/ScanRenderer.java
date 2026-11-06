@@ -203,7 +203,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             return;
         }
         plan = planner.plan(ShotPlanner.Scene.values()[sceneIdx - 1], subjectPick);
-        log("plan " + plan.scene + " subject (" + fmt(plan.sx) + ", " + fmt(plan.sz) + ") cramped=" + plan.cramped);
+        log("plan " + plan.scene + " subject (" + fmt(plan.sx) + ", " + fmt(plan.sz) + ") cramped=" + plan.cramped
+                + " | " + plan.explanation.replace('\n', ' / '));
         activity.updateStatus(plan.explanation);
     }
 
@@ -718,9 +719,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             planDraw(m, new float[]{e.x, p.floorY, e.z, e.x, e.y, e.z}, GLES20.GL_LINES, dim, 1);
             if (!e.isCamera) planDraw(m, new float[]{e.x, e.y, e.z, p.sx, p.sy, p.sz}, GLES20.GL_LINES, e.color, 1);
             if (e.isCamera) drawFrustum(m, e, p);
-            planDraw(m, new float[]{e.x, e.y, e.z}, GLES20.GL_POINTS, e.color, 44 * dens);
+            planDraw(m, new float[]{e.x, e.y, e.z}, GLES20.GL_POINTS, e.color, 34 * dens);
         }
-        planDraw(m, new float[]{p.sx, p.sy, p.sz}, GLES20.GL_POINTS, white, 36 * dens);
+        planDraw(m, new float[]{p.sx, p.sy, p.sz}, GLES20.GL_POINTS, white, 28 * dens);
     }
 
     private void drawFrustum(float[] m, ShotPlanner.Element c, ShotPlanner.Plan p) {

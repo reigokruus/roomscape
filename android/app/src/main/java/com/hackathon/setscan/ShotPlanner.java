@@ -41,6 +41,7 @@ final class ShotPlanner {
     }
 
     private static final float CELL = 0.10f;
+    private static final int BLOCKED = 15; // points in a 10 cm column before we call it furniture/wall
 
     float floorY;
     private float minX, minZ;
@@ -84,7 +85,7 @@ final class ShotPlanner {
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1) - floorY, z = pos.get(i * 3 + 2);
             int c = cell(x, z);
             if (c < 0) continue;
-            if (Math.abs(y) < 0.06f) floorKnown[c] = true;
+            if (Math.abs(y) < 0.08f) floorKnown[c] = true;
             else if (y > 0.25f && y < 1.9f) blocked[c]++;
         }
         ready = true;
@@ -100,10 +101,10 @@ final class ShotPlanner {
     private boolean free(float x, float z) {
         int c = cell(x, z);
         if (c < 0) return false;
-        if (blocked[c] > 3) return false;
+        if (blocked[c] > BLOCKED) return false;
         int ix = c % nx, iz = c / nx;
-        for (int dz = -1; dz <= 1; dz++)
-            for (int dx = -1; dx <= 1; dx++) {
+        for (int dz = -3; dz <= 3; dz++)
+            for (int dx = -3; dx <= 3; dx++) {
                 int jx = ix + dx, jz = iz + dz;
                 if (jx >= 0 && jz >= 0 && jx < nx && jz < nz && floorKnown[jz * nx + jx]) return true;
             }
@@ -118,7 +119,7 @@ final class ShotPlanner {
         for (int i = 1; i < steps; i++) {
             float t = i / (float) steps;
             int c = cell(x0 + (x1 - x0) * t, z0 + (z1 - z0) * t);
-            if (c >= 0 && blocked[c] > 3) hits++;
+            if (c >= 0 && blocked[c] > BLOCKED) hits++;
         }
         return hits;
     }
@@ -169,26 +170,26 @@ final class ShotPlanner {
         switch (scene) {
             case INTERVIEW: {
                 p.sy = floorY + 1.2f; // seated eye height
-                slots.add(new Slot(new Element("Camera", "at eye height, 1.8 m away, slightly off to one side of the subject's gaze", BLUE, true), 0, 1.8f, 0f));
-                slots.add(new Slot(new Element("Key light", "main soft light, 45° to one side and above eye level", ORANGE, false), 45, 1.5f, 0.5f));
-                slots.add(new Slot(new Element("Fill", "weaker light or a white sheet/reflector on the other side to soften shadows", YELLOW, false), -50, 1.9f, 0.1f));
-                slots.add(new Slot(new Element("Back light", "behind the subject, opposite the key, to separate them from the background", PURPLE, false), 155, 1.1f, 0.7f));
+                slots.add(new Slot(new Element("Camera", "eye height, 1.8 m away", BLUE, true), 0, 1.8f, 0f));
+                slots.add(new Slot(new Element("Key light", "main soft light, 45° to the side, above eyes", ORANGE, false), 45, 1.5f, 0.5f));
+                slots.add(new Slot(new Element("Fill", "dimmer light or white sheet, other side", YELLOW, false), -50, 1.9f, 0.1f));
+                slots.add(new Slot(new Element("Back light", "behind, separates subject from background", PURPLE, false), 155, 1.1f, 0.7f));
                 break;
             }
             case VLOG: {
                 p.sy = floorY + 1.5f; // standing / desk eye height
-                slots.add(new Slot(new Element("Camera", "phone at eye level, arm's length to 1 m away", BLUE, true), 0, 0.9f, 0f));
-                slots.add(new Slot(new Element("Key light", "ring light or lamp just above and beside the camera", ORANGE, false), 20, 0.85f, 0.25f));
-                slots.add(new Slot(new Element("Background light", "small lamp behind you, low, lighting the wall for depth", CYAN, false), 180, 1.2f, -0.9f));
+                slots.add(new Slot(new Element("Camera", "eye level, about 1 m away", BLUE, true), 0, 0.9f, 0f));
+                slots.add(new Slot(new Element("Key light", "ring light or lamp just above the camera", ORANGE, false), 20, 0.85f, 0.25f));
+                slots.add(new Slot(new Element("Background light", "small lamp lighting the wall behind you", CYAN, false), 180, 1.2f, -0.9f));
                 break;
             }
             default: { // PRODUCT
                 float h = pick[1] - floorY;
                 p.sy = (h > 0.4f && h < 1.3f) ? pick[1] + 0.08f : floorY + 0.8f; // on a table if you tapped one
-                slots.add(new Slot(new Element("Camera", "0.7 m away, looking down at about 25°", BLUE, true), 0, 0.7f, 0.33f));
-                slots.add(new Slot(new Element("Key light", "large soft light from the side, slightly above", ORANGE, false), 70, 0.6f, 0.45f));
-                slots.add(new Slot(new Element("Reflector", "white card opposite the key to lift the shadow side", YELLOW, false), -70, 0.45f, 0.1f));
-                slots.add(new Slot(new Element("Rim light", "behind the product for a bright edge outline", PURPLE, false), 160, 0.55f, 0.3f));
+                slots.add(new Slot(new Element("Camera", "0.7 m away, looking down ~25°", BLUE, true), 0, 0.7f, 0.33f));
+                slots.add(new Slot(new Element("Key light", "big soft light from the side", ORANGE, false), 70, 0.6f, 0.45f));
+                slots.add(new Slot(new Element("Reflector", "white card opposite the key", YELLOW, false), -70, 0.45f, 0.1f));
+                slots.add(new Slot(new Element("Rim light", "behind, for a bright edge", PURPLE, false), 160, 0.55f, 0.3f));
                 break;
             }
         }
@@ -219,30 +220,33 @@ final class ShotPlanner {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append(scene.label).append(" plan (tap the scan to move the subject):\n");
+        sb.append(scene.label).append(" (tap the scan to move the subject)\n");
+        int unsure = 0;
         for (Element e : p.elements) {
-            sb.append("• ").append(colorName(e.color)).append(' ').append(e.name).append(": ").append(e.role);
-            if (!onTable && !free(e.x, e.z)) sb.append(" (no clear floor scanned here, check this spot)");
-            sb.append('\n');
+            boolean ok = onTable || free(e.x, e.z);
+            if (!ok) unsure++;
+            sb.append(colorName(e.color)).append(' ').append(e.name).append(" - ").append(e.role)
+                    .append(ok ? "" : " *").append('\n');
         }
-        if (p.cramped) sb.append("Tight space: scan more of the floor around the subject for a better layout.\n");
+        if (unsure > 0) sb.append("* spot not clearly scanned, check it");
+        else if (p.cramped) sb.append("Tight space: scan more floor for a better layout");
         p.explanation = sb.toString().trim();
         return p;
     }
 
     private static String colorName(float[] c) {
-        if (c == BLUE) return "[blue]";
-        if (c == ORANGE) return "[orange]";
-        if (c == YELLOW) return "[yellow]";
-        if (c == PURPLE) return "[purple]";
-        if (c == CYAN) return "[cyan]";
+        if (c == BLUE) return "\uD83D\uDD35";
+        if (c == ORANGE) return "\uD83D\uDFE0";
+        if (c == YELLOW) return "\uD83D\uDFE1";
+        if (c == PURPLE) return "\uD83D\uDFE3";
+        if (c == CYAN) return "\uD83D\uDFE2";
         return "";
     }
 
     String summary() {
         if (!ready) return "planner: not analysed";
         int known = 0, blk = 0;
-        for (int i = 0; i < floorKnown.length; i++) { if (floorKnown[i]) known++; if (blocked[i] > 3) blk++; }
+        for (int i = 0; i < floorKnown.length; i++) { if (floorKnown[i]) known++; if (blocked[i] > BLOCKED) blk++; }
         return String.format(Locale.US, "planner: floor y=%.2f, grid %dx%d, floor cells %d, blocked cells %d",
                 floorY, nx, nz, known, blk);
     }
