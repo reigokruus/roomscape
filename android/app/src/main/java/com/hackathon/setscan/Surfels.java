@@ -19,14 +19,27 @@ final class Surfels {
     static final float CELL = 0.05f;    // grid cell = radius, so a 3x3x3 block covers every neighbour
     static final int MAX_NB = 48;
 
-    final FloatBuffer pos, nrm; // 3 and 4 floats per point, direct buffers ready for GL
-    final int n;
+    final FloatBuffer pos, raw, nrm; // 3, 3 and 4 floats per point, direct buffers ready for GL (raw = where the splat starts its settle animation)
+    final ByteBuffer col;            // rgba, a = opacity
+    int n; // may be less than the buffers' capacity (reused by the Trainer)
     int flat, curved, lonely;
+    boolean trained;                 // from the Trainer (no settle animation)
 
     private Surfels(int n) {
         this.n = n;
         pos = ByteBuffer.allocateDirect(Math.max(1, n) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        raw = ByteBuffer.allocateDirect(Math.max(1, n) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
         nrm = ByteBuffer.allocateDirect(Math.max(1, n) * 16).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        col = ByteBuffer.allocateDirect(Math.max(1, n) * 4).order(ByteOrder.nativeOrder());
+    }
+
+    static Surfels empty(int n) { return new Surfels(n); }
+
+    /** Surfels for the points src/srcCol (colours copied, opacity 1). */
+    static Surfels build(FloatBuffer src, ByteBuffer srcCol, int n) {
+        Surfels s = build(src, n);
+        for (int i = 0; i < n * 4; i++) s.col.put(i, (i & 3) == 3 ? (byte) 255 : srcCol.get(i));
+        return s;
     }
 
     private static long cellKey(int ix, int iy, int iz) {
@@ -108,6 +121,7 @@ final class Surfels {
                     ox = x - nx * off * w; oy = y - ny * off * w; oz = z - nz * off * w;
                 } else { s.curved++; nx = ny = nz = 0; }
             }
+            s.raw.put(i * 3, x); s.raw.put(i * 3 + 1, y); s.raw.put(i * 3 + 2, z);
             s.pos.put(i * 3, ox); s.pos.put(i * 3 + 1, oy); s.pos.put(i * 3 + 2, oz);
             s.nrm.put(i * 4, nx); s.nrm.put(i * 4 + 1, ny); s.nrm.put(i * 4 + 2, nz); s.nrm.put(i * 4 + 3, rad);
         }

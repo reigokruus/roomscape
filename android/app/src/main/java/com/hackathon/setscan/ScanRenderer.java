@@ -78,7 +78,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // GL objects
     private int bgTex, bgProg, ptProg, posVbo, colVbo;
     // surfel splats (see Surfels): built in the background after a scan, uploaded on the GL thread
-    private int surfProg, surfPosVbo, surfNrmVbo, surfCount;
+    private int surfProg, surfPosVbo, surfNrmVbo, surfColVbo, surfRawVbo, surfCount;
+    private boolean surfTrained;
     private volatile Surfels surfPending, surfDone;
     private volatile int surfGen;
     private int width = 1, height = 1;
@@ -269,29 +270,123 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (n == 0) return;
         final java.nio.FloatBuffer snap = java.nio.FloatBuffer.allocate(n * 3);
         for (int i = 0; i < n * 3; i++) snap.put(i, pos.get(i));
-        surfDone = null;
+        final ByteBuffer colSnap = ByteBuffer.allocate(n * 4);
+        for (int i = 0; i < n * 4; i++) colSnap.put(i, col.get(i));
+        surfDone = null; surfBase = null; training = false; trainer = null; trainViews = null;
         new Thread(() -> { try {
             long t0 = System.currentTimeMillis();
-            Surfels s = Surfels.build(snap, n);
+            Surfels s = Surfels.build(snap, colSnap, n);
             if (gen != surfGen) return;
-            surfDone = s; surfPending = s;
+            surfDone = s; surfBase = s; surfPending = s;
             log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
                     + (System.currentTimeMillis() - t0) + " ms");
         } catch (Throwable e) { logError("splats", new RuntimeException(e)); } }).start();
+    }
+
+    // ---- on-phone splat training (see Trainer) ----
+    private volatile Surfels surfBase;
+    private volatile Trainer trainer;
+    private volatile boolean training;
+    private volatile java.util.List<Trainer.View> trainViews;
+
+    boolean isTraining() { return training; }
+
+    /** GL thread: start or pause the training. Returns the button label. */
+    String toggleTraining() {
+        if (training) { training = false; return "Train splats"; }
+        final Surfels base = surfBase;
+        if (base == null) { activity.updateStatus("The splats are still being built. Try again in a few seconds."); return "Train splats"; }
+        if (trainViews == null) trainViews = readTrainViews();
+        final java.util.List<Trainer.View> views = trainViews;
+        if (views.isEmpty()) { activity.updateStatus("No photos were saved during this scan, so there is nothing to train against."); return "Train splats"; }
+        style = 1; splats = true;
+        training = true;
+        final int gen = surfGen;
+        new Thread(() -> { try {
+            if (trainer == null) {
+                long t0 = System.currentTimeMillis();
+                trainer = Trainer.fromSurfels(base, base.col);
+                log("training: " + trainer.n + " splats from " + base.n + " surfels, " + views.size() + " photos (" + (System.currentTimeMillis() - t0) + " ms)");
+            }
+            Trainer tr = trainer;
+            java.util.Random rnd = new java.util.Random();
+            long lastPub = 0, t0 = System.currentTimeMillis(); int it0 = tr.iter;
+            float base0 = -1, ema = -1;
+            while (training && gen == surfGen) {
+                float l = tr.step(views.get(rnd.nextInt(views.size())));
+                ema = ema < 0 ? l : ema * 0.95f + l * 0.05f;
+                if (tr.iter <= 20) base0 = base0 < 0 ? l : base0 + (l - base0) / tr.iter;
+                long now = System.currentTimeMillis();
+                if (now - lastPub > 400) {
+                    lastPub = now;
+                    surfPending = tr.toSurfels();
+                    float better = base0 > 0 ? Math.max(0, 1 - ema / base0) * 100 : 0;
+                    float ms = (now - t0) / (float) Math.max(1, tr.iter - it0);
+                    activity.updateStatus(String.format(java.util.Locale.US,
+                            "Training splats on the phone: step %d (%.0f ms each), %d splats vs %d photos.\nMatches the photos %.0f%% better than the raw scan. Tap Pause any time, or let it keep honing.",
+                            tr.iter, ms, tr.n, views.size(), better));
+                }
+            }
+            if (gen == surfGen) surfPending = tr.toSurfels();
+            log("training paused at step " + tr.iter + ", error " + tr.lastLoss);
+        } catch (Throwable e) { training = false; logError("training", new RuntimeException(e)); } }).start();
+        return "Pause training";
+    }
+
+    /** GL thread: the keyframe photos shrunk to 256x144, with their cameras. */
+    private java.util.List<Trainer.View> readTrainViews() {
+        java.util.List<Trainer.View> out = new java.util.ArrayList<>();
+        final int W = 256, H = 144, TW = PhotoRoom.TEX_W, TH = PhotoRoom.TEX_H;
+        int[] fb = new int[1];
+        GLES20.glGenFramebuffers(1, fb, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fb[0]);
+        ByteBuffer px = ByteBuffer.allocateDirect(TW * TH * 4).order(ByteOrder.nativeOrder());
+        for (PhotoRoom.Keyframe k : new java.util.ArrayList<>(photos.keyframes)) {
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, k.tex, 0);
+            px.position(0);
+            GLES20.glReadPixels(0, 0, TW, TH, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+            Trainer.View v = new Trainer.View();
+            v.view = k.view.clone(); v.W = W; v.H = H;
+            v.fx = k.fx * W / k.w; v.fy = k.fy * H / k.h; v.cu = k.cx * W / k.w; v.cv = k.cy * H / k.h;
+            v.img = new float[W * H * 3];
+            for (int y = 0; y < H; y++) {
+                int sy0 = y * TH / H, sy1 = Math.max(sy0 + 1, (y + 1) * TH / H);
+                for (int x = 0; x < W; x++) {
+                    int sx0 = x * TW / W, sx1 = Math.max(sx0 + 1, (x + 1) * TW / W);
+                    float r = 0, g = 0, b = 0; int c = 0;
+                    for (int sy = sy0; sy < sy1; sy++) for (int sx = sx0; sx < sx1; sx++) {
+                        int o = (sy * TW + sx) * 4;
+                        r += px.get(o) & 0xFF; g += px.get(o + 1) & 0xFF; b += px.get(o + 2) & 0xFF; c++;
+                    }
+                    int q = (y * W + x) * 3;
+                    v.img[q] = r / c / 255f; v.img[q + 1] = g / c / 255f; v.img[q + 2] = b / c / 255f;
+                }
+            }
+            out.add(v);
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glDeleteFramebuffers(1, fb, 0);
+        GLES20.glViewport(0, 0, width, height);
+        log("training photos: " + out.size());
+        return out;
     }
 
     private void uploadSurfels() {
         Surfels s = surfPending;
         if (s == null) return;
         surfPending = null;
-        if (s.n != count) { surfCount = 0; return; }
-        s.pos.position(0); s.nrm.position(0);
+        s.pos.position(0); s.nrm.position(0); s.raw.position(0); s.col.position(0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfPosVbo);
-        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 12, s.pos, GLES20.GL_STATIC_DRAW);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 12, s.pos, GLES20.GL_DYNAMIC_DRAW);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfRawVbo);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 12, s.raw, GLES20.GL_DYNAMIC_DRAW);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfNrmVbo);
-        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 16, s.nrm, GLES20.GL_STATIC_DRAW);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 16, s.nrm, GLES20.GL_DYNAMIC_DRAW);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfColVbo);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 4, s.col, GLES20.GL_DYNAMIC_DRAW);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
-        surfCount = s.n; surfShownAt = System.currentTimeMillis();
+        if (!s.trained) surfShownAt = System.currentTimeMillis();
+        surfCount = s.n; surfTrained = s.trained;
     }
     private long surfShownAt;
 
@@ -318,23 +413,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfPosVbo);
         GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
         GLES20.glEnableVertexAttribArray(aPos);
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfColVbo);
         GLES20.glVertexAttribPointer(aCol, 4, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
         GLES20.glEnableVertexAttribArray(aCol);
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, posVbo);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfRawVbo);
         GLES20.glVertexAttribPointer(aRaw, 3, GLES20.GL_FLOAT, false, 0, 0);
         GLES20.glEnableVertexAttribArray(aRaw);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, surfNrmVbo);
         GLES20.glVertexAttribPointer(aNrm, 4, GLES20.GL_FLOAT, false, 0, 0);
         GLES20.glEnableVertexAttribArray(aNrm);
         int uScale = GLES20.glGetUniformLocation(surfProg, "uScale"), uPass = GLES20.glGetUniformLocation(surfProg, "uPass");
-        GLES20.glUniform1f(uScale, 1.6f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uTrained"), surfTrained ? 1f : 0f);
+        GLES20.glUniform1f(uScale, surfTrained ? 1.8f : 1.6f);
         GLES20.glUniform1f(uPass, 0f);
         GLES20.glDrawArrays(GLES20.GL_POINTS, 0, surfCount);
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glDepthMask(false);
-        GLES20.glUniform1f(uScale, 2.4f);
+        GLES20.glUniform1f(uScale, surfTrained ? 1.8f : 2.4f);
         GLES20.glUniform1f(uPass, 1f);
         GLES20.glDrawArrays(GLES20.GL_POINTS, 0, surfCount);
         GLES20.glDepthMask(true);
@@ -1447,7 +1543,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
-        surfGen++; surfDone = null; surfPending = null; surfCount = 0;
+        surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
@@ -1651,17 +1747,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "  vN = (uView * vec4(aNrm.xyz, 0.0)).xyz; }",
                 // Surfel: the point sprite becomes a disc lying on the surface (an ellipse on screen), with a gaussian falloff.
                 // uPass 0 = opaque core (writes depth), 1 = soft halo blended on top.
-                "precision mediump float; varying vec4 vColor; varying vec3 vN; uniform float uPass;" +
+                "precision mediump float; varying vec4 vColor; varying vec3 vN; uniform float uPass; uniform float uTrained;" +
                 "void main(){ vec2 d = gl_PointCoord * 2.0 - 1.0; d.y = -d.y; float dz = 0.0;" +
                 "  if (dot(vN, vN) > 0.25) { float nz = vN.z; if (abs(nz) < 0.25) nz = nz < 0.0 ? -0.25 : 0.25;" +
                 "    dz = -(vN.x * d.x + vN.y * d.y) / nz; }" +
                 "  float r2 = dot(d, d) + dz * dz; if (r2 > 1.0) discard;" +
+                "  if (uTrained > 0.5) { float ta = vColor.a * exp(-r2 * 4.5);" + // the same gaussian the trainer fitted
+                "    if (uPass < 0.5) { if (ta < 0.5) discard; gl_FragColor = vec4(vColor.rgb, 1.0); }" +
+                "    else { gl_FragColor = vec4(vColor.rgb * ta, ta); } return; }" +
                 "  if (uPass < 0.5) { if (r2 > 0.45) discard; gl_FragColor = vec4(vColor.rgb, 1.0); }" +
                 "  else { float a = exp(-r2 * 2.5) * 0.85; gl_FragColor = vec4(vColor.rgb * a, a); }" +
                 "}");
-        int[] sb = new int[2];
-        GLES20.glGenBuffers(2, sb, 0);
-        surfPosVbo = sb[0]; surfNrmVbo = sb[1]; surfCount = 0;
+        int[] sb = new int[4];
+        GLES20.glGenBuffers(4, sb, 0);
+        surfPosVbo = sb[0]; surfNrmVbo = sb[1]; surfColVbo = sb[2]; surfRawVbo = sb[3]; surfCount = 0;
         if (surfDone != null) surfPending = surfDone; // GL context was recreated: upload again
 
         int[] b = new int[2];
@@ -2519,7 +2618,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         } else if (style == 0 && photos.ready && meshTris > 0)
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
-        else if (style == 1 && surfCount > 0 && surfCount == count && uploaded == count) drawSurfels(mvp);
+        else if (style == 1 && surfCount > 0) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         if (roomReady) drawRoom(mvp, simple);
         cutActive = false;
