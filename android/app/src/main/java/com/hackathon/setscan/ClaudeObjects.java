@@ -5,8 +5,10 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Objects Claude boxed in a live photo, lifted into 3D: the scan points that land inside the photo box and sit
- * at the front (nearest the camera) become an oriented box or cylinder. Kept across photos and merged by position.
+ * Objects Claude boxed in a live photo, placed in 3D. The phone's depth is too noisy to measure small things
+ * (a pair of sneakers barely rises out of the floor noise), so the scan only says WHERE: the middle of Claude's photo
+ * box is looked up in the scan points. Claude says WHAT and HOW BIG (its real-world size estimate).
+ * Repeat sightings of the same thing are averaged, so the position settles as you scan.
  */
 final class ClaudeObjects {
 
@@ -16,6 +18,7 @@ final class ClaudeObjects {
         int n;
         float radX, radY; // radians per unit of upright photo width / height
         float floorY;
+        float camX, camZ;
     }
 
     final List<RoomModel.Box> objs = new ArrayList<>();
@@ -27,91 +30,90 @@ final class ClaudeObjects {
     synchronized List<RoomModel.Box> list() { return new ArrayList<>(objs); }
 
     private static final java.util.Set<String> ROUND = new java.util.HashSet<>(Arrays.asList("bottle", "can", "cup", "vase", "lamp", "plant", "pole"));
+    private static final java.util.Set<String> FLOOR = new java.util.HashSet<>(Arrays.asList("table", "desk", "chair", "stool", "bed", "sofa", "shelf", "cabinet", "wardrobe", "pole"));
 
-    /** The 3D box for one detection, or null when too few scan points back it up. */
+    private static float median(float[] a, int n) { float[] c = Arrays.copyOf(a, n); Arrays.sort(c); return c[n / 2]; }
+
+    /** The 3D box for one detection, or null when the scan has no points where Claude points. */
     static RoomModel.Box lift(Snapshot s, ClaudeHelper.Det det) {
-        float mu = (det.x1 - det.x0) * 0.12f, mv = (det.y1 - det.y0) * 0.12f;
-        float u0 = det.x0 + mu, u1 = det.x1 - mu, v0 = det.y0 + mv, v1 = det.y1 - mv;
-        int[] in = new int[s.n]; int m = 0;
-        for (int i = 0; i < s.n; i++)
-            if (s.u[i] >= u0 && s.u[i] <= u1 && s.v[i] >= v0 && s.v[i] <= v1 && s.y[i] > s.floorY + 0.025f) in[m++] = i;
-        if (m < 25) return null;
-        float[] ds = new float[m];
-        for (int i = 0; i < m; i++) ds[i] = s.d[in[i]];
-        Arrays.sort(ds);
-        float ang = Math.max((det.x1 - det.x0) * s.radX, (det.y1 - det.y0) * s.radY);
-        float extent = Math.max(0.12f, Math.min(2.0f, ang * ds[m / 2] * 1.1f));
-        // the depth slab holding the most points is the object; a chair leg in front or the wall behind holds fewer
-        int best = 0, bestN = 0;
-        for (int i = 0, j = 0; i < m; i++) {
-            while (j < m && ds[j] <= ds[i] + extent) j++;
-            if (j - i > bestN * 1.15f) { bestN = j - i; best = i; } // ties go to the nearer slab
+        float cu = (det.x0 + det.x1) / 2, cv = (det.y0 + det.y1) / 2, hw = (det.x1 - det.x0) / 2, hh = (det.y1 - det.y0) / 2;
+        float[] px = new float[s.n], py = new float[s.n], pz = new float[s.n], pd = new float[s.n];
+        int m = 0;
+        for (float f : new float[]{0.3f, 0.5f}) { // the middle of the box first; a wider look if that has too few points
+            m = 0;
+            for (int i = 0; i < s.n; i++)
+                if (Math.abs(s.u[i] - cu) < hw * f && Math.abs(s.v[i] - cv) < hh * f) { px[m] = s.x[i]; py[m] = s.y[i]; pz[m] = s.z[i]; pd[m] = s.d[i]; m++; }
+            if (m >= 6) break;
         }
-        float near = ds[best] + 0.05f;
-        int k = 0;
-        float mx = 0, mz = 0;
-        for (int i = 0; i < m; i++) {
-            float d = s.d[in[i]];
-            if (d >= near - 0.05f && d <= near + extent) { in[k++] = in[i]; mx += s.x[in[i]]; mz += s.z[in[i]]; }
-        }
-        if (k < 20) return null;
-        mx /= k; mz /= k;
-        double sxx = 0, szz = 0, sxz = 0;
-        for (int i = 0; i < k; i++) { float dx = s.x[in[i]] - mx, dz = s.z[in[i]] - mz; sxx += dx * dx; szz += dz * dz; sxz += dx * dz; }
-        float a = (float) (0.5 * Math.atan2(2 * sxz, sxx - szz));
-        float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
-        float[] pu = new float[k], pv = new float[k], py = new float[k];
-        for (int i = 0; i < k; i++) {
-            float dx = s.x[in[i]] - mx, dz = s.z[in[i]] - mz;
-            pu[i] = dx * ca + dz * sa; pv[i] = -dx * sa + dz * ca; py[i] = s.y[in[i]];
-        }
-        Arrays.sort(pu); Arrays.sort(pv); Arrays.sort(py);
-        float ulo = pu[k * 5 / 100], uhi = pu[k * 95 / 100], vlo = pv[k * 5 / 100], vhi = pv[k * 95 / 100];
+        if (m < 6) return null;
+        float ax = median(px, m), ay = median(py, m), az = median(pz, m), dist = median(pd, m);
+        // size: Claude's estimate, or what the photo box spans at that distance
+        float appW = 2 * hw * s.radX * dist, appH = 2 * hh * s.radY * dist;
+        float w = det.sw > 0 ? det.sw : Math.max(0.05f, appW), dp = det.sd > 0 ? det.sd : w * 0.6f, h = det.sh > 0 ? det.sh : Math.max(0.05f, appH);
+        // the photo shows the front: the middle of the object is half its depth further from the camera
+        float dx = ax - s.camX, dz = az - s.camZ, dl = (float) Math.hypot(dx, dz);
+        if (dl < 1e-3f) { dx = 0; dz = 1; dl = 1; }
+        dx /= dl; dz /= dl;
         RoomModel.Box b = new RoomModel.Box();
-        float cu = (ulo + uhi) / 2, cv = (vlo + vhi) / 2;
-        b.cx = mx + cu * ca - cv * sa; b.cz = mz + cu * sa + cv * ca;
-        b.cosA = ca; b.sinA = sa;
-        b.hu = Math.max(0.03f, (uhi - ulo) / 2); b.hv = Math.max(0.03f, (vhi - vlo) / 2);
-        b.y0 = py[k * 3 / 100]; b.y1 = py[Math.min(k - 1, k * 97 / 100)];
-        if (b.y0 - s.floorY < 0.12f) b.y0 = s.floorY;
-        if (b.y1 - b.y0 < 0.04f) b.y1 = b.y0 + 0.04f;
-        if (ROUND.contains(det.kind)) { b.cyl = true; b.hu = b.hv = Math.max(b.hu, b.hv); }
-        b.name = det.name; b.kind = det.kind; b.generic = det.name; b.voxels = k;
-        b.rel = b.y0 <= s.floorY + 0.001f ? "on the floor" : "raised";
+        b.cx = ax + dx * dp / 2; b.cz = az + dz * dp / 2;
+        b.cosA = -dz; b.sinA = dx; // width runs across the view, depth along it
+        b.hu = w / 2; b.hv = dp / 2;
+        boolean onFloor = FLOOR.contains(det.kind) || det.on.equals("floor") || ay - s.floorY < Math.max(0.25f, h * 0.8f);
+        b.y0 = onFloor ? s.floorY : Math.max(s.floorY, ay - h / 2);
+        b.y1 = b.y0 + h;
+        if (ROUND.contains(det.kind)) { b.cyl = true; b.hu = b.hv = Math.max(w, dp) / 2; }
+        b.name = det.name; b.kind = det.kind; b.generic = det.name; b.voxels = 1;
+        b.rel = onFloor ? "on the floor" : !det.on.isEmpty() && !det.on.equals("floor") ? "on the " + det.on : "raised";
         b.updateAabb();
         return b;
     }
 
-    /** Keep the newest box for each spot. */
-    synchronized void add(RoomModel.Box b) {
-        float rb = Math.max(b.hu, b.hv);
-        for (int i = objs.size() - 1; i >= 0; i--) {
-            RoomModel.Box o = objs.get(i);
-            float d = (float) Math.hypot(o.cx - b.cx, o.cz - b.cz);
-            float ro = Math.max(o.hu, o.hv);
-            boolean same = sameKind(o, b) && d < Math.max(0.4f, 0.9f * Math.max(rb, ro)) && Math.abs(o.y0 - b.y0) < 0.4f;
-            float ox = Math.min(o.x1, b.x1) - Math.max(o.x0, b.x0), oz = Math.min(o.z1, b.z1) - Math.max(o.z0, b.z0);
-            boolean overlap = ox > 0 && oz > 0 && ox * oz > 0.5f * Math.min((o.x1 - o.x0) * (o.z1 - o.z0), (b.x1 - b.x0) * (b.z1 - b.z0))
-                    && Math.min(o.y1, b.y1) - Math.max(o.y0, b.y0) > 0.5f * Math.min(o.y1 - o.y0, b.y1 - b.y0);
-            if (same || overlap || (d < Math.max(0.2f, 0.5f * Math.max(rb, ro)) && Math.abs(o.y0 - b.y0) < 0.3f)) objs.remove(i);
-        }
-        objs.add(b);
-        // things standing on another Claude object
-        for (RoomModel.Box c : objs) {
-            c.parent = null;
-            for (RoomModel.Box p : objs)
-                if (p != c && c.y0 > p.y0 + 0.1f && Math.abs(c.y0 - p.y1) < 0.12f && c.cx > p.x0 && c.cx < p.x1 && c.cz > p.z0 && c.cz < p.z1) { c.parent = p; c.depth = 1; }
-        }
-    }
-
-    private static boolean sameKind(RoomModel.Box a, RoomModel.Box b) {
+    private static boolean sameThing(RoomModel.Box a, RoomModel.Box b) {
         if (a.kind != null && a.kind.equals(b.kind) && !a.kind.equals("other")) return true;
         return a.name != null && b.name != null && a.name.equalsIgnoreCase(b.name);
     }
 
+    /** Average a repeat sighting into the earlier one; anything else is a new object. */
+    synchronized void add(RoomModel.Box b) {
+        float rb = Math.max(b.hu, b.hv);
+        RoomModel.Box hit = null; float hd = 1e9f;
+        for (RoomModel.Box o : objs) {
+            float d = (float) Math.hypot(o.cx - b.cx, o.cz - b.cz);
+            float lim = Math.max(0.35f, 1.2f * Math.max(rb, Math.max(o.hu, o.hv)));
+            if (sameThing(o, b) && d < lim && Math.abs(o.y0 - b.y0) < 0.4f && d < hd) { hit = o; hd = d; }
+        }
+        if (hit == null) {
+            for (int i = objs.size() - 1; i >= 0; i--) { // a different name on the very same spot: Claude changed its mind
+                RoomModel.Box o = objs.get(i);
+                if (Math.hypot(o.cx - b.cx, o.cz - b.cz) < 0.12f && Math.abs(o.y0 - b.y0) < 0.2f) objs.remove(i);
+            }
+            objs.add(b);
+        } else {
+            float n = Math.min(hit.voxels, 6), t = 1f / (n + 1); // running average, newest counts at least 1/7
+            hit.cx += (b.cx - hit.cx) * t; hit.cz += (b.cz - hit.cz) * t;
+            hit.hu += (b.hu - hit.hu) * t; hit.hv += (b.hv - hit.hv) * t;
+            float h = (hit.y1 - hit.y0) + ((b.y1 - b.y0) - (hit.y1 - hit.y0)) * t;
+            hit.y0 += (b.y0 - hit.y0) * t; hit.y1 = hit.y0 + h;
+            if (!hit.cyl) { // keep the heading of the best view: the first one unless this one is a lot closer to square-on
+                float c = hit.cosA + (b.cosA - hit.cosA) * t, s = hit.sinA + (b.sinA - hit.sinA) * t, l = (float) Math.hypot(c, s);
+                if (l > 0.3f) { hit.cosA = c / l; hit.sinA = s / l; }
+            }
+            hit.name = b.name; hit.generic = b.name;
+            hit.voxels++;
+            hit.updateAabb();
+        }
+        // things standing on another Claude object
+        for (RoomModel.Box c : objs) {
+            c.parent = null; c.depth = 0;
+            for (RoomModel.Box p : objs)
+                if (p != c && c.y0 > p.y0 + 0.1f && Math.abs(c.y0 - p.y1) < 0.15f && c.cx > p.x0 && c.cx < p.x1 && c.cz > p.z0 && c.cz < p.z1) { c.parent = p; c.depth = 1; }
+        }
+    }
+
     /** Once Claude has placed anything, only Claude's objects are shown: the scan's own guesses are dropped. */
-    synchronized void mergeInto(List<RoomModel.Box> boxes) {
+    synchronized void mergeInto(List<RoomModel.Box> boxes, float floorY) {
         if (objs.isEmpty()) return;
+        for (RoomModel.Box b : objs) if ("on the floor".equals(b.rel)) { float h = b.y1 - b.y0; b.y0 = floorY; b.y1 = floorY + h; } // the floor estimate improves as the scan grows
         boxes.clear();
         boxes.addAll(objs);
     }

@@ -467,7 +467,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     rm.knownH = h; rm.knownW = w; rm.knownD = d;
                     rm.build(new java.util.ArrayList<>(), sp, p, c, n);
                     applyLabels(rm.boxes);
-                    claudeObjs.mergeInto(rm.boxes);
+                    claudeObjs.mergeInto(rm.boxes, rm.floorY);
                     liveRoom = rm;
                 }
             } catch (Throwable e) { /* a live estimate is best effort */ }
@@ -817,7 +817,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try {
                 room.build(planes, planner, pos, col, count);
                 applyLabels(room.boxes);
-                claudeObjs.mergeInto(room.boxes);
+                claudeObjs.mergeInto(room.boxes, room.floorY);
                 roomReady = true;
                 buildFloorMesh();
                 log(room.logLine());
@@ -1013,7 +1013,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             map.mapPoints(q);
             boolean swap = Math.abs(q[2] - q[0]) < Math.abs(q[3] - q[1]); // texture u runs along the photo's height
             snap.radX = swap ? k.h / k.fy : k.w / k.fx; snap.radY = swap ? k.w / k.fx : k.h / k.fy;
-            snap.floorY = r.floorY;
+            snap.floorY = r.floorY; snap.camX = k.px; snap.camZ = k.pz;
             int n = count, step = Math.max(1, n / 60000), cap = n / step + 1;
             snap.u = new float[cap]; snap.v = new float[cap]; snap.d = new float[cap]; snap.x = new float[cap]; snap.y = new float[cap]; snap.z = new float[cap];
             float[] vm = k.view, pt = new float[2];
@@ -1040,7 +1040,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     RoomModel.Box b = ClaudeObjects.lift(snap, d);
                     if (b == null) continue;
                     claudeObjs.add(b);
-                    placed.append(placed.length() > 0 ? ", " : "").append(String.format(java.util.Locale.US, "%s %.2fx%.2fx%.2f", d.name, 2 * b.hu, 2 * b.hv, b.y1 - b.y0));
+                    placed.append(placed.length() > 0 ? ", " : "").append(String.format(java.util.Locale.US, "%s %.2fx%.2fx%.2f at (%.2f, %.2f, %.2f) %s", d.name, 2 * b.hu, 2 * b.hv, b.y1 - b.y0, b.cx, b.y0, b.cz, b.rel));
                 }
                 claudeCalls++;
                 claudeLine = "🤖 Claude sees: " + (seen.length() > 0 ? seen : "nothing it can name") + (dets.size() > 0 && placed.length() == 0 ? " (not scanned enough yet to place)" : "");

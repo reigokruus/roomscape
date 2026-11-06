@@ -152,7 +152,7 @@ final class ClaudeHelper {
     }
 
     /** One thing Claude found in the live photo: its name, kind and box in the photo (0..1, top-left origin). */
-    static final class Det { String name, kind; float x0, y0, x1, y1; }
+    static final class Det { String name, kind, on = ""; float x0, y0, x1, y1, sw, sd, sh; }
 
     /**
      * Live detection: Claude finds the objects in the newest photo itself and boxes them; the app then lifts each box
@@ -168,8 +168,9 @@ final class ClaudeHelper {
                     + "Find each distinct physical object in it that is at least half visible: furniture, things on furniture, things on the floor. "
                     + "Skip walls, floor, ceiling, doors, windows, rugs, shadows, light patches, people and body parts.\n"
                     + "Reply with only JSON, no other text:\n"
-                    + "{\"objects\": [{\"name\": \"1-3 word name\", \"kind\": \"one of: " + KINDS + "\", \"box\": [x0, y0, x1, y1]}]}\n"
+                    + "{\"objects\": [{\"name\": \"1-3 word name\", \"kind\": \"one of: " + KINDS + "\", \"box\": [x0, y0, x1, y1], \"size_cm\": [width, depth, height], \"on\": \"floor, wall, or what it stands on (e.g. desk)\"}]}\n"
                     + "box is the tight bounding box in the photo in thousandths of the image width and height (0-1000, top-left origin). "
+                    + "size_cm is your best estimate of the thing's real size, from what it is and how it compares with things around it. "
                     + "At most 10 objects, biggest first. A pair of shoes side by side can be one object."));
             MessageCreateParams params = MessageCreateParams.builder()
                     .model(MODEL)
@@ -209,6 +210,12 @@ final class ClaudeHelper {
             float x0 = (float) bx.optDouble(0, -1), y0 = (float) bx.optDouble(1, -1), x1 = (float) bx.optDouble(2, -1), y1 = (float) bx.optDouble(3, -1);
             d.x0 = Math.max(0, Math.min(x0, x1)) / 1000f; d.x1 = Math.min(1000, Math.max(x0, x1)) / 1000f;
             d.y0 = Math.max(0, Math.min(y0, y1)) / 1000f; d.y1 = Math.min(1000, Math.max(y0, y1)) / 1000f;
+            JSONArray sz = o.optJSONArray("size_cm");
+            if (sz != null && sz.length() == 3) {
+                d.sw = (float) sz.optDouble(0, 0) / 100f; d.sd = (float) sz.optDouble(1, 0) / 100f; d.sh = (float) sz.optDouble(2, 0) / 100f;
+                if (d.sw <= 0 || d.sd <= 0 || d.sh <= 0 || d.sw > 4 || d.sd > 4 || d.sh > 3) d.sw = d.sd = d.sh = 0;
+            }
+            d.on = o.optString("on", "").trim().toLowerCase(Locale.US);
             if (d.name.isEmpty() || d.kind.equals("noise") || d.x1 - d.x0 < 0.01f || d.y1 - d.y0 < 0.01f) continue;
             out.add(d);
         }
