@@ -67,6 +67,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private int meshTris;
     private final java.util.ArrayList<ScanExport.Rec> recs = new java.util.ArrayList<>();
     private final ScanExport.PoseLog poseLog = new ScanExport.PoseLog();
+    final SensorLog sensors = new SensorLog();
     private final float[] poseTq = new float[7];
     private final byte[] obs = new byte[MAX_POINTS]; // how many times each point was seen (capped)
     private int refineCursor; private boolean refined; private int refinedTotal, droppedNoise;
@@ -162,6 +163,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         config.setFocusMode(Config.FocusMode.AUTO);
         config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE);
         config.setPlaneFindingMode(Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL);
+        config.setLightEstimationMode(Config.LightEstimationMode.AMBIENT_INTENSITY); // scene brightness + colour cast per frame
         session.configure(config);
         depthSupported = m != Config.DepthMode.DISABLED;
         rawDepth = m == Config.DepthMode.RAW_DEPTH_ONLY;
@@ -217,6 +219,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void finishScan() {
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
+        sensors.active = false;
         log("finish: " + count + " points, " + diagnostics());
         dropNoise();
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks, kept " + count);
@@ -555,7 +558,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final int n = count;
         final String name = "cinex-scan-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(new java.util.Date()) + ".zip";
         new Thread(() -> {
-            try { done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log, poseLog)); }
+            try { done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log, poseLog, sensors)); }
             catch (Throwable e) { fail.accept(String.valueOf(e)); }
         }).start();
     }
@@ -567,7 +570,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -776,6 +779,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (frame.getTimestamp() != 0) drawBackground();
 
         TrackingState ts = camera.getTrackingState();
+        sensors.active = !viewing;
         if (!viewing && frame.getTimestamp() != 0) {
             com.google.ar.core.Pose cp = camera.getPose();
             cp.getTranslation(poseTq, 0); cp.getRotationQuaternion(poseTq, 3);
@@ -937,6 +941,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     float gs = (float) iw / ii.getImageDimensions()[0] / step;
                     r.gfx = ifx * gs; r.gfy = ify * gs; r.gcx = icx * gs; r.gcy = icy * gs;
                 }
+                try {
+                    com.google.ar.core.LightEstimate le = frame.getLightEstimate();
+                    if (le.getState() == com.google.ar.core.LightEstimate.State.VALID) {
+                        r.ambient = le.getPixelIntensity(); le.getColorCorrection(r.colorCorr, 0);
+                    }
+                } catch (Throwable ignored) { }
+                try {
+                    com.google.ar.core.ImageMetadata md = frame.getImageMetadata();
+                    r.exposureNs = md.getLong(com.google.ar.core.ImageMetadata.SENSOR_EXPOSURE_TIME);
+                    r.iso = md.getInt(com.google.ar.core.ImageMetadata.SENSOR_SENSITIVITY);
+                } catch (Throwable ignored) { }
+                r.lux = sensors.lastLux; r.heading = sensors.lastHeadingDeg;
                 try (PointCloud fpc = frame.acquirePointCloud()) {
                     java.nio.IntBuffer ids = fpc.getIds(); java.nio.FloatBuffer pts = fpc.getPoints();
                     int nf = ids.remaining();

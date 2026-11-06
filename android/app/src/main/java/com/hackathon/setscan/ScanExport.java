@@ -27,6 +27,7 @@ import java.util.zip.ZipOutputStream;
  *  frames.csv + frames/NNNN.depth (uint16 mm, little endian) + frames/NNNN.conf (uint8) — every depth frame with its pose
  *  keyframes.csv + keyframes/NN.jpg — the HD photos (1024x576) with pose and intrinsics
  *  frames/NNNN.pgm — 160x120-ish greyscale camera picture per depth frame, frames/NNNN.fp — ARCore feature points
+ *  sensors.bin — raw gyro/accel/compass/light/pressure log (format in log.txt)
  *  poses.csv — every camera frame's pose + tracking state (state 0 tracking, 1 paused, 2 stopped)
  *  points.ply — the cleaned coloured point cloud, log.txt — the diagnostics report.
  * Poses are 4x4 column-major camera-to-world matrices (ARCore world, +Y up, metres; camera looks down -Z, +Y up).
@@ -45,6 +46,8 @@ final class ScanExport {
         byte[] gray; int gw, gh; float gfx, gfy, gcx, gcy;
         // ARCore's own tracked feature points (stable ids across frames; world xyz + confidence)
         int[] fpId; float[] fp;
+        // light and exposure: ARCore ambient intensity + colour correction, camera exposure time / ISO, light sensor lux, compass heading
+        float ambient = -1; float[] colorCorr = new float[4]; long exposureNs; int iso; float lux = -1, heading = Float.NaN;
     }
 
     /** Every camera frame's pose and tracking state (not just the recorded depth frames). */
@@ -117,7 +120,7 @@ final class ScanExport {
 
     /** Writes the zip to Downloads/CineX and returns a shareable uri (or a file uri on old Android). Background thread. */
     static Uri write(Context ctx, String name, List<Rec> recs, PhotoRoom photos, List<byte[]> jpgs,
-                     FloatBuffer pos, ByteBuffer col, int count, String log, PoseLog poses) throws Exception {
+                     FloatBuffer pos, ByteBuffer col, int count, String log, PoseLog poses, SensorLog sensors) throws Exception {
         Uri uri;
         OutputStream os;
         if (Build.VERSION.SDK_INT >= 29) {
@@ -139,13 +142,15 @@ final class ScanExport {
             z.setLevel(9);
             StringBuilder csv = new StringBuilder("idx,timestamp_ns,w,h,fx,fy,cx,cy");
             for (int i = 0; i < 16; i++) csv.append(",m").append(i);
-            csv.append(",gray_w,gray_h,gfx,gfy,gcx,gcy,feature_pts\n");
+            csv.append(",gray_w,gray_h,gfx,gfy,gcx,gcy,feature_pts,ambient,cc_r,cc_g,cc_b,cc_a,exposure_ns,iso,lux,heading_deg\n");
             for (int i = 0; i < recs.size(); i++) {
                 Rec r = recs.get(i);
                 csv.append(i).append(',').append(r.ts).append(',').append(r.w).append(',').append(r.h);
                 csv.append(String.format(Locale.US, ",%.4f,%.4f,%.4f,%.4f", r.fx, r.fy, r.cx, r.cy));
                 for (float v : r.pose) csv.append(String.format(Locale.US, ",%.6f", v));
                 csv.append(String.format(Locale.US, ",%d,%d,%.3f,%.3f,%.3f,%.3f,%d", r.gw, r.gh, r.gfx, r.gfy, r.gcx, r.gcy, r.fpId == null ? 0 : r.fpId.length));
+                csv.append(String.format(Locale.US, ",%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%.1f,%.1f", r.ambient, r.colorCorr[0], r.colorCorr[1], r.colorCorr[2], r.colorCorr[3],
+                        r.exposureNs, r.iso, r.lux, r.heading));
                 csv.append('\n');
                 if (r.gray != null) {
                     byte[] hd = ("P5\n" + r.gw + " " + r.gh + "\n255\n").getBytes("US-ASCII");
@@ -199,7 +204,8 @@ final class ScanExport {
                 ply.put(col.get(i * 4)).put(col.get(i * 4 + 1)).put(col.get(i * 4 + 2));
             }
             put(z, "points.ply", ply.array());
-            put(z, "log.txt", log.getBytes("UTF-8"));
+            if (sensors != null) put(z, "sensors.bin", sensors.toBytes());
+            put(z, "log.txt", (log + (sensors != null ? "\n--- sensors ---\n" + sensors.describe() : "")).getBytes("UTF-8"));
         }
         return uri;
     }

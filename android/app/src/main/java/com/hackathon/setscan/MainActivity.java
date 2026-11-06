@@ -332,6 +332,7 @@ public class MainActivity extends Activity {
                 return;
             }
         }
+        renderer.sensors.start(this);
         if (!renderer.isViewing()) resumeSession();
         glView.onResume();
     }
@@ -359,6 +360,7 @@ public class MainActivity extends Activity {
         super.onPause();
         glView.onPause();
         if (session != null) session.pause();
+        renderer.sensors.stop(this);
     }
 
     @Override
