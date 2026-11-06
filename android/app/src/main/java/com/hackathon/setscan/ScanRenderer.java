@@ -204,7 +204,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         plan = planner.plan(ShotPlanner.Scene.values()[sceneIdx - 1], subjectPick);
         log("plan " + plan.scene + " subject (" + fmt(plan.sx) + ", " + fmt(plan.sz) + ") cramped=" + plan.cramped
-                + " | " + plan.explanation.replace('\n', ' / '));
+                + " | " + plan.explanation.replace("\n", " / "));
         activity.updateStatus(plan.explanation);
     }
 
