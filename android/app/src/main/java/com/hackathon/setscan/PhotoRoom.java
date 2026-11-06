@@ -31,6 +31,7 @@ final class PhotoRoom {
     }
 
     final List<Keyframe> keyframes = new ArrayList<>();
+    volatile Keyframe last; // most recent photo (for live Claude)
     private int fbo, copyProg, meshProg;
     private final FloatBuffer quad = fb(new float[]{-1, -1, 1, -1, -1, 1, 1, 1});
     private final FloatBuffer quadUv = fb(new float[]{0, 0, 1, 0, 0, 1, 1, 1});
@@ -60,7 +61,8 @@ final class PhotoRoom {
                 "uniform mat4 uMvp; attribute vec4 aPos; attribute vec2 aUv; attribute vec4 aColor;" +
                 "varying vec2 vUv; varying vec4 vColor; varying float vHide;" +
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
-                "void main(){ vHide = 0.0;" +
+                ScanRenderer.HIDE_DECL +
+                "void main(){ vHide = 0.0;" + ScanRenderer.HIDE_TEST.replace("HIDE", "vHide = 1.0;") +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
                 "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) vHide = 1.0; }" +
                 "  gl_Position = uMvp * aPos; vUv = aUv; vColor = aColor; }",
@@ -170,6 +172,7 @@ final class PhotoRoom {
         k.fwd[0] = -pose[8]; k.fwd[1] = -pose[9]; k.fwd[2] = -pose[10];
         k.closeUp = closeUp;
         if (replace >= 0) keyframes.set(replace, k); else keyframes.add(k);
+        last = k;
     }
 
     /** Picks the best photo for every triangle of the mesh (triangle soup), and builds per-photo draw groups. */
@@ -322,6 +325,7 @@ final class PhotoRoom {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uCutD2"), cutD2);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uFloor"), floorY);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uCeil"), ceilY);
+        ScanRenderer.setHideUniforms(meshProg);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(meshProg, "uTex"), 0);
         int uUse = GLES20.glGetUniformLocation(meshProg, "uUseTex");
         int aPos = GLES20.glGetAttribLocation(meshProg, "aPos");

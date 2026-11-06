@@ -90,7 +90,7 @@ final class ObjectNamer {
     }
 
     /** The box's 8 corners in the photo as a padded rectangle (0..1), or null if it isn't well inside the photo. */
-    private static float[] rect(PhotoRoom.Keyframe k, RoomModel.Box b) {
+    static float[] rect(PhotoRoom.Keyframe k, RoomModel.Box b) {
         float minU = 9, minV = 9, maxU = -9, maxV = -9;
         float[] m = k.view;
         for (int i = 0; i < 8; i++) {
@@ -108,6 +108,41 @@ final class ObjectNamer {
         if (iw <= 0 || ih <= 0 || iw * ih < 0.6f * (maxU - minU) * (maxV - minV)) return null;
         float pu = (maxU - minU) * 0.15f, pv = (maxV - minV) * 0.15f;
         return new float[]{Math.max(0, minU - pu), Math.max(0, minV - pv), Math.min(1, maxU + pu), Math.min(1, maxV + pv)};
+    }
+
+    /** GL thread: one photo as an upright 1024-wide bitmap, plus the matrix that maps its 0..1 coordinates into it. */
+    static Bitmap readUpright(PhotoRoom.Keyframe k, int screenW, int screenH, android.graphics.Matrix outMap) {
+        int[] fb = new int[1];
+        GLES20.glGenFramebuffers(1, fb, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fb[0]);
+        ByteBuffer px = ByteBuffer.allocateDirect(PhotoRoom.TEX_W * PhotoRoom.TEX_H * 4).order(ByteOrder.nativeOrder());
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, k.tex, 0);
+        GLES20.glReadPixels(0, 0, PhotoRoom.TEX_W, PhotoRoom.TEX_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glDeleteFramebuffers(1, fb, 0);
+        GLES20.glViewport(0, 0, screenW, screenH);
+        px.position(0);
+        Bitmap full = Bitmap.createBitmap(PhotoRoom.TEX_W, PhotoRoom.TEX_H, Bitmap.Config.ARGB_8888);
+        full.copyPixelsFromBuffer(px);
+        Bitmap img = Bitmap.createScaledBitmap(full, 1024, 576, true);
+        full.recycle();
+        float ux = k.view[4], uy = k.view[5];
+        int rot = Math.round((float) Math.toDegrees(Math.atan2(ux, uy)) / 90f) * 90;
+        android.graphics.Matrix m = new android.graphics.Matrix();
+        m.setScale(1024, 576);
+        android.graphics.Matrix r = new android.graphics.Matrix();
+        r.postRotate(rot);
+        android.graphics.RectF bounds = new android.graphics.RectF(0, 0, 1024, 576);
+        r.mapRect(bounds);
+        r.postTranslate(-bounds.left, -bounds.top);
+        m.postConcat(r);
+        if (outMap != null) outMap.set(m);
+        if (rot == 0) return img;
+        android.graphics.Matrix rr = new android.graphics.Matrix();
+        rr.postRotate(rot);
+        Bitmap up = Bitmap.createBitmap(img, 0, 0, 1024, 576, rr, true);
+        img.recycle();
+        return up;
     }
 
     /** Any thread: label the crops; callbacks arrive on the main thread. done() runs once all are labelled. */

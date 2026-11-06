@@ -30,6 +30,7 @@ final class RoomModel {
         float x0, z0, x1, z1, y0, y1; // world axis-aligned bounds (for photo cropping)
         String label;
         volatile String name; // what the photo recognition thinks it is (null until labelled)
+        volatile String kind; // Claude's category (table, chair, shoe, noise, ...) or null
         float cx, cz, cosA = 1, sinA, hu, hv; // centre, heading and half sizes of the oriented footprint
         boolean cyl;           // round footprint: drawn as a cylinder of radius hu
         Box parent;            // what it stands on (null = floor or wall)

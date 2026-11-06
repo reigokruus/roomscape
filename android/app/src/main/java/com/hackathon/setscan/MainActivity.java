@@ -30,7 +30,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton;
+    private Button mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
@@ -78,40 +78,49 @@ public class MainActivity extends Activity {
     // ---- Ask Claude (optional, needs internet and the user's own API key) ----
     private static final String PREFS = "cinex", KEY = "claude_api_key";
 
-    private void askClaude(boolean changeKey) {
-        String key = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
-        if (key == null || key.isEmpty() || changeKey) {
-            android.widget.EditText in = new android.widget.EditText(this);
-            in.setHint("sk-ant-...");
-            in.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-            new android.app.AlertDialog.Builder(this)
-                    .setTitle("Claude API key")
-                    .setMessage("Paste your key from console.anthropic.com. It's saved only on this phone. "
-                            + "Ask Claude sends a few scan photos to Claude to name objects and suggest shots. Long-press the button to change the key.")
-                    .setView(in)
-                    .setPositiveButton("Save", (d, w) -> {
-                        String k = in.getText().toString().trim();
-                        if (k.isEmpty()) return;
-                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY, k).apply();
-                        askClaude(false);
-                    })
-                    .setNegativeButton("Cancel", null)
-                    .show();
+    /** Live Claude: while scanning, every few seconds the newest photo goes to Claude to name what's in view. */
+    private void toggleLiveClaude() {
+        if (renderer.claudeLiveKey != null) {
+            renderer.claudeLiveKey = null;
+            liveClaudeButton.setText("Claude live: off");
             return;
         }
+        String key = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
+        if (key == null || key.isEmpty()) { askKey(this::toggleLiveClaude); return; }
+        renderer.claudeLiveKey = key;
+        liveClaudeButton.setText("Claude live: on");
+        Toast.makeText(this, "Claude now looks at the scan every few seconds and names what it sees (needs internet).", Toast.LENGTH_LONG).show();
+    }
+
+    private void askKey(Runnable then) {
+        android.widget.EditText in = new android.widget.EditText(this);
+        in.setHint("sk-ant-...");
+        in.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Claude API key")
+                .setMessage("Paste your key from console.anthropic.com. It's saved only on this phone. "
+                        + "Claude gets scan photos to name objects. Long-press Ask Claude to change the key.")
+                .setView(in)
+                .setPositiveButton("Save", (d, w) -> {
+                    String k = in.getText().toString().trim();
+                    if (k.isEmpty()) return;
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY, k).apply();
+                    if (renderer.claudeLiveKey != null) renderer.claudeLiveKey = k;
+                    then.run();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void askClaude(boolean changeKey) {
+        String key = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
+        if (changeKey) { askKey(() -> { }); return; }
+        if (key == null || key.isEmpty()) { askKey(() -> askClaude(false)); return; }
         claudeButton.setEnabled(false);
         Toast.makeText(this, "Asking Claude about the scan...", Toast.LENGTH_SHORT).show();
         glView.queueEvent(() -> renderer.askClaude(key, r -> runOnUiThread(() -> {
             claudeButton.setEnabled(true);
-            StringBuilder b = new StringBuilder();
-            if (!r.room.isEmpty()) b.append(r.room).append("\n\n");
-            if (!r.lighting.isEmpty()) b.append("💡 ").append(r.lighting).append("\n\n");
-            if (!r.shots.isEmpty()) {
-                b.append("🎬 Shot ideas:\n");
-                for (String sh : r.shots) b.append("• ").append(sh).append('\n');
-            }
-            new android.app.AlertDialog.Builder(this).setTitle("Claude's take").setMessage(b.toString().trim())
-                    .setPositiveButton("OK", null).show();
+            Toast.makeText(this, "Claude named the objects. Its tips are at the top of the status.", Toast.LENGTH_LONG).show();
         }), err -> runOnUiThread(() -> {
             claudeButton.setEnabled(true);
             new android.app.AlertDialog.Builder(this).setTitle("Ask Claude failed").setMessage(err)
@@ -216,6 +225,10 @@ public class MainActivity extends Activity {
         claudeButton.setOnClickListener(v -> askClaude(false));
         claudeButton.setOnLongClickListener(v -> { askClaude(true); return true; }); // long press: change the key
         bar.addView(claudeButton);
+        liveClaudeButton = new Button(this);
+        liveClaudeButton.setText("Claude live: off");
+        liveClaudeButton.setOnClickListener(v -> toggleLiveClaude());
+        bar.addView(liveClaudeButton);
         Button logButton = new Button(this);
         logButton.setText("Copy log");
         logButton.setOnClickListener(v -> {

@@ -28,10 +28,12 @@ import java.util.Locale;
 final class ClaudeHelper {
 
     static final String MODEL = "claude-opus-5-5";
+    /** Categories the app has a simple cartoon model for. */
+    static final String KINDS = "table, desk, chair, stool, bed, sofa, shelf, cabinet, wardrobe, shoe, bottle, can, cup, vase, lamp, plant, bag, screen, box, pole, other, noise";
 
     /** What came back: names per object index, plus advice for the set. */
     static final class Result {
-        final List<String> names = new ArrayList<>();
+        final List<String> names = new ArrayList<>(), kinds = new ArrayList<>();
         String room = "", lighting = "";
         final List<String> shots = new ArrayList<>();
     }
@@ -72,10 +74,11 @@ final class ClaudeHelper {
                     + "The 3D scan found the objects above (each crop is the best photo of that object; it may be partly wrong or show a neighbouring thing). "
                     + "Scan summary: " + roomSummary + "\n\n"
                     + "Reply with only a JSON object, no other text:\n"
-                    + "{\"objects\": [{\"id\": 0, \"name\": \"2-4 word name, e.g. white leather sneakers\"}, ...one per object],\n"
-                    + " \"room\": \"one sentence on what kind of room this is\",\n"
-                    + " \"lighting\": \"one or two sentences on the light in the room and how to improve it for filming\",\n"
-                    + " \"shots\": [\"three short shot ideas that fit this room and its objects\"]}\n"
+                    + "{\"objects\": [{\"id\": 0, \"name\": \"2-4 word name, e.g. white leather sneakers\", \"kind\": \"one of: " + KINDS + "\"}, ...one per object],\n"
+                    + " \"room\": \"what kind of room, max 6 words\",\n"
+                    + " \"lighting\": \"one lighting tip for filming here, max 15 words\",\n"
+                    + " \"shots\": [\"three shot ideas, max 8 words each\"]}\n"
+                    + "Use kind \"noise\" when the crop shows nothing real (empty floor, a blurry fragment of a wall), so the app can delete it.\n"
                     + "If a crop shows nothing recognisable, name it \"unclear\"."));
             MessageCreateParams params = MessageCreateParams.builder()
                     .model(MODEL)
@@ -96,18 +99,56 @@ final class ClaudeHelper {
         }
     }
 
+    /**
+     * Live: one current photo with numbered boxes drawn on it; Claude says what each numbered thing is.
+     * Low effort keeps the answer quick (a few seconds) while scanning.
+     */
+    static Result askLive(String apiKey, String photoB64, List<String> objectInfo) throws Exception {
+        AnthropicClient client = AnthropicOkHttpClient.builder().apiKey(apiKey).build();
+        try {
+            List<BetaContentBlockParam> content = new ArrayList<>();
+            content.add(image(photoB64));
+            StringBuilder t = new StringBuilder("A phone is 3D-scanning a room to plan a video shoot. The scan found the numbered boxes drawn on this photo:\n");
+            for (int i = 0; i < objectInfo.size(); i++) t.append(i).append(": ").append(objectInfo.get(i)).append('\n');
+            t.append("For each number, say what the thing inside that box is. Reply with only JSON, no other text:\n")
+             .append("{\"objects\": [{\"id\": 0, \"name\": \"1-3 word name\", \"kind\": \"one of: ").append(KINDS).append("\"}]}\n")
+             .append("Use kind \"noise\" when a box holds nothing real (empty floor, a fragment of wall, a shadow).");
+            content.add(BetaContentBlockParam.ofText(t.toString()));
+            MessageCreateParams params = MessageCreateParams.builder()
+                    .model(MODEL)
+                    .maxTokens(4000L)
+                    .outputConfig(com.anthropic.models.beta.messages.BetaOutputConfig.builder()
+                            .effort(com.anthropic.models.beta.messages.BetaOutputConfig.Effort.LOW).build())
+                    .addUserMessageOfContentBlockParams(content)
+                    .addBeta("server-side-fallback-2026-07-01")
+                    .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
+                    .build();
+            BetaMessage msg = client.beta().messages().create(params);
+            if (msg.stopReason().isPresent() && msg.stopReason().get().equals(BetaStopReason.REFUSAL))
+                throw new IllegalStateException("Claude declined this request");
+            StringBuilder text = new StringBuilder();
+            for (BetaContentBlock b : msg.content()) b.text().ifPresent(x -> text.append(x.text()));
+            return parse(text.toString(), objectInfo.size());
+        } finally {
+            client.close();
+        }
+    }
+
     static Result parse(String text, int n) throws Exception {
         int a = text.indexOf('{'), b = text.lastIndexOf('}');
         if (a < 0 || b <= a) throw new IllegalStateException("no JSON in the reply");
         JSONObject j = new JSONObject(text.substring(a, b + 1));
         Result r = new Result();
-        for (int i = 0; i < n; i++) r.names.add(null);
+        for (int i = 0; i < n; i++) { r.names.add(null); r.kinds.add(null); }
         JSONArray objs = j.optJSONArray("objects");
         if (objs != null) for (int i = 0; i < objs.length(); i++) {
             JSONObject o = objs.getJSONObject(i);
             int id = o.optInt("id", -1);
             String name = o.optString("name", "").trim();
-            if (id >= 0 && id < n && !name.isEmpty() && !name.toLowerCase(Locale.US).equals("unclear")) r.names.set(id, name);
+            if (id < 0 || id >= n) continue;
+            String kind = o.optString("kind", "").trim().toLowerCase(Locale.US);
+            if (!kind.isEmpty()) r.kinds.set(id, kind);
+            if (!name.isEmpty() && !name.toLowerCase(Locale.US).equals("unclear")) r.names.set(id, name);
         }
         r.room = j.optString("room", "");
         r.lighting = j.optString("lighting", "");

@@ -297,10 +297,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         StringBuilder objs = new StringBuilder();
         if (roomReady) for (RoomModel.Box bx : room.boxes) {
             if (bx.name == null && bx.depth == 0 && bx.voxels < 40) continue;
+            if ("noise".equals(bx.kind)) continue;
             objs.append(objs.length() > 0 ? ", " : "").append(bx.title());
             if (bx.parent != null) objs.append(" (on ").append(bx.parent.title()).append(")");
         }
-        activity.updateStatus((roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. You're standing in the middle of the room: drag to look around, pinch out to see it from outside, two fingers to move. Yellow line = your walking path.");
+        activity.updateStatus((claudeAdvice != null ? claudeAdvice : "") + (roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. You're standing in the middle of the room: drag to look around, pinch out to see it from outside, two fingers to move. Yellow line = your walking path.");
     }
 
     private java.util.List<RoomModel.PlaneData> lastPlanes = new java.util.ArrayList<>();
@@ -465,6 +466,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     RoomModel rm = new RoomModel();
                     rm.knownH = h; rm.knownW = w; rm.knownD = d;
                     rm.build(new java.util.ArrayList<>(), sp, p, c, n);
+                    applyLabels(rm.boxes);
                     liveRoom = rm;
                 }
             } catch (Throwable e) { /* a live estimate is best effort */ }
@@ -495,6 +497,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         drawObjects(m, r.boxes, true);
         GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDepthMask(true);
         if (!r.hasLayout) return;
         float dens = height / 1000f;
         GLES20.glLineWidth(4f * dens);
@@ -507,6 +510,39 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    // ---- clean view: recognised objects are drawn as simple models and the scan inside them is hidden ----
+    static final String HIDE_DECL = "uniform vec4 uHA[16]; uniform vec4 uHB[16]; uniform float uHN;";
+    static final String HIDE_TEST = "for (int i = 0; i < 16; i++) { if (float(i) >= uHN) break; vec2 hd = aPos.xz - uHA[i].xy;"
+            + " float hu = dot(hd, uHA[i].zw), hv = dot(hd, vec2(-uHA[i].w, uHA[i].z));"
+            + " if (abs(hu) < uHB[i].x && abs(hv) < uHB[i].y && aPos.y > uHB[i].z && aPos.y < uHB[i].w) { HIDE } }";
+    private static final float[] hideA = new float[64], hideB = new float[64];
+    private static int hideN;
+    private volatile boolean cleanView = true;
+
+    boolean toggleClean() { cleanView = !cleanView; return cleanView; }
+
+    static void setHideUniforms(int prog) {
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uHA"), 16, hideA, 0);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uHB"), 16, hideB, 0);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uHN"), hideN);
+    }
+
+    private static boolean recognised(RoomModel.Box b) { return b.kind != null && !b.kind.equals("other"); }
+
+    /** Objects Claude recognised (or called noise) hide the raw scan inside them. GL thread, once per frame. */
+    private void updateHideList() {
+        hideN = 0;
+        if (!cleanView || !roomReady) return;
+        for (RoomModel.Box b : room.boxes) {
+            if (hideN >= 16) break;
+            if (!recognised(b)) continue;
+            int i = hideN * 4;
+            hideA[i] = b.cx; hideA[i + 1] = b.cz; hideA[i + 2] = b.cosA; hideA[i + 3] = b.sinA;
+            hideB[i] = b.hu + 0.03f; hideB[i + 1] = b.hv + 0.03f; hideB[i + 2] = b.y0 - 0.02f; hideB[i + 3] = b.y1 + 0.03f;
+            hideN++;
+        }
+    }
+
     private static final float[] ITEM_COL = {0.3f, 0.85f, 1f, 0.3f}, ITEM_EDGE = {0.35f, 0.9f, 1f, 1f};
 
     /** Every object the scan found as a translucent box / cylinder with a name tag (furniture orange, things on it blue). */
@@ -515,6 +551,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glLineWidth((live ? 3f : 2.5f) * dens);
         for (RoomModel.Box b : boxes) {
             if (!live && cutHides(b)) continue;
+            if ("noise".equals(b.kind)) continue;
+            if (recognised(b)) { drawCartoon(m, b); continue; }
             boolean item = b.depth > 0;
             planDraw(m, objTriangles(b), GLES20.GL_TRIANGLES, item ? ITEM_COL : BOX_COL, 1);
             planDraw(m, objEdges(b), GLES20.GL_LINES, item ? ITEM_EDGE : BOX_EDGE, 1);
@@ -522,10 +560,127 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int labels = 0;
         for (RoomModel.Box b : boxes) {
             if (!live && cutHides(b)) continue;
+            if ("noise".equals(b.kind)) continue;
             if (labels++ > 40) break;
             String where = b.where();
             drawLabel(m, b.cx, b.y1 + 0.03f, b.cz, b.title() + (where.isEmpty() ? "" : "  ·  " + where), b.depth > 0);
         }
+    }
+
+    // ---- low-poly cartoon models for what Claude recognised ----
+    private static final float[] OUTLINE = {0.08f, 0.07f, 0.06f, 1f};
+
+    private static float[] kindColour(String k) {
+        switch (k) {
+            case "table": case "desk": return new float[]{0.80f, 0.58f, 0.35f, 1f};
+            case "chair": case "stool": return new float[]{0.95f, 0.55f, 0.30f, 1f};
+            case "bed": return new float[]{0.55f, 0.70f, 0.95f, 1f};
+            case "sofa": return new float[]{0.60f, 0.45f, 0.85f, 1f};
+            case "shelf": case "cabinet": case "wardrobe": return new float[]{0.70f, 0.52f, 0.38f, 1f};
+            case "shoe": return new float[]{0.95f, 0.95f, 0.92f, 1f};
+            case "bottle": case "can": case "cup": case "vase": return new float[]{0.35f, 0.85f, 0.75f, 1f};
+            case "lamp": return new float[]{1f, 0.88f, 0.35f, 1f};
+            case "plant": return new float[]{0.40f, 0.80f, 0.40f, 1f};
+            case "bag": return new float[]{0.85f, 0.40f, 0.45f, 1f};
+            case "screen": return new float[]{0.25f, 0.28f, 0.35f, 1f};
+            default: return new float[]{0.80f, 0.80f, 0.85f, 1f};
+        }
+    }
+
+    /** One part of a cartoon model: a box in the object's own axes (u along hu, v along hv), shaded per face, outlined. */
+    private void cbox(float[] m, RoomModel.Box b, float u0, float u1, float v0, float v1, float y0, float y1, float[] col) {
+        float[][] c = new float[4][];
+        float[][] uv = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
+        for (int i = 0; i < 4; i++)
+            c[i] = new float[]{b.cx + uv[i][0] * b.cosA - uv[i][1] * b.sinA, b.cz + uv[i][0] * b.sinA + uv[i][1] * b.cosA};
+        float[] top = {c[0][0], y1, c[0][1], c[1][0], y1, c[1][1], c[2][0], y1, c[2][1], c[0][0], y1, c[0][1], c[2][0], y1, c[2][1], c[3][0], y1, c[3][1]};
+        planDraw(m, top, GLES20.GL_TRIANGLES, col, 1);
+        for (int i = 0; i < 4; i++) {
+            float[] p = c[i], q = c[(i + 1) % 4];
+            float shade = (i % 2 == 0) ? 0.78f : 0.62f; // two side tones give the flat cartoon look
+            float[] sc = {col[0] * shade, col[1] * shade, col[2] * shade, 1f};
+            planDraw(m, new float[]{p[0], y0, p[1], q[0], y0, q[1], q[0], y1, q[1], p[0], y0, p[1], q[0], y1, q[1], p[0], y1, p[1]}, GLES20.GL_TRIANGLES, sc, 1);
+        }
+        float[] e = new float[24 * 3]; int k = 0;
+        for (int i = 0; i < 4; i++) {
+            float[] p = c[i], q = c[(i + 1) % 4];
+            float[] seg = {p[0], y1, p[1], q[0], y1, q[1], p[0], y0, p[1], q[0], y0, q[1], p[0], y0, p[1], p[0], y1, p[1]};
+            System.arraycopy(seg, 0, e, k, 18); k += 18;
+        }
+        planDraw(m, java.util.Arrays.copyOf(e, k), GLES20.GL_LINES, OUTLINE, 1);
+    }
+
+    private void drawCartoon(float[] m, RoomModel.Box b) {
+        String k = b.kind;
+        float[] col = kindColour(k);
+        float hu = b.hu, hv = b.hv, y0 = b.y0, y1 = b.y1, h = y1 - y0, leg = Math.min(0.05f, Math.min(hu, hv) * 0.3f);
+        GLES20.glDepthMask(true);
+        GLES20.glLineWidth(3f * height / 1000f);
+        switch (k) {
+            case "table": case "desk": {
+                cbox(m, b, -hu, hu, -hv, hv, y1 - 0.05f, y1, col);
+                for (int i = 0; i < 4; i++) {
+                    float su = (i & 1) == 0 ? -1 : 1, sv = (i & 2) == 0 ? -1 : 1;
+                    float u = su * (hu - leg * 1.5f), v = sv * (hv - leg * 1.5f);
+                    cbox(m, b, u - leg / 2, u + leg / 2, v - leg / 2, v + leg / 2, y0, y1 - 0.05f, col);
+                }
+                break;
+            }
+            case "chair": case "stool": {
+                float seat = y0 + Math.min(0.48f, h * (k.equals("stool") ? 0.92f : 0.55f));
+                cbox(m, b, -hu, hu, -hv, hv, seat - 0.05f, seat, col);
+                for (int i = 0; i < 4; i++) {
+                    float su = (i & 1) == 0 ? -1 : 1, sv = (i & 2) == 0 ? -1 : 1;
+                    float u = su * (hu - leg), v = sv * (hv - leg);
+                    cbox(m, b, u - leg / 2, u + leg / 2, v - leg / 2, v + leg / 2, y0, seat - 0.05f, col);
+                }
+                if (k.equals("chair") && y1 > seat + 0.12f) cbox(m, b, -hu, hu, -hv, -hv + 0.05f, seat, y1, col);
+                break;
+            }
+            case "bed": case "sofa": {
+                float base = y0 + Math.max(0.15f, h * 0.55f);
+                cbox(m, b, -hu, hu, -hv, hv, y0, base, col);
+                if (k.equals("sofa")) {
+                    cbox(m, b, -hu, hu, -hv, -hv + Math.min(0.2f, hv * 0.4f), base, y1, col);
+                    cbox(m, b, -hu, -hu + 0.12f, -hv, hv, base, base + (y1 - base) * 0.5f, col);
+                    cbox(m, b, hu - 0.12f, hu, -hv, hv, base, base + (y1 - base) * 0.5f, col);
+                } else {
+                    cbox(m, b, -hu, -hu + 0.06f, -hv, hv, base, Math.max(y1, base + 0.25f), col); // headboard
+                    cbox(m, b, -hu + 0.1f, -hu + 0.45f, -hv * 0.8f, hv * 0.8f, base, base + 0.08f, new float[]{1f, 1f, 1f, 1f}); // pillow
+                }
+                break;
+            }
+            case "shoe": {
+                cbox(m, b, -hu, hu, -hv, hv, y0, y0 + h * 0.45f, col);
+                cbox(m, b, -hu, hu * 0.1f, -hv * 0.85f, hv * 0.85f, y0 + h * 0.45f, y1, col);
+                break;
+            }
+            case "bottle": case "can": case "cup": case "vase": case "lamp": case "plant": case "pole": {
+                RoomModel.Box c = new RoomModel.Box();
+                c.cx = b.cx; c.cz = b.cz; c.hu = c.hv = Math.max(0.02f, Math.min(hu, hv)); c.cyl = true; c.y0 = y0; c.y1 = y1;
+                c.cosA = 1; c.sinA = 0;
+                if (k.equals("plant")) {
+                    c.y1 = y0 + h * 0.35f; planDraw(m, objTriangles(c), GLES20.GL_TRIANGLES, new float[]{0.75f, 0.45f, 0.30f, 1f}, 1);
+                    c.y0 = c.y1; c.y1 = y1; c.hu = c.hv = Math.max(hu, hv);
+                }
+                planDraw(m, objTriangles(c), GLES20.GL_TRIANGLES, col, 1);
+                planDraw(m, objEdges(c), GLES20.GL_LINES, OUTLINE, 1);
+                break;
+            }
+            case "shelf": case "cabinet": case "wardrobe": {
+                cbox(m, b, -hu, hu, -hv, hv, y0, y1, col);
+                if (!k.equals("wardrobe")) for (int i = 1; i < 4; i++) {
+                    float yy = y0 + h * i / 4f;
+                    cbox(m, b, -hu - 0.005f, hu + 0.005f, -hv - 0.005f, hv + 0.005f, yy - 0.012f, yy + 0.012f, OUTLINE);
+                }
+                break;
+            }
+            default: {
+                if (b.cyl) { planDraw(m, objTriangles(b), GLES20.GL_TRIANGLES, col, 1); planDraw(m, objEdges(b), GLES20.GL_LINES, OUTLINE, 1); }
+                else cbox(m, b, -hu, hu, -hv, hv, y0, y1, col);
+            }
+        }
+        GLES20.glDepthMask(false);
     }
 
     /** Same rule as the shaders' dollhouse cut, for whole objects. */
@@ -660,6 +815,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (planner.isReady()) {
             try {
                 room.build(planes, planner, pos, col, count);
+                applyLabels(room.boxes);
                 roomReady = true;
                 buildFloorMesh();
                 log(room.logLine());
@@ -771,7 +927,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         new Thread(() -> {
             try {
                 ClaudeHelper.Result r = ClaudeHelper.ask(apiKey, summary, photosB64, crops, info);
-                for (int i = 0; i < asked.size(); i++) if (r.names.get(i) != null) asked.get(i).name = r.names.get(i);
+                for (int i = 0; i < asked.size(); i++) {
+                    RoomModel.Box b = asked.get(i);
+                    if (r.names.get(i) != null) b.name = r.names.get(i);
+                    if (r.kinds.get(i) != null) b.kind = r.kinds.get(i);
+                    remember(b);
+                }
+                claudeAdvice = (r.room.isEmpty() ? "" : "🤖 " + r.room + "\n") + (r.lighting.isEmpty() ? "" : "💡 " + r.lighting + "\n")
+                        + (r.shots.isEmpty() ? "" : "🎬 " + String.join(" · ", r.shots) + "\n");
                 log("Claude: " + r.room + " | " + r.lighting + " | " + r.shots);
                 finishStatus();
                 done.accept(r);
@@ -781,6 +944,118 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 fail.accept(m.contains("401") || m.toLowerCase(java.util.Locale.US).contains("authentication")
                         ? "The API key was rejected. Long-press Ask Claude to enter it again." : "Couldn't reach Claude: " + m);
             }
+        }).start();
+    }
+
+    // ---- live Claude: labels what's in view every few seconds while scanning ----
+    volatile String claudeLiveKey; // set when the user turns live Claude on
+    private volatile boolean claudeBusy;
+    private long claudeLastMs;
+    private PhotoRoom.Keyframe claudeLastKf;
+    private volatile String claudeLine, claudeAdvice;
+    private int claudeCalls;
+
+    /** What Claude said is at a spot; applied to whatever object the scan finds there later. */
+    private static final class Label { float x, z, y0, y1, r; String name, kind; }
+    private final java.util.List<Label> labels = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+    private void remember(RoomModel.Box b) {
+        if (b.kind == null && b.name == null) return;
+        Label l = new Label();
+        l.x = b.cx; l.z = b.cz; l.y0 = b.y0; l.y1 = b.y1; l.r = Math.max(b.hu, b.hv); l.name = b.name; l.kind = b.kind;
+        synchronized (labels) {
+            for (int i = labels.size() - 1; i >= 0; i--) {
+                Label o = labels.get(i);
+                if (Math.hypot(o.x - l.x, o.z - l.z) < Math.max(0.15f, 0.5f * Math.min(o.r, l.r)) && Math.abs(o.y0 - l.y0) < 0.25f) labels.remove(i);
+            }
+            labels.add(l);
+        }
+    }
+
+    /** Give objects the newest label found at their spot. */
+    private void applyLabels(java.util.List<RoomModel.Box> boxes) {
+        synchronized (labels) {
+            if (labels.isEmpty()) return;
+            for (RoomModel.Box b : boxes) {
+                Label best = null; float bd = 1e9f;
+                for (Label l : labels) {
+                    float d = (float) Math.hypot(l.x - b.cx, l.z - b.cz);
+                    float lim = Math.max(0.2f, 0.6f * Math.max(l.r, Math.max(b.hu, b.hv)));
+                    if (d < lim && Math.abs(l.y0 - b.y0) < 0.3f && d < bd) { bd = d; best = l; }
+                }
+                if (best != null) { if (best.name != null) b.name = best.name; b.kind = best.kind; }
+            }
+        }
+    }
+
+    private void maybeAskClaudeLive(long nowMs) {
+        String key = claudeLiveKey;
+        RoomModel r = liveRoom;
+        PhotoRoom.Keyframe k = photos.last;
+        if (key == null || claudeBusy || r == null || k == null || nowMs - claudeLastMs < 7000) return;
+        if (k == claudeLastKf && nowMs - claudeLastMs < 20000) return; // nothing new to show it
+        java.util.List<RoomModel.Box> cand = new java.util.ArrayList<>();
+        java.util.List<float[]> rects = new java.util.ArrayList<>();
+        java.util.List<RoomModel.Box> sorted = new java.util.ArrayList<>(r.boxes);
+        sorted.sort((a, b) -> b.voxels - a.voxels);
+        for (RoomModel.Box b : sorted) {
+            if (cand.size() >= 10) break;
+            float[] rc = ObjectNamer.rect(k, b);
+            if (rc == null) continue;
+            cand.add(b); rects.add(rc);
+        }
+        if (cand.isEmpty()) return;
+        claudeLastMs = nowMs; claudeLastKf = k; claudeBusy = true;
+        final String b64; final java.util.List<String> info = new java.util.ArrayList<>();
+        final java.util.List<RoomModel.Box> sent = new java.util.ArrayList<>();
+        try {
+            android.graphics.Matrix map = new android.graphics.Matrix();
+            android.graphics.Bitmap img = ObjectNamer.readUpright(k, width, height, map);
+            android.graphics.Bitmap draw = img.copy(android.graphics.Bitmap.Config.ARGB_8888, true);
+            img.recycle();
+            android.graphics.Canvas cv = new android.graphics.Canvas(draw);
+            android.graphics.Paint box = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            box.setStyle(android.graphics.Paint.Style.STROKE); box.setStrokeWidth(4); box.setColor(0xFFFFD000);
+            android.graphics.Paint txt = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            txt.setTextSize(34); txt.setColor(0xFF000000); txt.setFakeBoldText(true);
+            android.graphics.Paint tag = new android.graphics.Paint(); tag.setColor(0xFFFFD000);
+            for (int i = 0; i < cand.size(); i++) {
+                float[] rc = rects.get(i);
+                android.graphics.RectF rf = new android.graphics.RectF(rc[0], rc[1], rc[2], rc[3]);
+                map.mapRect(rf);
+                cv.drawRect(rf, box);
+                cv.drawRect(rf.left, rf.top, rf.left + 30, rf.top + 38, tag);
+                cv.drawText(String.valueOf(i), rf.left + 6, rf.top + 32, txt);
+                RoomModel.Box b = cand.get(i);
+                info.add(String.format(java.util.Locale.US, "%.2f x %.2f m, %.2f m tall, %s", 2 * b.hu, 2 * b.hv, b.y1 - b.y0,
+                        b.where().isEmpty() ? "on the floor" : b.where()));
+                RoomModel.Box copy = new RoomModel.Box(); // the live model is rebuilt every 2 s; keep this geometry
+                copy.cx = b.cx; copy.cz = b.cz; copy.hu = b.hu; copy.hv = b.hv; copy.y0 = b.y0; copy.y1 = b.y1;
+                sent.add(copy);
+            }
+            b64 = ClaudeHelper.jpegBase64(draw, 1024);
+            draw.recycle();
+        } catch (Throwable e) { claudeBusy = false; logError("claude live photo", new RuntimeException(e)); return; }
+        new Thread(() -> {
+            try {
+                ClaudeHelper.Result res = ClaudeHelper.askLive(key, b64, info);
+                StringBuilder seen = new StringBuilder();
+                for (int i = 0; i < sent.size(); i++) {
+                    RoomModel.Box b = sent.get(i);
+                    b.name = res.names.get(i); b.kind = res.kinds.get(i);
+                    remember(b);
+                    if (b.kind != null && !b.kind.equals("noise") && b.name != null) seen.append(seen.length() > 0 ? ", " : "").append(b.name);
+                }
+                claudeCalls++;
+                claudeLine = "🤖 Claude sees: " + (seen.length() > 0 ? seen : "nothing new");
+                RoomModel lr = liveRoom;
+                if (lr != null) applyLabels(lr.boxes);
+            } catch (Throwable e) {
+                String m = String.valueOf(e.getMessage());
+                claudeLine = m.contains("401") ? "🤖 Claude: API key rejected (long-press Claude to change it)" : "🤖 Claude: " + m;
+                logError("claude live", new RuntimeException(e));
+            }
+            claudeBusy = false;
         }).start();
     }
 
@@ -810,7 +1085,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -971,7 +1246,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
                 // Dollhouse cutaway: hide the wall band facing the viewer and the ceiling.
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
-                "void main(){" +
+                HIDE_DECL +
+                "void main(){ float hh = 0.0;" + HIDE_TEST.replace("HIDE", "hh = 1.0;") +
+                "  if (hh > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; }" +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
                 "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
                 "      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; } }" +
@@ -1116,6 +1393,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             drawGuide(mvp);
             drawObjectHint(mvp);
+            maybeAskClaudeLive(nowMs);
         }
         if (frameNo % 15 == 0) {
             String s;
@@ -1129,7 +1407,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + "[tracking " + ts + ", reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + "]\n"
                         + diagnostics();
             } else {
-                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "")
+                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "") + (claudeLiveKey != null && claudeLine != null ? "\n" + claudeLine : "")
                         + "\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n" + diagnostics();
             }
             activity.updateStatus(s);
@@ -1710,6 +1988,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform3f(GLES20.glGetUniformLocation(ptProg, "uCenter"), roomCenter[0], roomCenter[1], roomCenter[2]);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(ptProg, "uDir"), cutDirX, cutDirZ);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCutD"), cutD);
+        setHideUniforms(ptProg);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(ptProg, "uDir2"), cutDir2X, cutDir2Z);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCutD2"), cutD2);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uFloor"), cutFloor);
@@ -1821,6 +2100,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else Matrix.setLookAtM(view, 0, ex, ey, ez, target[0], target[1], target[2], 0, 1, 0);
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
         updateCutaway(ex, ez, topView);
+        updateHideList();
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         if (viewMode != 1 || !roomReady) {
             if (style == 0 && photos.ready && meshTris > 0)
