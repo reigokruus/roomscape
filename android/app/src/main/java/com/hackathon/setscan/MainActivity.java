@@ -31,7 +31,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button mainButton, topButton;
+    private Button mainButton, topButton, splatButton;
     private ScaleGestureDetector scaleDetector;
     private float lastX, lastY;
     private int lastPointerCount;
@@ -75,8 +75,15 @@ public class MainActivity extends Activity {
             boolean top = renderer.toggleTopView();
             topButton.setText(top ? "3D view" : "Top view");
         });
+        splatButton = new Button(this);
+        splatButton.setText("Dots");
+        splatButton.setOnClickListener(v -> {
+            boolean on = renderer.toggleSplats();
+            splatButton.setText(on ? "Dots" : "Splats");
+        });
         bar.addView(mainButton);
         bar.addView(topButton);
+        bar.addView(splatButton);
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);

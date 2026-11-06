@@ -141,8 +141,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "void main(){ gl_FragColor = texture2D(uTex, vUv); }");
         ptProg = program(
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
-                "void main(){ gl_Position = uMvp * aPos; gl_PointSize = clamp(uSize / max(gl_Position.w, 0.05), 2.0, 40.0); vColor = aColor; }",
-                "precision mediump float; varying vec4 vColor; void main(){ gl_FragColor = vColor; }");
+                "void main(){ gl_Position = uMvp * aPos; gl_PointSize = clamp(uSize / max(gl_Position.w, 0.05), 2.0, 96.0); vColor = aColor; }",
+                // uPass: 0 = splat core (opaque, writes depth), 1 = splat halo (soft gaussian, blended), 2 = plain
+                "precision mediump float; varying vec4 vColor; uniform float uPass;" +
+                "void main(){" +
+                "  if (uPass > 1.5) { gl_FragColor = vColor; return; }" +
+                "  vec2 d = gl_PointCoord * 2.0 - 1.0; float r2 = dot(d, d);" +
+                "  if (r2 > 1.0) discard;" +
+                "  float a = exp(-r2 * 3.5);" +
+                "  if (uPass < 0.5) { if (a < 0.6) discard; gl_FragColor = vec4(vColor.rgb, 1.0); }" +
+                "  else { gl_FragColor = vec4(vColor.rgb * a, a); }" +
+                "}");
 
         int[] b = new int[2];
         GLES20.glGenBuffers(2, b, 0);
@@ -405,12 +414,39 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glDepthMask(true);
     }
 
+    private volatile boolean splats = true;
+
+    boolean toggleSplats() { splats = !splats; return splats; }
+
     private void drawPoints(float[] m, float sizeScale) {
         if (count == 0) return;
         GLES20.glUseProgram(ptProg);
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
         float pxPerMeter = height / (2f * (float) Math.tan(Math.toRadians(30)));
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uSize"), VOXEL * pxPerMeter * 1.4f * sizeScale);
+        int uSize = GLES20.glGetUniformLocation(ptProg, "uSize");
+        int uPass = GLES20.glGetUniformLocation(ptProg, "uPass");
+        if (!splats) {
+            GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 1.4f * sizeScale);
+            GLES20.glUniform1f(uPass, 2f);
+            drawPointArrays();
+            return;
+        }
+        // Splat look: an opaque core pass fills the surface and the depth buffer,
+        // then a larger soft gaussian halo is blended on top without writing depth.
+        GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 2.0f * sizeScale);
+        GLES20.glUniform1f(uPass, 0f);
+        drawPointArrays();
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 3.2f * sizeScale);
+        GLES20.glUniform1f(uPass, 1f);
+        drawPointArrays();
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    private void drawPointArrays() {
         int aPos = GLES20.glGetAttribLocation(ptProg, "aPos");
         int aCol = GLES20.glGetAttribLocation(ptProg, "aColor");
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, posVbo);
@@ -430,6 +466,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUseProgram(ptProg);
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uSize"), 4f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uPass"), 2f);
         int aPos = GLES20.glGetAttribLocation(ptProg, "aPos");
         int aCol = GLES20.glGetAttribLocation(ptProg, "aColor");
         path.position(0);
