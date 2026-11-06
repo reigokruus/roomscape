@@ -1014,6 +1014,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             boolean swap = Math.abs(q[2] - q[0]) < Math.abs(q[3] - q[1]); // texture u runs along the photo's height
             snap.radX = swap ? k.h / k.fy : k.w / k.fx; snap.radY = swap ? k.w / k.fx : k.h / k.fy;
             snap.floorY = r.floorY; snap.camX = k.px; snap.camZ = k.pz;
+            snap.view = k.view.clone(); snap.fx = k.fx; snap.fy = k.fy; snap.cx = k.cx; snap.cy = k.cy; snap.w = k.w; snap.h = k.h;
+            snap.iw = iw; snap.ih = ih;
+            android.graphics.Matrix inv = new android.graphics.Matrix();
+            map.invert(inv);
+            float[] mv = new float[9]; inv.getValues(mv);
+            snap.inv[0] = mv[0]; snap.inv[1] = mv[1]; snap.inv[2] = mv[2]; snap.inv[3] = mv[3]; snap.inv[4] = mv[4]; snap.inv[5] = mv[5];
             int n = count, step = Math.max(1, n / 60000), cap = n / step + 1;
             snap.u = new float[cap]; snap.v = new float[cap]; snap.d = new float[cap]; snap.x = new float[cap]; snap.y = new float[cap]; snap.z = new float[cap];
             float[] vm = k.view, pt = new float[2];
@@ -1039,11 +1045,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     seen.append(seen.length() > 0 ? ", " : "").append(d.name);
                     RoomModel.Box b = ClaudeObjects.lift(snap, d);
                     if (b == null) continue;
-                    claudeObjs.add(b);
+                    claudeObjs.add(b, ClaudeObjects.sighting(snap, d), snap.floorY);
                     placed.append(placed.length() > 0 ? ", " : "").append(String.format(java.util.Locale.US, "%s %.2fx%.2fx%.2f at (%.2f, %.2f, %.2f) %s", d.name, 2 * b.hu, 2 * b.hv, b.y1 - b.y0, b.cx, b.y0, b.cz, b.rel));
                 }
                 claudeCalls++;
-                claudeLine = "🤖 Claude sees: " + (seen.length() > 0 ? seen : "nothing it can name") + (dets.size() > 0 && placed.length() == 0 ? " (not scanned enough yet to place)" : "");
+                claudeLine = "🤖 Claude sees: " + (seen.length() > 0 ? seen : "nothing it can name") + (claudeObjs.carved > 0 ? "\n📐 " + claudeObjs.carved + " measured from several angles (walk around things to measure more)" : "") + (dets.size() > 0 && placed.length() == 0 ? " (not scanned enough yet to place)" : "");
                 log("claude live " + claudeCalls + ": " + dets.size() + " found, placed " + (placed.length() > 0 ? placed : "none") + " (" + snap.n + " points in view) " + ClaudeHelper.costLine());
             } catch (Throwable e) {
                 String m = String.valueOf(e.getMessage());
@@ -1063,7 +1069,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final int n = count;
         final String name = "cinex-scan-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(new java.util.Date()) + ".zip";
         new Thread(() -> {
-            try { done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log, poseLog, sensors)); }
+            try { ScanExport.claudeJson = claudeObjs.has() ? claudeObjs.toJson() : null; done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log, poseLog, sensors)); }
             catch (Throwable e) { fail.accept(String.valueOf(e)); }
         }).start();
     }

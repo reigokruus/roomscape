@@ -205,10 +205,14 @@ final class ScanExport {
             }
             put(z, "points.ply", ply.array());
             if (sensors != null) put(z, "sensors.bin", sensors.toBytes());
+            if (claudeJson != null) put(z, "claude_objects.json", claudeJson.getBytes("UTF-8"));
             put(z, "log.txt", (log + (sensors != null ? "\n--- sensors ---\n" + sensors.describe() : "")).getBytes("UTF-8"));
         }
         return uri;
     }
+
+    /** Claude's objects with every view of them (set just before writing). */
+    static volatile String claudeJson;
 
     private static void put(ZipOutputStream z, String name, byte[] data) throws Exception {
         z.putNextEntry(new ZipEntry(name));
