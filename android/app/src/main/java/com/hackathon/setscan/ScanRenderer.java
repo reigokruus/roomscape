@@ -57,7 +57,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final float[] target = new float[3];
     private boolean topView;
     private long lastDepthTs = -1;
-    private int frameNo;
+    private int frameNo, updateErrors;
     // diagnostics shown on screen
     private int depthFrames, depthPixels, depthRejectedRange, depthNotYet;
     private String lastError = "", depthSize = "";
@@ -185,6 +185,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         try {
             frame = session.update();
         } catch (Exception e) {
+            updateErrors++;
+            lastError = "update: " + e.getClass().getSimpleName() + " " + e.getMessage();
+            if (updateErrors % 30 == 1) activity.updateStatus("Camera/AR error (" + updateErrors + "): " + lastError);
             return;
         }
         Camera camera = frame.getCamera();
@@ -214,7 +217,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (frameNo % 15 == 0) {
             String s;
             if (ts != TrackingState.TRACKING) {
-                s = "Move the phone slowly to start tracking...\n" + camera.getTrackingFailureReason();
+                s = "Move the phone slowly, pointing at the floor or furniture...\n"
+                        + "[tracking " + ts + ", reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + "]\n"
+                        + diagnostics();
             } else {
                 s = "Scanning: " + count + " points\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n"
                         + diagnostics();
