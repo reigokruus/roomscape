@@ -22,6 +22,7 @@ final class PhotoRoom {
     static final class Keyframe {
         int tex;
         float[] view = new float[16];  // world -> camera
+        float[] pose = new float[16];  // camera -> world
         float fx, fy, cx, cy, w, h;   // texture (camera image) intrinsics, pixels
         short[] depth; int dw, dh; float dfx, dfy, dcx, dcy; // depth image for occlusion checks (mm)
         float px, py, pz;              // camera position
@@ -129,6 +130,7 @@ final class PhotoRoom {
         Keyframe k = new Keyframe();
         k.tex = t[0];
         Matrix.invertM(k.view, 0, pose, 0);
+        System.arraycopy(pose, 0, k.pose, 0, 16);
         k.fx = texIntr[0]; k.fy = texIntr[1]; k.cx = texIntr[2]; k.cy = texIntr[3]; k.w = texIntr[4]; k.h = texIntr[5];
         k.depth = depth; k.dw = dw; k.dh = dh;
         if (depIntr != null) { k.dfx = depIntr[0]; k.dfy = depIntr[1]; k.dcx = depIntr[2]; k.dcy = depIntr[3]; }

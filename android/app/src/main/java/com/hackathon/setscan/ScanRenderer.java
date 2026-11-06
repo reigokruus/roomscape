@@ -49,6 +49,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean havePrevPose;
     private float frameMove = 1f, frameTurn = 90f;
     private int meshTris;
+    private final java.util.ArrayList<ScanExport.Rec> recs = new java.util.ArrayList<>();
     private final byte[] obs = new byte[MAX_POINTS]; // how many times each point was seen (capped)
     private int refineCursor; private boolean refined; private int refinedTotal, droppedNoise;
     private final FloatBuffer path = ByteBuffer.allocateDirect(MAX_PATH * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -251,12 +252,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         activity.updateStatus((roomReady ? room.summary + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
     }
 
+    /** Export the whole scan as a zip (GL thread part), then write it in the background and hand back a share uri. */
+    void exportScan(java.util.function.Consumer<android.net.Uri> done, java.util.function.Consumer<String> fail) {
+        final java.util.List<byte[]> jpgs;
+        try { jpgs = ScanExport.readKeyframes(photos, width, height); }
+        catch (Throwable e) { fail.accept("photo readback failed: " + e); return; }
+        final String log = report();
+        final int n = count;
+        final String name = "cinex-scan-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(new java.util.Date()) + ".zip";
+        new Thread(() -> {
+            try { done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log)); }
+            catch (Throwable e) { fail.accept(String.valueOf(e)); }
+        }).start();
+    }
+
+    int recordedFrames() { return recs.size(); }
+
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); photos.clear(); meshTris = 0; havePrevPose = false;
+        tsdf.clear(); photos.clear(); meshTris = 0; havePrevPose = false; recs.clear();
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -592,6 +609,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
             int[] rgb = new int[3];
+            // Record the raw frame for export (replaying the scan off the phone).
+            if (recs.size() < ScanExport.MAX_RECS) {
+                ScanExport.Rec r = new ScanExport.Rec();
+                r.ts = depth.getTimestamp(); r.w = dw; r.h = dh; r.fx = fx; r.fy = fy; r.cx = cx; r.cy = cy;
+                System.arraycopy(m, 0, r.pose, 0, 16);
+                r.depth = new short[dw * dh];
+                for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) r.depth[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+                if (cbuf != null) {
+                    r.conf = new byte[dw * dh];
+                    for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) r.conf[v * dw + u] = cbuf.get(v * cRow + u * cPix);
+                }
+                recs.add(r);
+            }
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;

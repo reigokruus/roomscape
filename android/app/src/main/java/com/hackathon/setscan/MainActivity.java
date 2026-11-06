@@ -30,13 +30,31 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button mainButton, topButton, splatButton, planButton, cutButton, viewButton;
+    private Button mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
     private ScaleGestureDetector scaleDetector;
     private float lastX, lastY;
     private int lastPointerCount;
+
+    private void exportScan() {
+        exportButton.setEnabled(false);
+        Toast.makeText(this, "Packing the scan (" + renderer.recordedFrames() + " depth frames)...", Toast.LENGTH_SHORT).show();
+        glView.queueEvent(() -> renderer.exportScan(uri -> runOnUiThread(() -> {
+            exportButton.setEnabled(true);
+            Toast.makeText(this, "Saved to Downloads/CineX. Pick Claude to send it.", Toast.LENGTH_LONG).show();
+            android.content.Intent send = new android.content.Intent(android.content.Intent.ACTION_SEND);
+            send.setType("application/zip");
+            send.putExtra(android.content.Intent.EXTRA_STREAM, uri);
+            send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try { startActivity(android.content.Intent.createChooser(send, "Send CineX scan")); }
+            catch (Exception e) { Toast.makeText(this, "Saved, but sharing failed: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+        }), err -> runOnUiThread(() -> {
+            exportButton.setEnabled(true);
+            Toast.makeText(this, "Export failed: " + err, Toast.LENGTH_LONG).show();
+        })));
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -80,9 +98,14 @@ public class MainActivity extends Activity {
         splatButton = new Button(this);
         splatButton.setText(renderer.styleLabel());
         splatButton.setOnClickListener(v -> splatButton.setText(renderer.cycleStyle()));
+        exportButton = new Button(this);
+        exportButton.setText("Export");
+        exportButton.setVisibility(View.GONE);
+        exportButton.setOnClickListener(v -> exportScan());
         bar.addView(mainButton);
         bar.addView(topButton);
         bar.addView(splatButton);
+        bar.addView(exportButton);
         Button logButton = new Button(this);
         logButton.setText("Copy log");
         logButton.setOnClickListener(v -> {
@@ -180,6 +203,7 @@ public class MainActivity extends Activity {
             planButton.setVisibility(View.GONE);
             cutButton.setVisibility(View.GONE);
             viewButton.setVisibility(View.GONE);
+            exportButton.setVisibility(View.GONE);
             planButton.setText("Plan shot");
             resumeSession();
         } else {
@@ -192,6 +216,7 @@ public class MainActivity extends Activity {
                     planButton.setVisibility(View.VISIBLE);
                     cutButton.setVisibility(View.VISIBLE);
                     viewButton.setVisibility(View.VISIBLE);
+                    exportButton.setVisibility(View.VISIBLE);
                 });
             });
         }
