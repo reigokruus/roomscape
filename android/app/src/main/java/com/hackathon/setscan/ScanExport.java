@@ -42,6 +42,7 @@ final class ScanExport {
     }
 
     static final int MAX_RECS = 1500;
+    static final int MAX_EXPORT_FRAMES = 300;
 
     /** Reads keyframe textures back as JPEG bytes. Must run on the GL thread. */
     static List<byte[]> readKeyframes(PhotoRoom photos, int screenW, int screenH) {
@@ -60,7 +61,7 @@ final class ScanExport {
             b.copyPixelsFromBuffer(px);
             Bitmap s = Bitmap.createScaledBitmap(b, 1024, 576, true); // back to the camera's 16:9
             ByteArrayOutputStream jpg = new ByteArrayOutputStream();
-            s.compress(Bitmap.CompressFormat.JPEG, 88, jpg);
+            s.compress(Bitmap.CompressFormat.JPEG, 80, jpg);
             b.recycle(); s.recycle();
             out.add(jpg.toByteArray());
         }
@@ -88,7 +89,14 @@ final class ScanExport {
             uri = Uri.fromFile(f);
             os = new FileOutputStream(f);
         }
+        // Keep the zip under the chat upload limit: at most MAX_EXPORT_FRAMES depth frames, evenly spread.
+        if (recs.size() > MAX_EXPORT_FRAMES) {
+            List<Rec> thin = new ArrayList<>();
+            for (int i = 0; i < MAX_EXPORT_FRAMES; i++) thin.add(recs.get((int) ((long) i * recs.size() / MAX_EXPORT_FRAMES)));
+            recs = thin;
+        }
         try (ZipOutputStream z = new ZipOutputStream(os)) {
+            z.setLevel(9);
             StringBuilder csv = new StringBuilder("idx,timestamp_ns,w,h,fx,fy,cx,cy");
             for (int i = 0; i < 16; i++) csv.append(",m").append(i);
             csv.append('\n');
