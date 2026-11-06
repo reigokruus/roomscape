@@ -22,6 +22,8 @@ final class ClaudeObjects {
 
     synchronized void clear() { objs.clear(); }
 
+    synchronized boolean has() { return !objs.isEmpty(); }
+
     synchronized List<RoomModel.Box> list() { return new ArrayList<>(objs); }
 
     private static final java.util.Set<String> ROUND = new java.util.HashSet<>(Arrays.asList("bottle", "can", "cup", "vase", "lamp", "plant", "pole"));
@@ -37,9 +39,15 @@ final class ClaudeObjects {
         float[] ds = new float[m];
         for (int i = 0; i < m; i++) ds[i] = s.d[in[i]];
         Arrays.sort(ds);
-        float near = ds[m / 10];
         float ang = Math.max((det.x1 - det.x0) * s.radX, (det.y1 - det.y0) * s.radY);
-        float extent = Math.max(0.12f, Math.min(2.0f, ang * near * 1.1f));
+        float extent = Math.max(0.12f, Math.min(2.0f, ang * ds[m / 2] * 1.1f));
+        // the depth slab holding the most points is the object; a chair leg in front or the wall behind holds fewer
+        int best = 0, bestN = 0;
+        for (int i = 0, j = 0; i < m; i++) {
+            while (j < m && ds[j] <= ds[i] + extent) j++;
+            if (j - i > bestN * 1.15f) { bestN = j - i; best = i; } // ties go to the nearer slab
+        }
+        float near = ds[best] + 0.05f;
         int k = 0;
         float mx = 0, mz = 0;
         for (int i = 0; i < m; i++) {
@@ -80,7 +88,12 @@ final class ClaudeObjects {
         for (int i = objs.size() - 1; i >= 0; i--) {
             RoomModel.Box o = objs.get(i);
             float d = (float) Math.hypot(o.cx - b.cx, o.cz - b.cz);
-            if (d < Math.max(0.2f, 0.5f * Math.max(rb, Math.max(o.hu, o.hv))) && Math.abs(o.y0 - b.y0) < 0.3f) objs.remove(i);
+            float ro = Math.max(o.hu, o.hv);
+            boolean same = sameKind(o, b) && d < Math.max(0.4f, 0.9f * Math.max(rb, ro)) && Math.abs(o.y0 - b.y0) < 0.4f;
+            float ox = Math.min(o.x1, b.x1) - Math.max(o.x0, b.x0), oz = Math.min(o.z1, b.z1) - Math.max(o.z0, b.z0);
+            boolean overlap = ox > 0 && oz > 0 && ox * oz > 0.5f * Math.min((o.x1 - o.x0) * (o.z1 - o.z0), (b.x1 - b.x0) * (b.z1 - b.z0))
+                    && Math.min(o.y1, b.y1) - Math.max(o.y0, b.y0) > 0.5f * Math.min(o.y1 - o.y0, b.y1 - b.y0);
+            if (same || overlap || (d < Math.max(0.2f, 0.5f * Math.max(rb, ro)) && Math.abs(o.y0 - b.y0) < 0.3f)) objs.remove(i);
         }
         objs.add(b);
         // things standing on another Claude object
@@ -91,20 +104,15 @@ final class ClaudeObjects {
         }
     }
 
-    /** The scan's own boxes, minus those Claude's objects cover, plus Claude's objects. */
+    private static boolean sameKind(RoomModel.Box a, RoomModel.Box b) {
+        if (a.kind != null && a.kind.equals(b.kind) && !a.kind.equals("other")) return true;
+        return a.name != null && b.name != null && a.name.equalsIgnoreCase(b.name);
+    }
+
+    /** Once Claude has placed anything, only Claude's objects are shown: the scan's own guesses are dropped. */
     synchronized void mergeInto(List<RoomModel.Box> boxes) {
         if (objs.isEmpty()) return;
-        for (int i = boxes.size() - 1; i >= 0; i--) {
-            RoomModel.Box f = boxes.get(i);
-            float area = Math.max(1e-4f, (f.x1 - f.x0) * (f.z1 - f.z0)), cover = 0;
-            boolean drop = false;
-            for (RoomModel.Box c : objs) {
-                if (f.cx > c.x0 - 0.1f && f.cx < c.x1 + 0.1f && f.cz > c.z0 - 0.1f && f.cz < c.z1 + 0.1f && f.y1 > c.y0 - 0.1f && f.y0 < c.y1 + 0.1f) { drop = true; break; }
-                float ox = Math.min(f.x1, c.x1) - Math.max(f.x0, c.x0), oz = Math.min(f.z1, c.z1) - Math.max(f.z0, c.z0);
-                if (ox > 0 && oz > 0) cover += ox * oz;
-            }
-            if (drop || cover > 0.3f * area) boxes.remove(i);
-        }
+        boxes.clear();
         boxes.addAll(objs);
     }
 }

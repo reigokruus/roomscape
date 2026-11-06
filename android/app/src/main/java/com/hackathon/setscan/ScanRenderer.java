@@ -851,7 +851,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
         } catch (Throwable e) { logError("photos", new RuntimeException(e)); } }).start();
         try {
-            java.util.List<ObjectNamer.Job> jobs = ObjectNamer.prepare(room, photos, width, height);
+            java.util.List<ObjectNamer.Job> jobs = claudeObjs.has() ? new java.util.ArrayList<>() : ObjectNamer.prepare(room, photos, width, height); // Claude already named everything
             if (!jobs.isEmpty()) {
                 log("naming " + jobs.size() + " furniture blocks from photos");
                 ObjectNamer.label(jobs, () -> {
@@ -912,7 +912,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             java.util.List<byte[]> jpgs = ScanExport.readKeyframes(photos, width, height);
             int want = Math.min(4, jpgs.size());
             for (int i = 0; i < want; i++) photosB64.add(ClaudeHelper.jpegBase64(jpgs.get(i * jpgs.size() / want)));
-            java.util.List<ObjectNamer.Job> jobs = ObjectNamer.prepare(room, photos, width, height);
+            java.util.List<ObjectNamer.Job> jobs = claudeObjs.has() ? new java.util.ArrayList<>() : ObjectNamer.prepare(room, photos, width, height); // Claude already named everything
             jobs.sort((a, b) -> b.box.voxels - a.box.voxels); // biggest first, at most 16
             for (ObjectNamer.Job j : jobs) {
                 if (asked.size() < 16) {
@@ -2183,7 +2183,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (room.hasLayout) continue; // the fitted layout replaces ARCore's wall patches
                 if (cutActive && ((sf.cx - roomCenter[0]) * cutDirX + (sf.cz - roomCenter[2]) * cutDirZ) > cutD * 0.5f) continue;
                 fill = WALL_COL;
-            } else if (sf.kind == RoomModel.Surface.Kind.TABLE) fill = TABLE_COL;
+            } else if (sf.kind == RoomModel.Surface.Kind.TABLE) { if (claudeObjs.has()) continue; fill = TABLE_COL; } // Claude's objects replace the plane guesses
             else continue;
             planDraw(m, sf.poly, GLES20.GL_TRIANGLE_FAN, fill, 1);
             planDraw(m, sf.poly, GLES20.GL_LINE_LOOP, sf.kind == RoomModel.Surface.Kind.WALL ? WALL_EDGE : TABLE_COL, 1);
