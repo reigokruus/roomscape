@@ -116,6 +116,52 @@ final class PhotoRoom {
         return best;
     }
 
+    private int grabTex, grabFbo;
+    private static final int GRAB_W = 1024, GRAB_H = 512;
+
+    /** GL thread: the current camera picture as a 1024x576 bitmap (row 0 = top of the camera image). */
+    android.graphics.Bitmap grab(int cameraTex, float gain, int screenW, int screenH) {
+        if (grabTex == 0) {
+            int[] t = new int[1];
+            GLES20.glGenTextures(1, t, 0); grabTex = t[0];
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, grabTex);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, GRAB_W, GRAB_H, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLES20.glGenFramebuffers(1, t, 0); grabFbo = t[0];
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, grabFbo);
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, grabTex, 0);
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, grabFbo);
+        if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) != GLES20.GL_FRAMEBUFFER_COMPLETE) { GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0); return null; }
+        GLES20.glViewport(0, 0, GRAB_W, GRAB_H);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glUseProgram(copyProg);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(copyProg, "uTex"), 0);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(copyProg, "uGain"), gain);
+        int aPos = GLES20.glGetAttribLocation(copyProg, "aPos"), aUv = GLES20.glGetAttribLocation(copyProg, "aUv");
+        quad.position(0); quadUv.position(0);
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad);
+        GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 0, quadUv);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv);
+        ByteBuffer px = ByteBuffer.allocateDirect(GRAB_W * GRAB_H * 4).order(ByteOrder.nativeOrder());
+        GLES20.glReadPixels(0, 0, GRAB_W, GRAB_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glViewport(0, 0, screenW, screenH);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        px.position(0);
+        android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(GRAB_W, GRAB_H, android.graphics.Bitmap.Config.ARGB_8888);
+        b.copyPixelsFromBuffer(px);
+        android.graphics.Bitmap s = android.graphics.Bitmap.createScaledBitmap(b, 1024, 576, true);
+        b.recycle();
+        return s;
+    }
+
     /** Copies the live camera texture into a new keyframe texture. */
     void capture(int cameraTex, float[] pose, float[] texIntr, short[] depth, int dw, int dh, float[] depIntr, float gain, int screenW, int screenH, boolean closeUp) {
         int[] t = new int[1];
@@ -182,7 +228,14 @@ final class PhotoRoom {
      * when no photo covers them they get the fallback colour in col (or are dropped if its alpha is 0).
      * col holds 4 bytes per vertex for mesh and proxy vertices alike.
      */
-    void build(FloatBuffer pos, ByteBuffer col, int verts, int proxyFrom) {
+    void build(FloatBuffer pos, ByteBuffer col, int verts, int proxyFrom) { build(pos, col, verts, proxyFrom, false); }
+
+    /**
+     * relaxed: the simple photo room (walls and floor only). A photo counts unless its depth clearly shows something
+     * in front of the wall, and neighbouring cells stick with the same photo when it's nearly as good, so the walls
+     * read as whole pictures instead of a patchwork.
+     */
+    void build(FloatBuffer pos, ByteBuffer col, int verts, int proxyFrom, boolean relaxed) {
         List<FloatBuffer> groupPos = new ArrayList<>(), groupUv = new ArrayList<>();
         List<Integer> groupVerts = new ArrayList<>();
         List<Keyframe> keyframes = new ArrayList<>(this.keyframes);
@@ -200,7 +253,8 @@ final class PhotoRoom {
             float nl = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
             if (nl < 1e-9f) { pick[t] = -1; plainTris++; continue; }
             nx /= nl; ny /= nl; nz /= nl;
-            int best = -1; float bestScore = 0;
+            int best = -1; float bestScore = 0, prevScore = 0;
+            int prev = relaxed && t > 0 ? pick[t - 1] : -1;
             for (int k = 0; k < nk; k++) {
                 Keyframe kf = keyframes.get(k);
                 float dx = kf.px - cx, dy = kf.py - cy, dz = kf.pz - cz;
@@ -209,11 +263,13 @@ final class PhotoRoom {
                 float cosA = Math.abs(nx * dx + ny * dy + nz * dz) / dist;
                 if (cosA < 0.25f) continue;
                 float score = cosA * cosA / dist;
-                if (score <= bestScore) continue;
+                if (score <= bestScore && k != prev) continue;
                 if (!project(kf, v, uv)) continue;
-                if (t * 3 >= proxyFrom ? !confirmed(kf, cx, cy, cz) : occluded(kf, cx, cy, cz)) continue;
-                best = k; bestScore = score;
+                if (t * 3 >= proxyFrom ? (relaxed ? occluded(kf, cx, cy, cz) : !confirmed(kf, cx, cy, cz)) : occluded(kf, cx, cy, cz)) continue;
+                if (k == prev) prevScore = score;
+                if (score > bestScore) { best = k; bestScore = score; }
             }
+            if (prev >= 0 && prevScore >= 0.6f * bestScore) best = prev;
             pick[t] = best;
             if (best >= 0) { perKf[best]++; texturedTris++; }
             else if (t * 3 >= proxyFrom && col.get(t * 12 + 3) == 0) pick[t] = -2; // uncovered cell of a guessed wall: leave it out

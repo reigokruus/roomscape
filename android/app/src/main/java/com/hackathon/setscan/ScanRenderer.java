@@ -185,7 +185,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- called on GL thread via queueEvent ----
     final RoomModel room = new RoomModel();
     private boolean roomReady;
-    private int viewMode; // 0 = room + scan, 1 = room only, 2 = scan only
+    private int viewMode; // 0 = photo room, 1 = raw scan
     private FloatBuffer floorTris;
     private int floorTriVerts;
 
@@ -218,10 +218,46 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return out;
     }
 
+    /** 0 = photo room (walls and floor with the photos on them, plus cut-outs), 1 = the raw scan. Rebuilds the photos. */
     String cycleViewMode() {
-        viewMode = (viewMode + 1) % 3;
-        return viewMode == 0 ? "View: both" : viewMode == 1 ? "View: room" : "View: scan";
+        viewMode = (viewMode + 1) % 2;
+        if (viewing && count > 0) buildPhotos();
+        return viewModeLabel();
     }
+
+    String viewModeLabel() { return viewMode == 0 ? "View: photo room" : "View: scan"; }
+    /** Photo texturing (background): the simple photo room (walls + floor) or the full scan surface. */
+    private void buildPhotos() {
+        final RoomModel roomNow = room; final boolean ready = roomReady;
+        if (meshPosAll == null) { meshPosAll = tsdf.meshPos; meshColAll = tsdf.meshCol; meshVerts = tsdf.meshVerts; }
+        final FloatBuffer mp = meshPosAll; final ByteBuffer mc = meshColAll; final int mvAll = meshVerts;
+        photos.ready = false;
+        // Photo texturing takes a few seconds on the phone, so it runs in the background; the view shows points until it's done.
+        final boolean simple = viewMode == 0 && ready && roomNow.hasLayout;
+        new Thread(() -> { try {
+            long t1 = System.currentTimeMillis();
+            RoomProxies rp = ready && roomNow.hasLayout ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
+            float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
+            if (ready && !simple) {
+                ScenePriors.Fill f = ScenePriors.apply(mp, mvAll, roomNow, pos, col, count);
+                proxy = ScenePriors.concat(proxy, f.triArray()); proxyCol = ScenePriors.concat(proxyCol, f.colArray());
+                log(f.toString());
+            }
+            int mv = simple ? 0 : mvAll, pv = proxy.length / 3; // the photo room is walls and floor only
+            FloatBuffer all = ByteBuffer.allocateDirect(Math.max(1, mv + pv) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            mp.position(0); mp.limit(mv * 3);
+            all.put(mp).put(proxy).position(0);
+            mp.limit(mp.capacity()); mp.position(0);
+            ByteBuffer allCol = ByteBuffer.allocateDirect(Math.max(4, (mv + pv) * 4)).order(ByteOrder.nativeOrder());
+            mc.position(0); mc.limit(mv * 4);
+            allCol.put(mc).put(proxyCol).position(0);
+            mc.limit(mc.capacity()); mc.position(0);
+            photos.build(all, allCol, mv + pv, mv, simple);
+            log((simple ? "photo room: " : "photos: ") + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
+                    + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
+        } catch (Throwable e) { logError("photos", new RuntimeException(e)); } }).start();
+    }
+
 
     void finishScan() {
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
@@ -301,7 +337,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             objs.append(objs.length() > 0 ? ", " : "").append(bx.title());
             if (bx.parent != null) objs.append(" (on ").append(bx.parent.title()).append(")");
         }
-        activity.updateStatus((claudeAdvice != null ? claudeAdvice : "") + (ClaudeHelper.sessionCalls > 0 ? "💰 " + ClaudeHelper.costLine() + "\n" : "") + (roomReady ? room.summary + "\n" : "") + (objs.length() > 0 ? "🪑 Objects: " + objs + "\n" : "") + count + " points captured. You're standing in the middle of the room: drag to look around, pinch out to see it from outside, two fingers to move. Yellow line = your walking path.");
+        activity.updateStatus((claudeAdvice != null ? claudeAdvice : "") + (ClaudeHelper.sessionCalls > 0 ? "💰 " + ClaudeHelper.costLine() + "\n" : "") + (roomReady ? room.summary + "\n" : "") + (cutouts.size() > 0 ? cutouts.describe() + "\n" : "") + (roomReady && room.hasLayout ? "" : "Walls not found clearly, so this shows the raw scan. Scan more of the walls next time.\n") + "Drag to look around, pinch out to see it from outside, two fingers to move.");
     }
 
     private java.util.List<RoomModel.PlaneData> lastPlanes = new java.util.ArrayList<>();
@@ -316,7 +352,53 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (viewing && count > 0) { analyseRoom(); finishStatus(); }
     }
 
-    // ---- tap to rescan an area ----
+    // ---- tap a thing: cut it out of the photo and stand it in the room ----
+    final Cutouts cutouts = new Cutouts();
+    private final com.google.mlkit.vision.label.ImageLabeler cutLabeler = com.google.mlkit.vision.label.ImageLabeling.getClient(
+            new com.google.mlkit.vision.label.defaults.ImageLabelerOptions.Builder().setConfidenceThreshold(0.4f).build());
+
+    /** GL thread: measure the tapped spot with ARCore, grab the photo and hand it to the cut-out. */
+    private void handleCutoutTap(Frame frame, Camera camera, float x, float y) {
+        float[] hit = null;
+        try {
+            for (com.google.ar.core.HitResult h : frame.hitTest(x, y)) { Pose p = h.getHitPose(); hit = new float[]{p.tx(), p.ty(), p.tz()}; break; }
+        } catch (Exception e) { logError("hitTest", e); }
+        float[] pose = new float[16];
+        camera.getPose().toMatrix(pose, 0);
+        CameraIntrinsics ti = camera.getTextureIntrinsics();
+        int[] td = ti.getImageDimensions();
+        float[] k = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
+        float[] uv = new float[2];
+        frame.transformCoordinates2d(com.google.ar.core.Coordinates2d.VIEW, new float[]{x, y}, com.google.ar.core.Coordinates2d.TEXTURE_NORMALIZED, uv);
+        if (hit != null) { // the measured point says exactly where the tap is in the photo
+            float[] v = new float[16]; Matrix.invertM(v, 0, pose, 0);
+            float cx = v[0] * hit[0] + v[4] * hit[1] + v[8] * hit[2] + v[12], cy = v[1] * hit[0] + v[5] * hit[1] + v[9] * hit[2] + v[13], cz = v[2] * hit[0] + v[6] * hit[1] + v[10] * hit[2] + v[14];
+            if (-cz > 0.05f) { uv[0] = (k[0] * cx / -cz + k[2]) / k[4]; uv[1] = (k[3] - k[1] * cy / -cz) / k[5]; }
+        }
+        RoomModel lr = liveRoom;
+        float floorY = lr != null ? lr.floorY : planner.isReady() ? planner.floorY : hit != null ? hit[1] : pose[13] - 1.4f;
+        android.graphics.Bitmap img = photos.grab(bgTex, colorGain, width, height);
+        if (img == null) { activity.toast("Couldn't read the camera picture"); return; }
+        activity.toast("Cutting it out...");
+        final float[] fhit = hit;
+        cutouts.make(img, pose, k, uv[0], uv[1], hit, floorY, (c, err) -> {
+            if (c == null) { activity.toast(err); log("cut-out failed: " + err); return; }
+            log(String.format(java.util.Locale.US, "cut-out at (%.2f, %.2f) %.0f cm tall, %.0f cm wide%s", c.x, c.z, c.height * 100, c.width * 100, fhit == null ? " (no ARCore hit)" : ""));
+            activity.toast(String.format(java.util.Locale.US, "Placed: %.0f cm tall. Tap it again from another side to improve it.", c.height * 100));
+            android.graphics.Bitmap b = c.bmp;
+            if (b != null) {
+                android.graphics.Bitmap flat = android.graphics.Bitmap.createBitmap(b.getWidth(), b.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
+                new android.graphics.Canvas(flat).drawColor(0xFF808080);
+                new android.graphics.Canvas(flat).drawBitmap(b, 0, 0, null);
+                cutLabeler.process(com.google.mlkit.vision.common.InputImage.fromBitmap(flat, 0)).addOnSuccessListener(labels -> {
+                    if (!labels.isEmpty()) c.name = labels.get(0).getText().toLowerCase(java.util.Locale.US);
+                    flat.recycle();
+                }).addOnFailureListener(e -> flat.recycle());
+            }
+        });
+    }
+
+    // ---- tap to rescan an area (no longer bound to a tap) ----
     private volatile float[] pendingTap;
     private float[] rescanAt;      // centre of the area being redone
     private int rescanFound;       // fresh points in it so far
@@ -823,33 +905,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 log(room.logLine());
             } catch (Exception e) { logError("room", e); }
         }
-        final RoomModel roomNow = room; final boolean ready = roomReady;
-        if (meshPosAll == null) { meshPosAll = tsdf.meshPos; meshColAll = tsdf.meshCol; meshVerts = tsdf.meshVerts; }
-        final FloatBuffer mp = meshPosAll; final ByteBuffer mc = meshColAll; final int mvAll = meshVerts;
-        photos.ready = false;
-        // Photo texturing takes a few seconds on the phone, so it runs in the background; the view shows points until it's done.
-        new Thread(() -> { try {
-            long t1 = System.currentTimeMillis();
-            RoomProxies rp = ready && roomNow.hasLayout ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
-            float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
-            if (ready) {
-                ScenePriors.Fill f = ScenePriors.apply(mp, mvAll, roomNow, pos, col, count);
-                proxy = ScenePriors.concat(proxy, f.triArray()); proxyCol = ScenePriors.concat(proxyCol, f.colArray());
-                log(f.toString());
-            }
-            int mv = mvAll, pv = proxy.length / 3;
-            FloatBuffer all = ByteBuffer.allocateDirect(Math.max(1, mv + pv) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
-            mp.position(0); mp.limit(mv * 3);
-            all.put(mp).put(proxy).position(0);
-            mp.limit(mp.capacity()); mp.position(0);
-            ByteBuffer allCol = ByteBuffer.allocateDirect(Math.max(4, (mv + pv) * 4)).order(ByteOrder.nativeOrder());
-            mc.position(0); mc.limit(mv * 4);
-            allCol.put(mc).put(proxyCol).position(0);
-            mc.limit(mc.capacity()); mc.position(0);
-            photos.build(all, allCol, mv + pv, mv);
-            log("photos: " + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
-                    + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
-        } catch (Throwable e) { logError("photos", new RuntimeException(e)); } }).start();
+        buildPhotos();
         try {
             java.util.List<ObjectNamer.Job> jobs = claudeObjs.has() ? new java.util.ArrayList<>() : ObjectNamer.prepare(room, photos, width, height); // Claude already named everything
             if (!jobs.isEmpty()) {
@@ -1387,9 +1443,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
             float[] tap = pendingTap;
-            if (tap != null) { pendingTap = null; handleRescanTap(frame, camera, tap[0], tap[1]); }
+            if (tap != null) { pendingTap = null; handleCutoutTap(frame, camera, tap[0], tap[1]); }
             maybeStartLiveRoom(nowMs);
             drawLiveRoom(mvp);
+            cutouts.draw(mvp);
             drawRescanTarget(mvp, camera);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             drawGuide(mvp);
@@ -1408,8 +1465,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + "[tracking " + ts + ", reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + "]\n"
                         + diagnostics();
             } else {
-                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "") + (claudeLiveKey != null && claudeLine != null ? "\n" + claudeLine : "") + (ClaudeHelper.sessionCalls > 0 ? "\n💰 " + ClaudeHelper.costLine() : "")
-                        + "\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n" + diagnostics();
+                s = "Scanning: " + photos.keyframes.size() + " photos · " + cutouts.size() + " objects placed\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "") + (claudeLiveKey != null && claudeLine != null ? "\n" + claudeLine : "") + (ClaudeHelper.sessionCalls > 0 ? "\n💰 " + ClaudeHelper.costLine() : "")
+                        + "\nWalk slowly round the room, pointing at the walls and floor. Tap on a thing (shoes, chair...) to cut it out and place it. Tap Finish when done.";
             }
             activity.updateStatus(s);
         }
@@ -2027,7 +2084,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * Live coverage: what's already scanned shows the clear camera image, everything else is dimmed.
      * The scanned points stamp a mask into the framebuffer's alpha, then one dark quad is blended by that mask.
      */
+    static final boolean DIM_UNSCANNED = false;
+
     private void drawPaint(float[] m) {
+        if (!DIM_UNSCANNED) { // the greyed-out overlay wasn't helping (rk, 6 Nov): just keep the view opaque
+            GLES20.glColorMask(false, false, false, true);
+            GLES20.glClearColor(0f, 0f, 0f, 1f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            GLES20.glColorMask(true, true, true, true);
+            GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+            return;
+        }
         // 1) alpha = 0.62 everywhere ("not scanned"), then scanned points punch it to 0
         GLES20.glColorMask(false, false, false, true);
         GLES20.glClearColor(0f, 0f, 0f, 0.62f);
@@ -2106,12 +2173,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         updateCutaway(ex, ez, topView);
         if (SHOW_OBJECTS) updateHideList(); else hideN = 0;
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-        if (viewMode != 1 || !roomReady) {
-            if (style == 0 && photos.ready && meshTris > 0)
-                photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
-            else drawPoints(mvp, viewMode == 0 && roomReady ? 0.9f : 1f);
-        }
-        if (viewMode != 2 && roomReady) drawRoom(mvp);
+        boolean simple = viewMode == 0 && roomReady && room.hasLayout;
+        if (simple) {
+            if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
+        } else if (style == 0 && photos.ready && meshTris > 0)
+            photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
+        else drawPoints(mvp, roomReady ? 0.9f : 1f);
+        if (roomReady) drawRoom(mvp);
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         drawPath(mvp);
@@ -2214,6 +2282,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         // objects: furniture and the things on it, as boxes and cylinders
         if (SHOW_OBJECTS) drawObjects(m, room.boxes, false);
+        cutouts.draw(m);
+        for (Cutouts.Cutout c : cutouts.snapshot())
+            drawLabel(m, c.x, c.bottomY + c.height + 0.04f, c.z, String.format(java.util.Locale.US, "%s · %.0f cm tall", c.name, c.height * 100), false);
         GLES20.glDepthMask(true);
         GLES20.glDisable(GLES20.GL_BLEND);
         // light sources: glowing markers with a drop line to the floor

@@ -259,7 +259,7 @@ public class MainActivity extends Activity {
         });
         this.cutButton = cutButton;
         Button viewButton = new Button(this);
-        viewButton.setText("View: both");
+        viewButton.setText("View: photo room");
         viewButton.setVisibility(View.GONE);
         viewButton.setOnClickListener(v -> glView.queueEvent(() -> {
             String label = renderer.cycleViewMode();
@@ -289,6 +289,14 @@ public class MainActivity extends Activity {
         blp.bottomMargin = dp(56);
         root.addView(bars, blp);
 
+        // the cut-out model comes from Google Play services: ask for it now so the first tap works
+        try {
+            com.google.android.gms.common.moduleinstall.ModuleInstall.getClient(this).installModules(
+                    com.google.android.gms.common.moduleinstall.ModuleInstallRequest.newBuilder()
+                            .addApi(com.google.mlkit.vision.segmentation.subject.SubjectSegmentation.getClient(
+                                    new com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build()))
+                            .build());
+        } catch (Throwable ignored) { }
         setContentView(root);
 
         scaleDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -300,7 +308,7 @@ public class MainActivity extends Activity {
         });
         glView.setOnTouchListener((v, e) -> {
             if (!renderer.isViewing()) {
-                // While scanning, a quick tap on a poorly scanned spot wipes it so it can be scanned again.
+                // While scanning, a quick tap on a thing cuts it out of the photo and stands it in the room.
                 if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false; }
                 if (e.getPointerCount() > 1) multiTouch = true;
                 if (e.getActionMasked() == MotionEvent.ACTION_UP && !multiTouch && e.getEventTime() - downTime < 300
