@@ -10,9 +10,10 @@
 ## Why not Previs Pro (or similar apps)?
 Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. SetScan starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. SetScan uses the scan to plan the shoot.
 
-Requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
+## iPhone version (main)
+This is the `SetScan.swiftpm` folder. It requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
 
-## Build and install on an iPhone
+### Build and install on an iPhone
 1. Download this repo (green **Code** button › **Download ZIP**) and unzip it.
 2. Double-click **SetScan.swiftpm**. It opens in Xcode.
 3. Connect the iPhone by cable and tap **Trust**. On the iPhone, turn on Settings › Privacy & Security › **Developer Mode** (the phone restarts).
@@ -20,3 +21,18 @@ Requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 
 5. Press ▶︎ Run. The first time, approve the developer account on the iPhone under Settings › General › VPN & Device Management, then run again.
 
 Apps signed with a free Apple ID stop working after 7 days. Just press Run again to reinstall.
+
+## Android version (Samsung and other ARCore phones)
+This is the `android/` folder: a separate Android Studio project, so you can develop on Windows or Linux without a Mac. The iPhone version above is unaffected.
+
+Android has no equivalent of Apple's RoomPlan, so this version uses ARCore depth to capture the room as a coloured 3D point cloud. You can rotate it and switch to a top-down view, and it shows the path you walked. It works on ARCore depth-capable phones such as the Galaxy S24. LiDAR isn't required.
+
+### Develop on a Windows/Linux laptop
+1. Install [Android Studio](https://developer.android.com/studio).
+2. **File › Open** the `android` folder (not the repo root), and let Gradle sync.
+3. On the phone, turn on Developer options (Settings › About phone › Software information › tap **Build number** 7 times), then turn on **USB debugging**.
+4. Plug the phone in, accept the prompt, pick it in the device list and press ▶︎ Run.
+
+From the command line: `cd android && ./gradlew assembleDebug` (on Windows, `gradlew.bat assembleDebug`). The APK ends up in `android/app/build/outputs/apk/debug/`.
+
+On first launch, the phone may ask to install or update **Google Play Services for AR**.
