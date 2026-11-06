@@ -107,13 +107,33 @@ final class RoomModel {
         boolean[] seen = new boolean[nx * nz];
         int[] stack = new int[nx * nz];
         float cell = ShotPlanner.CELL;
+        // With a fitted layout, cells hugging a wall (or outside the room) are wall/doorway clutter, not furniture.
+        boolean[] furn = new boolean[nx * nz];
+        float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
+        float uMin = 0, uMax = 0, vMin = 0, vMax = 0;
+        if (hasLayout) {
+            Wall w0 = layout.get(0), w2 = layout.get(2);
+            uMin = Math.min(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
+            uMax = Math.max(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
+            vMin = -w0.x0 * ls + w0.z0 * lc; vMax = -w2.x0 * ls + w2.z0 * lc;
+            if (vMin > vMax) { float t = vMin; vMin = vMax; vMax = t; }
+        }
+        for (int i = 0; i < nx * nz; i++) {
+            if (grid.blocked[i] <= ShotPlanner.BLOCKED) continue;
+            if (hasLayout) {
+                float x = grid.minX + (i % nx + 0.5f) * cell, z = grid.minZ + (i / nx + 0.5f) * cell;
+                float u = x * lc + z * ls, v = -x * ls + z * lc;
+                if (u < uMin + 0.25f || u > uMax - 0.25f || v < vMin + 0.25f || v > vMax - 0.25f) continue;
+            }
+            furn[i] = true;
+        }
         float fx0 = Float.MAX_VALUE, fz0 = Float.MAX_VALUE, fx1 = -Float.MAX_VALUE, fz1 = -Float.MAX_VALUE;
         for (int i = 0; i < nx * nz; i++) {
             if (grid.floorKnown[i]) {
                 float x = grid.minX + (i % nx + 0.5f) * cell, z = grid.minZ + (i / nx + 0.5f) * cell;
                 fx0 = Math.min(fx0, x); fx1 = Math.max(fx1, x); fz0 = Math.min(fz0, z); fz1 = Math.max(fz1, z);
             }
-            if (seen[i] || grid.blocked[i] <= ShotPlanner.BLOCKED) continue;
+            if (seen[i] || !furn[i]) continue;
             int sp = 0, n = 0;
             stack[sp++] = i; seen[i] = true;
             int ix0 = nx, iz0 = nz, ix1 = -1, iz1 = -1;
@@ -129,14 +149,15 @@ final class RoomModel {
                         int jx = cx + dx, jz = cz + dz;
                         if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
                         int j = jz * nx + jx;
-                        if (!seen[j] && grid.blocked[j] > ShotPlanner.BLOCKED) { seen[j] = true; stack[sp++] = j; }
+                        if (!seen[j] && furn[j]) { seen[j] = true; stack[sp++] = j; }
                     }
             }
             float w = (ix1 - ix0 + 1) * cell, d = (iz1 - iz0 + 1) * cell;
             float area = n * cell * cell;
             boolean thinStrip = Math.min(w, d) <= 0.3f && Math.max(w, d) > 1.2f; // probably a wall
             boolean tallWall = top > 2.0f && Math.max(w, d) > 1.5f && area < 0.35f * w * d;
-            if (area < 0.06f || area > 8f || thinStrip || tallWall) continue;
+            boolean huge = hasLayout && w * d > 0.5f * roomW * roomD;
+            if (area < 0.06f || area > 8f || thinStrip || tallWall || huge) continue;
             Box b = new Box();
             b.x0 = grid.minX + ix0 * cell; b.x1 = grid.minX + (ix1 + 1) * cell;
             b.z0 = grid.minZ + iz0 * cell; b.z1 = grid.minZ + (iz1 + 1) * cell;
