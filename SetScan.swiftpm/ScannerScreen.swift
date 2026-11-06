@@ -4,13 +4,19 @@ import os
 
 private let log = Logger(subsystem: "SetScan", category: "scan")
 
+/// Live counts shown while scanning.
+struct ScanStats: Equatable {
+    var walls = 0, floors = 0, doors = 0, windows = 0, objects = 0
+    var isEmpty: Bool { walls + floors + doors + windows + objects == 0 }
+}
+
 /// Drives RoomPlan's RoomCaptureView for the live scan, then builds and saves the room model itself.
 ///
 /// We don't let RoomCaptureView present its own result: we return `false` from `shouldPresent` and run
 /// `RoomBuilder` ourselves. That way every outcome (success, tracking failure, processing error) reaches
 /// our code, and the UI can never get stuck waiting for a callback that doesn't come.
 @MainActor
-final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate {
+final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate, RoomCaptureSessionDelegate {
     enum Phase: Equatable {
         case scanning
         case processing
@@ -25,14 +31,21 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     @Published var phaseStarted = Date()
     /// Set when the app ended the scan by itself (memory or heat), so the user knows why.
     @Published var endedEarlyReason: String?
+    @Published var scanStats = ScanStats()
     let captureView: RoomCaptureView
     private var running = false
     private var processingTask: Task<Void, Never>?
+    /// The session delegate RoomCaptureView had before we took over (see init). Set once, then only read.
+    nonisolated(unsafe) private var forwardSessionEvents: RoomCaptureSessionDelegate?
 
     override init() {
         captureView = RoomCaptureView(frame: .zero)
         super.init()
         captureView.delegate = self
+        // We listen to the session for live counts. RoomCaptureView may rely on the session's delegate itself,
+        // so keep whatever delegate it set and pass every event on to it; otherwise its UI could stop updating.
+        forwardSessionEvents = captureView.captureSession.delegate
+        captureView.captureSession.delegate = self
         NotificationCenter.default.addObserver(self, selector: #selector(memoryWarning),
                                                name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(thermalStateChanged),
@@ -50,6 +63,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         running = true
         saved = nil
         endedEarlyReason = nil
+        scanStats = ScanStats()
         setPhase(.scanning)
         captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
     }
@@ -107,6 +121,44 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 self.endEarly("The phone got hot, so the scan was finished early and what you scanned so far was kept.")
             }
         }
+    }
+
+    // MARK: RoomCaptureSessionDelegate
+
+    nonisolated func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
+        forwardSessionEvents?.captureSession(session, didUpdate: room)
+        let stats = ScanStats(
+            walls: room.walls.count,
+            floors: room.floors.count,
+            doors: room.doors.count,
+            windows: room.windows.count,
+            objects: room.objects.count
+        )
+        Task { @MainActor in self.scanStats = stats }
+    }
+
+    nonisolated func captureSession(_ session: RoomCaptureSession, didAdd room: CapturedRoom) {
+        forwardSessionEvents?.captureSession(session, didAdd: room)
+    }
+
+    nonisolated func captureSession(_ session: RoomCaptureSession, didChange room: CapturedRoom) {
+        forwardSessionEvents?.captureSession(session, didChange: room)
+    }
+
+    nonisolated func captureSession(_ session: RoomCaptureSession, didRemove room: CapturedRoom) {
+        forwardSessionEvents?.captureSession(session, didRemove: room)
+    }
+
+    nonisolated func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
+        forwardSessionEvents?.captureSession(session, didProvide: instruction)
+    }
+
+    nonisolated func captureSession(_ session: RoomCaptureSession, didStartWith configuration: RoomCaptureSession.Configuration) {
+        forwardSessionEvents?.captureSession(session, didStartWith: configuration)
+    }
+
+    nonisolated func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: Error?) {
+        forwardSessionEvents?.captureSession(session, didEndWith: data, error: error)
     }
 
     // MARK: RoomCaptureViewDelegate
@@ -177,6 +229,34 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     }
 }
 
+private struct ScanStatsHUD: View {
+    let stats: ScanStats
+
+    var body: some View {
+        if !stats.isEmpty {
+            HStack(spacing: 14) {
+                if stats.walls > 0 {
+                    Label("^[\(stats.walls) wall](inflect: true)", systemImage: "rectangle.portrait")
+                }
+                if stats.doors > 0 {
+                    Label("^[\(stats.doors) door](inflect: true)", systemImage: "door.left.hand.open")
+                }
+                if stats.windows > 0 {
+                    Label("^[\(stats.windows) window](inflect: true)", systemImage: "rectangle.inset.filled")
+                }
+                if stats.objects > 0 {
+                    Label("^[\(stats.objects) object](inflect: true)", systemImage: "cube")
+                }
+            }
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: Capsule())
+            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+        }
+    }
+}
+
 private struct RoomCaptureRepresentable: UIViewRepresentable {
     let controller: ScanController
 
@@ -198,6 +278,13 @@ struct ScannerScreen: View {
             RoomCaptureRepresentable(controller: controller)
                 .ignoresSafeArea()
                 .onAppear { controller.start() }
+
+            if controller.phase == .scanning {
+                ScanStatsHUD(stats: controller.scanStats)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 60)
+                    .animation(.easeInOut(duration: 0.25), value: controller.scanStats)
+            }
 
             VStack(spacing: 12) {
                 switch controller.phase {
