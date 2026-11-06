@@ -496,7 +496,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (r == null) return;
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        drawObjects(m, r.boxes, true);
+        if (SHOW_OBJECTS) drawObjects(m, r.boxes, true);
         GLES20.glDisable(GLES20.GL_BLEND);
         GLES20.glDepthMask(true);
         if (!r.hasLayout) return;
@@ -1393,7 +1393,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             drawRescanTarget(mvp, camera);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             drawGuide(mvp);
-            drawObjectHint(mvp);
+            if (SHOW_OBJECTS) drawObjectHint(mvp);
             maybeAskClaudeLive(nowMs);
         }
         if (frameNo % 15 == 0) {
@@ -1527,6 +1527,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 : bestDir == 1 ? "Step left around the " + what + ", keep it in view"
                 : "Raise the phone and look down at the " + what;
     }
+
+    /** Off for now (rk, 6 Nov): the object models were off in shape, size and place. Names still show in the status. */
+    static final boolean SHOW_OBJECTS = false;
 
     private void drawObjectHint(float[] m) {
         RoomModel.Box b = hintBox;
@@ -2101,7 +2104,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else Matrix.setLookAtM(view, 0, ex, ey, ez, target[0], target[1], target[2], 0, 1, 0);
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
         updateCutaway(ex, ez, topView);
-        updateHideList();
+        if (SHOW_OBJECTS) updateHideList(); else hideN = 0;
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         if (viewMode != 1 || !roomReady) {
             if (style == 0 && photos.ready && meshTris > 0)
@@ -2210,7 +2213,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             planDraw(m, outline, GLES20.GL_LINE_LOOP, WALL_EDGE, 1);
         }
         // objects: furniture and the things on it, as boxes and cylinders
-        drawObjects(m, room.boxes, false);
+        if (SHOW_OBJECTS) drawObjects(m, room.boxes, false);
         GLES20.glDepthMask(true);
         GLES20.glDisable(GLES20.GL_BLEND);
         // light sources: glowing markers with a drop line to the floor
