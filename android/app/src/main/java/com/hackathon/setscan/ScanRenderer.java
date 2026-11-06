@@ -7,6 +7,7 @@ import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
 
 import com.google.ar.core.Camera;
+import com.google.ar.core.Config;
 import com.google.ar.core.CameraIntrinsics;
 import com.google.ar.core.Coordinates2d;
 import com.google.ar.core.Frame;
@@ -59,15 +60,83 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private long lastDepthTs = -1;
     private int frameNo, updateErrors;
     // diagnostics shown on screen
-    private int depthFrames, depthPixels, depthRejectedRange, depthNotYet;
+    private int depthFrames, depthPixels, depthRejectedRange, depthRejectedConf, depthNotYet;
     private String lastError = "", depthSize = "";
 
     private final float[] proj = new float[16], view = new float[16], mvp = new float[16];
 
     ScanRenderer(MainActivity a) { activity = a; }
 
-    void setSession(Session s, boolean depth, boolean raw) {
-        session = s; depthSupported = depth; rawDepth = raw; textureSet = false;
+    // Depth modes to try in order. If tracking doesn't start within a few seconds, move to the next one.
+    private final java.util.List<Config.DepthMode> modes = new java.util.ArrayList<>();
+    private int modeIndex;
+    private long notTrackingSince;
+    private boolean everTracked;
+    private String modeLabel = "";
+    private TrackingState lastTs;
+    private final StringBuilder log = new StringBuilder();
+    private final long t0 = System.currentTimeMillis();
+    private final java.util.Set<String> loggedErrors = new java.util.HashSet<>();
+
+    synchronized void log(String msg) {
+        if (log.length() > 20000) return;
+        log.append(String.format(java.util.Locale.US, "%6.1fs  %s%n", (System.currentTimeMillis() - t0) / 1000f, msg));
+    }
+
+    private void logError(String where, Exception e) {
+        String m = where + ": " + e.getClass().getSimpleName() + " " + e.getMessage();
+        lastError = m;
+        if (loggedErrors.add(m)) log("ERROR " + m);
+    }
+
+    /** Full report for the "Copy log" button. */
+    synchronized String report() {
+        StringBuilder r = new StringBuilder("CineX Android diagnostics\n");
+        r.append("Device: ").append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL)
+                .append(" (").append(android.os.Build.DEVICE).append("), Android ").append(android.os.Build.VERSION.RELEASE)
+                .append(" / SDK ").append(android.os.Build.VERSION.SDK_INT).append('\n');
+        try {
+            r.append("ARCore (Play Services for AR): ").append(activity.getPackageManager()
+                    .getPackageInfo("com.google.ar.core", 0).versionName).append('\n');
+        } catch (Exception e) { r.append("ARCore version: unknown\n"); }
+        r.append("Modes tried: ").append(modes).append(", current ").append(modeLabel).append('\n');
+        r.append("Tracking: ").append(lastTs).append(", ever tracked ").append(everTracked)
+                .append(", frames ").append(frameNo).append(", update errors ").append(updateErrors).append('\n');
+        r.append("Points: ").append(count).append(", path samples ").append(pathCount).append('\n');
+        r.append(diagnostics()).append("\n\nEvent log:\n").append(log);
+        return r.toString();
+    }
+
+    void setSession(Session s) {
+        session = s; textureSet = false;
+        modes.clear();
+        if (s.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) modes.add(Config.DepthMode.RAW_DEPTH_ONLY);
+        if (s.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) modes.add(Config.DepthMode.AUTOMATIC);
+        modes.add(Config.DepthMode.DISABLED);
+        log("session created, depth modes to try: " + modes);
+        try {
+            com.google.ar.core.CameraConfig cc = s.getCameraConfig();
+            log("camera config: cpu image " + cc.getImageSize() + ", texture " + cc.getTextureSize()
+                    + ", fps " + cc.getFpsRange() + ", depth sensor " + cc.getDepthSensorUsage()
+                    + ", facing " + cc.getFacingDirection());
+        } catch (Exception e) { logError("cameraConfig", e); }
+        modeIndex = 0;
+        applyMode();
+    }
+
+    private void applyMode() {
+        Config.DepthMode m = modes.get(modeIndex);
+        Config config = new Config(session);
+        config.setDepthMode(m);
+        config.setFocusMode(Config.FocusMode.AUTO);
+        config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE);
+        session.configure(config);
+        depthSupported = m != Config.DepthMode.DISABLED;
+        rawDepth = m == Config.DepthMode.RAW_DEPTH_ONLY;
+        modeLabel = m.name();
+        log("depth mode set to " + m);
+        notTrackingSince = 0;
+        lastDepthTs = -1;
     }
 
     boolean isViewing() { return viewing; }
@@ -75,6 +144,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- called on GL thread via queueEvent ----
     void finishScan() {
         viewing = true;
+        log("finish: " + count + " points, " + diagnostics());
         topView = false;
         if (count > 0) {
             float minX = 1e9f, minY = 1e9f, minZ = 1e9f, maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
@@ -94,7 +164,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
-        depthFrames = depthPixels = depthRejectedRange = depthNotYet = 0; lastError = "";
+        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthNotYet = 0; lastError = "";
         voxels.clear();
         viewing = false;
     }
@@ -186,7 +256,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             frame = session.update();
         } catch (Exception e) {
             updateErrors++;
-            lastError = "update: " + e.getClass().getSimpleName() + " " + e.getMessage();
+            logError("session.update", e);
             if (updateErrors % 30 == 1) activity.updateStatus("Camera/AR error (" + updateErrors + "): " + lastError);
             return;
         }
@@ -199,11 +269,27 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (frame.getTimestamp() != 0) drawBackground();
 
         TrackingState ts = camera.getTrackingState();
+        if (ts != lastTs) {
+            log("tracking " + lastTs + " -> " + ts + " (reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + ")");
+            lastTs = ts;
+        }
+        if (ts == TrackingState.TRACKING) {
+            everTracked = true;
+            notTrackingSince = 0;
+        } else if (!everTracked) {
+            long now = System.currentTimeMillis();
+            if (notTrackingSince == 0) notTrackingSince = now;
+            else if (now - notTrackingSince > 8000 && modeIndex < modes.size() - 1) {
+                modeIndex++;
+                log("no tracking after 8s, falling back");
+                try { applyMode(); } catch (Exception e) { logError("configure", e); }
+            }
+        }
         if (ts == TrackingState.TRACKING) {
             try {
                 integrate(frame, camera);
             } catch (Exception e) {
-                lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
+                logError("integrate", e);
             }
             recordPath(camera.getPose());
             camera.getProjectionMatrix(proj, 0, 0.05f, 100f);
@@ -248,6 +334,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
             int dw = depth.getWidth(), dh = depth.getHeight();
             depthFrames++;
+            if (depthFrames == 1) log("first depth image " + dw + "x" + dh + " (raw=" + rawDepth + ")");
             depthSize = dw + "x" + dh;
             CameraIntrinsics ti = camera.getTextureIntrinsics();
             CameraIntrinsics ii = camera.getImageIntrinsics();
@@ -281,7 +368,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
                     if (mm < 200 || mm > 5000) { depthRejectedRange++; continue; }
                     depthPixels++;
-                    if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 110) continue;
+                    if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 40) { depthRejectedConf++; continue; }
                     float d = mm * 0.001f;
                     float xc = (u + 0.5f - cx) * d / fx;
                     float yc = (cy - (v + 0.5f)) * d / fy;
@@ -336,8 +423,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private String diagnostics() {
-        return "[depth " + (depthSupported ? "on " + depthSize : "NOT SUPPORTED") + " | frames " + depthFrames
-                + " | valid px " + depthPixels + " | out of range " + depthRejectedRange
+        return "[mode " + modeLabel + " " + depthSize + " | frames " + depthFrames
+                + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf
                 + " | not ready " + depthNotYet + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 

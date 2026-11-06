@@ -19,7 +19,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.google.ar.core.ArCoreApk;
-import com.google.ar.core.Config;
 import com.google.ar.core.Session;
 import com.google.ar.core.exceptions.CameraNotAvailableException;
 
@@ -84,6 +83,14 @@ public class MainActivity extends Activity {
         bar.addView(mainButton);
         bar.addView(topButton);
         bar.addView(splatButton);
+        Button logButton = new Button(this);
+        logButton.setText("Copy log");
+        logButton.setOnClickListener(v -> {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("CineX log", renderer.report()));
+            Toast.makeText(this, "Diagnostics copied. Paste them into the chat.", Toast.LENGTH_SHORT).show();
+        });
+        bar.addView(logButton);
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
@@ -162,18 +169,8 @@ public class MainActivity extends Activity {
                     return;
                 }
                 session = new Session(this);
-                Config config = new Config(session);
-                boolean depth = false;
-                // Smoothed (AUTOMATIC) depth gives a value for every pixel, which is much denser than raw depth.
-                if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
-                    config.setDepthMode(Config.DepthMode.AUTOMATIC);
-                    depth = true;
-                }
-                config.setFocusMode(Config.FocusMode.AUTO);
-                config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE);
-                session.configure(config);
-                renderer.setSession(session, depth,
-                        false);
+                // The renderer picks the depth mode and falls back to another one if tracking never starts.
+                renderer.setSession(session);
             } catch (Exception e) {
                 Toast.makeText(this, "ARCore error: " + e, Toast.LENGTH_LONG).show();
                 updateStatus("ARCore could not start: " + e.getMessage());
