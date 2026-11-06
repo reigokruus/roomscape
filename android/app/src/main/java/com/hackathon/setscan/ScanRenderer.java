@@ -60,7 +60,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private long lastDepthTs = -1;
     private int frameNo, updateErrors;
     // diagnostics shown on screen
-    private int depthFrames, depthPixels, depthRejectedRange, depthRejectedConf, depthNotYet;
+    private int depthFrames, depthPixels, depthRejectedRange, depthRejectedConf, depthRejectedEdge, depthNotYet;
     private String lastError = "", depthSize = "";
 
     private final float[] proj = new float[16], view = new float[16], mvp = new float[16];
@@ -167,7 +167,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
-        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthNotYet = 0; recoveries = 0; lastError = "";
+        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         viewing = false;
     }
@@ -387,9 +387,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
-                    if (mm < 200 || mm > 5000) { depthRejectedRange++; continue; }
+                    if (mm < 200 || mm > 4000) { depthRejectedRange++; continue; }
                     depthPixels++;
-                    if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 40) { depthRejectedConf++; continue; }
+                    if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 90) { depthRejectedConf++; continue; }
+                    // Edge filter: depth jumps between neighbours create "flying pixel" streaks, so skip them.
+                    if (u == 0 || v == 0 || u == dw - 1 || v == dh - 1) { depthRejectedEdge++; continue; }
+                    int tol = mm / 25 + 20; // ~4% of distance + 2 cm
+                    if (Math.abs((dbuf.get(v * dRow + (u - 1) * dPix) & 0xFFFF) - mm) > tol
+                            || Math.abs((dbuf.get(v * dRow + (u + 1) * dPix) & 0xFFFF) - mm) > tol
+                            || Math.abs((dbuf.get((v - 1) * dRow + u * dPix) & 0xFFFF) - mm) > tol
+                            || Math.abs((dbuf.get((v + 1) * dRow + u * dPix) & 0xFFFF) - mm) > tol) {
+                        depthRejectedEdge++; continue;
+                    }
                     float d = mm * 0.001f;
                     float xc = (u + 0.5f - cx) * d / fx;
                     float yc = (cy - (v + 0.5f)) * d / fy;
@@ -445,7 +454,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private String diagnostics() {
         return "[mode " + modeLabel + " " + depthSize + " | frames " + depthFrames
-                + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf
+                + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf + " | edges " + depthRejectedEdge
                 + " | not ready " + depthNotYet + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 
