@@ -170,8 +170,8 @@ struct RoomSummary: View {
             }
             if !room.objects.isEmpty {
                 Section("Furniture & objects") {
-                    ForEach(objectCounts, id: \.0) { name, count in
-                        LabeledContent(name.capitalized, value: "\(count)")
+                    ForEach(objectCounts, id: \.0) { item in
+                        LabeledContent(item.0.capitalized, value: "\(item.1)")
                     }
                 }
             }
