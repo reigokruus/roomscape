@@ -40,18 +40,21 @@ final class RoomProxies {
                 oc.add(cc);
             }
         }
-        RoomModel.Wall w0 = room.layout.get(0), w3 = room.layout.get(3);
+        // floor: every cell whose middle is inside the walls (works for any shape of room)
         int[] fc = medianColor(pos, col, count, null, room.floorY, y1);
         if (fc == null) fc = new int[]{120, 100, 80, 0};
-        float ax = w0.x0, az = w0.z0, ux = w0.x1 - w0.x0, uz = w0.z1 - w0.z0, vx = w3.x0 - w0.x0, vz = w3.z0 - w0.z0;
-        float lu = (float) Math.sqrt(ux * ux + uz * uz), lv = (float) Math.sqrt(vx * vx + vz * vz);
-        int nu = Math.max(1, Math.round(lu / C)), nv = Math.max(1, Math.round(lv / C));
+        int n = room.layout.size();
+        float[] px = new float[n], pz = new float[n];
+        float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
+        for (int i = 0; i < n; i++) {
+            px[i] = room.layout.get(i).x0; pz[i] = room.layout.get(i).z0;
+            minX = Math.min(minX, px[i]); maxX = Math.max(maxX, px[i]); minZ = Math.min(minZ, pz[i]); maxZ = Math.max(maxZ, pz[i]);
+        }
         float fy = y0 - BACK;
-        for (int i = 0; i < nu; i++) for (int j = 0; j < nv; j++) {
-            float a0 = (float) i / nu, a1 = (float) (i + 1) / nu, b0 = (float) j / nv, b1 = (float) (j + 1) / nv;
-            float[] p00 = {ax + ux * a0 + vx * b0, az + uz * a0 + vz * b0}, p10 = {ax + ux * a1 + vx * b0, az + uz * a1 + vz * b0};
-            float[] p11 = {ax + ux * a1 + vx * b1, az + uz * a1 + vz * b1}, p01 = {ax + ux * a0 + vx * b1, az + uz * a0 + vz * b1};
-            out.add(new float[]{p00[0], fy, p00[1], p10[0], fy, p10[1], p11[0], fy, p11[1], p00[0], fy, p00[1], p11[0], fy, p11[1], p01[0], fy, p01[1]});
+        for (float x = minX; x < maxX; x += C) for (float z = minZ; z < maxZ; z += C) {
+            if (!inside(px, pz, x + C / 2, z + C / 2)) continue;
+            float xa = x, xb = Math.min(maxX, x + C), za = z, zb = Math.min(maxZ, z + C);
+            out.add(new float[]{xa, fy, za, xb, fy, za, xb, fy, zb, xa, fy, za, xb, fy, zb, xa, fy, zb});
             oc.add(fc);
         }
         r.tris = new float[out.size() * 18];
@@ -62,6 +65,13 @@ final class RoomProxies {
             for (int v = 0; v < 6; v++) for (int k = 0; k < 4; k++) r.cols[(i * 6 + v) * 4 + k] = (byte) c[k];
         }
         return r;
+    }
+
+    private static boolean inside(float[] px, float[] pz, float x, float z) {
+        boolean in = false;
+        for (int i = 0, j = px.length - 1; i < px.length; j = i++)
+            if ((pz[i] > z) != (pz[j] > z) && x < (px[j] - px[i]) * (z - pz[i]) / (pz[j] - pz[i]) + px[i]) in = !in;
+        return in;
     }
 
     /** Median colour of points on this wall (within 6 cm of its plane, between 0.3 m and the top), or on the floor when w == null. */

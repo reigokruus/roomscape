@@ -74,6 +74,19 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    /** After a tap while scanning: what did you tap? */
+    void askTapKind() {
+        runOnUiThread(() -> {
+            String[] items = {"Room corner (where floor meets walls)", "Wall", "Floor", "Ceiling", "Object: cut it out and place it", "Undo my last mark"};
+            int[] kinds = {1, 3, 2, 4, 0, 5};
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("What did you tap?")
+                    .setItems(items, (d, which) -> glView.queueEvent(() -> renderer.applyTap(kinds[which])))
+                    .setOnCancelListener(d -> glView.queueEvent(() -> renderer.applyTap(-1)))
+                    .show();
+        });
+    }
+
     void toast(String msg) { runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()); }
 
     // ---- Ask Claude (optional, needs internet and the user's own API key) ----
@@ -219,6 +232,7 @@ public class MainActivity extends Activity {
         exportButton.setVisibility(View.GONE);
         exportButton.setOnClickListener(v -> exportScan());
         bar.addView(mainButton);
+
         bar.addView(topButton);
         bar.addView(splatButton);
         bar.addView(exportButton);

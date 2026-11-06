@@ -83,6 +83,10 @@ final class RoomModel {
     /** Fitted room layout: a rectangle of 4 walls aligned to the dominant wall direction. */
     final List<Wall> layout = new ArrayList<>();
     boolean hasLayout;
+    /** Corners the user tapped on the floor (x, z), in order around the room; overrides the automatic fit. */
+    List<float[]> userCorners;
+    float userFloorY = Float.NaN, userCeilingY = Float.NaN;
+    boolean fromCorners;
     float layoutAngle, roomW, roomD, topY;
     /** Room size the user typed in (0 = unknown). It overrides what the scan measured. */
     float knownH, knownW, knownD;
@@ -122,6 +126,7 @@ final class RoomModel {
         // A large ARCore floor plane is more precise than the point histogram.
         for (Surface s : surfaces)
             if (s.kind == Surface.Kind.FLOOR && s.area == bestFloorArea && bestFloorArea > 1f) floorY = s.cy;
+        if (!Float.isNaN(userFloorY)) floorY = userFloorY;
 
         // 2) Ceiling height: a ceiling plane if found, else the top of the scan if it looks like a ceiling.
         // Robust top of the scan: the 99.5th percentile of heights, so a few stray specks don't fake a tall ceiling.
@@ -138,15 +143,15 @@ final class RoomModel {
         for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING) { ceilingY = s.cy; hasCeiling = true; }
         if (!hasCeiling && maxY - floorY > 2.0f && maxY - floorY < 4f) hasCeiling = true;
 
+        if (!Float.isNaN(userCeilingY) && userCeilingY > floorY + 1.2f) { ceilingY = userCeilingY; hasCeiling = true; }
         if (knownH > 0.5f) { ceilingY = floorY + knownH; hasCeiling = true; }
         topY = hasCeiling ? ceilingY : Math.max(floorY + 2.4f, Math.min(maxY, floorY + 3f));
         fitLayout(pos, count);
         floorCoverage = 0;
         if (hasLayout) {
             float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
-            Wall w0 = layout.get(0), w2 = layout.get(2);
-            float u0 = Math.min(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls), u1 = Math.max(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
-            float v0 = Math.min(-w0.x0 * ls + w0.z0 * lc, -w2.x0 * ls + w2.z0 * lc), v1 = Math.max(-w0.x0 * ls + w0.z0 * lc, -w2.x0 * ls + w2.z0 * lc);
+            float[] ub = layoutBounds(lc, ls);
+            float u0 = ub[0], u1 = ub[1], v0 = ub[2], v1 = ub[3];
             int known = 0;
             for (int i = 0; i < grid.nx * grid.nz; i++) {
                 if (!grid.floorKnown[i] && grid.blocked[i] <= ShotPlanner.BLOCKED) continue; // furniture counts as seen floor
@@ -163,12 +168,7 @@ final class RoomModel {
         float[] bounds = null; this.bounds = null;
         if (hasLayout) {
             float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
-            Wall w0 = layout.get(0), w2 = layout.get(2);
-            float uMin = Math.min(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
-            float uMax = Math.max(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
-            float vMin = -w0.x0 * ls + w0.z0 * lc, vMax = -w2.x0 * ls + w2.z0 * lc;
-            if (vMin > vMax) { float t = vMin; vMin = vMax; vMax = t; }
-            bounds = new float[]{uMin, uMax, vMin, vMax};
+            bounds = layoutBounds(lc, ls);
             this.bounds = bounds;
         }
         boxes.addAll(ObjectFinder.find(pos, count, floorY, topY, hasLayout ? layoutAngle : 0, bounds, hasLayout ? roomW * roomD : 0));
@@ -225,7 +225,7 @@ final class RoomModel {
             if (s.kind == Surface.Kind.FLOOR) floor = true;
         }
         StringBuilder sb = new StringBuilder("Room: ");
-        if (hasLayout) sb.append(String.format(Locale.US, "about %.1f × %.1f m", roomW, roomD));
+        if (hasLayout) sb.append(String.format(Locale.US, "about %.1f × %.1f m", roomW, roomD)).append(fromCorners ? String.format(Locale.US, " (from your %d corners, %.1f m² floor)", layout.size(), floorArea()) : "");
         else if (sizeX > 0) sb.append(String.format(Locale.US, "about %.1f × %.1f m", sizeX, sizeZ));
         if ((knownW > 0.5f || knownD > 0.5f) && hasLayout) sb.append(" (entered)");
         if (hasCeiling) sb.append(String.format(Locale.US, ", ceiling %.1f m", ceilingY - floorY)).append(knownH > 0.5f ? " (entered)" : "");
@@ -236,7 +236,7 @@ final class RoomModel {
         for (Wall w : layout) if (w.seen) seenWalls++;
         if (hasLayout) walls = seenWalls;
         sb.append(" · ").append(walls).append(walls == 1 ? " wall" : " walls");
-        if (hasLayout && seenWalls < 4) sb.append(" (").append(4 - seenWalls).append(" guessed)");
+        if (hasLayout && !fromCorners && seenWalls < 4) sb.append(" (").append(4 - seenWalls).append(" guessed)");
         sb.append(" · ").append(tables).append(tables == 1 ? " table surface" : " table surfaces");
         int onTop = 0;
         for (Box bx : boxes) if (bx.parent != null) onTop++;
@@ -253,8 +253,53 @@ final class RoomModel {
      * 2) on each axis, the outermost strong peak on each side is a wall;
      * 3) a side with no peak gets a guessed wall at the scan's edge.
      */
+    /** Layout extent in layout axes {uMin, uMax, vMin, vMax} over every wall corner. */
+    float[] layoutBounds(float lc, float ls) {
+        float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+        for (Wall w : layout) for (int e = 0; e < 2; e++) {
+            float x = e == 0 ? w.x0 : w.x1, z = e == 0 ? w.z0 : w.z1, u = x * lc + z * ls, v = -x * ls + z * lc;
+            u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+        }
+        return new float[]{u0, u1, v0, v1};
+    }
+
+    float floorArea() {
+        double a = 0;
+        for (Wall w : layout) a += w.x0 * w.z1 - w.x1 * w.z0;
+        return (float) Math.abs(a / 2);
+    }
+
+    /** Walls straight from the tapped corners (any number, any shape), normals pointing out of the room. */
+    private void cornerLayout() {
+        int n = userCorners.size();
+        float mx = 0, mz = 0;
+        for (float[] c : userCorners) { mx += c[0]; mz += c[1]; }
+        mx /= n; mz /= n;
+        for (int i = 0; i < n; i++) {
+            float[] a = userCorners.get(i), b = userCorners.get((i + 1) % n);
+            Wall w = new Wall();
+            w.x0 = a[0]; w.z0 = a[1]; w.x1 = b[0]; w.z1 = b[1];
+            float dx = b[0] - a[0], dz = b[1] - a[1], l = (float) Math.hypot(dx, dz);
+            if (l < 0.05f) continue;
+            w.nx = dz / l; w.nz = -dx / l;
+            if ((((a[0] + b[0]) / 2 - mx) * w.nx + ((a[1] + b[1]) / 2 - mz) * w.nz) < 0) { w.nx = -w.nx; w.nz = -w.nz; }
+            w.seen = true;
+            layout.add(w);
+        }
+        if (layout.size() < 3) { layout.clear(); return; }
+        // the longest wall sets the room's axes
+        Wall lw = layout.get(0);
+        for (Wall w : layout) if (Math.hypot(w.x1 - w.x0, w.z1 - w.z0) > Math.hypot(lw.x1 - lw.x0, lw.z1 - lw.z0)) lw = w;
+        layoutAngle = (float) Math.toDegrees(Math.atan2(lw.z1 - lw.z0, lw.x1 - lw.x0));
+        float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
+        float[] b = layoutBounds(lc, ls);
+        roomW = b[1] - b[0]; roomD = b[3] - b[2];
+        hasLayout = true; fromCorners = true;
+    }
+
     private void fitLayout(FloatBuffer pos, int count) {
-        layout.clear(); hasLayout = false;
+        layout.clear(); hasLayout = false; fromCorners = false;
+        if (userCorners != null && userCorners.size() >= 3) { cornerLayout(); if (hasLayout) return; }
         float lo = floorY + 0.3f, hi = topY - 0.15f;
         if (hi - lo < 0.5f) hi = lo + 1.5f;
         int step = Math.max(1, count / 80000);

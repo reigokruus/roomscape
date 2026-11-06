@@ -357,12 +357,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final com.google.mlkit.vision.label.ImageLabeler cutLabeler = com.google.mlkit.vision.label.ImageLabeling.getClient(
             new com.google.mlkit.vision.label.defaults.ImageLabelerOptions.Builder().setConfidenceThreshold(0.4f).build());
 
-    /** GL thread: measure the tapped spot with ARCore, grab the photo and hand it to the cut-out. */
-    private void handleCutoutTap(Frame frame, Camera camera, float x, float y) {
-        float[] hit = null;
-        try {
-            for (com.google.ar.core.HitResult h : frame.hitTest(x, y)) { Pose p = h.getHitPose(); hit = new float[]{p.tx(), p.ty(), p.tz()}; break; }
-        } catch (Exception e) { logError("hitTest", e); }
+    /** Everything measured at the moment of a tap, kept while the user says what they tapped. */
+    private static final class TapInfo { float[] hit6, hit, pose, k, cam; float u, v, floorY; android.graphics.Bitmap img; }
+    private volatile TapInfo lastTap;
+
+    /** GL thread: measure the tapped spot with ARCore and keep the photo, then ask what it is. */
+    private void prepareTap(Frame frame, Camera camera, float x, float y) {
+        float[] h6 = hitAny(frame, camera, x, y);
+        float[] hit = h6 == null ? null : new float[]{h6[0], h6[1], h6[2]};
         float[] pose = new float[16];
         camera.getPose().toMatrix(pose, 0);
         CameraIntrinsics ti = camera.getTextureIntrinsics();
@@ -376,9 +378,30 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (-cz > 0.05f) { uv[0] = (k[0] * cx / -cz + k[2]) / k[4]; uv[1] = (k[3] - k[1] * cy / -cz) / k[5]; }
         }
         RoomModel lr = liveRoom;
-        float floorY = lr != null ? lr.floorY : planner.isReady() ? planner.floorY : hit != null ? hit[1] : pose[13] - 1.4f;
+        float floorY = markFloor != null ? markFloor[1] : lr != null ? lr.floorY : planner.isReady() ? planner.floorY : hit != null ? hit[1] : pose[13] - 1.4f;
         android.graphics.Bitmap img = photos.grab(bgTex, colorGain, width, height);
-        if (img == null) { activity.toast("Couldn't read the camera picture"); return; }
+        TapInfo t = new TapInfo();
+        t.hit6 = h6; t.hit = hit; t.pose = pose; t.k = k; t.u = uv[0]; t.v = uv[1]; t.floorY = floorY; t.img = img;
+        t.cam = new float[]{pose[12], pose[13], pose[14]};
+        TapInfo old = lastTap;
+        lastTap = t;
+        if (old != null && old.img != null) old.img.recycle();
+        activity.askTapKind();
+    }
+
+    /** GL thread: the user said what the tap was. kind: 0 object, 1 corner, 2 floor, 3 wall, 4 ceiling, 5 undo, -1 cancel. */
+    void applyTap(int kind) {
+        TapInfo t = lastTap;
+        lastTap = null;
+        if (t == null) return;
+        if (kind != 0 && t.img != null) { t.img.recycle(); t.img = null; }
+        if (kind < 0) return;
+        if (kind == 5) { activity.toast(undoLast()); return; }
+        if (kind != 0) { if (t.hit6 == null) { activity.toast("Couldn't measure there: point at it for a moment first, then tap again"); return; } handleMarkTap(t.hit6, t.cam, kind); return; }
+        if (t.img == null) { activity.toast("Couldn't read the camera picture"); return; }
+        float[] pose = t.pose, k = t.k, hit = t.hit, uv = {t.u, t.v};
+        float floorY = t.floorY;
+        android.graphics.Bitmap img = t.img;
         activity.toast("Cutting it out...");
         final float[] fhit = hit;
         cutouts.make(img, pose, k, uv[0], uv[1], hit, floorY, (c, err) -> {
@@ -396,6 +419,191 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }).addOnFailureListener(e -> flat.recycle());
             }
         });
+    }
+
+    // ---- tap to mark the room: corners, floor, walls, ceiling ----
+    private final Object marks = new Object();
+    private final java.util.List<float[]> cornerList = new java.util.ArrayList<>(); // x, y, z
+    private final java.util.List<float[]> wallList = new java.util.ArrayList<>();   // x, y, z, nx, nz (normal into the room)
+    private float[] markFloor, markCeiling;
+
+
+    private final java.util.List<Integer> markOrder = new java.util.ArrayList<>();
+
+    /** Take back the most recent mark (corner, wall, floor or ceiling). */
+    String undoLast() {
+        synchronized (marks) {
+            if (markOrder.isEmpty()) return "Nothing to undo";
+            int kind = markOrder.remove(markOrder.size() - 1);
+            switch (kind) {
+                case 1: if (!cornerList.isEmpty()) cornerList.remove(cornerList.size() - 1); return "Corner removed";
+                case 2: markFloor = null; return "Floor mark removed";
+                case 3: if (!wallList.isEmpty()) wallList.remove(wallList.size() - 1); return "Wall removed";
+                case 4: markCeiling = null; return "Ceiling mark removed";
+                default: return "Nothing to undo";
+            }
+        }
+    }
+
+    private String marksLine() {
+        synchronized (marks) {
+            StringBuilder b = new StringBuilder("📐 ");
+            b.append(cornerList.size()).append(cornerList.size() == 1 ? " corner" : " corners").append(" · ").append(wallList.size()).append(wallList.size() == 1 ? " wall" : " walls");
+            b.append(" · floor ").append(markFloor != null ? "set" : "not set");
+            b.append(" · ceiling ").append(markCeiling != null ? String.format(java.util.Locale.US, "%.2f m", markCeiling[1] - floorGuess()) : "not set");
+            b.append(" · ").append(cutouts.size()).append(" objects");
+            return b.toString();
+        }
+    }
+
+    private float floorGuess() {
+        if (markFloor != null) return markFloor[1];
+        RoomModel lr = liveRoom;
+        return lr != null ? lr.floorY : planner.isReady() ? planner.floorY : 0;
+    }
+
+    /** First ARCore hit (or the nearest scanned point on the ray): position and surface normal. */
+    private float[] hitAny(Frame frame, Camera camera, float x, float y) {
+        try {
+            for (com.google.ar.core.HitResult h : frame.hitTest(x, y)) {
+                Pose p = h.getHitPose();
+                float[] n = p.getYAxis();
+                return new float[]{p.tx(), p.ty(), p.tz(), n[0], n[1], n[2]};
+            }
+        } catch (Exception e) { logError("hitTest", e); }
+        float[] c = nearestPointOnRay(camera, x, y);
+        return c == null ? null : new float[]{c[0], c[1], c[2], 0, 0, 0};
+    }
+
+    private void handleMarkTap(float[] h, float[] cam, int kind) {
+        synchronized (marks) {
+            switch (kind) {
+                case 1: {
+                    float fy = floorGuess();
+                    if (cornerList.size() >= 3) { // tapping the first corner again closes the room
+                        float[] f = cornerList.get(0);
+                        if (Math.hypot(f[0] - h[0], f[2] - h[2]) < 0.25f) { activity.toast("Room closed with " + cornerList.size() + " corners."); return; }
+                    }
+                    cornerList.add(new float[]{h[0], fy, h[2]});
+                    int n = cornerList.size();
+                    if (n >= 2) {
+                        float[] a = cornerList.get(n - 2);
+                        activity.toast(String.format(java.util.Locale.US, "Corner %d · wall %.2f m", n, Math.hypot(h[0] - a[0], h[2] - a[2])));
+                    } else activity.toast("Corner 1. Now the next corner along the wall.");
+                    log(String.format(java.util.Locale.US, "corner %d at (%.2f, %.2f)", n, h[0], h[2]));
+                    markOrder.add(1);
+                    break;
+                }
+                case 2:
+                    markFloor = new float[]{h[0], h[1], h[2]};
+                    activity.toast(String.format(java.util.Locale.US, "Floor set (%.2f m below the phone)", cam[1] - h[1]));
+                    log(String.format(java.util.Locale.US, "floor mark y=%.2f", h[1]));
+                    markOrder.add(2);
+                    break;
+                case 3: {
+                    // a wall is upright: use the hit's normal if it's horizontal-ish, else face the phone
+                    float nx = h[3], nz = h[5];
+                    if (Math.hypot(nx, nz) < 0.7f) { nx = cam[0] - h[0]; nz = cam[2] - h[2]; }
+                    float l = (float) Math.hypot(nx, nz);
+                    if (l < 1e-3f) return;
+                    nx /= l; nz /= l;
+                    if (nx * (cam[0] - h[0]) + nz * (cam[2] - h[2]) < 0) { nx = -nx; nz = -nz; } // into the room
+                    wallList.add(new float[]{h[0], h[1], h[2], nx, nz});
+                    activity.toast(String.format(java.util.Locale.US, "Wall %d · %.2f m from you", wallList.size(), Math.hypot(cam[0] - h[0], cam[2] - h[2])));
+                    log(String.format(java.util.Locale.US, "wall %d at (%.2f, %.2f) facing (%.2f, %.2f)", wallList.size(), h[0], h[2], nx, nz));
+                    markOrder.add(3);
+                    break;
+                }
+                case 4:
+                    markCeiling = new float[]{h[0], h[1], h[2]};
+                    activity.toast(String.format(java.util.Locale.US, "Ceiling set: room %.2f m high", h[1] - floorGuess()));
+                    log(String.format(java.util.Locale.US, "ceiling mark y=%.2f (%.2f m above the floor)", h[1], h[1] - floorGuess()));
+                    markOrder.add(4);
+                    break;
+            }
+        }
+    }
+
+    /** The room outline from your taps: the corners if 3+, else the walls cut against each other (convex room). */
+    private java.util.List<float[]> roomPolygon() {
+        if (cornerList.size() >= 3) {
+            java.util.List<float[]> p = new java.util.ArrayList<>();
+            for (float[] c : cornerList) p.add(new float[]{c[0], c[2]});
+            return p;
+        }
+        if (wallList.size() < 3) return null;
+        float mx = 0, mz = 0;
+        for (float[] w : wallList) { mx += w[0]; mz += w[2]; }
+        mx /= wallList.size(); mz /= wallList.size();
+        java.util.List<float[]> poly = new java.util.ArrayList<>();
+        float big = 30;
+        poly.add(new float[]{mx - big, mz - big}); poly.add(new float[]{mx + big, mz - big}); poly.add(new float[]{mx + big, mz + big}); poly.add(new float[]{mx - big, mz + big});
+        for (float[] w : wallList) { // keep the side the normal points to
+            java.util.List<float[]> out = new java.util.ArrayList<>();
+            for (int i = 0; i < poly.size(); i++) {
+                float[] a = poly.get(i), b = poly.get((i + 1) % poly.size());
+                float da = (a[0] - w[0]) * w[3] + (a[1] - w[2]) * w[4], db = (b[0] - w[0]) * w[3] + (b[1] - w[2]) * w[4];
+                if (da >= 0) out.add(a);
+                if ((da >= 0) != (db >= 0)) { float t = da / (da - db); out.add(new float[]{a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t}); }
+            }
+            poly = out;
+            if (poly.size() < 3) return null;
+        }
+        for (float[] c : poly) if (Math.abs(c[0] - mx) > big * 0.9f || Math.abs(c[1] - mz) > big * 0.9f) return null; // open side: not enough walls
+        return poly;
+    }
+
+    private static final float[] MARK_COL = {1f, 0.85f, 0.2f, 1f}, MARK_FILL = {1f, 0.85f, 0.2f, 0.18f}, CEIL_COL = {0.5f, 0.85f, 1f, 1f};
+
+    /** Your marks: corners joined on the floor with posts, walls as tall panels, floor and ceiling marks. */
+    private void drawMarks(float[] m, boolean live) {
+        float dens = height / 1000f;
+        java.util.List<float[]> poly; float fy, top;
+        java.util.List<float[]> walls;
+        float[] fl, ce;
+        synchronized (marks) {
+            poly = roomPolygon();
+            walls = new java.util.ArrayList<>(wallList);
+            fl = markFloor; ce = markCeiling;
+            fy = floorGuess();
+            top = ce != null ? ce[1] : fy + 2.5f;
+            if (cornerList.size() > 0 && cornerList.size() < 3) { poly = new java.util.ArrayList<>(); for (float[] c : cornerList) poly.add(new float[]{c[0], c[2]}); }
+        }
+        if (!live && roomReady && room.fromCorners) poly = null; // the finished room already shows them
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glLineWidth(4f * dens);
+        if (poly != null && !poly.isEmpty()) {
+            int n = poly.size();
+            float[] ring = new float[n * 3], posts = new float[n * 6];
+            for (int i = 0; i < n; i++) {
+                float[] c = poly.get(i);
+                ring[i * 3] = c[0]; ring[i * 3 + 1] = fy + 0.01f; ring[i * 3 + 2] = c[1];
+                posts[i * 6] = c[0]; posts[i * 6 + 1] = fy; posts[i * 6 + 2] = c[1]; posts[i * 6 + 3] = c[0]; posts[i * 6 + 4] = top; posts[i * 6 + 5] = c[1];
+            }
+            planDraw(m, ring, n >= 3 ? GLES20.GL_LINE_LOOP : GLES20.GL_LINE_STRIP, MARK_COL, 1);
+            planDraw(m, posts, GLES20.GL_LINES, MARK_COL, 1);
+            planDraw(m, ring, GLES20.GL_POINTS, MARK_COL, 22 * dens);
+            for (int i = 0; i + 1 < n || (n >= 3 && i < n); i++) { // wall lengths
+                float[] a = poly.get(i), b = poly.get((i + 1) % n);
+                drawLabel(m, (a[0] + b[0]) / 2, fy + 0.05f, (a[1] + b[1]) / 2, String.format(java.util.Locale.US, "%.2f m", Math.hypot(b[0] - a[0], b[1] - a[1])), false);
+            }
+        }
+        for (float[] w : walls) { // a 1.2 m wide panel on each tapped wall
+            float tx = -w[4], tz = w[3];
+            float x0 = w[0] - tx * 0.6f, z0 = w[2] - tz * 0.6f, x1 = w[0] + tx * 0.6f, z1 = w[2] + tz * 0.6f;
+            float[] q = {x0, fy, z0, x1, fy, z1, x1, top, z1, x0, fy, z0, x1, top, z1, x0, top, z0};
+            planDraw(m, q, GLES20.GL_TRIANGLES, MARK_FILL, 1);
+            planDraw(m, new float[]{x0, fy, z0, x1, fy, z1, x1, fy, z1, x1, top, z1, x1, top, z1, x0, top, z0, x0, top, z0, x0, fy, z0}, GLES20.GL_LINES, MARK_COL, 1);
+        }
+        if (fl != null) planDraw(m, new float[]{fl[0], fl[1], fl[2]}, GLES20.GL_POINTS, MARK_COL, 30 * dens);
+        if (ce != null) {
+            planDraw(m, new float[]{ce[0], ce[1], ce[2]}, GLES20.GL_POINTS, CEIL_COL, 30 * dens);
+            planDraw(m, new float[]{ce[0], fy, ce[2], ce[0], ce[1], ce[2]}, GLES20.GL_LINES, CEIL_COL, 1);
+        }
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
     }
 
     // ---- tap to rescan an area (no longer bound to a tap) ----
@@ -540,6 +748,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         pos.position(0); pos.limit(n * 3); p.put(pos); pos.limit(pos.capacity()); pos.position(0); p.position(0);
         col.position(0); col.limit(n * 4); c.put(col); col.limit(col.capacity()); col.position(0); c.position(0);
         final float h = knownH, w = knownW, d = knownD;
+        final java.util.List<float[]> poly; final float uf, uc;
+        synchronized (marks) { poly = roomPolygon(); uf = markFloor != null ? markFloor[1] : Float.NaN; uc = markCeiling != null ? markCeiling[1] : Float.NaN; }
         new Thread(() -> {
             try {
                 ShotPlanner sp = new ShotPlanner();
@@ -547,6 +757,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (sp.isReady()) {
                     RoomModel rm = new RoomModel();
                     rm.knownH = h; rm.knownW = w; rm.knownD = d;
+                    rm.userCorners = poly; rm.userFloorY = uf; rm.userCeilingY = uc;
                     rm.build(new java.util.ArrayList<>(), sp, p, c, n);
                     applyLabels(rm.boxes);
                     claudeObjs.mergeInto(rm.boxes, rm.floorY);
@@ -889,6 +1100,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void analyseRoom() {
         java.util.List<RoomModel.PlaneData> planes = lastPlanes;
         room.knownH = knownH; room.knownW = knownW; room.knownD = knownD;
+        synchronized (marks) {
+            java.util.List<float[]> poly = roomPolygon();
+            room.userCorners = poly;
+            room.userFloorY = markFloor != null ? markFloor[1] : Float.NaN;
+            room.userCeilingY = markCeiling != null ? markCeiling[1] : Float.NaN;
+            if (poly != null) log("room from your taps: " + poly.size() + " corners" + (cornerList.size() >= 3 ? "" : " (from " + wallList.size() + " walls)"));
+        }
         planner.analyse(pos, count);
         subjectPick = planner.isReady() ? planner.defaultSubject() : new float[]{target[0], target[1], target[2]};
         sceneIdx = 0; plan = null;
@@ -1142,7 +1360,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -1443,10 +1661,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
             float[] tap = pendingTap;
-            if (tap != null) { pendingTap = null; handleCutoutTap(frame, camera, tap[0], tap[1]); }
+            if (tap != null) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
             maybeStartLiveRoom(nowMs);
             drawLiveRoom(mvp);
             cutouts.draw(mvp);
+            drawMarks(mvp, true);
             drawRescanTarget(mvp, camera);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             drawGuide(mvp);
@@ -1466,7 +1685,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + diagnostics();
             } else {
                 s = "Scanning: " + photos.keyframes.size() + " photos · " + cutouts.size() + " objects placed\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "") + (claudeLiveKey != null && claudeLine != null ? "\n" + claudeLine : "") + (ClaudeHelper.sessionCalls > 0 ? "\n💰 " + ClaudeHelper.costLine() : "")
-                        + "\nWalk slowly round the room, pointing at the walls and floor. Tap on a thing (shoes, chair...) to cut it out and place it. Tap Finish when done.";
+                        + "\n" + marksLine() + "\nWalk slowly round the room. Tap anything: a room corner, a wall, the floor, the ceiling or an object, and say which it is. Tap Finish when done.";
             }
             activity.updateStatus(s);
         }
