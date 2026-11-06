@@ -59,10 +59,10 @@ final class PhotoRoom {
         meshProg = ScanRenderer.program(
                 "uniform mat4 uMvp; attribute vec4 aPos; attribute vec2 aUv; attribute vec4 aColor;" +
                 "varying vec2 vUv; varying vec4 vColor; varying float vHide;" +
-                "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform float uFloor; uniform float uCeil;" +
+                "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
                 "void main(){ vHide = 0.0;" +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
-                "    if ((dot(r, uDir) > uCutD && aPos.y > uFloor + 0.15) || aPos.y > uCeil) vHide = 1.0; }" +
+                "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) vHide = 1.0; }" +
                 "  gl_Position = uMvp * aPos; vUv = aUv; vColor = aColor; }",
                 "precision mediump float; varying vec2 vUv; varying vec4 vColor; varying float vHide;" +
                 "uniform sampler2D uTex; uniform float uUseTex;" +
@@ -305,7 +305,7 @@ final class PhotoRoom {
         return seen > 0 && hits * 2 >= seen;
     }
 
-    void draw(float[] mvp, boolean cut, float[] center, float dirX, float dirZ, float cutD, float floorY, float ceilY) {
+    void draw(float[] mvp, boolean cut, float[] center, float dirX, float dirZ, float cutD, float dir2X, float dir2Z, float cutD2, float floorY, float ceilY) {
         if (!ready) return;
         List<FloatBuffer> groupPos, groupUv; List<Integer> groupVerts; FloatBuffer plainPos; ByteBuffer plainCol; int plainVerts;
         synchronized (this) {
@@ -318,6 +318,8 @@ final class PhotoRoom {
         GLES20.glUniform3f(GLES20.glGetUniformLocation(meshProg, "uCenter"), center[0], center[1], center[2]);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(meshProg, "uDir"), dirX, dirZ);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uCutD"), cutD);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(meshProg, "uDir2"), dir2X, dir2Z);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uCutD2"), cutD2);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uFloor"), floorY);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uCeil"), ceilY);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(meshProg, "uTex"), 0);

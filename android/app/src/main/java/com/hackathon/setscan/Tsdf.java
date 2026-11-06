@@ -16,6 +16,7 @@ final class Tsdf {
     final float trunc;   // truncation band (m)
     final float carve;   // how far in front of a surface free space erases old geometry (m)
     static final int MAX_W = 40;        // cap the weight so later looks can still change things
+    float carveWeight = 1f; // weight of a 'saw through it' observation vs a surface hit
     int minW = 2;          // voxels seen fewer times are ignored for the mesh
     int minComponent = 0;  // drop floating mesh pieces smaller than this many triangles (noise flakes)
 
@@ -96,14 +97,16 @@ final class Tsdf {
         if (len < 1e-3f) return;
         dx /= len; dy /= len; dz /= len;
         int lastX = Integer.MIN_VALUE, lastY = 0, lastZ = 0;
-        // free space further in front (up to 60 cm) erases stale surfaces, existing voxels only
-        float farS = Math.min(carve, len - 0.15f);
-        for (float s = farS; s > trunc; s -= vs) {
+        // Free space in front of the surface erases stale surfaces and mid-air noise (existing voxels only).
+        // carve is how far back along the ray this goes (>= 10 means all the way to 25 cm from the camera).
+        // A margin that grows with distance keeps depth noise from eating the real surface.
+        float farS = Math.min(carve, len - 0.25f), nearS = trunc + 0.02f * len;
+        for (float s = farS; s > nearS; s -= vs) {
             int vx = (int) Math.floor((px - dx * s) / vs), vy = (int) Math.floor((py - dy * s) / vs), vz = (int) Math.floor((pz - dz * s) / vs);
             int i = get(vx, vy, vz);
             if (i < 0) continue;
             int wi = w[i];
-            sdf[i] = (sdf[i] * wi + 1f) / (wi + 1);
+            sdf[i] = (sdf[i] * wi + carveWeight) / (wi + carveWeight); // seeing through counts extra
             if (wi < MAX_W) w[i] = (short) (wi + 1);
         }
         for (float s = -trunc; s <= trunc + 1e-4f; s += vs * 0.5f) {
@@ -141,6 +144,12 @@ final class Tsdf {
 
     private static final int[][] CORNER = {{0,0,0},{1,0,0},{0,1,0},{1,1,0},{0,0,1},{1,0,1},{0,1,1},{1,1,1}};
     private static final int[][] EDGE = {{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}};
+
+    /** True when depth rays have repeatedly passed through this spot: it's empty air, so a point here is noise. */
+    boolean seenThrough(float x, float y, float z) {
+        int i = get((int) Math.floor(x / vs), (int) Math.floor(y / vs), (int) Math.floor(z / vs));
+        return i >= 0 && w[i] >= 4 && sdf[i] > 0.75f;
+    }
 
     private boolean good(int i) { return i >= 0 && w[i] >= minW; }
 

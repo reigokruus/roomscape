@@ -43,10 +43,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final ByteBuffer col = ByteBuffer.allocateDirect(MAX_POINTS * 4).order(ByteOrder.nativeOrder());
     private int count, uploaded;
     private final LongIntMap voxels = new LongIntMap(1 << 22);
-    private final Tsdf tsdf = new Tsdf(1_500_000, 0.04f, 0.12f, 0.6f);
+    private final Tsdf tsdf = new Tsdf(1_500_000, 0.04f, 0.12f, 99f); // carve along the whole ray
     /** Fine surface for the detail zones the user tapped (shoes, the table top...). */
     private final Tsdf detail = new Tsdf(1_000_000, 0.012f, 0.04f, 0.2f);
-    { tsdf.minW = 3; tsdf.minComponent = 200; detail.minComponent = 60; } // fewer one-off and floating flakes
+    { tsdf.minW = 3; tsdf.minComponent = 200; tsdf.carveWeight = 2f; detail.minComponent = 60; } // fewer one-off and floating flakes
     private final java.util.ArrayList<float[]> zones = new java.util.ArrayList<>(); // x, y, z, radius
     private static final float VOXEL_FINE = 0.008f;
     private int depthPixelsFrame, nearPixelsFrame, closeFrames;
@@ -222,7 +222,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         sensors.active = false;
         log("finish: " + count + " points, " + diagnostics());
         dropNoise();
-        log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks, kept " + count);
+        log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
         try {
             long t0 = System.currentTimeMillis();
             meshTris = tsdf.extractMesh();
@@ -638,7 +638,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final float[] roomCenter = new float[3];
     private volatile boolean cutaway = true;
     private boolean cutActive;
-    private float cutDirX, cutDirZ, cutD, cutFloor, cutCeil;
+    private float cutDirX, cutDirZ, cutD, cutFloor, cutCeil, cutDir2X, cutDir2Z, cutD2 = 1e9f;
 
     boolean toggleCutaway() { cutaway = !cutaway; return cutaway; }
 
@@ -649,13 +649,38 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         cutFloor = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
         float roomH = boxMaxY - cutFloor;
         cutCeil = roomH > 1.9f ? boxMaxY - 0.3f : 1e9f;
+        cutD2 = 1e9f;
+        if (roomReady && room.hasLayout && room.ceilingY > cutFloor + 1.9f) cutCeil = room.ceilingY - 0.25f;
         if (top) { cutDirX = 0; cutDirZ = 0; cutD = 1e9f; return; }
+        if (roomReady && room.hasLayout && room.layout.size() >= 3) {
+            // Dollhouse view: cut away the (up to two) fitted walls that face the viewer, plus 35 cm inside them,
+            // so you look into the room instead of at its outside.
+            float best1 = 0, best2 = 0; RoomModel.Wall w1 = null, w2 = null;
+            for (RoomModel.Wall w : room.layout) {
+                float mx = (w.x0 + w.x1) / 2, mz = (w.z0 + w.z1) / 2;
+                float facing = w.nx * (ex - mx) + w.nz * (ez - mz);
+                if (facing <= 0) continue;
+                float score = facing / (float) Math.sqrt((ex - mx) * (ex - mx) + (ez - mz) * (ez - mz) + 1e-6f);
+                if (score > best1) { best2 = best1; w2 = w1; best1 = score; w1 = w; }
+                else if (score > best2) { best2 = score; w2 = w; }
+            }
+            cutDirX = 0; cutDirZ = 0; cutD = 1e9f;
+            if (w1 != null) { cutDirX = w1.nx; cutDirZ = w1.nz; cutD = wallCut(w1); }
+            if (w2 != null && best2 > 0.25f) { cutDir2X = w2.nx; cutDir2Z = w2.nz; cutD2 = wallCut(w2); }
+            return;
+        }
         float dx = ex - roomCenter[0], dz = ez - roomCenter[2];
         float l = (float) Math.sqrt(dx * dx + dz * dz);
         if (l < 1e-3f) { cutDirX = 0; cutDirZ = 0; cutD = 1e9f; return; }
         cutDirX = dx / l; cutDirZ = dz / l;
         float halfExt = Math.abs(cutDirX) * boxHalfX + Math.abs(cutDirZ) * boxHalfZ;
         cutD = Math.max(0.3f, halfExt - 0.6f); // drop the outer 60 cm band on the viewer's side
+    }
+
+    /** Distance (from the room centre along the wall's outward normal) beyond which the wall gets hidden. */
+    private float wallCut(RoomModel.Wall w) {
+        float mx = (w.x0 + w.x1) / 2 - roomCenter[0], mz = (w.z0 + w.z1) / 2 - roomCenter[2];
+        return mx * w.nx + mz * w.nz - 0.35f;
     }
 
     boolean toggleTopView() { topView = !topView; return topView; }
@@ -709,10 +734,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         ptProg = program(
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
                 // Dollhouse cutaway: hide the wall band facing the viewer and the ceiling.
-                "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform float uFloor; uniform float uCeil;" +
+                "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
                 "void main(){" +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
-                "    if ((dot(r, uDir) > uCutD && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
+                "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
                 "      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; } }" +
                 // splats shrink in world size when you get close (w < 1.5 m), so near surfaces stay detailed instead of blobby
                 "  gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
@@ -1128,12 +1153,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Drop specks seen only once (noise, flying pixels), unless that would throw away most of a sparse scan. */
     private void dropNoise() {
         int keep = 0;
-        for (int i = 0; i < count; i++) if ((obs[i] & 0xFF) >= 2) keep++;
+        boolean[] drop = new boolean[count];
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            // one-off specks, and points in space the camera later saw straight through (mid-air noise)
+            drop[i] = (obs[i] & 0xFF) < 2 || (!inZone(x, y, z) && tsdf.seenThrough(x, y, z));
+            if (!drop[i]) keep++;
+        }
         droppedNoise = 0;
         if (count < 2000 || keep < count * 0.3f) return;
         int k = 0;
         for (int i = 0; i < count; i++) {
-            if ((obs[i] & 0xFF) < 2) continue;
+            if (drop[i]) continue;
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
@@ -1245,6 +1276,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform3f(GLES20.glGetUniformLocation(ptProg, "uCenter"), roomCenter[0], roomCenter[1], roomCenter[2]);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(ptProg, "uDir"), cutDirX, cutDirZ);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCutD"), cutD);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(ptProg, "uDir2"), cutDir2X, cutDir2Z);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCutD2"), cutD2);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uFloor"), cutFloor);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCeil"), cutCeil);
         if (!splats) {
@@ -1357,7 +1390,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         if (viewMode != 1 || !roomReady) {
             if (style == 0 && photos.ready && meshTris > 0)
-                photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutFloor, cutCeil);
+                photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
             else drawPoints(mvp, viewMode == 0 && roomReady ? 0.9f : 1f);
         }
         if (viewMode != 2 && roomReady) drawRoom(mvp);
@@ -1453,7 +1486,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             int k = 0;
             for (RoomModel.Wall w : room.layout) {
                 outline[k++] = w.x0; outline[k++] = y0 + 0.012f; outline[k++] = w.z0;
-                if (cutActive && w.nx * cutDirX + w.nz * cutDirZ > 0.45f) continue;
+                if (cutActive && (w.nx * cutDirX + w.nz * cutDirZ > 0.45f || (cutD2 < 1e8f && w.nx * cutDir2X + w.nz * cutDir2Z > 0.45f))) continue;
                 float[] quad = {w.x0, y0, w.z0, w.x1, y0, w.z1, w.x1, y1, w.z1, w.x0, y0, w.z0, w.x1, y1, w.z1, w.x0, y1, w.z0};
                 planDraw(m, quad, GLES20.GL_TRIANGLES, w.seen ? WALL_COL : WALL_GUESS, 1);
                 planDraw(m, new float[]{w.x0, y0, w.z0, w.x0, y1, w.z0, w.x1, y0, w.z1, w.x1, y1, w.z1,
