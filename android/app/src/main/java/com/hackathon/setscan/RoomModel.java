@@ -60,6 +60,10 @@ final class RoomModel {
     final List<Wall> layout = new ArrayList<>();
     boolean hasLayout;
     float layoutAngle, roomW, roomD, topY;
+    /** Room size the user typed in (0 = unknown). It overrides what the scan measured. */
+    float knownH, knownW, knownD;
+    /** Share of the room's floor (inside the fitted layout) that the scan has seen, 0..1. */
+    float floorCoverage;
     String summary = "";
 
     void build(List<PlaneData> planes, ShotPlanner grid, FloatBuffer pos, ByteBuffer col, int count) {
@@ -106,8 +110,24 @@ final class RoomModel {
         for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING) { ceilingY = s.cy; hasCeiling = true; }
         if (!hasCeiling && maxY - floorY > 2.0f && maxY - floorY < 4f) hasCeiling = true;
 
+        if (knownH > 0.5f) { ceilingY = floorY + knownH; hasCeiling = true; }
         topY = hasCeiling ? ceilingY : Math.max(floorY + 2.4f, Math.min(maxY, floorY + 3f));
         fitLayout(pos, count);
+        floorCoverage = 0;
+        if (hasLayout) {
+            float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
+            Wall w0 = layout.get(0), w2 = layout.get(2);
+            float u0 = Math.min(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls), u1 = Math.max(w0.x0 * lc + w0.z0 * ls, w0.x1 * lc + w0.z1 * ls);
+            float v0 = Math.min(-w0.x0 * ls + w0.z0 * lc, -w2.x0 * ls + w2.z0 * lc), v1 = Math.max(-w0.x0 * ls + w0.z0 * lc, -w2.x0 * ls + w2.z0 * lc);
+            int known = 0;
+            for (int i = 0; i < grid.nx * grid.nz; i++) {
+                if (!grid.floorKnown[i] && grid.blocked[i] <= ShotPlanner.BLOCKED) continue; // furniture counts as seen floor
+                float x = grid.minX + (i % grid.nx + 0.5f) * ShotPlanner.CELL, z = grid.minZ + (i / grid.nx + 0.5f) * ShotPlanner.CELL;
+                float u = x * lc + z * ls, v = -x * ls + z * lc;
+                if (u >= u0 && u <= u1 && v >= v0 && v <= v1) known++;
+            }
+            floorCoverage = Math.min(1f, known * ShotPlanner.CELL * ShotPlanner.CELL / Math.max(0.01f, roomW * roomD));
+        }
 
         // 3) Furniture: connected blocked cells in the floor grid that aren't thin wall strips.
         int nx = grid.nx, nz = grid.nz;
@@ -220,7 +240,9 @@ final class RoomModel {
         StringBuilder sb = new StringBuilder("Room: ");
         if (hasLayout) sb.append(String.format(Locale.US, "about %.1f × %.1f m", roomW, roomD));
         else if (sizeX > 0) sb.append(String.format(Locale.US, "about %.1f × %.1f m", sizeX, sizeZ));
-        if (hasCeiling) sb.append(String.format(Locale.US, ", ceiling %.1f m", ceilingY - floorY));
+        if ((knownW > 0.5f || knownD > 0.5f) && hasLayout) sb.append(" (entered)");
+        if (hasCeiling) sb.append(String.format(Locale.US, ", ceiling %.1f m", ceilingY - floorY)).append(knownH > 0.5f ? " (entered)" : "");
+        if (hasLayout) sb.append(String.format(Locale.US, ", floor %d%% scanned", Math.round(floorCoverage * 100)));
         sb.append('\n');
         sb.append(floor || grid.isReady() ? "Floor found" : "Floor not found");
         int seenWalls = 0;
@@ -277,6 +299,17 @@ final class RoomModel {
         for (int i = 0; i < n; i++) { us[i] = xs[i] * c + zs[i] * sn; vs[i] = -xs[i] * sn + zs[i] * c; }
         float[] ub = walls1D(us, n), vb = walls1D(vs, n);
         if (ub == null || vb == null) return;
+        // Known width/depth: the longer known size goes on the longer scanned side. Walls the scan saw stay put.
+        if (knownW > 0.5f || knownD > 0.5f) {
+            float a = Math.max(knownW, knownD), b = Math.min(knownW, knownD);
+            boolean uLong = ub[1] - ub[0] >= vb[1] - vb[0];
+            if (b <= 0.5f) { // only one size given: put it on the side it is closest to
+                if (Math.abs((ub[1] - ub[0]) - a) <= Math.abs((vb[1] - vb[0]) - a)) fitKnown(ub, a); else fitKnown(vb, a);
+            } else {
+                fitKnown(uLong ? ub : vb, a);
+                fitKnown(uLong ? vb : ub, b);
+            }
+        }
         roomW = ub[1] - ub[0]; roomD = vb[1] - vb[0];
         if (roomW < 1f || roomD < 1f || roomW > 20f || roomD > 20f) return;
         // corners in (u,v), back to world (x,z): x = u*c - v*sn, z = u*sn + v*c
@@ -293,6 +326,13 @@ final class RoomModel {
             layout.add(w);
         }
         hasLayout = true;
+    }
+
+    private static void fitKnown(float[] b, float len) {
+        boolean lo = b[2] > 0, hi = b[3] > 0;
+        if (lo && !hi) b[1] = b[0] + len;
+        else if (hi && !lo) b[0] = b[1] - len;
+        else { float m = (b[0] + b[1]) / 2; b[0] = m - len / 2; b[1] = m + len / 2; }
     }
 
     /** Sum of squared 5 cm histogram counts along both rotated axes: highest when walls line up with the bins. */

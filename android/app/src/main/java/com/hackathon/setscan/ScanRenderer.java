@@ -207,6 +207,107 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             meshTris = tsdf.extractMesh();
             log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
         } catch (Throwable e) { logError("surface", new RuntimeException(e)); }
+        lastPlanes = planes;
+        analyseRoom();
+        topView = false;
+        if (count > 0) {
+            float minX = 1e9f, minY = 1e9f, minZ = 1e9f, maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
+            for (int i = 0; i < count; i++) {
+                float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+            }
+            target[0] = (minX + maxX) / 2; target[1] = (minY + maxY) / 2; target[2] = (minZ + maxZ) / 2;
+            boxHalfX = (maxX - minX) / 2; boxHalfZ = (maxZ - minZ) / 2; boxMinY = minY; boxMaxY = maxY;
+            float ext = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
+            dist = Math.max(1f, ext * 1.2f);
+            roomCenter[0] = target[0]; roomCenter[1] = target[1]; roomCenter[2] = target[2];
+        }
+        yaw = 0.6f; pitch = 0.6f;
+        finishStatus();
+    }
+
+    private void finishStatus() {
+        activity.updateStatus((roomReady ? room.summary + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
+    }
+
+    private java.util.List<RoomModel.PlaneData> lastPlanes = new java.util.ArrayList<>();
+    private volatile float knownH, knownW, knownD; // room size typed in by the user (0 = unknown)
+
+    float[] knownSize() { return new float[]{knownH, knownW, knownD}; }
+
+    /** GL thread: store the room size the user knows; if a scan is finished, rebuild the room model with it. */
+    void setKnownSize(float h, float w, float d) {
+        knownH = h; knownW = w; knownD = d;
+        log(String.format(java.util.Locale.US, "known room size: height %.2f width %.2f depth %.2f", h, w, d));
+        if (viewing && count > 0) { analyseRoom(); finishStatus(); }
+    }
+
+    // ---- live room estimate while scanning ----
+    private volatile RoomModel liveRoom;
+    private volatile boolean liveBusy;
+    private long liveLastMs;
+
+    /** Every 2 s, estimate the room from a snapshot of the points on a background thread. */
+    private void maybeStartLiveRoom(long nowMs) {
+        if (liveBusy || nowMs - liveLastMs < 2000 || count < 3000) return;
+        liveLastMs = nowMs; liveBusy = true;
+        final int n = count;
+        final FloatBuffer p = FloatBuffer.allocate(n * 3);
+        final ByteBuffer c = ByteBuffer.allocate(n * 4);
+        pos.position(0); pos.limit(n * 3); p.put(pos); pos.limit(pos.capacity()); pos.position(0); p.position(0);
+        col.position(0); col.limit(n * 4); c.put(col); col.limit(col.capacity()); col.position(0); c.position(0);
+        final float h = knownH, w = knownW, d = knownD;
+        new Thread(() -> {
+            try {
+                ShotPlanner sp = new ShotPlanner();
+                sp.analyse(p, n);
+                if (sp.isReady()) {
+                    RoomModel rm = new RoomModel();
+                    rm.knownH = h; rm.knownW = w; rm.knownD = d;
+                    rm.build(new java.util.ArrayList<>(), sp, p, c, n);
+                    liveRoom = rm;
+                }
+            } catch (Throwable e) { /* a live estimate is best effort */ }
+            liveBusy = false;
+        }).start();
+    }
+
+    /** One line for the scanning status: size so far, walls found, how much floor is covered. */
+    private String liveRoomLine() {
+        RoomModel r = liveRoom;
+        if (r == null) return "Room: point at the floor and walls to start measuring";
+        if (!r.hasLayout) return "Room: floor found, keep scanning the walls";
+        int seen = 0;
+        for (RoomModel.Wall w : r.layout) if (w.seen) seen++;
+        return String.format(java.util.Locale.US, "Room so far: %.1f × %.1f m%s · height %s · walls %d/4 · floor %d%% covered",
+                r.roomW, r.roomD, knownW > 0 || knownD > 0 ? " (entered)" : "",
+                r.hasCeiling ? String.format(java.util.Locale.US, "%.1f m%s", r.topY - r.floorY, knownH > 0 ? " (entered)" : "") : "?",
+                seen, Math.round(r.floorCoverage * 100));
+    }
+
+    private static final float[] LIVE_SEEN = {0.2f, 1f, 0.85f, 1f}, LIVE_GUESS = {1f, 0.6f, 0.2f, 0.8f};
+
+    /** Draws the estimated room box over the camera view: solid teal for walls found, orange for guessed ones. */
+    private void drawLiveRoom(float[] m) {
+        RoomModel r = liveRoom;
+        if (r == null || !r.hasLayout) return;
+        float dens = height / 1000f;
+        GLES20.glLineWidth(4f * dens);
+        float y0 = r.floorY, y1 = r.topY;
+        for (RoomModel.Wall w : r.layout) {
+            float[] c = w.seen ? LIVE_SEEN : LIVE_GUESS;
+            planDraw(m, new float[]{w.x0, y0, w.z0, w.x1, y0, w.z1}, GLES20.GL_LINES, c, 1);
+            planDraw(m, new float[]{w.x0, y1, w.z0, w.x1, y1, w.z1}, GLES20.GL_LINES, c, 1);
+            planDraw(m, new float[]{w.x0, y0, w.z0, w.x0, y1, w.z0}, GLES20.GL_LINES, LIVE_SEEN, 1);
+        }
+    }
+
+    /** Planner, room model, layout proxies and photo texturing (re-run when the user enters a known room size). */
+    private void analyseRoom() {
+        java.util.List<RoomModel.PlaneData> planes = lastPlanes;
+        room.knownH = knownH; room.knownW = knownW; room.knownD = knownD;
         planner.analyse(pos, count);
         subjectPick = planner.isReady() ? planner.defaultSubject() : new float[]{target[0], target[1], target[2]};
         sceneIdx = 0; plan = null;
@@ -238,23 +339,6 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("photos: " + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
                     + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
         } catch (Throwable e) { logError("photos", new RuntimeException(e)); }
-        topView = false;
-        if (count > 0) {
-            float minX = 1e9f, minY = 1e9f, minZ = 1e9f, maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
-            for (int i = 0; i < count; i++) {
-                float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
-                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-                minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
-            }
-            target[0] = (minX + maxX) / 2; target[1] = (minY + maxY) / 2; target[2] = (minZ + maxZ) / 2;
-            boxHalfX = (maxX - minX) / 2; boxHalfZ = (maxZ - minZ) / 2; boxMinY = minY; boxMaxY = maxY;
-            float ext = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
-            dist = Math.max(1f, ext * 1.2f);
-            roomCenter[0] = target[0]; roomCenter[1] = target[1]; roomCenter[2] = target[2];
-        }
-        yaw = 0.6f; pitch = 0.6f;
-        activity.updateStatus((roomReady ? room.summary + "\n" : "") + count + " points captured. Drag to rotate, pinch to zoom, two fingers to move. Yellow line = your walking path.");
     }
 
     /** Export the whole scan as a zip (GL thread part), then write it in the background and hand back a share uri. */
@@ -278,7 +362,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); photos.clear(); meshTris = 0; havePrevPose = false; recs.clear();
+        tsdf.clear(); photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); liveRoom = null; liveLastMs = 0;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -533,6 +617,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             uploadNew();
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
+            maybeStartLiveRoom(nowMs);
+            drawLiveRoom(mvp);
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         }
         if (frameNo % 15 == 0) {
@@ -542,8 +628,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + "[tracking " + ts + ", reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + "]\n"
                         + diagnostics();
             } else {
-                s = "Scanning: " + count + " points\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n"
-                        + diagnostics();
+                s = "Scanning: " + count + " points · " + photos.keyframes.size() + " photos\n" + liveRoomLine()
+                        + "\nWalk slowly, point at walls, floor and furniture. Tap Finish when done.\n" + diagnostics();
             }
             activity.updateStatus(s);
         }

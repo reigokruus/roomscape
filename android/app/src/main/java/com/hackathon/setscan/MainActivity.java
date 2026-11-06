@@ -38,6 +38,41 @@ public class MainActivity extends Activity {
     private float lastX, lastY;
     private int lastPointerCount;
 
+    /** Lets the user type the room size they already know; empty fields stay measured by the scan. */
+    private void askRoomSize() {
+        float[] k = renderer.knownSize();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(20);
+        box.setPadding(pad, dp(8), pad, 0);
+        String[] labels = {"Height (m)", "Width (m)", "Depth (m)"};
+        android.widget.EditText[] fields = new android.widget.EditText[3];
+        for (int i = 0; i < 3; i++) {
+            android.widget.EditText e = new android.widget.EditText(this);
+            e.setHint(labels[i] + ", leave empty to measure");
+            e.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+            if (k[i] > 0) e.setText(String.format(java.util.Locale.US, "%.2f", k[i]));
+            fields[i] = e;
+            box.addView(e);
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Known room size")
+                .setMessage("If you already know the room's measurements, enter them and the scan will use them.")
+                .setView(box)
+                .setPositiveButton("Use", (d, w) -> {
+                    float[] v = new float[3];
+                    for (int i = 0; i < 3; i++) {
+                        try { v[i] = Float.parseFloat(fields[i].getText().toString().trim().replace(',', '.')); }
+                        catch (Exception ex) { v[i] = 0; }
+                        if (v[i] < 0.5f || v[i] > 50f) v[i] = 0;
+                    }
+                    glView.queueEvent(() -> renderer.setKnownSize(v[0], v[1], v[2]));
+                })
+                .setNeutralButton("Clear", (d, w) -> glView.queueEvent(() -> renderer.setKnownSize(0, 0, 0)))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void exportScan() {
         exportButton.setEnabled(false);
         Toast.makeText(this, "Packing the scan (" + renderer.recordedFrames() + " depth frames)...", Toast.LENGTH_SHORT).show();
@@ -143,10 +178,17 @@ public class MainActivity extends Activity {
         row2.addView(planButton);
         row2.addView(viewButton);
         row2.addView(cutButton);
+        Button sizeButton = new Button(this);
+        sizeButton.setText("Room size");
+        sizeButton.setOnClickListener(v -> askRoomSize());
+        row2.addView(sizeButton);
         row2.addView(logButton);
         LinearLayout bars = new LinearLayout(this);
         bars.setOrientation(LinearLayout.VERTICAL);
-        bars.addView(row2);
+        android.widget.HorizontalScrollView row2Scroll = new android.widget.HorizontalScrollView(this);
+        row2Scroll.setHorizontalScrollBarEnabled(false);
+        row2Scroll.addView(row2);
+        bars.addView(row2Scroll);
         bars.addView(bar);
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
