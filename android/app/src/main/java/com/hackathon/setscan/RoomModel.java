@@ -92,8 +92,15 @@ final class RoomModel {
             if (s.kind == Surface.Kind.FLOOR && s.area == bestFloorArea && bestFloorArea > 1f) floorY = s.cy;
 
         // 2) Ceiling height: a ceiling plane if found, else the top of the scan if it looks like a ceiling.
-        float maxY = -1e9f;
-        for (int i = 0; i < count; i++) maxY = Math.max(maxY, pos.get(i * 3 + 1));
+        // Robust top of the scan: the 99.5th percentile of heights, so a few stray specks don't fake a tall ceiling.
+        float maxY = floorY;
+        if (count > 0) {
+            int step = Math.max(1, count / 50000), m = 0;
+            float[] ys = new float[count / step + 1];
+            for (int i = 0; i < count; i += step) ys[m++] = pos.get(i * 3 + 1);
+            java.util.Arrays.sort(ys, 0, m);
+            maxY = ys[Math.min(m - 1, (int) (m * 0.995f))];
+        }
         hasCeiling = false;
         ceilingY = maxY;
         for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING) { ceilingY = s.cy; hasCeiling = true; }
@@ -196,6 +203,7 @@ final class RoomModel {
             Light l = new Light();
             l.x = x; l.y = y; l.z = z; l.strength = n;
             float h = y - floorY;
+            if (h < 0.1f) continue; // below the floor: a reflection, not a light
             if (hasCeiling && ceilingY - y < 0.5f) l.label = "ceiling light";
             else if (h > 0.6f && nearWall(x, y, z)) l.label = "window or wall light";
             else l.label = "lamp / bright spot";
