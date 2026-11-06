@@ -742,6 +742,48 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Only cut the room mesh where the fine scan actually produced something (so an unfinished zone isn't a hole). */
     private boolean hasDetailNear(float x, float y, float z) { return detail.meshVerts > 300; }
 
+    /**
+     * Ask Claude (GL thread part): grab a few room photos and a crop per object, then call Claude in the background.
+     * Names come back into the objects; done() gets the room advice.
+     */
+    void askClaude(String apiKey, java.util.function.Consumer<ClaudeHelper.Result> done, java.util.function.Consumer<String> fail) {
+        if (!roomReady) { fail.accept("Finish a scan first (no room found yet)."); return; }
+        final java.util.List<String> photosB64 = new java.util.ArrayList<>(), crops = new java.util.ArrayList<>(), info = new java.util.ArrayList<>();
+        final java.util.List<RoomModel.Box> asked = new java.util.ArrayList<>();
+        try {
+            java.util.List<byte[]> jpgs = ScanExport.readKeyframes(photos, width, height);
+            int want = Math.min(4, jpgs.size());
+            for (int i = 0; i < want; i++) photosB64.add(ClaudeHelper.jpegBase64(jpgs.get(i * jpgs.size() / want)));
+            java.util.List<ObjectNamer.Job> jobs = ObjectNamer.prepare(room, photos, width, height);
+            jobs.sort((a, b) -> b.box.voxels - a.box.voxels); // biggest first, at most 16
+            for (ObjectNamer.Job j : jobs) {
+                if (asked.size() < 16) {
+                    RoomModel.Box b = j.box;
+                    crops.add(ClaudeHelper.jpegBase64(j.crop, 512));
+                    info.add(String.format(java.util.Locale.US, "%.2f x %.2f m footprint, %.2f m tall, %s; on-device guess: %s",
+                            2 * b.hu, 2 * b.hv, b.y1 - b.y0, b.where().isEmpty() ? "on the floor" : b.where(), b.title()));
+                    asked.add(b);
+                }
+                j.crop.recycle();
+            }
+        } catch (Throwable e) { fail.accept("Couldn't read the scan photos: " + e); return; }
+        final String summary = room.summary.replace('\n', ' ');
+        new Thread(() -> {
+            try {
+                ClaudeHelper.Result r = ClaudeHelper.ask(apiKey, summary, photosB64, crops, info);
+                for (int i = 0; i < asked.size(); i++) if (r.names.get(i) != null) asked.get(i).name = r.names.get(i);
+                log("Claude: " + r.room + " | " + r.lighting + " | " + r.shots);
+                finishStatus();
+                done.accept(r);
+            } catch (Throwable e) {
+                logError("claude", new RuntimeException(e));
+                String m = String.valueOf(e.getMessage());
+                fail.accept(m.contains("401") || m.toLowerCase(java.util.Locale.US).contains("authentication")
+                        ? "The API key was rejected. Long-press Ask Claude to enter it again." : "Couldn't reach Claude: " + m);
+            }
+        }).start();
+    }
+
     /** Export the whole scan as a zip (GL thread part), then write it in the background and hand back a share uri. */
     void exportScan(java.util.function.Consumer<android.net.Uri> done, java.util.function.Consumer<String> fail) {
         final java.util.List<byte[]> jpgs;

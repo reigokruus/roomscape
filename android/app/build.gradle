@@ -28,4 +28,6 @@ dependencies {
     implementation 'com.google.ar:core:1.57.0'
     // on-device image labelling (bundled model, works offline) to name furniture from the scan photos
     implementation 'com.google.mlkit:image-labeling:17.0.9'
+    // optional "Ask Claude" after a scan: names objects and suggests shots from the scan photos
+    implementation 'com.anthropic:anthropic-java:3.3.0'
 }

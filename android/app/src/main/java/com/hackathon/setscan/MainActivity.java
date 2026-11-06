@@ -30,7 +30,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton;
+    private Button mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
@@ -74,6 +74,50 @@ public class MainActivity extends Activity {
     }
 
     void toast(String msg) { runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()); }
+
+    // ---- Ask Claude (optional, needs internet and the user's own API key) ----
+    private static final String PREFS = "cinex", KEY = "claude_api_key";
+
+    private void askClaude(boolean changeKey) {
+        String key = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
+        if (key == null || key.isEmpty() || changeKey) {
+            android.widget.EditText in = new android.widget.EditText(this);
+            in.setHint("sk-ant-...");
+            in.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("Claude API key")
+                    .setMessage("Paste your key from console.anthropic.com. It's saved only on this phone. "
+                            + "Ask Claude sends a few scan photos to Claude to name objects and suggest shots. Long-press the button to change the key.")
+                    .setView(in)
+                    .setPositiveButton("Save", (d, w) -> {
+                        String k = in.getText().toString().trim();
+                        if (k.isEmpty()) return;
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY, k).apply();
+                        askClaude(false);
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return;
+        }
+        claudeButton.setEnabled(false);
+        Toast.makeText(this, "Asking Claude about the scan...", Toast.LENGTH_SHORT).show();
+        glView.queueEvent(() -> renderer.askClaude(key, r -> runOnUiThread(() -> {
+            claudeButton.setEnabled(true);
+            StringBuilder b = new StringBuilder();
+            if (!r.room.isEmpty()) b.append(r.room).append("\n\n");
+            if (!r.lighting.isEmpty()) b.append("💡 ").append(r.lighting).append("\n\n");
+            if (!r.shots.isEmpty()) {
+                b.append("🎬 Shot ideas:\n");
+                for (String sh : r.shots) b.append("• ").append(sh).append('\n');
+            }
+            new android.app.AlertDialog.Builder(this).setTitle("Claude's take").setMessage(b.toString().trim())
+                    .setPositiveButton("OK", null).show();
+        }), err -> runOnUiThread(() -> {
+            claudeButton.setEnabled(true);
+            new android.app.AlertDialog.Builder(this).setTitle("Ask Claude failed").setMessage(err)
+                    .setPositiveButton("OK", null).show();
+        })));
+    }
 
     private void exportScan() {
         exportButton.setEnabled(false);
@@ -166,6 +210,12 @@ public class MainActivity extends Activity {
         bar.addView(topButton);
         bar.addView(splatButton);
         bar.addView(exportButton);
+        claudeButton = new Button(this);
+        claudeButton.setText("Ask Claude");
+        claudeButton.setVisibility(View.GONE);
+        claudeButton.setOnClickListener(v -> askClaude(false));
+        claudeButton.setOnLongClickListener(v -> { askClaude(true); return true; }); // long press: change the key
+        bar.addView(claudeButton);
         Button logButton = new Button(this);
         logButton.setText("Copy log");
         logButton.setOnClickListener(v -> {
@@ -281,6 +331,7 @@ public class MainActivity extends Activity {
             cutButton.setVisibility(View.GONE);
             viewButton.setVisibility(View.GONE);
             exportButton.setVisibility(View.GONE);
+            claudeButton.setVisibility(View.GONE);
             planButton.setText("Plan shot");
             resumeSession();
         } else {
@@ -294,6 +345,7 @@ public class MainActivity extends Activity {
                     cutButton.setVisibility(View.VISIBLE);
                     viewButton.setVisibility(View.VISIBLE);
                     exportButton.setVisibility(View.VISIBLE);
+                    claudeButton.setVisibility(View.VISIBLE);
                 });
             });
         }
