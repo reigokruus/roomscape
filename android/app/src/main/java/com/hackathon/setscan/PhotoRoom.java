@@ -162,6 +162,34 @@ final class PhotoRoom {
         return s;
     }
 
+    /** GL thread: a saved photo back into a keyframe texture (bitmap row 0 = top of the camera image). */
+    Keyframe addSaved(android.graphics.Bitmap bmp, ScanStore.Kf d) {
+        int[] t = new int[1];
+        GLES20.glGenTextures(1, t, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, t[0]);
+        android.graphics.Bitmap s = android.graphics.Bitmap.createScaledBitmap(bmp, TEX_W, TEX_H, true);
+        android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, s, 0);
+        if (s != bmp) s.recycle();
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        Keyframe k = new Keyframe();
+        k.tex = t[0];
+        System.arraycopy(d.view, 0, k.view, 0, 16);
+        System.arraycopy(d.pose, 0, k.pose, 0, 16);
+        k.fx = d.fx; k.fy = d.fy; k.cx = d.cx; k.cy = d.cy; k.w = d.w; k.h = d.h;
+        k.depth = d.depth; k.dw = d.dw; k.dh = d.dh; k.dfx = d.dfx; k.dfy = d.dfy; k.dcx = d.dcx; k.dcy = d.dcy;
+        k.px = d.pose[12]; k.py = d.pose[13]; k.pz = d.pose[14];
+        k.fwd[0] = -d.pose[8]; k.fwd[1] = -d.pose[9]; k.fwd[2] = -d.pose[10];
+        k.closeUp = d.closeUp;
+        keyframes.add(k);
+        last = k;
+        return k;
+    }
+
     /** Copies the live camera texture into a new keyframe texture. */
     void capture(int cameraTex, float[] pose, float[] texIntr, short[] depth, int dw, int dh, float[] depIntr, float gain, int screenW, int screenH, boolean closeUp) {
         int[] t = new int[1];

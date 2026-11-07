@@ -18,6 +18,7 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import java.io.File;
 
 import com.google.ar.core.ArCoreApk;
 import com.google.ar.core.Session;
@@ -31,7 +32,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
+    private Button saveButton, homeButton, improveButton, cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
@@ -209,7 +210,9 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP);
         slp.topMargin = dp(36);
-        root.addView(status, slp);
+        FrameLayout chrome = new FrameLayout(this);
+        scanChrome = chrome;
+        chrome.addView(status, slp);
 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
@@ -235,6 +238,20 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> depthButton.setText(label));
         }));
         bar.addView(depthButton);
+        saveButton = new Button(this);
+        saveButton.setText("Save");
+        saveButton.setVisibility(View.GONE);
+        saveButton.setOnClickListener(v -> saveScan());
+        bar.addView(saveButton);
+        improveButton = new Button(this);
+        improveButton.setText("Improve scan");
+        improveButton.setVisibility(View.GONE);
+        improveButton.setOnClickListener(v -> improveScan());
+        bar.addView(improveButton);
+        homeButton = new Button(this);
+        homeButton.setText("Home");
+        homeButton.setOnClickListener(v -> showHome());
+        bar.addView(homeButton);
         cleanButton = new Button(this);
         cleanButton.setText("Clean up");
         cleanButton.setVisibility(View.GONE);
@@ -311,7 +328,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{mainButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{homeButton, mainButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
             ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -322,7 +339,10 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
-        root.addView(bars, blp);
+        chrome.addView(bars, blp);
+        root.addView(chrome, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        root.addView(buildHome(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        scanChrome.setVisibility(View.GONE);
 
         // the cut-out model comes from Google Play services: ask for it now so the first tap works
         try {
@@ -380,45 +400,245 @@ public class MainActivity extends Activity {
             return true;
         });
         updateStatus("Starting...");
+        refreshHome();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (!homeShown()) { showHome(); return; }
+        super.onBackPressed();
     }
 
     private void onMainButton() {
         if (renderer.isViewing()) {
-            // Rescan
-            glView.queueEvent(() -> renderer.reset());
-            mainButton.setText("Finish scan");
-            topButton.setVisibility(View.GONE);
-            topButton.setText("Top view");
-            planButton.setVisibility(View.GONE);
-            cutButton.setVisibility(View.GONE);
-            viewButton.setVisibility(View.GONE);
-            exportButton.setVisibility(View.GONE);
-            claudeButton.setVisibility(View.GONE);
-            trainButton.setVisibility(View.GONE);
-            trainButton.setText("Train splats");
-            depthButton.setVisibility(View.GONE);
-            cleanButton.setVisibility(View.GONE);
-            depthButton.setText("Depth AI");
-            planButton.setText("Plan shot");
+            // Rescan: a new scan from scratch
+            glView.queueEvent(() -> renderer.startNewScan());
+            scanUi();
             resumeSession();
         } else {
             glView.queueEvent(() -> {
                 renderer.finishScan();
                 runOnUiThread(() -> {
                     if (session != null) session.pause();
-                    mainButton.setText("Rescan");
-                    topButton.setVisibility(View.VISIBLE);
-                    planButton.setVisibility(View.VISIBLE);
-                    cutButton.setVisibility(View.VISIBLE);
-                    viewButton.setVisibility(View.VISIBLE);
-                    exportButton.setVisibility(View.VISIBLE);
-                    claudeButton.setVisibility(View.VISIBLE);
-                    trainButton.setVisibility(View.VISIBLE);
-                    depthButton.setVisibility(View.VISIBLE);
-                    cleanButton.setVisibility(View.VISIBLE);
+                    viewerUi();
                 });
             });
         }
+    }
+
+    /** Buttons for scanning. */
+    private void scanUi() {
+        mainButton.setText("Finish scan");
+        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton, improveButton})
+            b.setVisibility(View.GONE);
+        topButton.setText("Top view");
+        trainButton.setText("Train splats");
+        depthButton.setText("Depth AI");
+        planButton.setText("Plan shot");
+    }
+
+    /** Buttons for looking at a finished or opened scan. */
+    private void viewerUi() {
+        mainButton.setText("New scan");
+        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton})
+            b.setVisibility(View.VISIBLE);
+        improveButton.setVisibility(renderer.currentDir != null ? View.VISIBLE : View.GONE);
+    }
+
+    // ---------------- home screen and saved scans ----------------
+
+    private FrameLayout home;
+    private LinearLayout homeList;
+    private View scanChrome; // status + buttons, hidden on the home screen
+
+    private View buildHome() {
+        home = new FrameLayout(this);
+        home.setBackgroundColor(0xFF101216);
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(16), dp(40), dp(16), dp(24));
+        TextView title = new TextView(this);
+        title.setText("CineX");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        col.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("Scan a room, plan the shot.");
+        sub.setTextColor(0xFFAAB0BA);
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        sub.setPadding(0, 0, 0, dp(16));
+        col.addView(sub);
+        Button newScan = new Button(this);
+        newScan.setText("+  New scan");
+        newScan.setAllCaps(false);
+        newScan.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        newScan.setOnClickListener(v -> startNewScan());
+        col.addView(newScan, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)));
+        TextView saved = new TextView(this);
+        saved.setText("Saved scans");
+        saved.setTextColor(Color.WHITE);
+        saved.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        saved.setPadding(0, dp(24), 0, dp(8));
+        col.addView(saved);
+        homeList = new LinearLayout(this);
+        homeList.setOrientation(LinearLayout.VERTICAL);
+        col.addView(homeList);
+        sv.addView(col);
+        home.addView(sv);
+        return home;
+    }
+
+    private void showHome() {
+        if (session != null) session.pause();
+        glView.queueEvent(() -> renderer.goHome());
+        scanChrome.setVisibility(View.GONE);
+        home.setVisibility(View.VISIBLE);
+        refreshHome();
+    }
+
+    private boolean homeShown() { return home != null && home.getVisibility() == View.VISIBLE; }
+
+    private void hideHome() {
+        home.setVisibility(View.GONE);
+        scanChrome.setVisibility(View.VISIBLE);
+    }
+
+    private void refreshHome() {
+        homeList.removeAllViews();
+        new Thread(() -> {
+            java.util.List<ScanStore.Entry> es = ScanStore.list(this);
+            java.util.List<android.graphics.Bitmap> th = new java.util.ArrayList<>();
+            for (ScanStore.Entry e : es) th.add(ScanStore.thumb(e));
+            runOnUiThread(() -> {
+                homeList.removeAllViews();
+                if (es.isEmpty()) {
+                    TextView t = new TextView(this);
+                    t.setText("No saved scans yet. After a scan, tap Save to keep it here.");
+                    t.setTextColor(0xFFAAB0BA);
+                    t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+                    homeList.addView(t);
+                    return;
+                }
+                LinearLayout row = null;
+                for (int i = 0; i < es.size(); i++) {
+                    if (i % 2 == 0) {
+                        row = new LinearLayout(this);
+                        row.setOrientation(LinearLayout.HORIZONTAL);
+                        homeList.addView(row);
+                    }
+                    View card = scanCard(es.get(i), th.get(i));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                    lp.setMargins(dp(4), dp(4), dp(4), dp(8));
+                    row.addView(card, lp);
+                }
+                if (es.size() % 2 == 1) row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+            });
+        }).start();
+    }
+
+    private View scanCard(ScanStore.Entry e, android.graphics.Bitmap thumb) {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackgroundColor(0xFF1C2028);
+        c.setPadding(dp(6), dp(6), dp(6), dp(8));
+        android.widget.ImageView iv = new android.widget.ImageView(this);
+        iv.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        iv.setBackgroundColor(0xFF2A2F38);
+        if (thumb != null) iv.setImageBitmap(thumb);
+        c.addView(iv, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(200)));
+        TextView name = new TextView(this);
+        name.setText(e.name);
+        name.setTextColor(Color.WHITE);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        name.setPadding(dp(2), dp(6), dp(2), 0);
+        name.setSingleLine(true);
+        c.addView(name);
+        TextView info = new TextView(this);
+        info.setText(android.text.format.DateFormat.format("d MMM, HH:mm", e.modified) + " · " + String.format(java.util.Locale.US, "%,d", e.points) + " pts"
+                + (e.corners > 0 ? " · " + e.corners + " corners" : ""));
+        info.setTextColor(0xFF9AA0AA);
+        info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        info.setPadding(dp(2), 0, dp(2), 0);
+        c.addView(info);
+        c.setOnClickListener(v -> openScan(e));
+        c.setOnLongClickListener(v -> { scanMenu(e); return true; });
+        return c;
+    }
+
+    private void scanMenu(ScanStore.Entry e) {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(e.name)
+                .setItems(new String[]{"Open", "Rename", "Delete"}, (d, which) -> {
+                    if (which == 0) openScan(e);
+                    else if (which == 1) askName("Rename scan", e.name, n -> new Thread(() -> {
+                        try { ScanStore.rename(e.dir, n); } catch (Exception ex) { toast("Rename failed: " + ex.getMessage()); }
+                        runOnUiThread(this::refreshHome);
+                    }).start());
+                    else new android.app.AlertDialog.Builder(this)
+                            .setMessage("Delete \"" + e.name + "\"? This can't be undone.")
+                            .setPositiveButton("Delete", (d2, w2) -> { ScanStore.delete(e.dir); refreshHome(); })
+                            .setNegativeButton("Cancel", null).show();
+                }).show();
+    }
+
+    private void askName(String title, String current, java.util.function.Consumer<String> then) {
+        android.widget.EditText in = new android.widget.EditText(this);
+        in.setSingleLine(true);
+        in.setText(current);
+        in.setSelectAllOnFocus(true);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(in)
+                .setPositiveButton("OK", (d, w) -> {
+                    String n = in.getText().toString().trim();
+                    then.accept(n.isEmpty() ? current : n);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void startNewScan() {
+        hideHome();
+        glView.queueEvent(() -> renderer.startNewScan());
+        scanUi();
+        updateStatus("Scanning. Walk around the room slowly. Tap things to mark corners, walls, floor or objects.");
+        resumeSession();
+    }
+
+    private void openScan(ScanStore.Entry e) {
+        hideHome();
+        if (session != null) session.pause();
+        scanUi();
+        mainButton.setText("New scan");
+        glView.queueEvent(() -> renderer.loadScan(e.dir, () -> runOnUiThread(this::viewerUi)));
+    }
+
+    private void saveScan() {
+        String def = renderer.currentName != null ? renderer.currentName
+                : "Room " + android.text.format.DateFormat.format("d MMM HH:mm", System.currentTimeMillis());
+        askName("Save scan as", def, name -> {
+            updateStatus("Saving \"" + name + "\"...");
+            File dir = renderer.currentDir;
+            glView.queueEvent(() -> renderer.requestSave(name, dir, (out, err) -> runOnUiThread(() -> {
+                if (out != null) {
+                    toast("Saved \"" + name + "\"");
+                    updateStatus("Saved \"" + name + "\". Improve scan adds a second pass that lines up with this one.");
+                    improveButton.setVisibility(View.VISIBLE);
+                } else updateStatus("Save failed: " + err);
+            })));
+        });
+    }
+
+    private void improveScan() {
+        File dir = renderer.currentDir;
+        if (dir == null) { toast("Save the scan first."); return; }
+        glView.queueEvent(() -> {
+            renderer.startImprove(dir);
+            String hint = renderer.improveHint();
+            runOnUiThread(() -> { scanUi(); updateStatus(hint); resumeSession(); });
+        });
     }
 
     private int dp(int v) {
@@ -460,14 +680,14 @@ public class MainActivity extends Activity {
             }
         }
         renderer.sensors.start(this);
-        if (!renderer.isViewing()) resumeSession();
+        if (!renderer.isViewing() && !homeShown()) resumeSession();
         glView.onResume();
     }
 
     /** Called from the GL thread when tracking is stuck: pause and resume the AR session. */
     void restartSession() {
         runOnUiThread(() -> {
-            if (session == null || renderer.isViewing()) return;
+            if (session == null || renderer.isViewing() || homeShown()) return;
             session.pause();
             resumeSession();
         });

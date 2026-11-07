@@ -18,6 +18,7 @@ import com.google.ar.core.Session;
 import com.google.ar.core.TrackingState;
 import com.google.ar.core.exceptions.NotYetAvailableException;
 
+import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -281,6 +282,291 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
                     + (System.currentTimeMillis() - t0) + " ms");
         } catch (Throwable e) { logError("splats", new RuntimeException(e)); } }).start();
+    }
+
+    // ---- saved scans (see ScanStore) ----
+    volatile boolean idle = true;            // home screen: draw nothing, no AR
+    private volatile Runnable pendingSave;   // runs at the end of the next viewer frame (so the thumbnail is the current view)
+    File currentDir;                         // the saved scan being shown (null = not saved yet)
+    String currentName;
+    private File improveDir;                 // improving this saved scan with a second pass
+    private String improveName;
+    private java.util.List<float[]> improveCorners = new java.util.ArrayList<>();
+    private float[] improveBase;             // its points (sub-sampled), to check which corners match
+    private int improveBaseN;
+    private volatile float[] improveT;       // new scan -> saved scan: {cos, sin, tx, ty, tz}
+
+    interface SaveDone { void done(File dir, String error); }
+
+    /** GL thread: save the scan under this name (into dir, or a new folder). The thumbnail is the view on screen. */
+    void requestSave(String name, File dir, SaveDone done) {
+        pendingSave = () -> {
+            try {
+                ScanStore.Data d = new ScanStore.Data();
+                d.name = name;
+                // thumbnail: the frame just drawn
+                java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
+                GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+                px.position(0);
+                android.graphics.Bitmap full = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888);
+                full.copyPixelsFromBuffer(px);
+                android.graphics.Matrix flip = new android.graphics.Matrix();
+                float sc = 360f / width;
+                flip.postScale(sc, -sc);
+                d.thumb = android.graphics.Bitmap.createBitmap(full, 0, 0, width, height, flip, true);
+                full.recycle();
+                d.n = count; d.pos = new float[count * 3]; d.col = new byte[count * 3];
+                for (int i = 0; i < count; i++) {
+                    d.pos[i * 3] = pos.get(i * 3); d.pos[i * 3 + 1] = pos.get(i * 3 + 1); d.pos[i * 3 + 2] = pos.get(i * 3 + 2);
+                    d.col[i * 3] = col.get(i * 4); d.col[i * 3 + 1] = col.get(i * 4 + 1); d.col[i * 3 + 2] = col.get(i * 4 + 2);
+                }
+                java.util.List<byte[]> jpgs = ScanExport.readKeyframes(photos, width, height);
+                for (int i = 0; i < photos.keyframes.size() && i < jpgs.size(); i++) {
+                    PhotoRoom.Keyframe k = photos.keyframes.get(i);
+                    ScanStore.Kf o = new ScanStore.Kf();
+                    o.jpg = jpgs.get(i);
+                    System.arraycopy(k.view, 0, o.view, 0, 16); System.arraycopy(k.pose, 0, o.pose, 0, 16);
+                    o.fx = k.fx; o.fy = k.fy; o.cx = k.cx; o.cy = k.cy; o.w = k.w; o.h = k.h; o.closeUp = k.closeUp;
+                    o.depth = k.depth; o.dw = k.dw; o.dh = k.dh; o.dfx = k.dfx; o.dfy = k.dfy; o.dcx = k.dcx; o.dcy = k.dcy;
+                    d.kfs.add(o);
+                }
+                d.path = new float[pathCount * 3];
+                for (int i = 0; i < d.path.length; i++) d.path[i] = path.get(i);
+                synchronized (marks) {
+                    for (float[] c : cornerList) d.corners.add(c.clone());
+                    for (float[] w : wallList) d.walls.add(w.clone());
+                    d.floor = markFloor == null ? null : markFloor.clone();
+                    d.ceiling = markCeiling == null ? null : markCeiling.clone();
+                }
+                new Thread(() -> {
+                    try {
+                        File out = ScanStore.save(activity, dir, d);
+                        currentDir = out; currentName = name;
+                        log("saved '" + name + "': " + d.n + " points, " + d.kfs.size() + " photos -> " + out);
+                        done.done(out, null);
+                    } catch (Throwable e) { logError("save", new RuntimeException(e)); done.done(null, String.valueOf(e.getMessage())); }
+                }).start();
+            } catch (Throwable e) { logError("save", new RuntimeException(e)); done.done(null, String.valueOf(e.getMessage())); }
+        };
+    }
+
+    /** GL thread: open a saved scan in the viewer. Photos stream in one by one. */
+    void loadScan(File dir, Runnable done) {
+        reset();
+        improveDir = null; improveT = null;
+        idle = false; viewing = true; sensors.active = false;
+        lastPlanes = new java.util.ArrayList<>();
+        currentDir = dir;
+        activity.updateStatus("Opening the scan...");
+        appendSaved(dir, true, () -> { enterViewer(); if (done != null) done.run(); });
+    }
+
+    /**
+     * Load a saved scan and add it to what is here now (points deduplicated, photos appended, at most 80 photos),
+     * then run then() on the GL thread. replaceMarks: take the saved room marks too.
+     */
+    private void appendSaved(File dir, boolean replaceMarks, Runnable then) {
+        final int gen = surfGen;
+        new Thread(() -> {
+            try {
+                ScanStore.Data d = ScanStore.load(dir);
+                if (currentName == null || replaceMarks) currentName = d.name;
+                glTasks.add(() -> {
+                    if (gen != surfGen) return;
+                    int[] rgb = new int[3];
+                    for (int i = 0; i < d.n && count < MAX_POINTS; i++) {
+                        float x = d.pos[i * 3], y = d.pos[i * 3 + 1], z = d.pos[i * 3 + 2];
+                        long vk = key(x, y, z);
+                        if (voxels.get(vk) >= 0) continue;
+                        rgb[0] = d.col[i * 3] & 255; rgb[1] = d.col[i * 3 + 1] & 255; rgb[2] = d.col[i * 3 + 2] & 255;
+                        voxels.put(vk, count);
+                        addPoint(x, y, z, rgb);
+                        obs[count - 1] = 2;
+                    }
+                    uploaded = 0;
+                    for (int i = 0; i + 2 < d.path.length && pathCount < MAX_PATH; i += 3) {
+                        path.put(pathCount * 3, d.path[i]); path.put(pathCount * 3 + 1, d.path[i + 1]); path.put(pathCount * 3 + 2, d.path[i + 2]); pathCount++;
+                    }
+                    if (replaceMarks) synchronized (marks) {
+                        cornerList.clear(); wallList.clear(); markOrder.clear();
+                        cornerList.addAll(d.corners); wallList.addAll(d.walls);
+                        markFloor = d.floor; markCeiling = d.ceiling;
+                    }
+                });
+                int room = Math.max(0, 80 - photos.keyframes.size());
+                for (int i = 0; i < d.kfs.size() && i < room; i++) {
+                    ScanStore.Kf k = d.kfs.get(i);
+                    android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeByteArray(k.jpg, 0, k.jpg.length);
+                    k.jpg = null;
+                    if (b == null) continue;
+                    final java.util.concurrent.CountDownLatch l = new java.util.concurrent.CountDownLatch(1);
+                    glTasks.add(() -> { try { if (gen == surfGen) photos.addSaved(b, k); } finally { b.recycle(); l.countDown(); } });
+                    l.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                    if (i % 8 == 7) activity.updateStatus("Opening the scan: photo " + (i + 1) + " of " + d.kfs.size());
+                }
+                glTasks.add(() -> { if (gen == surfGen) then.run(); });
+            } catch (Throwable e) {
+                logError("load", new RuntimeException(e));
+                activity.updateStatus("Could not open the scan: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    /** GL thread: a fresh scan (not tied to a save yet). */
+    void startNewScan() {
+        reset();
+        improveDir = null; improveT = null; currentDir = null; currentName = null;
+        idle = false;
+    }
+
+    /** GL thread: back to the home screen. */
+    void goHome() {
+        training = false; depthRunning = false;
+        idle = true;
+    }
+
+    /** GL thread: start a second pass over a saved scan. The new scan lines up once two of its corners are tapped. */
+    void startImprove(File dir) {
+        String keepName = currentName;
+        reset();
+        idle = false;
+        currentName = keepName;
+        improveDir = dir; improveT = null;
+        improveCorners = ScanStore.loadCorners(dir);
+        improveName = currentName;
+        currentDir = dir;
+        improveBase = null; improveBaseN = 0;
+        new Thread(() -> {
+            try {
+                ScanStore.Data d = ScanStore.load(dir);
+                improveName = d.name;
+                int step = Math.max(1, d.n / 150000), k = 0;
+                float[] b = new float[(d.n / step + 1) * 3];
+                for (int i = 0; i < d.n; i += step) { b[k * 3] = d.pos[i * 3]; b[k * 3 + 1] = d.pos[i * 3 + 1]; b[k * 3 + 2] = d.pos[i * 3 + 2]; k++; }
+                improveBase = b; improveBaseN = k;
+            } catch (Throwable e) { logError("improve load", new RuntimeException(e)); }
+        }).start();
+        log("improving " + dir + " (" + improveCorners.size() + " saved corners)");
+    }
+
+    String improveHint() {
+        if (improveDir == null) return null;
+        if (improveCorners.size() < 2) return "This saved scan has no room corners marked, so the two scans can't be lined up. Scan normally; it will be kept as a new scan.";
+        return "Improving \"" + (improveName == null ? "scan" : improveName) + "\": tap two of the room's corners (Room corner) to line this scan up with the saved one, then scan the parts you want sharper.";
+    }
+
+    /** GL thread (from a corner tap): find which saved corners the two newest taps are, and the transform. */
+    private void lineUpWithSaved() {
+        java.util.List<float[]> nc;
+        synchronized (marks) { nc = new java.util.ArrayList<>(cornerList); }
+        if (improveCorners.size() < 2 || nc.size() < 2) return;
+        float[] a = nc.get(nc.size() - 2), b = nc.get(nc.size() - 1);
+        float ln = (float) Math.hypot(b[0] - a[0], b[2] - a[2]);
+        if (ln < 0.3f) return;
+        // new points at mid height, for scoring each guess against the saved points
+        int n = count, step = Math.max(1, n / 30000);
+        float fy = floorGuess();
+        java.util.ArrayList<float[]> probe = new java.util.ArrayList<>();
+        for (int i = 0; i < n; i += step) { float y = pos.get(i * 3 + 1); if (y > fy + 0.3f && y < fy + 1.9f) probe.add(new float[]{pos.get(i * 3), y, pos.get(i * 3 + 2)}); }
+        java.util.HashSet<Long> occ = new java.util.HashSet<>();
+        float baseFloor = improveCorners.get(0)[1];
+        if (improveBase != null) for (int i = 0; i < improveBaseN; i++) {
+            float y = improveBase[i * 3 + 1];
+            if (y > baseFloor + 0.3f && y < baseFloor + 1.9f) occ.add(cell(improveBase[i * 3], improveBase[i * 3 + 2]));
+        }
+        float[] best = null; float bestScore = -1; int bi = -1, bj = -1;
+        int m = improveCorners.size();
+        for (int i = 0; i < m; i++) for (int j = 0; j < m; j++) {
+            if (i == j) continue;
+            float[] p = improveCorners.get(i), q = improveCorners.get(j);
+            float lb = (float) Math.hypot(q[0] - p[0], q[2] - p[2]);
+            if (Math.abs(lb - ln) > 0.25f * Math.max(lb, ln)) continue;
+            double th = Math.atan2(q[2] - p[2], q[0] - p[0]) - Math.atan2(b[2] - a[2], b[0] - a[0]);
+            float c = (float) Math.cos(th), sn = (float) Math.sin(th);
+            float nmx = (a[0] + b[0]) / 2, nmz = (a[2] + b[2]) / 2, bmx = (p[0] + q[0]) / 2, bmz = (p[2] + q[2]) / 2;
+            float tx = bmx - (c * nmx - sn * nmz), tz = bmz - (sn * nmx + c * nmz), ty = p[1] - a[1];
+            float score = Math.abs(lb - ln) < 0.05f ? 0.01f : 0; // tiny tie-break: lengths that match exactly
+            if (!occ.isEmpty() && !probe.isEmpty()) {
+                int hit = 0;
+                for (float[] v : probe) if (occ.contains(cell(c * v[0] - sn * v[2] + tx, sn * v[0] + c * v[2] + tz))) hit++;
+                score += hit / (float) probe.size();
+            }
+            if (score > bestScore) { bestScore = score; best = new float[]{c, sn, tx, ty, tz}; bi = i; bj = j; }
+        }
+        if (best == null) { activity.toast("Those two corners don't match any wall of the saved room (" + String.format(java.util.Locale.US, "%.2f m", ln) + "). Try two other corners."); return; }
+        improveT = best;
+        log(String.format(java.util.Locale.US, "lined up with saved corners %d-%d, overlap %.0f%%", bi + 1, bj + 1, bestScore * 100));
+        activity.toast(String.format(java.util.Locale.US, "Lined up with the saved room (corners %d and %d, %.0f%% overlap). Its outline is shown in blue.", bi + 1, bj + 1, bestScore * 100));
+    }
+
+    private static long cell(float x, float z) { return ((long) Math.floor(x / 0.1f) + 100000) * 1000003L + ((long) Math.floor(z / 0.1f) + 100000); }
+
+    private static final float[] GHOST_COL = {0.35f, 0.8f, 1f, 0.9f};
+
+    /** Live view while improving: the saved room's corners and walls, moved into this scan's coordinates. */
+    private void drawImproveGhost(float[] m, float fy, float top, float dens) {
+        float[] t = improveT;
+        if (t == null || improveCorners.size() < 2) return;
+        int n = improveCorners.size();
+        float c = t[0], sn = t[1];
+        float[] ring = new float[n * 3], posts = new float[n * 6];
+        for (int i = 0; i < n; i++) {
+            float[] p = improveCorners.get(i);
+            float x = p[0] - t[2], z = p[2] - t[4]; // inverse: R^T (p - t)
+            float nx = c * x + sn * z, nz = -sn * x + c * z;
+            ring[i * 3] = nx; ring[i * 3 + 1] = fy + 0.02f; ring[i * 3 + 2] = nz;
+            posts[i * 6] = nx; posts[i * 6 + 1] = fy; posts[i * 6 + 2] = nz; posts[i * 6 + 3] = nx; posts[i * 6 + 4] = top; posts[i * 6 + 5] = nz;
+        }
+        planDraw(m, ring, n >= 3 ? GLES20.GL_LINE_LOOP : GLES20.GL_LINE_STRIP, GHOST_COL, 1);
+        planDraw(m, posts, GLES20.GL_LINES, GHOST_COL, 1);
+        float[] ceil = ring.clone();
+        for (int i = 0; i < n; i++) ceil[i * 3 + 1] = top;
+        planDraw(m, ceil, n >= 3 ? GLES20.GL_LINE_LOOP : GLES20.GL_LINE_STRIP, GHOST_COL, 1);
+    }
+
+    /** GL thread, end of an improve pass: move this scan into the saved scan's coordinates and merge them. */
+    private void mergeImprove() {
+        float[] t = improveT;
+        File dir = improveDir;
+        improveDir = null;
+        if (t == null) {
+            currentDir = null; currentName = null; // keep it as its own scan
+            activity.toast("Not lined up with the saved scan (no matching corners), so this is kept as a new scan.");
+            enterViewer();
+            return;
+        }
+        float c = t[0], sn = t[1];
+        float[] T = {c, 0, sn, 0, 0, 1, 0, 0, -sn, 0, c, 0, t[2], t[3], t[4], 1};
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            pos.put(i * 3, c * x - sn * z + t[2]); pos.put(i * 3 + 1, y + t[3]); pos.put(i * 3 + 2, sn * x + c * z + t[4]);
+        }
+        for (int i = 0; i < pathCount; i++) {
+            float x = path.get(i * 3), y = path.get(i * 3 + 1), z = path.get(i * 3 + 2);
+            path.put(i * 3, c * x - sn * z + t[2]); path.put(i * 3 + 1, y + t[3]); path.put(i * 3 + 2, sn * x + c * z + t[4]);
+        }
+        for (PhotoRoom.Keyframe k : photos.keyframes) {
+            float[] np = new float[16];
+            Matrix.multiplyMM(np, 0, T, 0, k.pose, 0);
+            System.arraycopy(np, 0, k.pose, 0, 16);
+            Matrix.invertM(k.view, 0, k.pose, 0);
+            k.px = np[12]; k.py = np[13]; k.pz = np[14];
+            k.fwd[0] = -np[8]; k.fwd[1] = -np[9]; k.fwd[2] = -np[10];
+        }
+        // the new scan's surface and cut-outs were in its own coordinates: drop them (Depth AI / Clean up rebuild)
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshTris = 0; meshVerts = 0; cutouts.clear();
+        lastPlanes = new java.util.ArrayList<>(); // ARCore planes were in the new scan's coordinates
+        rebuildVoxelIndex();
+        uploaded = 0;
+        final int added = count;
+        log("improve: merging " + count + " new points into " + dir);
+        activity.updateStatus("Merging with the saved scan...");
+        currentDir = dir;
+        appendSaved(dir, true, () -> {
+            enterViewer();
+            activity.updateStatus(String.format(java.util.Locale.US, "Merged: %,d points from this pass + the saved scan = %,d points, %d photos. Run Depth AI and Clean up, then Save.\n%s",
+                    added, count, photos.keyframes.size(), roomReady ? room.summary : ""));
+        });
     }
 
     // ---- Depth AI: Depth Anything V2 on every keyframe photo, scaled by ARCore's points (see DepthNet) ----
@@ -700,6 +986,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
         } catch (Throwable e) { logError("surface", new RuntimeException(e)); }
         lastPlanes = planes;
+        if (improveDir != null) { mergeImprove(); return; }
+        enterViewer();
+    }
+
+    /** GL thread: room, splats and camera for the viewer, from whatever is in the scan now. */
+    private void enterViewer() {
+        viewing = true;
         buildSurfels();
         analyseRoom();
         topView = false;
@@ -916,6 +1209,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     } else activity.toast("Corner 1. Now the next corner along the wall.");
                     log(String.format(java.util.Locale.US, "corner %d at (%.2f, %.2f)", n, h[0], h[2]));
                     markOrder.add(1);
+                    if (improveDir != null && n >= 2) lineUpWithSaved();
                     break;
                 }
                 case 2:
@@ -994,6 +1288,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (cornerList.size() > 0 && cornerList.size() < 3) { poly = new java.util.ArrayList<>(); for (float[] c : cornerList) poly.add(new float[]{c[0], c[2]}); }
         }
         if (!live && roomReady && room.fromCorners) poly = null; // the finished room already shows them
+        if (live) drawImproveGhost(m, fy, top, dens);
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
@@ -2028,6 +2323,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     @Override
     public void onDrawFrame(GL10 gl) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
+        if (idle) { for (Runnable r; (r = glTasks.poll()) != null; ) r.run(); return; }
         if (viewing) { drawViewer(); return; }
         if (session == null) return;
         if (!displaySet) { session.setDisplayGeometry(displayRotation(), width, height); displaySet = true; }
@@ -2868,6 +3164,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         drawPath(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);
         if (plan != null) drawPlan(mvp, plan);
+        if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
     }
 
     private FloatBuffer scratch = ByteBuffer.allocateDirect(4096 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
