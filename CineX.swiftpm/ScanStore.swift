@@ -20,6 +20,8 @@ struct SavedScan: Identifiable, Hashable {
     var pointsURL: URL { base.appendingPathComponent(name + ".points.bin") }
     var keyframesURL: URL { base.appendingPathComponent(name + ".keyframes", isDirectory: true) }
     var thumbnailURL: URL { base.appendingPathComponent(name + ".thumb.jpg") }
+    /// Splats built from the points (a cache: rebuilt from points.bin if missing).
+    var surfelsURL: URL { base.appendingPathComponent(name + ".surfels.bin") }
 }
 
 /// One entry of `frames.json`. `pose` is the camera-to-world transform, 16 floats in column-major order.
@@ -87,7 +89,7 @@ enum ScanStore {
     }
 
     static func delete(_ scan: SavedScan) {
-        for url in [scan.modelURL, scan.dataURL, scan.pointsURL, scan.keyframesURL, scan.thumbnailURL] {
+        for url in [scan.modelURL, scan.dataURL, scan.pointsURL, scan.keyframesURL, scan.thumbnailURL, scan.surfelsURL] {
             try? FileManager.default.removeItem(at: url)
         }
     }
@@ -111,6 +113,20 @@ enum ScanStore {
             return (0..<count).map { raw.loadUnaligned(fromByteOffset: 8 + $0 * MemoryLayout<SavedPoint>.stride,
                                                        as: SavedPoint.self) }
         }
+    }
+
+    /// The scan's splats: from the cache, or built from the points, snapped to the room and cached.
+    static func loadSurfels(_ scan: SavedScan, room: CapturedRoom) -> [SurfelRecord]? {
+        if let cached = Surfels.read(from: scan.surfelsURL) { return cached }
+        let points = loadPoints(scan)
+        guard !points.isEmpty else { return nil }
+        let start = Date()
+        var (surfels, stats) = Surfels.build(points)
+        let snapped = Surfels.snap(&surfels, to: RoomShell(room: room))
+        print("splats: \(surfels.count) from \(points.count) points (\(stats.flat) flat, \(stats.curved) curved, "
+              + "\(stats.lonely) lonely, \(snapped) on walls/floor) in \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+        Surfels.write(surfels, to: scan.surfelsURL)
+        return surfels
     }
 
     /// Point and photo counts without loading everything, for summaries.
