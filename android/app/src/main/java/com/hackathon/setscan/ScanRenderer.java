@@ -3440,6 +3440,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
             // Record the raw frame for export (replaying the scan off the phone).
+            if (recs.size() >= ScanExport.MAX_RECS && depthFrames % 2 == 0) ScanExport.thinRecs(recs);
             if (recs.size() < ScanExport.MAX_RECS) {
                 ScanExport.Rec r = new ScanExport.Rec();
                 r.ts = depth.getTimestamp(); r.w = dw; r.h = dh; r.fx = fx; r.fy = fy; r.cx = cx; r.cy = cy;
