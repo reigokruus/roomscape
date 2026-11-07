@@ -26,6 +26,8 @@ struct KeyframeRecord: Codable {
     var fx: Float, fy: Float, cx: Float, cy: Float
     /// Camera-to-world transform, 16 floats, column-major.
     var cameraToWorld: [Float]
+    /// Missing in scans saved before 7 Nov 2026 13:30.
+    var exposure: PhotoExposure?
 }
 
 enum CaptureStore {
@@ -45,7 +47,8 @@ enum CaptureStore {
             records.append(KeyframeRecord(
                 file: file, timestamp: keyframe.timestamp, width: keyframe.width, height: keyframe.height,
                 fx: keyframe.fx, fy: keyframe.fy, cx: keyframe.cx, cy: keyframe.cy,
-                cameraToWorld: [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }))
+                cameraToWorld: [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] },
+                exposure: keyframe.exposure))
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

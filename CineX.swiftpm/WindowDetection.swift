@@ -7,7 +7,7 @@ import simd
 /// Runs `WindowFinder` on a saved scan and caches the result in `<scan>.capture/windows.json`.
 enum WindowDetection {
     /// Bump when the finder's rules change, so cached results are recomputed.
-    static let version = 2
+    static let version = 3
 
     private struct Cache: Codable {
         var version: Int
