@@ -30,6 +30,7 @@ public class MainActivity extends Activity {
     private GLSurfaceView glView;
     private ScanRenderer renderer;
     private NativePlanningUi nativePlanning;
+    private PilotIntakeUi pilotIntake;
     private Button catalogButton, scannedItemsButton, previewButton;
     private Session session;
     private boolean installRequested;
@@ -208,6 +209,7 @@ public class MainActivity extends Activity {
         renderer = new ScanRenderer(this);
         glView.setRenderer(renderer);
         nativePlanning = new NativePlanningUi(this, glView, renderer);
+        pilotIntake = new PilotIntakeUi(this);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
         root.addView(glView);
 
@@ -768,6 +770,7 @@ public class MainActivity extends Activity {
         newScan.setOnClickListener(v -> startNewScan());
         col.addView(newScan, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)));
         Button browseCatalog = new Button(this); browseCatalog.setText("Browse item catalog (offline)"); browseCatalog.setOnClickListener(v -> nativePlanning.showCatalog()); col.addView(browseCatalog);
+        Button pilot = new Button(this); pilot.setText("Interested in a paid pilot? (optional)"); pilot.setAllCaps(false); pilot.setOnClickListener(v -> pilotIntake.open()); col.addView(pilot);
         TextView saved = new TextView(this);
         saved.setText("Saved scans");
         saved.setTextColor(Color.WHITE);
@@ -1315,6 +1318,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (nativePlanning != null) nativePlanning.close();
+        if (pilotIntake != null) pilotIntake.close();
         if (session != null) { session.close(); session = null; }
         super.onDestroy();
     }
@@ -1323,6 +1327,7 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if(requestCode == NativePlanningUi.IMPORT_CATALOG && resultCode == RESULT_OK && data != null && data.getData() != null) nativePlanning.importUri(data.getData());
+        if(requestCode == PilotIntakeUi.EXPORT_PILOT) pilotIntake.exportResult(resultCode == RESULT_OK, data == null ? null : data.getData());
     }
 
     @Override
