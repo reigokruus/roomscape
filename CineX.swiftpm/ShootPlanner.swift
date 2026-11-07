@@ -52,8 +52,9 @@ struct ShootPlan {
 // MARK: - Engine
 
 enum ShootPlanner {
-    static func plan(scene: SceneType, room: CapturedRoom, gear: [GearItem]) -> ShootPlan {
-        let r = RoomFacts(room)
+    /// - Parameter extraWindowAreas: areas (m²) of windows found from the scan's photos that RoomPlan missed.
+    static func plan(scene: SceneType, room: CapturedRoom, gear: [GearItem], extraWindowAreas: [Float] = []) -> ShootPlan {
+        let r = RoomFacts(room, extraWindowAreas: extraWindowAreas)
         let g = GearFacts(gear)
         switch scene {
         case .talkingHead: return talkingHead(r, g)
@@ -75,10 +76,11 @@ private struct RoomFacts {
     let hasChair: Bool
     let hasSofa: Bool
 
-    init(_ room: CapturedRoom) {
-        windowCount = room.windows.count
-        hasWindows  = !room.windows.isEmpty
-        largestWindowArea = room.windows.map { $0.dimensions.x * $0.dimensions.y }.max() ?? 0
+    init(_ room: CapturedRoom, extraWindowAreas: [Float] = []) {
+        let areas = room.windows.map { $0.dimensions.x * $0.dimensions.y } + extraWindowAreas
+        windowCount = areas.count
+        hasWindows  = !areas.isEmpty
+        largestWindowArea = areas.max() ?? 0
 
         let cats = Set(room.objects.map { $0.category })
         // RoomPlan reports desks and counters as tables. Storage counts too when its top is at table height
