@@ -2093,7 +2093,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Every 2 s, estimate the room from a snapshot of the points on a background thread. */
     private void maybeStartLiveRoom(long nowMs) {
-        if (liveBusy || nowMs - liveLastMs < 2000 || count < 3000) return;
+        if (liveBusy || nowMs - liveLastMs < 5000 || count < 3000) return; // copies every point: not too often while scanning
         liveLastMs = nowMs; liveBusy = true;
         final int n = count;
         final FloatBuffer p = FloatBuffer.allocate(n * 3);
@@ -3141,7 +3141,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             camera.getProjectionMatrix(proj, 0, 0.05f, 100f);
             camera.getViewMatrix(view, 0);
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
-            uploadNew();
+            if (!LIVE_MESH) uploadNew(); // the points aren't drawn while scanning with the mesh: upload them for the viewer only
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
             if (LIVE_MESH) { maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); }
@@ -3618,7 +3618,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** Live disc colour code: how many times a spot has been seen, stored in the point colour's alpha (1 = once, 255 = solid). */
-    static final int SOLID_SEEN = 12;
+    static final int SOLID_SEEN = 5; // depth frames until a spot is solid (S24 depth runs ~1.6/s: 12 meant ~8 s standing still)
     private static int seenAlpha(int n) { return Math.min(255, Math.max(1, n * 255 / SOLID_SEEN)); }
     private final int[] seenStamp = new int[MAX_POINTS];
     private final byte[] thru = new byte[MAX_POINTS]; // depth frames that saw clearly past this point
@@ -3683,7 +3683,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             int t = Math.min(255, (thru[i] & 0xFF) + 1);
             thru[i] = (byte) t;
             int seen = Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f));
-            if (t >= 4 && t >= seen) {
+            if (t >= 4 && t >= (seen >= SOLID_SEEN ? 10 : seen)) { // solid surfaces need more evidence to be erased
                 obs[i] = 0; thru[i] = 0;
                 col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done
                 removed++;
@@ -4198,7 +4198,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
-        tooFast = moveSpeed > (tooFast ? 0.25f : 0.35f);
+        tooFast = moveSpeed > (tooFast ? 0.45f : 0.6f); // a slow walk (~0.4 m/s) is fine
         tooFar = farShare > (tooFar ? 0.45f : 0.6f);
         if (ts != TrackingState.TRACKING) {
             level = 2;
