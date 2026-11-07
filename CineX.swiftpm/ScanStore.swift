@@ -67,6 +67,34 @@ enum ScanStore {
         return try? JSONDecoder().decode(CapturedRoom.self, from: data)
     }
 
+    // MARK: Splats
+
+    /// The capture's points (`points.bin`, see `CaptureMeta`), or empty for scans saved without them.
+    static func loadPoints(_ scan: SavedScan) -> [LivePoint] {
+        let url = scan.captureURL.appendingPathComponent("points.bin")
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return [] }
+        let stride = MemoryLayout<LivePoint>.stride
+        return data.withUnsafeBytes { raw in
+            (0..<(raw.count / stride)).map { raw.loadUnaligned(fromByteOffset: $0 * stride, as: LivePoint.self) }
+        }
+    }
+
+    /// The scan's splats: from `surfels.bin` in the capture folder, or built from the points, snapped to RoomPlan's
+    /// walls and floor, and cached there. Slow the first time (about a second): call off the main thread.
+    static func loadSurfels(_ scan: SavedScan, room: CapturedRoom) -> [SurfelRecord]? {
+        let cache = scan.captureURL.appendingPathComponent("surfels.bin")
+        if let cached = Surfels.read(from: cache) { return cached }
+        let points = loadPoints(scan)
+        guard !points.isEmpty else { return nil }
+        let start = Date()
+        var (surfels, stats) = Surfels.build(points)
+        let snapped = Surfels.snap(&surfels, to: RoomShell(room: room))
+        print("splats: \(surfels.count) from \(points.count) points (\(stats.flat) flat, \(stats.curved) curved, "
+              + "\(stats.lonely) lonely, \(snapped) on walls/floor) in \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+        Surfels.write(surfels, to: cache)
+        return surfels
+    }
+
     static func delete(_ scan: SavedScan) {
         try? FileManager.default.removeItem(at: scan.modelURL)
         try? FileManager.default.removeItem(at: scan.dataURL)

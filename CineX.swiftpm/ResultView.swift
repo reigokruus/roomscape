@@ -3,18 +3,25 @@ import SceneKit
 import RoomPlan
 import simd
 
-/// Shows a saved scan as a 3D model with a summary of what RoomPlan found.
+/// Shows a saved scan: as splats (the captured points as discs on their surfaces, inside RoomPlan's walls and floor)
+/// when the scan has points, or as RoomPlan's own 3D model. Below it, a summary of what RoomPlan found.
 struct ResultView: View {
+    enum Style: Hashable { case splats, model }
+
     let scan: SavedScan
     @State private var scene: SCNScene?
     @State private var room: CapturedRoom?
     @State private var capture: CaptureMeta?
     @State private var topView = false
     @State private var loadError: String?
+    @State private var style: Style = .model
+    @State private var modelGroup: SCNNode?
+    @State private var splatGroup: SCNNode?
+    @State private var buildingSplats = false
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack(alignment: .topTrailing) {
+            ZStack(alignment: .top) {
                 if let scene {
                     RoomSceneView(scene: scene, topView: topView)
                 } else if let loadError {
@@ -22,12 +29,28 @@ struct ResultView: View {
                 } else {
                     ProgressView()
                 }
-                Picker("View", selection: $topView) {
-                    Text("3D").tag(false)
-                    Text("Top").tag(true)
+                HStack {
+                    if splatGroup != nil {
+                        Picker("Style", selection: $style) {
+                            Text("Splats").tag(Style.splats)
+                            Text("Model").tag(Style.model)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 160)
+                    } else if buildingSplats {
+                        Label("Building splats…", systemImage: "circle.dotted")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.regularMaterial, in: Capsule())
+                    }
+                    Spacer()
+                    Picker("View", selection: $topView) {
+                        Text("3D").tag(false)
+                        Text("Top").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 120)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 140)
                 .padding(10)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -57,24 +80,53 @@ struct ResultView: View {
             }
             ShareLink(item: scan.modelURL)
         }
+        .onChange(of: style) { _, newStyle in
+            modelGroup?.isHidden = newStyle == .splats
+            splatGroup?.isHidden = newStyle == .model
+        }
         .task {
             // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
             let scan = scan
             capture = await Task.detached(priority: .utility) { CaptureStore.loadMeta(scan.captureURL) }.value
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<SCNScene, Error>) in
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<(SCNScene, SCNNode), Error>) in
                 let room = ScanStore.loadRoom(scan)
-                let result = Result { () throws -> SCNScene in
+                let result = Result { () throws -> (SCNScene, SCNNode) in
                     let s = try SCNScene(url: scan.modelURL, options: nil)
                     ResultView.colorize(s.rootNode)
-                    return s
+                    // Gather the model under one node so the splat view can hide it.
+                    let group = SCNNode()
+                    for child in s.rootNode.childNodes { group.addChildNode(child) }
+                    s.rootNode.addChildNode(group)
+                    return (s, group)
                 }
                 return (room, result)
             }.value
             room = loaded.0
             switch loaded.1 {
-            case .success(let s): scene = s
-            case .failure(let error): loadError = "Could not open the 3D model: \(error.localizedDescription)"
+            case .success(let (s, group)):
+                scene = s
+                modelGroup = group
+            case .failure(let error):
+                loadError = "Could not open the 3D model: \(error.localizedDescription)"
             }
+
+            // Splats, when the scan has points: built in the background (cached after the first time), then shown
+            // instead of RoomPlan's boxes. The Splats / Model switch flips between the two.
+            guard let room = loaded.0, let scene, (capture?.pointCount ?? 0) > 0 else { return }
+            buildingSplats = true
+            let splats = await Task.detached(priority: .userInitiated) { () -> SCNNode? in
+                guard let surfels = ScanStore.loadSurfels(scan, room: room), !surfels.isEmpty else { return nil }
+                let node = SCNNode()
+                node.addChildNode(SplatScene.shellNode(RoomShell(room: room)))
+                node.addChildNode(SplatScene.splatNode(surfels))
+                return node
+            }.value
+            buildingSplats = false
+            guard let splats else { return }
+            splats.isHidden = true
+            scene.rootNode.addChildNode(splats)
+            splatGroup = splats
+            style = .splats
         }
     }
 
