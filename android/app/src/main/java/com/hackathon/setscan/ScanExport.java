@@ -64,13 +64,20 @@ final class ScanExport {
         void clear() { n = 0; }
     }
 
-    static final int MAX_RECS = 1500;
+    static final int MAX_RECS = 600; // ~60 KB each, kept in memory: when full, every other one is dropped (see thinRecs)
     static final int MAX_EXPORT_FRAMES = 300;
 
     /**
      * Keep only depth frames that add a new viewpoint (moved 8 cm or turned 6° from every kept one), so a long scan
      * of the same spot doesn't bloat the file; then thin evenly to MAX_EXPORT_FRAMES if it's still too many.
      */
+    /** The recording is full: drop every other frame so a long scan keeps an even spread in the same memory. */
+    static void thinRecs(List<Rec> recs) {
+        int k = 0;
+        for (int i = 0; i < recs.size(); i += 2) recs.set(k++, recs.get(i));
+        while (recs.size() > k) recs.remove(recs.size() - 1);
+    }
+
     static List<Rec> novelFrames(List<Rec> recs) {
         List<Rec> kept = new ArrayList<>();
         for (Rec r : recs) {
@@ -199,13 +206,17 @@ final class ScanExport {
 
             String hdr = "ply\nformat binary_little_endian 1.0\nelement vertex " + count
                     + "\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n";
-            ByteBuffer ply = ByteBuffer.allocate(hdr.length() + count * 15).order(ByteOrder.LITTLE_ENDIAN);
-            ply.put(hdr.getBytes("US-ASCII"));
+            // written in slices: one array for 2 million points (30 MB) ran out of memory (rk, 7 Nov)
+            z.putNextEntry(new ZipEntry("points.ply"));
+            z.write(hdr.getBytes("US-ASCII"));
+            ByteBuffer ply = ByteBuffer.allocate(65536 * 15).order(ByteOrder.LITTLE_ENDIAN);
             for (int i = 0; i < count; i++) {
                 ply.putFloat(pos.get(i * 3)).putFloat(pos.get(i * 3 + 1)).putFloat(pos.get(i * 3 + 2));
                 ply.put(col.get(i * 4)).put(col.get(i * 4 + 1)).put(col.get(i * 4 + 2));
+                if (!ply.hasRemaining()) { z.write(ply.array(), 0, ply.position()); ply.clear(); }
             }
-            put(z, "points.ply", ply.array());
+            z.write(ply.array(), 0, ply.position());
+            z.closeEntry();
             if (planningJson != null) put(z, "planning.json", planningJson.getBytes("UTF-8"));
             if (sensors != null) put(z, "sensors.bin", sensors.toBytes());
             if (claudeJson != null) put(z, "claude_objects.json", claudeJson.getBytes("UTF-8"));
