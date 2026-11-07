@@ -299,7 +299,7 @@ private extension ShootPlanner {
 
     static func lifestyle(_ r: RoomFacts, _ g: GearFacts) -> ShootPlan {
         var tips: [PlacementTip] = []
-        var notes: [String] = []
+        let notes: [String] = []
 
         let cameraInstr = g.hasTripod
             ? "On the tripod, eye level or slightly above. Leave more room in the frame than you think — lifestyle shots breathe better with space."
