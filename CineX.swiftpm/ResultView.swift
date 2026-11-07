@@ -42,6 +42,10 @@ struct ResultView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var finding: String?
     @State private var findError: String?
+    /// The camera's view in the lighting preview: small in the corner, or large.
+    @State private var shotLarge = false
+    @State private var planningShot = false
+    @State private var planError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,6 +58,15 @@ struct ResultView: View {
                     Text(loadError).padding()
                 } else {
                     ProgressView()
+                }
+                if lightingOn, let scene, let lighting {
+                    // Under the controls row, so a large view never covers the buttons.
+                    ShotPreviewInset(scene: scene, setup: lighting, large: $shotLarge)
+                        .padding(.horizontal, shotLarge ? 16 : 10)
+                        .padding(.top, shotLarge ? 64 : 0)
+                        .padding(.bottom, shotLarge ? 16 : 10)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: shotLarge ? .center : .bottomTrailing)
                 }
                 // Must fit a 375-pt-wide phone: compact controls in one row, or two rows if they still don't fit
                 // (large text). A row wider than the screen would also push the panel below off both edges.
@@ -87,7 +100,8 @@ struct ResultView: View {
                              claudeChecked: claudeChecked, finding: finding, error: findError, onFind: findObjects)
                     .frame(maxHeight: 340)
             } else if lightingOn, lighting != nil {
-                LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }))
+                LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }),
+                              planning: planningShot, planError: planError, onPlan: planShot)
                     .frame(maxHeight: 340)
             } else if let room {
                 RoomSummary(room: room, capture: capture, foundWindows: foundWindows, objects: objects)
@@ -493,6 +507,25 @@ struct ResultView: View {
         }
         setup.calibrate(samples)
         if setup != lighting { lighting = setup }
+    }
+
+    /// Asks Claude for a setup for this kind of shot (see `ShotDirector`) and shows it.
+    private func planShot(_ scene: SceneType, wish: String) {
+        guard let setup = lighting, let shell, !planningShot else { return }
+        planningShot = true
+        planError = nil
+        let objects = objects, gear = GearStore.load()
+        Task {
+            do {
+                lighting = try await ShotDirector.propose(scene: scene, note: wish, setup: setup, shell: shell,
+                                                          objects: objects, gear: gear)
+                // The room lights nearest the person's new spot.
+                refreshRoomLight()
+            } catch {
+                planError = error.localizedDescription
+            }
+            planningShot = false
+        }
     }
 
     private func toggleLighting() {

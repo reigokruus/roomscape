@@ -168,6 +168,9 @@ enum LightingShader {
 /// splats and room shell, kept in step with a `LightingSetup`.
 @MainActor
 final class LightingScene {
+    /// Category of the camera marker, so the shot preview's camera (which stands inside it) leaves it out.
+    nonisolated static let cameraMarkerCategory = 2
+
     let root = SCNNode()
     private var splatAndShell: [SCNMaterial] = []
     private var shellMaterials: [SCNMaterial] = []
@@ -266,6 +269,7 @@ final class LightingScene {
         n.addChildNode(stand)
         n.simdPosition = s.cameraPosition
         n.simdLook(at: s.faceCenter)
+        n.enumerateHierarchy { node, _ in node.categoryBitMask = Self.cameraMarkerCategory }
         return n
     }
 

@@ -1,8 +1,16 @@
 import SwiftUI
 
-/// Controls for the lighting preview: the face reading, the subject, the room light and exposure, and each light.
+/// Controls for the lighting preview: the face reading, planning with Claude, the subject and camera, the room light
+/// and exposure, and each light.
 struct LightingPanel: View {
     @Binding var setup: LightingSetup
+    /// Claude is working on a setup (see `ShotDirector`).
+    var planning = false
+    var planError: String?
+    var onPlan: (SceneType, String) -> Void = { _, _ in }
+    @State private var shot: SceneType = .talkingHead
+    @State private var wish = ""
+    @State private var showingKey = false
 
     var body: some View {
         List {
@@ -15,7 +23,19 @@ struct LightingPanel: View {
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("Tap the floor in the 3D view to move the person. The camera (grey box) is 2 m in front of them, and bright lights on their face stop the picture down. Use Exposure to brighten it.")
+                Text("Tap the floor in the 3D view to move the person. The corner view shows what the camera (grey box) sees; tap it to make it bigger. Bright lights on the face stop the picture down; use Exposure to brighten it.")
+            }
+
+            planSection
+
+            if let note = setup.planNote {
+                Section("Claude's plan") {
+                    Text(note)
+                    ForEach(setup.planTips, id: \.self) { tip in
+                        Label(tip, systemImage: "checkmark.circle")
+                            .font(.callout)
+                    }
+                }
             }
 
             Section("Person and camera") {
@@ -24,6 +44,17 @@ struct LightingPanel: View {
                 }
                 .pickerStyle(.segmented)
                 SliderRow(title: "Facing", value: $setup.facing, range: -180...180, step: 5) { "\(Int($0))°" }
+                SliderRow(title: "Camera distance", value: $setup.cameraDistance, range: 0.6...5, step: 0.1) {
+                    String(format: "%.1f m", $0)
+                }
+                Picker("Lens", selection: $setup.focalLength) {
+                    ForEach(LightingSetup.lenses, id: \.self) { Text("\(Int($0)) mm").tag($0) }
+                }
+                Picker("Frame", selection: $setup.vertical) {
+                    Text("Wide 16:9").tag(false)
+                    Text("Upright 9:16").tag(true)
+                }
+                .pickerStyle(.segmented)
                 SliderRow(title: roomLightsTitle, value: $setup.roomDimmer, range: 0...1, step: 0.05) { "\(Int($0 * 100))%" }
                 if setup.roomSources.contains(where: \.isWindow) {
                     SliderRow(title: "Daylight", value: $setup.daylight, range: 0...1, step: 0.05) { "\(Int($0 * 100))%" }
@@ -87,10 +118,43 @@ struct LightingPanel: View {
             }
         }
         .listStyle(.insetGrouped)
+        .sheet(isPresented: $showingKey) { ClaudeKeySheet() }
     }
 }
 
 private extension LightingPanel {
+    var planSection: some View {
+        Section {
+            Picker("Shot", selection: $shot) {
+                ForEach(SceneType.allCases) { Label($0.rawValue, systemImage: $0.icon).tag($0) }
+            }
+            TextField("Mood or wishes (optional), e.g. warm and moody", text: $wish, axis: .vertical)
+                .lineLimit(1...3)
+            if planning {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Claude is planning the shot…").font(.callout)
+                }
+            } else {
+                Button {
+                    if ClaudeKeyStore.key == nil { showingKey = true } else { onPlan(shot, wish) }
+                } label: {
+                    Label(setup.planNote == nil ? "Plan this shot with Claude" : "Plan again with Claude",
+                          systemImage: "sparkles")
+                }
+            }
+            if let planError {
+                Text(planError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Plan with Claude")
+        } footer: {
+            Text("Claude places the person, your lights from My Gear and the camera for this kind of shot, using the scanned room. Everything stays adjustable below.")
+        }
+    }
+
     var roomLightsTitle: String {
         let n = setup.roomSources.filter { !$0.isWindow }.count
         return n == 0 ? "Room lights" : "Room lights (\(n) found)"

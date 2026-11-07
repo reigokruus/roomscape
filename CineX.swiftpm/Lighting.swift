@@ -146,6 +146,17 @@ struct LightingSetup: Equatable {
     var whiteBalance: Float = 5600
     var iso: Float = 800
     var shutter: Float = 1.0 / 50
+    /// The shoot camera: how far in front of the face (metres), its lens (full-frame equivalent focal length, mm)
+    /// and whether the frame is upright (9:16, for phones and reels) or wide (16:9).
+    var cameraDistance: Float = 2
+    var focalLength: Float = 26
+    var vertical = false
+    /// Claude's reasoning and practical tips for the setup it proposed (see `ShotDirector`), or nil.
+    var planNote: String?
+    var planTips: [String] = []
+
+    /// Lenses offered (full-frame equivalent): iPhone ultra wide, main, then common primes.
+    static let lenses: [Float] = [13, 26, 35, 50, 85]
 
     static let maxLights = 4
     static let maxRoomSources = 8
@@ -158,8 +169,11 @@ struct LightingSetup: Equatable {
         return SIMD3(sin(a), 0, cos(a))
     }
 
-    /// The shoot camera: 2 m in front of the face, at face height.
-    var cameraPosition: SIMD3<Float> { faceCenter + facingDirection * 2 }
+    /// The shoot camera: `cameraDistance` in front of the face, at face height.
+    var cameraPosition: SIMD3<Float> { faceCenter + facingDirection * cameraDistance }
+
+    /// The frame's full field of view along its long side, degrees (36 mm full-frame long side).
+    var fieldOfView: Float { 2 * atan(18 / focalLength) * 180 / .pi }
 
     func position(of light: ShotLight) -> SIMD3<Float> {
         let a = (facing + light.angle) * .pi / 180
@@ -347,7 +361,10 @@ struct LightingSetup: Equatable {
                                  angle: s.angle, distance: s.distance, height: face + s.lift)
             }
         }
+        // A phone's main camera unless My Gear lists a proper camera.
+        let cameras = gear.filter { $0.category == .camera }.map { $0.name.lowercased() }
+        let realCamera = cameras.contains { !$0.contains("iphone") && !$0.contains("phone") && !$0.contains("action") }
         return LightingSetup(lights: lights, pose: pose, subjectX: subjectX, subjectZ: subjectZ, facing: facing,
-                             floorY: floorY)
+                             floorY: floorY, focalLength: realCamera ? 35 : 26)
     }
 }
