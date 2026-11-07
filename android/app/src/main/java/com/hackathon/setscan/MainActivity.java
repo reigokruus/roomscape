@@ -626,6 +626,14 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** The renderer saved the scan on its own (after Done, and again after clean-up). */
+    void autoSaved(String name, String err) {
+        runOnUiThread(() -> {
+            if (name == null) { toast("Couldn't save the scan: " + err); return; }
+            if (!scanning) improveButton.setVisibility(View.VISIBLE);
+        });
+    }
+
     void trainingLabel(String l) { runOnUiThread(() -> trainButton.setText(l)); }
 
     // ---------------- home screen and saved scans ----------------
@@ -996,6 +1004,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        renderer.paused = false;
         if (session == null) {
             try {
                 switch (ArCoreApk.getInstance().requestInstall(this, !installRequested)) {
@@ -1044,6 +1053,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        renderer.paused = true;
         glView.onPause();
         if (session != null) session.pause();
         renderer.sensors.stop(this);

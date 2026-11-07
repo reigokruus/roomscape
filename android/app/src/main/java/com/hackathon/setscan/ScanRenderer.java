@@ -903,7 +903,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     final android.graphics.Matrix map = new android.graphics.Matrix();
                     final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                     glTasks.add(() -> { try { img[0] = ObjectNamer.readUpright(k, width, height, map); } catch (Throwable e) { logError("depth read", new RuntimeException(e)); } finally { latch.countDown(); } });
-                    if (!latch.await(5, java.util.concurrent.TimeUnit.SECONDS) || img[0] == null) continue;
+                    boolean got;
+                    while (!(got = latch.await(5, java.util.concurrent.TimeUnit.SECONDS)) && paused && depthRunning) { /* in the background: wait for the app to come back */ }
+                    if (!got || img[0] == null) continue;
                     float[] D = net.run(img[0]);
                     int iw = img[0].getWidth(), ih = img[0].getHeight();
                     int[] pix = new int[iw * ih];
@@ -1082,12 +1084,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** GL thread: run the whole improvement chain on its own, reporting one progress bar. */
     private void startAuto() {
-        if (!AUTO_PROCESS || count == 0) return;
+        if (count == 0) return;
+        autosave(); // right away: Android may close the app in the background, and the scan only lives in memory
+        if (!AUTO_PROCESS) return;
         autoStage = 1;
         autoProgress("Improving depth with AI", 0.02f);
         if (photos.keyframes.isEmpty()) { autoStage = 2; startCleanUp(); return; }
         toggleDepthAI();
         if (!depthRunning) { autoStage = 2; startCleanUp(); }
+    }
+
+    volatile boolean paused;  // the app is in the background: GL work waits
+
+    /** Save without asking (a dated name the first time, then over the same folder). */
+    private void autosave() {
+        String name = currentName != null ? currentName : "Room " + android.text.format.DateFormat.format("d MMM HH:mm", System.currentTimeMillis());
+        requestSave(name, currentDir, (out, err) -> activity.autoSaved(out != null ? name : null, err));
     }
 
     private void autoFailed(String what) {
@@ -1135,7 +1147,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = n; uploaded = 0; refineCursor = 0;
         rebuildVoxelIndex();
         analyseRoom();
-        if (autoStage == 2) { autoStage = 3; autoProgress("Building splats", 0.6f); }
+        if (autoStage == 2) { autoStage = 3; autoProgress("Building splats", 0.6f); autosave(); }
         buildSurfels();
         activity.updateStatus(c.summary + "\nBuilding splats now (a few seconds), then you can Train splats.\n" + (roomReady ? room.summary : ""));
     }
