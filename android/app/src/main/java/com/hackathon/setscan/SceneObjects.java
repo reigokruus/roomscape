@@ -186,8 +186,21 @@ final class SceneObjects {
         }
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         for (Obj o : list) if (o.drawnSeparately() && o.n > 0) drawPoints(mvp, o, pxPerMeter);
-        if (!active && selected < 0) return;
         float dens = height / 1000f;
+        // gear placed from the catalogue has no scanned points: always show it as a see-through box of its real size
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        for (Obj o : list) {
+            if (o.removed || o.n > 0) continue;
+            float[] c = corners(o);
+            tris(mvp, faces(c), GEAR_FILL);
+            GLES20.glLineWidth(3f * dens);
+            lines(mvp, edges(c), GEAR_EDGE);
+        }
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        if (!active && selected < 0) return;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
@@ -199,6 +212,28 @@ final class SceneObjects {
             lines(mvp, edges(corners(o)), s ? SEL : (active ? BOX : FAINT));
         }
         GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    private static final float[] GEAR_FILL = {0.25f, 0.75f, 0.9f, 0.18f}, GEAR_EDGE = {0.35f, 0.85f, 1f, 0.95f};
+
+    private static float[] faces(float[] c) {
+        int[] f = {0, 1, 3, 0, 3, 2, 4, 5, 7, 4, 7, 6, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0, 6, 4, 1, 3, 7, 1, 7, 5};
+        float[] out = new float[f.length * 3];
+        for (int i = 0; i < f.length; i++) { out[i * 3] = c[f[i] * 3]; out[i * 3 + 1] = c[f[i] * 3 + 1]; out[i * 3 + 2] = c[f[i] * 3 + 2]; }
+        return out;
+    }
+
+    private void tris(float[] mvp, float[] v, float[] color) {
+        GLES20.glUseProgram(lineProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(lineProg, "uMvp"), 1, false, mvp, 0);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(lineProg, "uColor"), 1, color, 0);
+        if (v.length > scratch.capacity()) scratch = ByteBuffer.allocateDirect(v.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        scratch.clear(); scratch.put(v).position(0);
+        int aPos = GLES20.glGetAttribLocation(lineProg, "aPos");
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, scratch);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, v.length / 3);
+        GLES20.glDisableVertexAttribArray(aPos);
     }
 
     private static final float[] SEL = {1f, 0.85f, 0.2f, 1f}, BOX = {0.4f, 0.85f, 1f, 0.7f}, FAINT = {0.4f, 0.85f, 1f, 0.25f};

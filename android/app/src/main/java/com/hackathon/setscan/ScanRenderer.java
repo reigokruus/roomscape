@@ -317,14 +317,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void placeCatalog(ItemCatalog.Item item, double[] manual, float bottom) throws Exception {
         requirePlanningScan(); ItemCatalog.require(item.complete() || manual != null, "Size unknown: supply manual dimensions first");
         ItemCatalog.require(Float.isFinite(bottom) && bottom >= 0 && bottom <= 20, "Base height must be 0–20 m");
-        synchronized(lighting) {
-            int n = 0; for(Lighting.Prop p:lighting.props)if(p.catalog!=null)n++;
-            ItemCatalog.require(n < RoomEdits.MAX_PLACED, "At most 100 placed catalog items");
-            lighting.enabled = true;
-            Lighting.Prop p = Lighting.catalogProp(item, manual, bottom, target[0] + (n % 3) * .3f, target[2] + (n / 3 % 3) * .3f);
-            lighting.props.add(p); lighting.floorY = room.floorY; lighting.selected = lighting.lights.size() + lighting.props.size() - 1;
-        }
-        roomEdits.capture(room.boxes); planningPreview = true; savePlanning(); activity.lightingSelected();
+        // rk 7 Nov: placed gear becomes an Objects item (a see-through box of its real size you can drag and turn),
+        // not a solid Lighting prop: the solid box filled the whole screen when the view was near it.
+        double[] size = Lighting.catalogProp(item, manual, bottom, target[0], target[2]).size(); // {w, h, d} in m
+        float fy = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
+        SceneObjects.Obj o = new SceneObjects.Obj();
+        o.name = item.title(); o.hu = (float) size[0] / 2; o.hv = (float) size[2] / 2;
+        o.y0 = fy + bottom; o.y1 = o.y0 + (float) size[1]; o.cx = target[0]; o.cz = target[2];
+        o.fromCatalog = true; o.onFloor = bottom <= 0.01f; o.n = 0; o.pts = new float[0]; o.cols = new byte[0];
+        objects.list.add(o); objects.selected = objects.list.size() - 1; objects.edited = true; objects.active = true;
+        autosave();
     }
     void focusDetected(String id) {
         RoomEdits.Detected d = roomEdits.find(id); if(d == null)return;
@@ -334,7 +336,26 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         planningScanKey = dir.getName();
         try {
             String json = RoomEditStore.read(activity, dir);
-            if(json != null) { roomEdits = RoomEdits.decode(json, lighting); lighting.floorY = room.floorY; planningPreview = roomEdits.captured; if(!lighting.props.isEmpty()) lighting.enabled = true; activity.planningModeChanged(); }
+            if(json != null) { roomEdits = RoomEdits.decode(json, lighting); lighting.floorY = room.floorY; planningPreview = roomEdits.captured;
+                int migrated = 0;
+                // gear placed with the old solid Lighting props becomes see-through Objects boxes (lighting is parked)
+                synchronized (lighting) {
+                    for (java.util.Iterator<Lighting.Prop> itp = lighting.props.iterator(); itp.hasNext(); ) {
+                        Lighting.Prop pr = itp.next();
+                        if (pr.catalog == null) continue;
+                        double[] sz = pr.size();
+                        SceneObjects.Obj o = new SceneObjects.Obj();
+                        o.name = pr.catalog.title(); o.hu = (float) sz[0] / 2; o.hv = (float) sz[2] / 2;
+                        o.y0 = room.floorY + pr.bottom; o.y1 = o.y0 + (float) sz[1]; o.cx = pr.x; o.cz = pr.z;
+                        o.cosA = (float) Math.cos(Math.toRadians(pr.yawDeg)); o.sinA = (float) Math.sin(Math.toRadians(pr.yawDeg));
+                        o.fromCatalog = true; o.n = 0; o.pts = new float[0]; o.cols = new byte[0];
+                        objects.list.add(o); objects.edited = true; migrated++;
+                        itp.remove();
+                    }
+                    lighting.enabled = false;
+                }
+                if (migrated > 0) { try { savePlanning(); } catch (Exception ignored) { } autosave(); }
+                activity.planningModeChanged(); }
         } catch(Exception e) { planningLoadError = e.getMessage(); activity.updateStatus("Planning overlay could not be opened (original scan intact): " + e.getMessage()); }
     }
 
@@ -653,6 +674,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 ScanStore.Data d = new ScanStore.Data();
                 d.name = name;
                 d.lux = roomLux() > 0 ? roomLux() : loadedLux;
+                Surfels ss = surfShown;
+                if (ss != null && ss.trained && ss.n > 0) {
+                    int sn = ss.n; d.splN = sn; d.splPos = new float[sn * 3]; d.splNrm = new float[sn * 4]; d.splCol = new byte[sn * 4];
+                    for (int i = 0; i < sn * 3; i++) d.splPos[i] = ss.pos.get(i);
+                    for (int i = 0; i < sn * 4; i++) { d.splNrm[i] = ss.nrm.get(i); d.splCol[i] = ss.col.get(i); }
+                }
                 try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
@@ -712,7 +739,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         lastPlanes = new java.util.ArrayList<>();
         currentDir = dir;
         activity.updateStatus("Opening the scan...");
-        appendSaved(dir, true, () -> { enterViewer(); loadPlanning(dir); if (done != null) done.run(); });
+        appendSaved(dir, true, () -> {
+            enterViewer();
+            if (loadedSplats != null) { // show the improved model it was saved with, not a fresh rebuild from the raw points
+                surfGen++; surfDone = loadedSplats; surfBase = loadedSplats; surfPending = loadedSplats; loadedSplats = null;
+                log("opened with " + surfDone.n + " trained splats");
+            }
+            loadPlanning(dir); if (done != null) done.run();
+        });
     }
 
     /**
@@ -747,6 +781,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         cornerList.clear(); wallList.clear(); markOrder.clear();
                         cornerList.addAll(d.corners); wallList.addAll(d.walls);
                         markFloor = d.floor; markCeiling = d.ceiling;
+                    }
+                    if (replaceMarks && d.splN > 0) {
+                        Surfels ls = Surfels.empty(d.splN);
+                        ls.pos.put(d.splPos).position(0); ls.raw.put(d.splPos).position(0); ls.nrm.put(d.splNrm).position(0); ls.col.put(d.splCol).position(0);
+                        ls.trained = true; loadedSplats = ls;
                     }
                     if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
@@ -1342,6 +1381,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return out;
     }
 
+    private volatile Surfels surfShown;   // what the viewer shows now (saved with the scan when it's trained)
+    private Surfels loadedSplats;          // trained splats from a saved scan, shown instead of rebuilding
+
     private void uploadSurfels() {
         Surfels s = surfPending;
         if (s == null) return;
@@ -1357,7 +1399,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 4, s.col, GLES20.GL_DYNAMIC_DRAW);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         if (!s.trained) surfShownAt = System.currentTimeMillis();
-        surfCount = s.n; surfTrained = s.trained;
+        surfCount = s.n; surfTrained = s.trained; surfShown = s;
     }
     private long surfShownAt;
 
@@ -2551,7 +2593,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
-        surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; training = false; trainer = null; trainViews = null;
+        surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;

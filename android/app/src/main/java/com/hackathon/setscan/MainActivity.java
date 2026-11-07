@@ -880,6 +880,9 @@ public class MainActivity extends Activity {
     private float objLastX, objLastY, objDownX, objDownY;
     private long objDownT;
 
+    /** A catalogue item was just placed: open the Objects panel on it. */
+    void showPlacedObject() { if (objPanel == null) return; objPanel.setVisibility(View.VISIBLE); if (lightPanel != null) lightPanel.setVisibility(View.GONE); refreshObjPanel(); }
+
     private void setObjectMode(boolean on) {
         objPanel.setVisibility(on ? View.VISIBLE : View.GONE);
         if (on && lightPanel != null) lightPanel.setVisibility(View.GONE);

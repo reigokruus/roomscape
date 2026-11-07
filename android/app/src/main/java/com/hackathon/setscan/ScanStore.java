@@ -43,6 +43,7 @@ final class ScanStore {
         float[] path = new float[0];
         List<float[]> corners = new ArrayList<>(), walls = new ArrayList<>();
         float[] floor, ceiling;
+        float[] splPos, splNrm; byte[] splCol; int splN; // the trained splats as last shown (so reopening shows the improved model)
         String objects; // SceneObjects edits as a JSON array, or null
         float lux; // room light measured from the camera's exposure, 0 = unknown
         Bitmap thumb;
@@ -105,6 +106,12 @@ final class ScanStore {
                 try (FileOutputStream f = new FileOutputStream(new File(tmp, String.format(java.util.Locale.US, "kf/%03d.jpg", i)))) { f.write(k.jpg); }
             }
         }
+        if (d.splN > 0) try (DataOutputStream o = out(new File(tmp, "splats.bin"))) {
+            o.writeInt(d.splN);
+            for (int i = 0; i < d.splN * 3; i++) o.writeFloat(d.splPos[i]);
+            for (int i = 0; i < d.splN * 4; i++) o.writeFloat(d.splNrm[i]);
+            o.write(d.splCol, 0, d.splN * 4);
+        }
         try (DataOutputStream o = out(new File(tmp, "path.bin"))) {
             o.writeInt(d.path.length);
             for (float v : d.path) o.writeFloat(v);
@@ -165,6 +172,14 @@ final class ScanStore {
         }
         File pf = new File(dir, "path.bin");
         if (pf.exists()) try (DataInputStream in = in(pf)) { int n = in.readInt(); d.path = new float[n]; for (int i = 0; i < n; i++) d.path[i] = in.readFloat(); }
+        File sf = new File(dir, "splats.bin");
+        if (sf.exists()) try (DataInputStream in = in(sf)) {
+            int n = in.readInt(); float[] p = new float[n * 3], q = new float[n * 4]; byte[] c = new byte[n * 4];
+            for (int i = 0; i < n * 3; i++) p[i] = in.readFloat();
+            for (int i = 0; i < n * 4; i++) q[i] = in.readFloat();
+            in.readFully(c);
+            d.splPos = p; d.splNrm = q; d.splCol = c; d.splN = n;
+        } catch (Exception ignored) { d.splN = 0; } // an unreadable splat file just means the splats get rebuilt
         return d;
     }
 
