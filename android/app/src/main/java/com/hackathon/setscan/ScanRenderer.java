@@ -1033,7 +1033,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int c = (Y / 8) * cw + X / 8;
                         if (cd[c] == 0 || d < cd[c]) { cd[c] = d; cuu[c] = (float) X / iw - 0.5f; cvv[c] = (float) Y / ih - 0.5f; cr[c] = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))]; }
                     }
+                    float cdMax = 0; for (float q : cd) cdMax = Math.max(cdMax, q);
                     float[] ab = fitInverseDepth(cd, cr, cuu, cvv);
+                    if (ab != null) lastAb = ab;
+                    else if (DEMO_FAR && lastAb != null) { ab = lastAb; log("depth AI: photo " + ki + " looks out past what the phone measured, using the last photo's scale"); }
                     if (ab == null) { log("depth AI: photo " + ki + " skipped (too few ARCore points to scale it)"); continue; }
                     errSum += ab[4]; done++;
                     // 2) back-project a 192x108 grid of the photo with the fitted depth
@@ -1045,8 +1048,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int X = Math.min(iw - 1, Math.max(0, (int) pt[0])), Y = Math.min(ih - 1, Math.max(0, (int) pt[1]));
                         float r = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))];
                         float inv = ab[0] * r + ab[1] + ab[2] * ((float) X / iw - 0.5f) + ab[3] * ((float) Y / ih - 0.5f);
-                        float dd = inv > 0.15f ? 1f / inv : 0;
-                        gd[gv * GU + gu] = dd > 0 && fillsGap(cd, cw, chh, X / 8, Y / 8, dd) ? dd : 0;
+                        float dd = inv > (DEMO_FAR ? 1f / FAR_MAX : 0.15f) ? 1f / inv : 0;
+                        gd[gv * GU + gu] = dd > 0 && (fillsGap(cd, cw, chh, X / 8, Y / 8, dd) || (DEMO_FAR && farGap(cd, cw, chh, X / 8, Y / 8, dd, cdMax))) ? dd : 0;
                         gc[gv * GU + gu] = pix[Y * iw + X];
                     }
                     final float[] P = new float[GU * GV * 3]; final byte[] C = new byte[GU * GV * 3];
@@ -1055,7 +1058,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     for (int gv = 1; gv < GV - 1; gv++) for (int gu = 1; gu < GU - 1; gu++) {
                         int g = gv * GU + gu;
                         float d = gd[g];
-                        if (d <= 0.2f || d > 6f) continue;
+                        if (d <= 0.2f || d > (DEMO_FAR ? FAR_MAX : 6f)) continue;
                         // flying pixels at depth edges: drop where the neighbours disagree by more than 4 %
                         float mx = Math.max(Math.max(Math.abs(gd[g - 1] - d), Math.abs(gd[g + 1] - d)), Math.max(Math.abs(gd[g - GU] - d), Math.abs(gd[g + GU] - d)));
                         if (mx > 0.04f * d) continue;
@@ -1102,6 +1105,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * 2 cells agrees with the AI depth (6 % + 3 cm) and none disagrees. Everywhere else ARCore's measurement wins.
      * Before this, AI points were added on top of measured surfaces and stacked them into layers (scan1150 pillar).
      */
+    /**
+     * DEMO (rk, auditorium from the podium): beyond what the phone measured, keep the AI's guess out to FAR_MAX.
+     * Only where nothing nearby was measured and it is further than anything measured in this photo. Scale is
+     * extrapolated from the near points, so far walls are an estimate (maybe 10-20 % off at 20 m), not a measurement.
+     */
+    static final boolean DEMO_FAR = true;
+    private static float[] lastAb; // scale of the last photo that had enough measured points
+    static final float FAR_MAX = 30f;
+    static boolean farGap(float[] cd, int cw, int ch, int cx, int cy, float d, float cdMax) {
+        if (d <= Math.max(3.5f, cdMax * 1.1f) || d > FAR_MAX) return false;
+        for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
+            int x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= cw || y >= ch) continue;
+            if (cd[y * cw + x] > 0) return false;
+        }
+        return true;
+    }
+
     static boolean fillsGap(float[] cd, int cw, int ch, int cx, int cy, float d) {
         if (d > 3.5f) return false;
         if (cx < 0 || cy < 0 || cx >= cw || cy >= ch || cd[cy * cw + cx] > 0) return false;
@@ -1176,7 +1197,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         for (int i = 0; i < m && count < MAX_POINTS; i++) {
             float x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
             rgb[0] = C[i * 3] & 255; rgb[1] = C[i * 3 + 1] & 255; rgb[2] = C[i * 3 + 2] & 255;
-            tsdf.integrate(camX, camY, camZ, x, y, z, rgb);
+            float ddx = x - camX, ddy = y - camY, ddz = z - camZ;
+            if (ddx * ddx + ddy * ddy + ddz * ddz < 64f) tsdf.integrate(camX, camY, camZ, x, y, z, rgb); // far estimates: points only
             long vk = key(x, y, z);
             int hit = voxels.get(vk);
             if (hit >= 0) { refine(hit, x, y, z, rgb); continue; }
@@ -3484,7 +3506,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
-                    if (mm < 200 || mm > 4000) { depthRejectedRange++; continue; }
+                    if (mm < 200 || mm > (DEMO_FAR ? 8000 : 4000)) { depthRejectedRange++; continue; }
                     depthPixels++;
                     int cv = cbuf != null ? cbuf.get(v * cRow + u * cPix) & 0xFF : 255;
                     if (cv < 40) { depthRejectedConf++; continue; } // below this the S24's raw depth is mostly noise (scan3 replay)
@@ -4208,7 +4230,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int level; String hint, sub = null;
         float d = detailHere;
         tooFast = moveSpeed > (tooFast ? 0.45f : 0.6f); // a slow walk (~0.4 m/s) is fine
-        tooFar = farShare > (tooFar ? 0.45f : 0.6f);
+        tooFar = !DEMO_FAR && farShare > (tooFar ? 0.45f : 0.6f); // demo: looking out over a hall is the point
         if (ts != TrackingState.TRACKING) {
             level = 2;
             hint = lastFail == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_FEATURES ? "Lost track: point at something with texture, not a plain wall"
