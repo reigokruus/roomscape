@@ -43,9 +43,11 @@ final class LiveCloud: @unchecked Sendable {
     static let voxel: Float = 0.02
     /// We sample about 15 depth frames per second, so this is about 1 s of sightings.
     static let solidFrames = 15
-    static let maxPoints = 400_000
-    /// Keyframe budget from the handoff: more costs memory without a visible gain.
-    static let maxKeyframes = 80
+    /// About 600 m² of surface at 2 cm: a large room with its floor, walls and some ceiling. 400k filled up after one
+    /// corner of a 14 × 12 m room and silently dropped the rest. Costs ~70 MB (GPU buffer 24 MB, index and counters).
+    static let maxPoints = 1_500_000
+    /// Photo budget. The handoff's 80 ran out in a large room; 160 JPEGs are about 16 MB.
+    static let maxKeyframes = 160
     static let photoWidth = 1024
 
     let buffer: MTLBuffer
@@ -74,6 +76,8 @@ final class LiveCloud: @unchecked Sendable {
     private lazy var imageContext = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
     /// Smoothed share of solid spots where the phone points, 0…1, or -1 before there is enough to say.
     private(set) var detailHere: Float = -1
+    /// True once the point budget is used up: new spots are no longer added.
+    var isFull: Bool { count >= Self.maxPoints }
 
     init?(device: MTLDevice) {
         guard let buffer = device.makeBuffer(length: MemoryLayout<LivePoint>.stride * Self.maxPoints,
@@ -82,7 +86,7 @@ final class LiveCloud: @unchecked Sendable {
         points = buffer.contents().bindMemory(to: LivePoint.self, capacity: Self.maxPoints)
         observations = [UInt8](repeating: 0, count: Self.maxPoints)
         seenStamp = [Int32](repeating: -1, count: Self.maxPoints)
-        index.reserveCapacity(100_000)
+        index.reserveCapacity(300_000)
     }
 
     func reset() {

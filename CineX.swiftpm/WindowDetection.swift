@@ -7,7 +7,7 @@ import simd
 /// Runs `WindowFinder` on a saved scan and caches the result in `<scan>.capture/windows.json`.
 enum WindowDetection {
     /// Bump when the finder's rules change, so cached results are recomputed.
-    static let version = 1
+    static let version = 2
 
     private struct Cache: Codable {
         var version: Int
@@ -34,7 +34,10 @@ enum WindowDetection {
                 fx: k.fx, fy: k.fy, cx: k.cx, cy: k.cy, width: k.width, height: k.height,
                 url: scan.captureURL.appendingPathComponent(k.file))
         }
-        let points = ScanStore.loadPoints(scan).map { SIMD3($0.x, $0.y, $0.z) }
+        // Every n-th point is plenty for counting surfaces and see-through per 10 cm cell, and keeps big scans fast.
+        let all = ScanStore.loadPoints(scan)
+        let step = max(1, all.count / 400_000)
+        let points = Swift.stride(from: 0, to: all.count, by: step).map { SIMD3(all[$0].x, all[$0].y, all[$0].z) }
 
         let shell = RoomShell(room: room)
         let walls = shell.walls.map {

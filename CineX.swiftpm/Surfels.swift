@@ -21,7 +21,7 @@ enum Surfels {
     static let cell: Float = 0.05
     static let maxNeighbours = 48
     /// More points than this are thinned first; the density-based radius grows to keep the surfaces closed.
-    static let maxSurfels = 250_000
+    static let maxSurfels = 350_000
 
     struct Stats { var flat = 0, curved = 0, lonely = 0, snapped = 0 }
 

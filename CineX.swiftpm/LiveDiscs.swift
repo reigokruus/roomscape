@@ -54,7 +54,7 @@ final class LiveCapture: ObservableObject {
         // One frame at a time, released as soon as it's read, so ARKit never runs short of camera buffers.
         worker.async { [weak self] in
             cloud.integrate(frame)
-            let detail = cloud.detailHere
+            let detail = cloud.isFull ? -2 : cloud.detailHere
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.busy = false
@@ -65,6 +65,7 @@ final class LiveCapture: ObservableObject {
     }
 
     private static func line(for detail: Float) -> String {
+        if detail <= -2 { return "⚪️ Capture memory is full. Tap Done to keep what you have" }
         guard detail >= 0 else { return "Detail here: point at something" }
         let percent = Int((detail * 100).rounded())
         if percent >= 70 { return "🟢 Detail here: \(percent)% solid, move on" }

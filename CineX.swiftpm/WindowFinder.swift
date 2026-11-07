@@ -50,6 +50,12 @@ enum WindowFinder {
         /// Share of the rectangle where LiDAR found a surface on the wall plane (curtain, blind, frame) rather than a
         /// hole (clear glass gives no LiDAR return).
         var solid: Float
+        /// Of all the photos that saw the rectangle, the share in which it looked bright. A window is bright from
+        /// every angle; glare (a reflection of a ceiling light) moves or disappears as the camera moves.
+        var consistency: Float
+        /// Mean brightness change between neighbouring 10 cm cells inside, across (x) and along (y) the wall.
+        /// Curtain pleats and blind slats make stripes; a wall lit by a lamp is smooth.
+        var textureAcross: Float, textureUp: Float
         /// True when it overlaps a window RoomPlan reported.
         var matchesRoomPlan: Bool
 
@@ -65,6 +71,7 @@ enum WindowFinder {
         var cols: Int, rows: Int
         var lum: [Float]      // mean photo luminance per cell, -1 = never seen
         var views: [Int]
+        var brightViews: [Int] // views in which the cell looked bright (≥ brightAbsolute)
         var onWall: [Int]     // LiDAR points on the wall plane
         var behind: [Int]     // LiDAR points seen through it
         var typical: Float    // the wall's median luminance
@@ -101,6 +108,8 @@ enum WindowFinder {
                 let minAlong = Float(rect.c0) * cell - wall.halfWidth, maxAlong = Float(rect.c1 + 1) * cell - wall.halfWidth
                 let minUp = Float(rect.r0) * cell - wall.halfHeight, maxUp = Float(rect.r1 + 1) * cell - wall.halfHeight
                 var lumSum: Float = 0, lumN = 0, through = 0, cells = 0, blown = 0, solidCells = 0
+                var views = 0, brightViews = 0
+                var dx: Float = 0, dxN = 0, dy: Float = 0, dyN = 0
                 for r in rect.r0...rect.r1 {
                     for c in rect.c0...rect.c1 {
                         let i = r * grid.cols + c
@@ -108,6 +117,13 @@ enum WindowFinder {
                         if grid.lum[i] >= 0 { lumSum += grid.lum[i]; lumN += 1 }
                         if grid.lum[i] >= 0.95 { blown += 1 }
                         if grid.onWall[i] >= 2 { solidCells += 1 }
+                        if grid.bright[i] { views += grid.views[i]; brightViews += grid.brightViews[i] }
+                        if grid.lum[i] >= 0 {
+                            if c < rect.c1, grid.lum[i + 1] >= 0 { dx += abs(grid.lum[i + 1] - grid.lum[i]); dxN += 1 }
+                            if r < rect.r1, grid.lum[i + grid.cols] >= 0 {
+                                dy += abs(grid.lum[i + grid.cols] - grid.lum[i]); dyN += 1
+                            }
+                        }
                         if grid.behind[i] > max(2, grid.onWall[i]) { through += 1 }
                     }
                 }
@@ -120,7 +136,10 @@ enum WindowFinder {
                                    brightness: brightness, contrast: brightness / max(0.05, grid.typical),
                                    seeThrough: Float(through) / Float(max(1, cells)),
                                    blownOut: Float(blown) / Float(max(1, cells)),
-                                   solid: Float(solidCells) / Float(max(1, cells)), matchesRoomPlan: matches)
+                                   solid: Float(solidCells) / Float(max(1, cells)),
+                                   consistency: Float(brightViews) / Float(max(1, views)),
+                                   textureAcross: dx / Float(max(1, dxN)), textureUp: dy / Float(max(1, dyN)),
+                                   matchesRoomPlan: matches)
                 candidates.append(candidate)
                 if let kind = classify(candidate) {
                     var window = candidate
@@ -147,11 +166,14 @@ enum WindowFinder {
     /// corridor and ceiling-light glare on white walls:
     /// - clear glass: blown out (daylight saturates the indoor exposure) and LiDAR sees through. Glare on a wall is
     ///   blown out too, but solid.
-    /// - curtains/blinds: a large, bright, solid surface that is *not* blown out. A lit glass partition is bright
-    ///   but has no surface (glass gives no LiDAR return); glare is blown out.
+    /// - curtains/blinds: a large, bright, solid surface that is *not* blown out and has stripes (pleats or slats).
+    ///   A lit glass partition is bright but has no surface (glass gives no LiDAR return); glare is blown out; a
+    ///   white wall lit by a ceiling light is smooth (texture 0.003–0.034 measured, curtains 0.061–0.063), and
+    ///   bright from every angle, so view consistency can't tell it apart.
     static func classify(_ f: Found) -> Kind? {
         if f.blownOut >= 0.2 && f.seeThrough >= 0.15 { return .clearGlass }
-        if f.solid >= 0.4 && f.brightness >= 0.70 && f.blownOut < 0.12 && f.area >= 1.5 { return .curtained }
+        if f.solid >= 0.4 && f.brightness >= 0.70 && f.blownOut < 0.12 && f.area >= 1.5
+            && max(f.textureAcross, f.textureUp) >= 0.045 { return .curtained }
         return nil
     }
 
@@ -165,7 +187,8 @@ enum WindowFinder {
         let cols = max(1, Int((wall.halfWidth * 2 / cell).rounded(.up)))
         let rows = max(1, Int((wall.halfHeight * 2 / cell).rounded(.up)))
         var g = WallGrid(cols: cols, rows: rows, lum: [Float](repeating: -1, count: cols * rows),
-                         views: [Int](repeating: 0, count: cols * rows), onWall: [Int](repeating: 0, count: cols * rows),
+                         views: [Int](repeating: 0, count: cols * rows),
+                         brightViews: [Int](repeating: 0, count: cols * rows), onWall: [Int](repeating: 0, count: cols * rows),
                          behind: [Int](repeating: 0, count: cols * rows), typical: 0,
                          bright: [Bool](repeating: false, count: cols * rows))
 
@@ -203,8 +226,10 @@ enum WindowFinder {
                     let iu = Int(u), iv = Int(v)
                     guard iu >= 1, iv >= 1, iu < image.width - 1, iv < image.height - 1 else { continue }
                     let i = r * cols + c
-                    sums[i] += image.at(iu, iv)
+                    let l = image.at(iu, iv)
+                    sums[i] += l
                     g.views[i] += 1
+                    if l >= brightAbsolute { g.brightViews[i] += 1 }
                 }
             }
         }
