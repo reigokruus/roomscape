@@ -10,6 +10,7 @@ struct ResultView: View {
     @State private var room: CapturedRoom?
     @State private var topView = false
     @State private var loadError: String?
+    @State private var detail: (points: Int, photos: Int)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,7 +34,7 @@ struct ResultView: View {
             .frame(maxHeight: .infinity)
 
             if let room {
-                RoomSummary(room: room)
+                RoomSummary(room: room, detail: detail)
                     .frame(maxHeight: 260)
             }
         }
@@ -55,10 +56,15 @@ struct ResultView: View {
                 let result = Result { () throws -> SCNScene in
                     let s = try SCNScene(url: scan.modelURL, options: nil)
                     ResultView.colorize(s.rootNode)
+                    let points = ScanStore.loadPoints(scan)
+                    if !points.isEmpty {
+                        s.rootNode.addChildNode(ScanStore.pointNode(points, maxPoints: 400_000, pointSize: 4))
+                    }
                     return s
                 }
                 return (room, result)
             }.value
+            detail = await Task.detached(priority: .utility) { ScanStore.detailCounts(scan) }.value
             room = loaded.0
             switch loaded.1 {
             case .success(let s): scene = s
@@ -167,6 +173,7 @@ struct RoomSceneView: UIViewRepresentable {
 /// Plain-language summary of what was found: size, light sources (windows), doors and furniture.
 struct RoomSummary: View {
     let room: CapturedRoom
+    var detail: (points: Int, photos: Int)?
 
     var body: some View {
         List {
@@ -177,6 +184,12 @@ struct RoomSummary: View {
                 LabeledContent("Doors", value: "\(room.doors.count)")
                 if !room.openings.isEmpty {
                     LabeledContent("Openings", value: "\(room.openings.count)")
+                }
+            }
+            if let detail, detail.points > 0 || detail.photos > 0 {
+                Section("Captured detail") {
+                    LabeledContent("Points", value: detail.points.formatted())
+                    LabeledContent("Photos", value: "\(detail.photos)")
                 }
             }
             if !room.objects.isEmpty {

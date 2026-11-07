@@ -1,6 +1,29 @@
 import SwiftUI
 import RoomPlan
 
+/// The scan's saved thumbnail, or a placeholder for scans saved before thumbnails existed.
+struct ScanThumbnail: View {
+    let url: URL
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Image(systemName: "cube.transparent").foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 88, height: 66)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .task(id: url) {
+            let url = url
+            image = await Task.detached(priority: .utility) { UIImage(contentsOfFile: url.path) }.value
+        }
+    }
+}
+
 struct HomeView: View {
     @State private var scans: [SavedScan] = []
     @State private var path: [SavedScan] = []
@@ -31,9 +54,12 @@ struct HomeView: View {
                     Section("Saved scans") {
                         ForEach(scans) { scan in
                             NavigationLink(value: scan) {
-                                VStack(alignment: .leading) {
-                                    Text(scan.date.formatted(date: .abbreviated, time: .shortened))
-                                    Text(scan.name).font(.caption).foregroundStyle(.secondary)
+                                HStack(spacing: 12) {
+                                    ScanThumbnail(url: scan.thumbnailURL)
+                                    VStack(alignment: .leading) {
+                                        Text(scan.date.formatted(date: .abbreviated, time: .shortened))
+                                        Text(scan.name).font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
