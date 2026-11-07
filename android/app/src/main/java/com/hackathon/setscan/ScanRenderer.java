@@ -1114,7 +1114,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private static float[] lastAb; // scale of the last photo that had enough measured points
     static final float FAR_MAX = 30f;
     static boolean farGap(float[] cd, int cw, int ch, int cx, int cy, float d, float cdMax) {
-        if (d <= Math.max(3.5f, cdMax * 1.1f) || d > FAR_MAX) return false;
+        if (d <= 3.5f || d > FAR_MAX) return false; // everything the phone did not measure, from 3.5 m out
         for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
             int x = cx + dx, y = cy + dy;
             if (x < 0 || y < 0 || x >= cw || y >= ch) continue;
