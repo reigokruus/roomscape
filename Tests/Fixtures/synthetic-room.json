@@ -1,0 +1,371 @@
+{
+  "content" : {
+    "project" : {
+      "_0" : {
+        "id" : "817A9E6D-A33E-4A0A-AC3D-E44A752E5DD6",
+        "name" : "Synthetic QA room — NOT a scan",
+        "presets" : [
+          {
+            "id" : "BEE429AA-0394-4A61-96BF-ADEB31AAC631",
+            "items" : [
+              {
+                "dailyRate" : 35,
+                "id" : "14255B38-77D3-4308-BD67-D630C3DFB8FD",
+                "kind" : "light",
+                "name" : "LED light + stand",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 0.9,
+                  "y" : 2.1,
+                  "z" : 0.9
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 20,
+                "id" : "EB33AC4D-5D70-4B59-9838-BFA2C580FA1C",
+                "kind" : "light",
+                "name" : "LED panel + stand",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 0.85,
+                  "y" : 2,
+                  "z" : 0.85
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 65,
+                "id" : "BAB14238-6E29-4912-8F9D-1975A4E91B1D",
+                "kind" : "camera",
+                "name" : "Camera + tripod",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 0.9,
+                  "y" : 1.6,
+                  "z" : 0.9
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 15,
+                "id" : "4C6928FB-1869-42C7-BDED-7D0FC5FC3D37",
+                "kind" : "audio",
+                "name" : "Boom microphone + stand",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 1.2,
+                  "y" : 2.3,
+                  "z" : 0.9
+                },
+                "source" : "planned",
+                "yaw" : 0
+              }
+            ],
+            "name" : "Interview kit"
+          },
+          {
+            "id" : "F3C1F66D-3945-4B58-9175-F84CD273BECE",
+            "items" : [
+              {
+                "dailyRate" : 25,
+                "id" : "5602ED13-17F1-4FDB-84E5-13020D21DEE0",
+                "kind" : "light",
+                "name" : "90 cm softbox + stand",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 1,
+                  "y" : 2.1,
+                  "z" : 1
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 20,
+                "id" : "EB33AC4D-5D70-4B59-9838-BFA2C580FA1C",
+                "kind" : "light",
+                "name" : "LED panel + stand",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 0.85,
+                  "y" : 2,
+                  "z" : 0.85
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 65,
+                "id" : "BAB14238-6E29-4912-8F9D-1975A4E91B1D",
+                "kind" : "camera",
+                "name" : "Camera + tripod",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 0.9,
+                  "y" : 1.6,
+                  "z" : 0.9
+                },
+                "source" : "planned",
+                "yaw" : 0
+              }
+            ],
+            "name" : "Product kit"
+          },
+          {
+            "id" : "E1945C15-6464-4C9A-AA8F-D226B4539CE4",
+            "items" : [
+              {
+                "dailyRate" : 20,
+                "id" : "EB33AC4D-5D70-4B59-9838-BFA2C580FA1C",
+                "kind" : "light",
+                "name" : "LED panel + stand",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 0.85,
+                  "y" : 2,
+                  "z" : 0.85
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 65,
+                "id" : "BAB14238-6E29-4912-8F9D-1975A4E91B1D",
+                "kind" : "camera",
+                "name" : "Camera + tripod",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : 0
+                },
+                "size" : {
+                  "x" : 0.9,
+                  "y" : 1.6,
+                  "z" : 0.9
+                },
+                "source" : "planned",
+                "yaw" : 0
+              }
+            ],
+            "name" : "Simple vlog kit"
+          }
+        ],
+        "room" : {
+          "ceiling" : 2.8,
+          "floor" : 0,
+          "heightsEstimated" : true,
+          "walls" : [
+            {
+              "a" : {
+                "x" : -3,
+                "y" : 1.4,
+                "z" : -3
+              },
+              "b" : {
+                "x" : 3,
+                "y" : 1.4,
+                "z" : -3
+              },
+              "bottom" : 0,
+              "top" : 2.8
+            },
+            {
+              "a" : {
+                "x" : 3,
+                "y" : 1.4,
+                "z" : -3
+              },
+              "b" : {
+                "x" : 3,
+                "y" : 1.4,
+                "z" : 3
+              },
+              "bottom" : 0,
+              "top" : 2.8
+            },
+            {
+              "a" : {
+                "x" : 3,
+                "y" : 1.4,
+                "z" : 3
+              },
+              "b" : {
+                "x" : -3,
+                "y" : 1.4,
+                "z" : 3
+              },
+              "bottom" : 0,
+              "top" : 2.8
+            },
+            {
+              "a" : {
+                "x" : -3,
+                "y" : 1.4,
+                "z" : 3
+              },
+              "b" : {
+                "x" : -3,
+                "y" : 1.4,
+                "z" : -3
+              },
+              "bottom" : 0,
+              "top" : 2.8
+            }
+          ]
+        },
+        "shots" : [
+          {
+            "camera" : {
+              "focalMM" : 24,
+              "position" : {
+                "x" : 0,
+                "y" : 0.9,
+                "z" : 2
+              },
+              "sensorHeightMM" : 24,
+              "sensorWidthMM" : 36,
+              "yaw" : 0
+            },
+            "days" : 1,
+            "id" : "044F8F6E-1126-4DD6-9741-3EEB8BF5ACCB",
+            "items" : [
+              {
+                "dailyRate" : 0,
+                "id" : "FD00A638-1272-4837-B978-62B96DB9A686",
+                "kind" : "subject",
+                "name" : "Standing person (envelope)",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : -1
+                },
+                "size" : {
+                  "x" : 0.65,
+                  "y" : 1.8,
+                  "z" : 0.4
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 35,
+                "id" : "14255B38-77D3-4308-BD67-D630C3DFB8FD",
+                "kind" : "light",
+                "name" : "LED light + stand",
+                "position" : {
+                  "x" : 1.5,
+                  "y" : 0,
+                  "z" : -1.3
+                },
+                "size" : {
+                  "x" : 0.9,
+                  "y" : 2.1,
+                  "z" : 0.9
+                },
+                "source" : "planned",
+                "yaw" : 0
+              }
+            ],
+            "name" : "Wide — should fit",
+            "notes" : "Synthetic 6 × 6 m test geometry, not a real RoomPlan scan. Rates and dimensions are illustrative.",
+            "targetID" : "FD00A638-1272-4837-B978-62B96DB9A686"
+          },
+          {
+            "camera" : {
+              "focalMM" : 85,
+              "position" : {
+                "x" : 0,
+                "y" : 0.9,
+                "z" : 2
+              },
+              "sensorHeightMM" : 24,
+              "sensorWidthMM" : 36,
+              "yaw" : 0
+            },
+            "days" : 1,
+            "id" : "50511DAE-D9B5-491E-9356-381C9ABF8D7B",
+            "items" : [
+              {
+                "dailyRate" : 0,
+                "id" : "1014EC77-4E98-4243-B957-A7552BDB1519",
+                "kind" : "subject",
+                "name" : "Standing person (envelope)",
+                "position" : {
+                  "x" : 0,
+                  "y" : 0,
+                  "z" : -1
+                },
+                "size" : {
+                  "x" : 0.65,
+                  "y" : 1.8,
+                  "z" : 0.4
+                },
+                "source" : "planned",
+                "yaw" : 0
+              },
+              {
+                "dailyRate" : 35,
+                "id" : "EB4F21DA-CBF8-4D69-954D-7581F75E7A58",
+                "kind" : "light",
+                "name" : "LED light + stand",
+                "position" : {
+                  "x" : 1.5,
+                  "y" : 0,
+                  "z" : -1.3
+                },
+                "size" : {
+                  "x" : 0.9,
+                  "y" : 2.1,
+                  "z" : 0.9
+                },
+                "source" : "planned",
+                "yaw" : 0
+              }
+            ],
+            "name" : "85 mm — should NOT fit",
+            "notes" : "Synthetic 6 × 6 m test geometry, not a real RoomPlan scan. Rates and dimensions are illustrative.",
+            "targetID" : "1014EC77-4E98-4243-B957-A7552BDB1519"
+          }
+        ]
+      }
+    }
+  },
+  "format" : "shootlocal-native",
+  "version" : 1
+}

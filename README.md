@@ -5,7 +5,9 @@
 ## Status
 **v0.1 (hackathon prototype):** the scan works. Apple RoomPlan captures the room, and it comes back as a 3D model with windows (natural light), doors and furniture picked out, plus a room summary and a top-down view.
 
-**Next:** a gear inventory, scene presets, and suggestions for camera and light placement on the scanned room.
+**Native planning integration (source, awaiting Xcode/iPhone validation):** open a saved scan → **Storyboard** for real-room floor planning, dimensioned quick-add items, sensor/lens frame checks, independent storyboard views, per-view gear budgets, reusable equipment presets and validated JSON export/import. Home → **Planning projects** reopens local plans or imports other-room exports. Existing My Gear and Plan a Shoot suggestions remain available.
+
+**Not a production-ready build:** portable Swift logic is compiled/tested; SwiftUI / SceneKit / RoomPlan integration has not been built with an iOS SDK or run on a phone here. Items are measured planning envelopes, not photorealistic assets; catalog dimensions/rates are estimates. See [native integration, limitations and exact Xcode/device test gate](docs/native-planning.md) and [verification evidence](docs/native-planning-verification.md). Run `swift test` from the repository root to verify the shared native model/geometry/import/persistence logic.
 
 ## Why not Previs Pro (or similar apps)?
 Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. CineX starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. CineX uses the scan to plan the shoot.
@@ -30,6 +32,8 @@ Apps signed with a free Apple ID stop working after 7 days. Just press Run again
 - **Browser planning prototype:** [`hackathon/ui_prototype.html`](hackathon/ui_prototype.html) covers the storyboard, kit budgets, presets and scale-aware placement on a sample room. Run `node hackathon/verify_v3.mjs` to test it.
 - **Pitch pack:** [`hackathon/pitch_deck.html`](hackathon/pitch_deck.html) and [`hackathon/pitch_script.md`](hackathon/pitch_script.md).
 - **iPhone app additions:** gear inventory, shoot planner, and the mesh overlay while scanning, all in `CineX.swiftpm`.
+- **Integrated native planning:** [`CineX.swiftpm/Planning/`](CineX.swiftpm/Planning/); [build/validation handoff](docs/native-planning.md). Export formats are native JSON (not the older browser-prototype format); no hosted sync or photorealistic lighting is claimed.
+- **Synthetic UI test fixture:** [`Tests/Fixtures/synthetic-room.json`](Tests/Fixtures/synthetic-room.json), importable via Planning projects without LiDAR; explicitly not a real scan.
 
 ## Android version (Samsung and other ARCore phones)
 This is the `android/` folder: a separate Android Studio project, so you can develop on Windows or Linux without a Mac. The iPhone version above is unaffected.
@@ -54,3 +58,7 @@ For hands-free updates, install [Obtainium](https://github.com/ImranR98/Obtainiu
 All builds, whether from GitHub or from Android Studio, use the same signing key (`android/app/debug.keystore`, a debug key committed on purpose), so they install over each other. If Android refuses to install, uninstall the old CineX once and try again.
 
 On first launch, the phone may ask to install or update **Google Play Services for AR**.
+
+## Competitor research
+
+[Shootlocal competitor research page](https://cursor.com/canvas/store-da409d30-ab83-48e7-b175-2e0183165750/65ee7be5-f0df-44b1-93ff-f27a3643bda4) — the previously approved team research link, preserved alongside the native build handoff.

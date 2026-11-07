@@ -41,6 +41,9 @@ struct ResultView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let room {
+                NavigationLink(destination: PlanningLaunchView(room: room, scan: scan)) {
+                    Label("Storyboard", systemImage: "rectangle.stack")
+                }
                 NavigationLink(destination: ShootPlannerView(room: room)) {
                     Label("Plan a Shoot", systemImage: "sparkles")
                 }
