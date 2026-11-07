@@ -74,6 +74,10 @@ final class LiveCloud: @unchecked Sendable {
 
     let buffer: MTLBuffer
     private let points: UnsafeMutablePointer<LivePoint>
+    /// Surface normal of each point (snorm8 x, y, z, 0; world space, facing the camera that first saw it), for the
+    /// live mesh overlay only (not saved). Same index as `buffer`; zero = not known yet.
+    let normalBuffer: MTLBuffer
+    private let normals: UnsafeMutablePointer<SIMD4<Int8>>
     private let countLock = OSAllocatedUnfairLock(initialState: 0)
     /// Number of points in `buffer`. Safe to read from any thread.
     var count: Int { countLock.withLock { $0 } }
@@ -117,8 +121,12 @@ final class LiveCloud: @unchecked Sendable {
     init?(device: MTLDevice) {
         guard let buffer = device.makeBuffer(length: MemoryLayout<LivePoint>.stride * Self.maxPoints,
                                              options: .storageModeShared) else { return nil }
+        guard let normalBuffer = device.makeBuffer(length: MemoryLayout<SIMD4<Int8>>.stride * Self.maxPoints,
+                                                   options: .storageModeShared) else { return nil }
         self.buffer = buffer
         points = buffer.contents().bindMemory(to: LivePoint.self, capacity: Self.maxPoints)
+        self.normalBuffer = normalBuffer
+        normals = normalBuffer.contents().bindMemory(to: SIMD4<Int8>.self, capacity: Self.maxPoints)
         observations = [UInt8](repeating: 0, count: Self.maxPoints)
         seenStamp = [Int32](repeating: -1, count: Self.maxPoints)
         index.reserveCapacity(Self.maxPoints)
@@ -221,15 +229,23 @@ final class LiveCloud: @unchecked Sendable {
                 guard d > 0.2, d < 4 else { continue }
                 // Flying pixels sit on depth edges: drop a pixel whose neighbour jumps by more than 4% + 2 cm.
                 let tolerance = d * 0.04 + 0.02
-                if abs(dPtr[v * dRow + u - 1] - d) > tolerance || abs(dPtr[v * dRow + u + 1] - d) > tolerance
-                    || abs(dPtr[(v - 1) * dRow + u] - d) > tolerance || abs(dPtr[(v + 1) * dRow + u] - d) > tolerance {
+                let dl = dPtr[v * dRow + u - 1], dr = dPtr[v * dRow + u + 1]
+                let du = dPtr[(v - 1) * dRow + u], dd = dPtr[(v + 1) * dRow + u]
+                if abs(dl - d) > tolerance || abs(dr - d) > tolerance || abs(du - d) > tolerance || abs(dd - d) > tolerance {
                     continue
                 }
 
                 // Camera space: x right, y up, looking down -z. Image v grows downwards.
-                let xc = (Float(u) + 0.5 - cx) * d / fx
-                let yc = (cy - (Float(v) + 0.5)) * d / fy
-                let world = pose * SIMD4<Float>(xc, yc, -d, 1)
+                func cam(_ u: Int, _ v: Int, _ d: Float) -> SIMD3<Float> {
+                    SIMD3((Float(u) + 0.5 - cx) * d / fx, (cy - (Float(v) + 0.5)) * d / fy, -d)
+                }
+                let pc = cam(u, v, d)
+                let world = pose * SIMD4<Float>(pc, 1)
+                // Surface normal from the four neighbours, turned to face the camera, then into world space.
+                var nc = simd_cross(cam(u + 1, v, dr) - cam(u - 1, v, dl), cam(u, v - 1, du) - cam(u, v + 1, dd))
+                if simd_dot(nc, pc) > 0 { nc = -nc }
+                let nl = simd_length(nc)
+                let normal: SIMD3<Float>? = nl > 1e-9 ? simd_make_float3(pose * SIMD4<Float>(nc / nl, 0)) : nil
 
                 // Colour from the camera image at the same spot (full-range YCbCr 4:2:0).
                 let iu = min(iw - 1, Int((Float(u) + 0.5) / sx))
@@ -264,11 +280,21 @@ final class LiveCloud: @unchecked Sendable {
                     let nr = blend(old & 0xFF, r, w), ng = blend((old >> 8) & 0xFF, g, w), nb = blend((old >> 16) & 0xFF, b, w)
                     p.rgba = nr | (ng << 8) | (nb << 16) | (alpha << 24)
                     points[i] = p
+                    if let normal {
+                        let old = Self.decode(normals[i])
+                        if simd_length_squared(old) < 0.25 {
+                            normals[i] = Self.encode(normal)
+                        } else {
+                            let new = simd_dot(old, normal) < 0 ? -normal : normal
+                            normals[i] = Self.encode(old + (new - old) * max(w, 0.1))
+                        }
+                    }
                 } else {
                     guard n < Self.maxPoints else { continue }
                     frameHits += 1
                     points[n] = LivePoint(x: world.x, y: world.y, z: world.z,
                                           rgba: r | (g << 8) | (b << 16) | (Self.firstSeen << 24))
+                    normals[n] = normal.map(Self.encode) ?? .zero
                     observations[n] = 1
                     seenStamp[n] = depthFrames
                     index[key] = Int32(n)
@@ -396,11 +422,14 @@ final class LiveCloud: @unchecked Sendable {
                 }
                 q.rgba = mix(0) | (mix(8) << 8) | (mix(16) << 16) | (max(a >> 24, b >> 24) << 24)
                 points[k] = q
+                let nk = Self.decode(normals[k]), ni = Self.decode(normals[i])
+                normals[k] = Self.encode(nk * wk + (simd_dot(nk, ni) < 0 ? -ni : ni) * w)
                 weights[k] = total
                 observations[k] = UInt8(min(255, Int(observations[k]) + Int(observations[i])))
                 seenStamp[k] = max(seenStamp[k], seenStamp[i])
             } else {
                 points[out] = p
+                normals[out] = normals[i]
                 weights[out] = w
                 observations[out] = observations[i]
                 seenStamp[out] = seenStamp[i]
@@ -442,6 +471,18 @@ final class LiveCloud: @unchecked Sendable {
         photoMove *= 2
         photoTurn *= 2
         print("LiveCloud: photo budget full, kept \(kept), now one photo per \(photoMove) m or \(photoTurn)°")
+    }
+
+    /// Unit vector ↔ snorm8 (zero stays zero).
+    private static func encode(_ n: SIMD3<Float>) -> SIMD4<Int8> {
+        let l = simd_length(n)
+        guard l > 1e-6 else { return .zero }
+        let q = (n / l * 127).rounded(.toNearestOrAwayFromZero)
+        return SIMD4(Int8(q.x), Int8(q.y), Int8(q.z), 0)
+    }
+
+    private static func decode(_ n: SIMD4<Int8>) -> SIMD3<Float> {
+        SIMD3(Float(n.x), Float(n.y), Float(n.z)) / 127
     }
 
     private static func key(_ x: Float, _ y: Float, _ z: Float, _ voxel: Float) -> Int64 {
