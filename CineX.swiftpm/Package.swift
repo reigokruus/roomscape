@@ -1,20 +1,21 @@
 // swift-tools-version: 5.9
 
-// App package: double-click CineX.swiftpm to open it in Xcode 15+ (or Swift Playgrounds on a Mac).
+// App package: double-click CineX.swiftpm to open it in Xcode 15+ (or Swift Playgrounds on a Mac). Pick your own
+// signing team in Xcode (Signing & Capabilities); teamIdentifier stays empty here so everyone can build.
 
 import PackageDescription
 import AppleProductTypes
 
 let package = Package(
-    name: "CineX",
+    name: "RoomScape",
     platforms: [
         .iOS("17.0")
     ],
     products: [
         .iOSApplication(
-            name: "CineX",
+            name: "RoomScape",
             targets: ["AppModule"],
-            bundleIdentifier: "com.hackathon.cinex",
+            bundleIdentifier: "com.hackathon.roomscape",
             teamIdentifier: "",
             displayVersion: "0.1",
             bundleVersion: "1",
@@ -27,7 +28,7 @@ let package = Package(
                 .portrait
             ],
             capabilities: [
-                .camera(purposeString: "CineX uses the camera and LiDAR scanner to capture your room.")
+                .camera(purposeString: "RoomScape uses the camera and LiDAR scanner to capture your room.")
             ]
         )
     ],
