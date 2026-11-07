@@ -1097,9 +1097,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     volatile boolean paused;  // the app is in the background: GL work waits
 
     /** Save without asking (a dated name the first time, then over the same folder). */
+    private volatile boolean saving;
+    private long lastAutosaveMs; private int lastAutosaveCount;
+    static final long AUTOSAVE_MS = 8000;
+
+    /** While scanning: save every few seconds when there is new data (not during an improve pass, which isn't lined up yet). */
+    private void maybeAutosaveWhileScanning(long nowMs) {
+        if (saving || improveDir != null || count < 2000 || count == lastAutosaveCount || nowMs - lastAutosaveMs < AUTOSAVE_MS) return;
+        lastAutosaveMs = nowMs; lastAutosaveCount = count;
+        autosave();
+    }
+
     private void autosave() {
+        if (saving) { glTasks.add(() -> { if (!saving) autosave(); }); return; }
+        saving = true;
         String name = currentName != null ? currentName : "Room " + android.text.format.DateFormat.format("d MMM HH:mm", System.currentTimeMillis());
-        requestSave(name, currentDir, (out, err) -> activity.autoSaved(out != null ? name : null, err));
+        requestSave(name, currentDir, (out, err) -> { saving = false; activity.autoSaved(out != null ? name : null, err); });
     }
 
     private void autoFailed(String what) {
@@ -2450,7 +2463,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; autoStage = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -2828,6 +2841,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             activity.updateStatus(s);
         }
         if (frameNo % 5 == 0) postHud(ts);
+        if (ts == TrackingState.TRACKING) maybeAutosaveWhileScanning(nowMs);
+        if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
     }
 
     // ---------------- "scan over there" guide ----------------

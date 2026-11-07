@@ -99,6 +99,7 @@ final class ScanExport {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fb[0]);
         ByteBuffer px = ByteBuffer.allocateDirect(PhotoRoom.TEX_W * PhotoRoom.TEX_H * 4).order(ByteOrder.nativeOrder());
         for (PhotoRoom.Keyframe k : photos.keyframes) {
+            if (k.jpg != null) { out.add(k.jpg); continue; }
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, k.tex, 0);
             px.position(0);
             GLES20.glReadPixels(0, 0, PhotoRoom.TEX_W, PhotoRoom.TEX_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
@@ -110,7 +111,8 @@ final class ScanExport {
             ByteArrayOutputStream jpg = new ByteArrayOutputStream();
             s.compress(Bitmap.CompressFormat.JPEG, 80, jpg);
             b.recycle(); s.recycle();
-            out.add(jpg.toByteArray());
+            k.jpg = jpg.toByteArray();
+            out.add(k.jpg);
         }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glDeleteFramebuffers(1, fb, 0);
