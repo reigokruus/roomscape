@@ -11,6 +11,8 @@
 Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. CineX starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. CineX uses the scan to plan the shoot.
 
 ## iPhone version (main)
+Porting the Android features to iPhone? Start with [docs/android-to-ios-handoff.md](docs/android-to-ios-handoff.md).
+
 This is the `CineX.swiftpm` folder. It requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
 
 ### Build and install on an iPhone
