@@ -991,20 +991,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /**
      * Robust fit of 1/depth = a * disparity + b + c * x + d * y over the filled cells (x, y = photo position, -0.5..0.5).
-     * The x/y terms take out the slight tilt the net puts into some photos (7.6 % -> 6.1 % median error on scan10).
+     * Weighted by 1/depth^2: phone depth-from-motion error grows with distance squared, so the near points set the scale
+     * and the net keeps its own shape further out. The x/y tilt terms are off (TILT_FIT): they copied ARCore's tilted far
+     * walls into the AI depth (scan1047 back wall 60 deg off vertical with them, 33-45 deg without and near-weighted).
      * Returns {a, b, c, d, median relative error} or null.
      */
+    static final boolean TILT_FIT = false;
     static float[] fitInverseDepth(float[] cd, float[] cr, float[] cu, float[] cv) {
         int n = 0;
         for (float d : cd) if (d > 0) n++;
         if (n < 40) return null;
-        int k = n >= 150 ? 4 : 2;
+        int k = TILT_FIT && n >= 150 ? 4 : 2;
         double[][] f = new double[n][];
-        double[] y = new double[n], w = new double[n], e = new double[n];
+        double[] y = new double[n], w = new double[n], w0 = new double[n], e = new double[n];
         int j = 0;
         for (int i = 0; i < cd.length; i++) if (cd[i] > 0) {
             f[j] = k == 4 ? new double[]{cr[i], 1, cu[i], cv[i]} : new double[]{cr[i], 1};
-            y[j] = 1.0 / cd[i]; w[j] = 1; j++;
+            y[j] = 1.0 / cd[i]; w0[j] = 1.0 / (cd[i] * cd[i]); w[j] = w0[j]; j++;
         }
         double[] sol = null;
         for (int iter = 0; iter < 12; iter++) {
@@ -1018,7 +1021,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int i = 0; i < n; i++) { double p = 0; for (int q = 0; q < k; q++) p += sol[q] * f[i][q]; e[i] = Math.abs(p - y[i]); }
             double[] s = e.clone(); java.util.Arrays.sort(s);
             double sc = s[n / 2] * 1.5 + 1e-6;
-            for (int i = 0; i < n; i++) w[i] = 1.0 / Math.max(1, e[i] / sc);
+            for (int i = 0; i < n; i++) w[i] = w0[i] / Math.max(1, e[i] / sc);
         }
         if (sol[0] <= 0) return null; // the net's disparity must grow as things get closer
         double[] rel = new double[n];
@@ -3100,7 +3103,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
             int[] rgb = new int[3];
-            frameHits = 0; frameSolid = 0;
+            frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
             // Record the raw frame for export (replaying the scan off the phone).
             if (recs.size() < ScanExport.MAX_RECS) {
@@ -3169,6 +3172,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     float wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13];
                     float wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
                     depthPixelsFrame++;
+                    if (d > FAR_M) farPixelsFrame++;
                     if (d < 0.8f) { nearPixelsFrame++; nearSum[0] += wx; nearSum[1] += wy; nearSum[2] += wz; }
                     boolean fine = !zones.isEmpty() && inZone(wx, wy, wz);
                     long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
@@ -3185,6 +3189,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
             carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
+            if (depthPixelsFrame > 300) { float fs = (float) farPixelsFrame / depthPixelsFrame; farShare = farShare < 0 ? fs : farShare * 0.7f + fs * 0.3f; }
             if (frameHits > 200) { float f = (float) frameSolid / frameHits; detailHere = detailHere < 0 ? f : detailHere * 0.8f + f * 0.2f; }
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
             // Close-up held for a moment: make it a detail zone automatically.
@@ -3332,6 +3337,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) return false;
         return mm * 0.001f > lim;
     }
+    static final float FAR_M = 2.3f;        // beyond this the S24's depth from motion bends flat walls (scan1047)
+    private float farShare = -1;            // smoothed share of this view's depth further than FAR_M
+    private int farPixelsFrame;
     private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
     private float detailHere = -1;           // smoothed share of solid points where the phone points
     private int solidCount, hudCalls;        // points seen often enough to count as solid
@@ -3605,10 +3613,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "void main(){ gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
                 "  if (aColor.a < 0.002) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; }" +
                 "  float solid = step(0.99, aColor.a);" + // done spots shrink to a faint dot so they stop hiding the camera
-                "  gl_PointSize = clamp(uSize / w * mix(1.0, 0.4, solid), 2.0, 64.0); vColor = aColor; }",
+                "  float grow = solid > 0.5 ? 0.4 : mix(1.25, 0.7, aColor.a);" + // red discs start big and visibly shrink with every new look
+                "  gl_PointSize = clamp(uSize / w * grow, 2.0, 64.0); vColor = aColor; }",
                 "precision mediump float; varying vec4 vColor;" +
                 "void main(){ vec2 d = gl_PointCoord * 2.0 - 1.0; float r2 = dot(d, d); if (r2 > 1.0) discard;" +
-                "  float s = vColor.a;" + // 0..1 how solid
+                "  float s = floor(vColor.a * 4.0) / 4.0;" + // 4 clear colour steps (red, orange, yellow, green) so progress pops
                 "  if (s > 0.99) { gl_FragColor = vec4(0.15, 1.0, 0.35, 0.35); return; }" +
                 "  vec3 heat = s < 0.5 ? mix(vec3(1.0, 0.15, 0.1), vec3(1.0, 0.85, 0.1), s * 2.0) : mix(vec3(1.0, 0.85, 0.1), vec3(0.15, 1.0, 0.35), s * 2.0 - 1.0);" +
                 "  if (r2 > 0.55) { gl_FragColor = vec4(heat, 1.0); return; }" +
@@ -3647,6 +3656,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float d = detailHere;
         if (ts != TrackingState.TRACKING) { level = 2; hint = "Lost track. Point at something with detail and move slowly"; }
         else if (d < 0 || count < 3000) { level = 1; hint = "Walk slowly around the room. Wherever the bar turns red, stay there and sway the phone gently"; }
+        else if (farShare > 0.6f && d < 0.7f) { level = 2; hint = "Too far to measure well. Walk closer, to about 1 to 2 m from it"; }
         else if (moveSpeed > 0.35f && d < 0.7f) { level = 2; hint = "Too fast. Stay right here and sway the phone slowly"; }
         else if (d < 0.35f) { level = 2; hint = "New area. Stay here and sway the phone gently side to side until the bar fills"; }
         else if (d < 0.7f) { level = 1; hint = "Good. Keep swaying gently here a little longer"; }
