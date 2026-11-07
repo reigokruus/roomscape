@@ -17,6 +17,7 @@ struct SurfelRecord {
 /// - on clearly flat patches the point is pulled onto the fitted plane, removing depth noise without moving edges.
 /// Then points near RoomPlan's walls and floor are snapped onto those planes.
 enum Surfels {
+    /// Neighbour radius and grid cell for 2 cm points; both scale with the scan's cell size (`build(_:voxel:)`).
     static let radius: Float = 0.05
     static let cell: Float = 0.05
     static let maxNeighbours = 48
@@ -29,7 +30,11 @@ enum Surfels {
         UInt64((ix + 1024) & 2047) | UInt64((iy + 1024) & 2047) << 11 | UInt64((iz + 1024) & 2047) << 22
     }
 
-    static func build(_ input: [LivePoint]) -> (surfels: [SurfelRecord], stats: Stats) {
+    /// - Parameter voxel: the capture's cell size (`CaptureMeta.voxelSize`): neighbourhoods and disc sizes scale
+    ///   with it, so a large room captured at coarser cells still closes up.
+    static func build(_ input: [LivePoint], voxel: Float = 0.02) -> (surfels: [SurfelRecord], stats: Stats) {
+        let scale = max(1, voxel / 0.02)
+        let radius = Self.radius * scale, cell = Self.cell * scale
         let thin = max(1, (input.count + maxSurfels - 1) / maxSurfels)
         let src = thin == 1 ? input : Swift.stride(from: 0, to: input.count, by: thin).map { input[$0] }
         let n = src.count
@@ -109,10 +114,10 @@ enum Surfels {
                 var nx: Float = 0, ny: Float = 0, nz: Float = 0
                 // Disc radius from density: `found` points share the pi*R^2 patch around this one.
                 let spacing = (Float.pi * r2max / Float(max(1, found))).squareRoot()
-                var rad = min(0.035, max(0.008, spacing * 0.75))
+                var rad = min(0.035 * scale, max(0.008 * scale, spacing * 0.75))
                 if m < 5 {
                     stats.lonely += 1
-                    rad = 0.012
+                    rad = 0.012 * scale
                 } else {
                     var mx = 0.0, my = 0.0, mz = 0.0
                     var t = 0

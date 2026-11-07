@@ -50,7 +50,7 @@ enum CaptureStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(records).write(to: temp.appendingPathComponent("keyframes.json"))
-        let meta = CaptureMeta(pointCount: capture.pointCount, keyframeCount: records.count, voxelSize: LiveCloud.voxel)
+        let meta = CaptureMeta(pointCount: capture.pointCount, keyframeCount: records.count, voxelSize: capture.voxelSize)
         try encoder.encode(meta).write(to: temp.appendingPathComponent("meta.json"))
 
         try? fm.removeItem(at: folder)

@@ -29,6 +29,8 @@ struct CaptureSnapshot: Sendable {
     var points: Data
     var pointCount: Int
     var keyframes: [Keyframe]
+    /// Cell size the points ended up at (2 cm, or coarser after a large room filled the budget).
+    var voxelSize: Float
 }
 
 /// The live point cloud built from LiDAR depth while RoomPlan scans (handoff section 2: live capture + seen counter).
@@ -40,7 +42,11 @@ struct CaptureSnapshot: Sendable {
 /// Threading: `integrate` and `reset` run on one serial worker queue. The renderer reads `buffer` and `count` from the
 /// main thread while the worker writes; a disc drawn from a half-updated point is harmless.
 final class LiveCloud: @unchecked Sendable {
+    /// Starting cell size. When a large room fills the point budget, the cloud is merged into 1.5× bigger cells
+    /// and capture goes on at that size (see `coarsen`), so the whole room is covered at a little less detail.
     static let voxel: Float = 0.02
+    /// Merge into bigger cells at this share of `maxPoints`, leaving room for the next frames.
+    static let coarsenAt = 0.95
     /// We sample about 15 depth frames per second, so this is about 1 s of sightings.
     static let solidFrames = 15
     /// About 600 m² of surface at 2 cm: a large room with its floor, walls and some ceiling. 400k filled up after one
@@ -55,6 +61,13 @@ final class LiveCloud: @unchecked Sendable {
     private let countLock = OSAllocatedUnfairLock(initialState: 0)
     /// Number of points in `buffer`. Safe to read from any thread.
     var count: Int { countLock.withLock { $0 } }
+    private let voxelLock = OSAllocatedUnfairLock(initialState: LiveCloud.voxel)
+    /// Current cell size in metres. Safe to read from any thread.
+    var voxelSize: Float { voxelLock.withLock { $0 } }
+    /// Worker-only copy of `voxelSize`.
+    private var voxel = LiveCloud.voxel
+    /// Photo spacing (metres moved, degrees turned); doubled each time the photo budget is thinned.
+    private var photoMove: Float = 0.2, photoTurn: Float = 15
 
     // Worker-only state.
     private var index: [Int64: Int32] = [:]
@@ -91,6 +104,10 @@ final class LiveCloud: @unchecked Sendable {
 
     func reset() {
         countLock.withLock { $0 = 0 }
+        voxel = Self.voxel
+        voxelLock.withLock { $0 = Self.voxel }
+        photoMove = 0.2
+        photoTurn = 15
         index.removeAll(keepingCapacity: true)
         depthFrames = 0
         lastPosition = nil
@@ -108,7 +125,7 @@ final class LiveCloud: @unchecked Sendable {
         photoQueue.sync {}
         let n = count
         return CaptureSnapshot(points: Data(bytes: points, count: n * MemoryLayout<LivePoint>.stride),
-                               pointCount: n, keyframes: keyframes.withLock { $0 })
+                               pointCount: n, keyframes: keyframes.withLock { $0 }, voxelSize: voxel)
     }
 
     // MARK: Integration
@@ -202,7 +219,7 @@ final class LiveCloud: @unchecked Sendable {
                 let g = clampByte(luma - 0.344136 * cb - 0.714136 * cr)
                 let b = clampByte(luma + 1.772 * cb)
 
-                let key = Self.key(world.x, world.y, world.z)
+                let key = Self.key(world.x, world.y, world.z, voxel)
                 if let hit = index[key] {
                     let i = Int(hit)
                     var alpha = points[i].rgba >> 24
@@ -240,6 +257,8 @@ final class LiveCloud: @unchecked Sendable {
 
         let total = n
         countLock.withLock { $0 = total }
+        // Up to ~7 cm cells (2 → 3 → 4.5 → 6.75 cm); past that the cloud fills and the status line says so.
+        if Double(total) >= Double(Self.maxPoints) * Self.coarsenAt, voxel < 0.06 { coarsen() }
         if frameHits > 200 {
             let share = Float(frameSolid) / Float(frameHits)
             detailHere = detailHere < 0 ? share : detailHere * 0.8 + share * 0.2
@@ -252,7 +271,7 @@ final class LiveCloud: @unchecked Sendable {
     /// Only the pixel copy happens here, so ARKit's camera frame is let go within a millisecond or two. Scaling and
     /// JPEG encoding run later on `photoQueue`.
     private func captureKeyframeIfMoved(_ frame: ARFrame, pose: simd_float4x4) {
-        guard keyframesTaken < Self.maxKeyframes else { return }
+        if keyframesTaken >= Self.maxKeyframes { thinPhotos() }
         // Not while tracking is still settling: that's when extra work can make ARKit lose track.
         guard let since = trackingNormalSince, frame.timestamp - since >= 1 else { return }
         if let last = lastKeyframePose {
@@ -261,7 +280,7 @@ final class LiveCloud: @unchecked Sendable {
             let lookA = simd_normalize(SIMD3(last.columns.2.x, last.columns.2.y, last.columns.2.z))
             let lookB = simd_normalize(SIMD3(pose.columns.2.x, pose.columns.2.y, pose.columns.2.z))
             let turnedDegrees = acos(max(-1, min(1, simd_dot(lookA, lookB)))) * 180 / .pi
-            guard moved >= 0.2 || turnedDegrees >= 15 else { return }
+            guard moved >= photoMove || turnedDegrees >= photoTurn else { return }
         }
         guard let pixels = Self.copy(frame.capturedImage) else { return }
         keyframesTaken += 1
@@ -319,7 +338,70 @@ final class LiveCloud: @unchecked Sendable {
         return copy
     }
 
-    private static func key(_ x: Float, _ y: Float, _ z: Float) -> Int64 {
+    // MARK: Large rooms
+
+    /// Merges the cloud into cells 1.5× bigger and carries on at that size. Points that land in the same new cell
+    /// are averaged, weighted by how often each was seen; the cell keeps the highest "solid" level. Compacts in
+    /// place (a point only ever moves to a lower index), so the renderer may show one odd frame at worst.
+    private func coarsen() {
+        let n = count
+        let newVoxel = voxel * 1.5
+        let started = Date()
+        index.removeAll(keepingCapacity: true)
+        var weights = [Float](repeating: 0, count: n)
+        var out = 0
+        for i in 0..<n {
+            let p = points[i]
+            let w = Float(max(1, observations[i]))
+            let key = Self.key(p.x, p.y, p.z, newVoxel)
+            if let hit = index[key] {
+                let k = Int(hit)
+                var q = points[k]
+                let wk = weights[k], total = wk + w
+                q.x = (q.x * wk + p.x * w) / total
+                q.y = (q.y * wk + p.y * w) / total
+                q.z = (q.z * wk + p.z * w) / total
+                let a = q.rgba, b = p.rgba
+                func mix(_ shift: UInt32) -> UInt32 {
+                    clampByte((Float((a >> shift) & 0xFF) * wk + Float((b >> shift) & 0xFF) * w) / total)
+                }
+                q.rgba = mix(0) | (mix(8) << 8) | (mix(16) << 16) | (max(a >> 24, b >> 24) << 24)
+                points[k] = q
+                weights[k] = total
+                observations[k] = UInt8(min(255, Int(observations[k]) + Int(observations[i])))
+                seenStamp[k] = max(seenStamp[k], seenStamp[i])
+            } else {
+                points[out] = p
+                weights[out] = w
+                observations[out] = observations[i]
+                seenStamp[out] = seenStamp[i]
+                index[key] = Int32(out)
+                out += 1
+            }
+        }
+        voxel = newVoxel
+        voxelLock.withLock { $0 = newVoxel }
+        let kept = out
+        countLock.withLock { $0 = kept }
+        print("LiveCloud: budget full, merged \(n) points into \(kept) at \(Int((newVoxel * 1000).rounded())) mm cells "
+              + "in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+    }
+
+    /// The photo budget is used up: keep every other photo and take new ones twice as far apart, so photos cover the
+    /// whole room instead of the first part of it.
+    private func thinPhotos() {
+        photoQueue.sync {}
+        let kept = keyframes.withLock { frames -> Int in
+            frames = frames.enumerated().filter { $0.offset % 2 == 0 }.map(\.element)
+            return frames.count
+        }
+        keyframesTaken = kept
+        photoMove *= 2
+        photoTurn *= 2
+        print("LiveCloud: photo budget full, kept \(kept), now one photo per \(photoMove) m or \(photoTurn)°")
+    }
+
+    private static func key(_ x: Float, _ y: Float, _ z: Float, _ voxel: Float) -> Int64 {
         let ix = Int64(floor(x / voxel)) & 0x1F_FFFF
         let iy = Int64(floor(y / voxel)) & 0x1F_FFFF
         let iz = Int64(floor(z / voxel)) & 0x1F_FFFF
