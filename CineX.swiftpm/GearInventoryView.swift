@@ -17,7 +17,7 @@ struct GearInventoryView: View {
                 ContentUnavailableView(
                     "No gear yet",
                     systemImage: "camera.on.rectangle",
-                    description: Text("Add the camera, lights and other equipment you own and CineX will use it when planning your shoot.")
+                    description: Text("Add the camera, lights and other equipment you own and RoomScape will use it when planning your shoot.")
                 )
             } else {
                 ForEach(grouped, id: \.0) { category, catItems in

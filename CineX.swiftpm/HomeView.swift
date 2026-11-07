@@ -19,7 +19,7 @@ struct HomeView: View {
                                 .font(.headline)
                         }
                     } else {
-                        Label("This iPhone has no LiDAR scanner. CineX needs an iPhone 12 Pro or newer Pro model.",
+                        Label("This iPhone has no LiDAR scanner. RoomScape needs an iPhone 12 Pro or newer Pro model.",
                               systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.secondary)
                     }
@@ -58,7 +58,7 @@ struct HomeView: View {
                     }
                 }
             }
-            .navigationTitle("CineX")
+            .navigationTitle("RoomScape")
             .navigationDestination(for: SavedScan.self) { scan in
                 ResultView(scan: scan)
             }
