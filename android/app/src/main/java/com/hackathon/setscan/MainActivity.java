@@ -247,10 +247,14 @@ public class MainActivity extends Activity {
         lightButton = new Button(this);
         lightButton.setText("Lighting");
         lightButton.setVisibility(View.GONE);
-        lightButton.setOnClickListener(v -> glView.queueEvent(() -> {
+        lightButton.setOnClickListener(v -> {
+            // panel closed while lighting is still on: the button just brings the panel back
+            if (renderer.lighting.enabled && lightPanel.getVisibility() != View.VISIBLE) { lightPanel.setVisibility(View.VISIBLE); lightingSelected(); return; }
+            glView.queueEvent(() -> {
             String label = renderer.toggleLighting();
             runOnUiThread(() -> { lightButton.setText(label); lightPanel.setVisibility(renderer.lighting.enabled ? View.VISIBLE : View.GONE); lightingSelected(); });
-        }));
+            });
+        });
         bar.addView(lightButton);
         saveButton = new Button(this);
         saveButton.setText("Save");
@@ -359,6 +363,11 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         llp.bottomMargin = dp(150);
         chrome.addView(lightPanel, llp);
+        // keep the panel just above the button rows, however many rows they wrap into
+        bars.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            int want = dp(56) + (b - t);
+            if (llp.bottomMargin != want) { llp.bottomMargin = want; lightPanel.post(() -> lightPanel.setLayoutParams(llp)); }
+        });
         root.addView(chrome, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(buildHome(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         scanChrome.setVisibility(View.GONE);
@@ -684,7 +693,17 @@ public class MainActivity extends Activity {
         selLabel = new TextView(this);
         selLabel.setTextColor(Color.WHITE);
         selLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        p.addView(selLabel);
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(selLabel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button close = new Button(this);
+        close.setText("✕ Close"); close.setAllCaps(false); close.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        close.setMinHeight(0); close.setMinimumHeight(0); close.setMinWidth(0); close.setMinimumWidth(0);
+        close.setPadding(dp(10), dp(4), dp(10), dp(4));
+        close.setOnClickListener(v -> { p.setVisibility(View.GONE); toast("Lights stay on. Tap the Lighting button to open the panel again."); });
+        head.addView(close);
+        p.addView(head);
         FlowRow row = new FlowRow(this, dp(4));
         String[] names = {"+ Light", "+ Person", "+ Seated", "+ Table", "+ Chair", "Type", "On/Off", "Delete"};
         for (int i = 0; i < names.length; i++) {
