@@ -3201,7 +3201,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** Live disc colour code: how many times a spot has been seen, stored in the point colour's alpha (1 = once, 255 = solid). */
-    static final int SOLID_SEEN = 8;
+    static final int SOLID_SEEN = 12;
     private static int seenAlpha(int n) { return Math.min(255, Math.max(1, n * 255 / SOLID_SEEN)); }
     private final int[] seenStamp = new int[MAX_POINTS];
     private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
@@ -3449,10 +3449,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (liveProg == 0) liveProg = program(
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
                 "void main(){ gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
-                "  gl_PointSize = clamp(uSize / w, 3.0, 64.0); vColor = aColor; }",
+                "  float solid = step(0.99, aColor.a);" + // done spots shrink to a faint dot so they stop hiding the camera
+                "  gl_PointSize = clamp(uSize / w * mix(1.0, 0.4, solid), 2.0, 64.0); vColor = aColor; }",
                 "precision mediump float; varying vec4 vColor;" +
                 "void main(){ vec2 d = gl_PointCoord * 2.0 - 1.0; float r2 = dot(d, d); if (r2 > 1.0) discard;" +
                 "  float s = vColor.a;" + // 0..1 how solid
+                "  if (s > 0.99) { gl_FragColor = vec4(0.15, 1.0, 0.35, 0.35); return; }" +
                 "  vec3 heat = s < 0.5 ? mix(vec3(1.0, 0.15, 0.1), vec3(1.0, 0.85, 0.1), s * 2.0) : mix(vec3(1.0, 0.85, 0.1), vec3(0.15, 1.0, 0.35), s * 2.0 - 1.0);" +
                 "  if (r2 > 0.55) { gl_FragColor = vec4(heat, 1.0); return; }" +
                 "  gl_FragColor = vec4(mix(vColor.rgb, heat, 0.25), 0.8); }");
