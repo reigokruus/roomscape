@@ -130,6 +130,7 @@ public class MainActivity extends Activity {
                     String k = in.getText().toString().trim();
                     if (k.isEmpty()) return;
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY, k).apply();
+                    updateSpend();
                     if (renderer.claudeLiveKey != null) renderer.claudeLiveKey = k;
                     then.run();
                 })
@@ -414,6 +415,17 @@ public class MainActivity extends Activity {
                                     new com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build()))
                             .build());
         } catch (Throwable ignored) { }
+        spendView = new TextView(this);
+        spendView.setTextColor(0xFFE8F4F8); spendView.setTextSize(12);
+        android.graphics.drawable.GradientDrawable sbg = new android.graphics.drawable.GradientDrawable();
+        sbg.setColor(0xC0101418); sbg.setCornerRadius(dp(10));
+        spendView.setBackground(sbg); spendView.setPadding(dp(10), dp(4), dp(10), dp(4));
+        spendView.setOnClickListener(v -> toast("What Claude has cost on your API key: this session, and in total on this phone (estimate)."));
+        FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
+        sp.topMargin = dp(38); sp.rightMargin = dp(14);
+        root.addView(spendView, sp);
+        ClaudeHelper.onSpend = () -> runOnUiThread(this::updateSpend);
+        updateSpend();
         setContentView(root);
 
         scaleDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -665,6 +677,25 @@ public class MainActivity extends Activity {
 
     /** The renderer saved the scan on its own (after Done, and again after clean-up). */
     private String lastSavedName;
+    private TextView spendView;
+    private double spendSaved; // session spend already added to the stored total
+
+    /** The money counter at the top: shown whenever a Claude key is saved. */
+    void updateSpend() {
+        if (spendView == null) return;
+        android.content.SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        double now = ClaudeHelper.sessionUsd, total = p.getFloat("claude_usd_total", 0f);
+        if (now > spendSaved) { total += now - spendSaved; spendSaved = now; p.edit().putFloat("claude_usd_total", (float) total).apply(); }
+        boolean on = claudeKey() != null;
+        spendView.setVisibility(on ? View.VISIBLE : View.GONE);
+        spendView.setText(String.format(java.util.Locale.US, "Claude $%.2f · total $%.2f", now, total));
+        if (hud != null && hud.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams hp = (FrameLayout.LayoutParams) hud.getLayoutParams();
+            int want = on ? dp(68) : dp(40); // the scan card sits under the counter
+            if (hp.topMargin != want) { hp.topMargin = want; hud.setLayoutParams(hp); }
+        }
+    }
+
     /** The Claude key saved on this phone, or null. */
     String claudeKey() {
         String k = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);

@@ -31,12 +31,16 @@ final class ClaudeHelper {
     /** Estimated spend since the app started, in US dollars (Claude Opus 5.5 list price: $4 in / $20 out per million tokens). */
     static volatile double sessionUsd;
     static volatile int sessionCalls;
+    static volatile Runnable onSpend; // called after every request (any thread), for the money counter
 
     private static void count(BetaMessage msg) {
         com.anthropic.models.beta.messages.BetaUsage u = msg.usage();
         long in = u.inputTokens() + u.cacheCreationInputTokens().orElse(0L), cached = u.cacheReadInputTokens().orElse(0L);
-        sessionUsd += (in * 4.0 + cached * 0.2 + u.outputTokens() * 20.0) / 1_000_000.0;
+        long written = u.cacheCreationInputTokens().orElse(0L);
+        // Opus 5.5: $4 / MTok in, $5 cache writes, $0.20 cache reads, $20 out
+        sessionUsd += ((in - written) * 4.0 + written * 5.0 + cached * 0.2 + u.outputTokens() * 20.0) / 1_000_000.0;
         sessionCalls++;
+        Runnable r = onSpend; if (r != null) r.run();
     }
 
     static String costLine() {
