@@ -7,7 +7,7 @@ import simd
 /// The scan's colours are the room as the phone camera saw it, already lit by the room's own light (`roomLux`,
 /// 250 lx). So each surface's albedo is its scanned colour / 250 lx, and with gear lights on it shows
 ///   linear(colour) × (roomDimmer + Σ gear lux / roomLux) × exposure
-/// then a highlight shoulder above 0.8. The camera is exposed for the subject's face, like a DP would, ± an EV offset.
+/// then a highlight shoulder above 0.8. The camera stops down for a face brighter than the scan (never pushes it up), ± an EV offset.
 enum LightType: String, CaseIterable, Codable, Identifiable {
     case fresnel, panel, softbox, tube, practical, ringLight
 
@@ -252,6 +252,10 @@ struct LightingSetup: Equatable {
     }
 
     /// Exposure multiplier that brings the face back to how the room looked in the scan, then ± exposureEV.
+    /// Only ever darkens: bright gear on the face stops the room down, but a face lit by less than the scan's room
+    /// light (no gear on, or the estimated room light on an unscanned face is low) doesn't push the whole scan up.
+    /// Uncapped, removing the last light gave gains up to 50x and blew every scanned surface out to white. The
+    /// readout still meters the real face, and the EV slider can brighten on purpose.
     var exposure: Float {
         let n = facingDirection
         let room: Float
@@ -262,7 +266,7 @@ struct LightingSetup: Equatable {
             room = r.fittings + r.daylight
         }
         let onFace = room + lights.reduce(0) { $0 + lux(from: $1, at: faceCenter, normal: n) }
-        return Self.roomLux / max(5, onFace) * pow(2, exposureEV)
+        return min(1, Self.roomLux / max(5, onFace)) * pow(2, exposureEV)
     }
 
     /// Incident-meter f-stop for the face: N = √(E · t · ISO / 250), then the EV offset.

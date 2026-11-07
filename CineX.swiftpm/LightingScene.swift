@@ -94,22 +94,27 @@ enum LightingShader {
 
     /// Surface modifiers, per pixel in world space: the room shell (stands in for scanned surfaces, so `baked`)
     /// and the props (the person and stool, not scanned).
-    static let surfaceModifier = surface(baked: true)
-    static let propSurfaceModifier = surface(baked: false)
+    /// The shell's also takes the mesh look (`clay`, see `MeshLook`): clay colour before the lighting, grid after.
+    static let surfaceModifier = surface(baked: true, meshLook: true)
+    static let propSurfaceModifier = surface(baked: false, meshLook: false)
 
-    private static func surface(baked: Bool) -> String {
+    private static func surface(baked: Bool, meshLook: Bool) -> String {
         """
         #pragma arguments
-        \(arguments)
+        \(arguments)\(meshLook ? "float clay;\n" : "")
         #pragma body
+        float3 surfaceP = (scn_frame.inverseViewTransform * float4(_surface.position, 1.0)).xyz;
+        float3 surfaceN = normalize((scn_frame.inverseViewTransform * float4(_surface.normal, 0.0)).xyz);
+        \(meshLook ? "if (clay > 0.5) { _surface.diffuse.rgb = \(MeshLook.clay("surfaceN")); }" : "")
         if (litA.x > 0.5) {
-            float3 P = (scn_frame.inverseViewTransform * float4(_surface.position, 1.0)).xyz;
-            float3 N = normalize((scn_frame.inverseViewTransform * float4(_surface.normal, 0.0)).xyz);
+            float3 P = surfaceP;
+            float3 N = surfaceN;
             float hasN = 1.0;
             float3 lin = _surface.diffuse.rgb;
         \(shade(twoSided: false, baked: baked))
             _surface.diffuse.rgb = v;
         }
+        \(meshLook ? "if (clay > 0.5) \(MeshLook.grid(p: "surfaceP", n: "surfaceN"))" : "")
         """
     }
 
@@ -189,8 +194,9 @@ final class LightingScene {
     /// Shows the setup (or turns the preview off with nil).
     func apply(_ setup: LightingSetup?) {
         for m in splatAndShell { LightingShader.apply(setup, to: m) }
-        // The shell is lit by the preview instead of SceneKit's default lights while it's on.
-        for m in shellMaterials { m.lightingModel = setup == nil ? .lambert : .constant }
+        // The shell is lit by the preview instead of SceneKit's default lights while it's on (and shades itself
+        // in the mesh look).
+        for m in shellMaterials { SplatScene.updateLightingModel(m) }
         root.childNodes.forEach { $0.removeFromParentNode() }
         propMaterials = []
         guard let setup else { return }
