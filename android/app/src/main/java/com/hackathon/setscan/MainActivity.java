@@ -29,6 +29,8 @@ public class MainActivity extends Activity {
 
     private GLSurfaceView glView;
     private ScanRenderer renderer;
+    private NativePlanningUi nativePlanning;
+    private Button catalogButton, scannedItemsButton, previewButton;
     private Session session;
     private boolean installRequested;
     private TextView status;
@@ -204,6 +206,7 @@ public class MainActivity extends Activity {
         glView.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
         renderer = new ScanRenderer(this);
         glView.setRenderer(renderer);
+        nativePlanning = new NativePlanningUi(this, glView, renderer);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
         root.addView(glView);
 
@@ -256,6 +259,13 @@ public class MainActivity extends Activity {
             });
         });
         bar.addView(lightButton);
+        catalogButton = new Button(this); catalogButton.setText("Catalog"); catalogButton.setOnClickListener(v -> nativePlanning.showCatalog()); bar.addView(catalogButton);
+        scannedItemsButton = new Button(this); scannedItemsButton.setText("Scanned items"); scannedItemsButton.setOnClickListener(v -> nativePlanning.showScanned()); bar.addView(scannedItemsButton);
+        previewButton = new Button(this); previewButton.setText("Plan / original scan"); previewButton.setOnClickListener(v -> glView.queueEvent(() -> {
+            try { renderer.requirePlanningScan(); renderer.roomEdits.capture(renderer.room.boxes); renderer.planningPreview = !renderer.planningPreview; planningModeChanged(); toast(renderer.planningPreview ? "Planning shapes only; original scan unchanged" : "Original scan — hidden planning items reappear here"); }
+            catch(Exception e) { toast(e.getMessage()); }
+        })); bar.addView(previewButton);
+
         saveButton = new Button(this);
         saveButton.setText("Rename");
         saveButton.setVisibility(View.GONE);
@@ -346,7 +356,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{homeButton, mainButton, lightButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{homeButton, mainButton, lightButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
             ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -422,7 +432,7 @@ public class MainActivity extends Activity {
                     if (e.getPointerCount() > 1) lightDragging = false;
                     else {
                         if (act == MotionEvent.ACTION_MOVE) renderer.lightingDragTo(e.getX(), e.getY());
-                        else if (act == MotionEvent.ACTION_UP) { lightDragging = false; renderer.lightingDragEnd(); }
+                        else if (act == MotionEvent.ACTION_UP) { lightDragging = false; glView.queueEvent(renderer::lightingDragEnd); }
                         return true;
                     }
                 }
@@ -513,7 +523,7 @@ public class MainActivity extends Activity {
 
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
-        Button[] viewerMain = {homeButton, exportButton, lightButton, saveButton};
+        Button[] viewerMain = {homeButton, exportButton, lightButton, catalogButton, scannedItemsButton, previewButton, saveButton};
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
         improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE);
@@ -523,7 +533,7 @@ public class MainActivity extends Activity {
         }
         mainButton.setVisibility(View.VISIBLE);
         // the text panel is for debugging; testers see it only for the lighting readout
-        status.setVisibility(debug || (!scanning && renderer.lighting.enabled) ? View.VISIBLE : View.GONE);
+        status.setVisibility(debug || (!scanning && (renderer.lighting.enabled || renderer.planningPreview)) ? View.VISIBLE : View.GONE);
         if (hud != null) hud.setVisibility(scanning ? View.VISIBLE : View.GONE);
         if (procBox != null && scanning) procBox.setVisibility(View.GONE);
     }
@@ -600,6 +610,14 @@ public class MainActivity extends Activity {
 
     private static final int[] HINT_COLORS = {0xFF33D17A, 0xFFF5C542, 0xFFFF6B5B};
 
+    void planningModeChanged() {
+        runOnUiThread(() -> {
+            previewButton.setText(renderer.planningPreview ? "Show original scan" : "Show planning room");
+            applyUi();
+            if(renderer.planningPreview) updateStatus("Planning shapes only — approximate detected furniture and catalog size proxies. Original fused scan/photos unchanged; hidden surfaces are NOT reconstructed.");
+        });
+    }
+
     /** From the renderer, ~2x a second while scanning. level 0 ok, 1 hold on, 2 stop and stay here. */
     void updateHud(String hint, String sub, int level, float detail, float room, int points) {
         runOnUiThread(() -> {
@@ -672,6 +690,7 @@ public class MainActivity extends Activity {
         newScan.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         newScan.setOnClickListener(v -> startNewScan());
         col.addView(newScan, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)));
+        Button browseCatalog = new Button(this); browseCatalog.setText("Browse item catalog (offline)"); browseCatalog.setOnClickListener(v -> nativePlanning.showCatalog()); col.addView(browseCatalog);
         TextView saved = new TextView(this);
         saved.setText("Saved scans");
         saved.setTextColor(Color.WHITE);
@@ -857,7 +876,7 @@ public class MainActivity extends Activity {
         head.addView(close);
         p.addView(head);
         FlowRow row = new FlowRow(this, dp(4));
-        String[] names = {"+ Light", "+ Person", "+ Seated", "+ Table", "+ Chair", "Type", "On/Off", "Delete"};
+        String[] names = {"+ Light", "+ Person", "+ Seated", "+ Table", "+ Chair", "Type", "On/Off", "Delete", "Placed details"};
         for (int i = 0; i < names.length; i++) {
             Button b = new Button(this);
             b.setText(names[i]); b.setAllCaps(false); b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
@@ -945,6 +964,7 @@ public class MainActivity extends Activity {
     }
 
     private void lightAction(int which) {
+        if(which == 8) { nativePlanning.editSelectedPlacement(); return; }
         Lighting L = renderer.lighting;
         synchronized (L) {
             float[] face = L.subjectFace();
@@ -990,7 +1010,7 @@ public class MainActivity extends Activity {
             }
         }
         lightingSelected();
-        glView.queueEvent(() -> renderer.lightingStatus());
+        glView.queueEvent(() -> { renderer.lightingStatus(); renderer.planningChanged(); });
     }
 
     private int dp(int v) {
@@ -1066,8 +1086,15 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (nativePlanning != null) nativePlanning.close();
         if (session != null) { session.close(); session = null; }
         super.onDestroy();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if(requestCode == NativePlanningUi.IMPORT_CATALOG && resultCode == RESULT_OK && data != null && data.getData() != null) nativePlanning.importUri(data.getData());
     }
 
     @Override

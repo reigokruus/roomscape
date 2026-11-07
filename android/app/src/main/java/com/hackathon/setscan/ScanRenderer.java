@@ -294,6 +294,50 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- shot lighting preview (see Lighting) ----
     final Lighting lighting = new Lighting();
+    RoomEdits roomEdits = new RoomEdits();
+    volatile boolean planningPreview;
+    private String planningLoadError;
+    private String planningScanKey;
+
+    void requirePlanningScan() {
+        ItemCatalog.require(isViewing() && currentDir != null && roomReady, "Open a saved, processed scan first (wait for autosave after Done).");
+        if(!currentDir.getName().equals(planningScanKey)) loadPlanning(currentDir);
+        ItemCatalog.require(planningLoadError == null, "Planning overlay could not be read; original scan is intact. " + planningLoadError);
+    }
+    void prepareScannedItems() throws Exception {
+        requirePlanningScan(); roomEdits.capture(room.boxes); planningPreview = true; savePlanning();
+    }
+    void savePlanning() throws Exception {
+        requirePlanningScan(); RoomEditStore.write(activity, currentDir, roomEdits.encode(lighting));
+    }
+    void planningChanged() {
+        try { if(currentDir != null && isViewing() && planningLoadError == null) savePlanning(); }
+        catch(Exception e) { activity.toast("Planning edits NOT saved: " + e.getMessage()); }
+    }
+    void placeCatalog(ItemCatalog.Item item, double[] manual, float bottom) throws Exception {
+        requirePlanningScan(); ItemCatalog.require(item.complete() || manual != null, "Size unknown: supply manual dimensions first");
+        ItemCatalog.require(Float.isFinite(bottom) && bottom >= 0 && bottom <= 20, "Base height must be 0–20 m");
+        synchronized(lighting) {
+            int n = 0; for(Lighting.Prop p:lighting.props)if(p.catalog!=null)n++;
+            ItemCatalog.require(n < RoomEdits.MAX_PLACED, "At most 100 placed catalog items");
+            lighting.enabled = true;
+            Lighting.Prop p = Lighting.catalogProp(item, manual, bottom, target[0] + (n % 3) * .3f, target[2] + (n / 3 % 3) * .3f);
+            lighting.props.add(p); lighting.floorY = room.floorY; lighting.selected = lighting.lights.size() + lighting.props.size() - 1;
+        }
+        roomEdits.capture(room.boxes); planningPreview = true; savePlanning(); activity.lightingSelected();
+    }
+    void focusDetected(String id) {
+        RoomEdits.Detected d = roomEdits.find(id); if(d == null)return;
+        roomEdits.selectedId = id; planningPreview = true; target[0] = d.cx; target[1] = (d.y0 + d.y1) / 2; target[2] = d.cz;
+    }
+    private void loadPlanning(File dir) {
+        planningScanKey = dir.getName();
+        try {
+            String json = RoomEditStore.read(activity, dir);
+            if(json != null) { roomEdits = RoomEdits.decode(json, lighting); lighting.floorY = room.floorY; planningPreview = roomEdits.captured; if(!lighting.props.isEmpty()) lighting.enabled = true; activity.planningModeChanged(); }
+        } catch(Exception e) { planningLoadError = e.getMessage(); activity.updateStatus("Planning overlay could not be opened (original scan intact): " + e.getMessage()); }
+    }
+
     private final java.util.List<float[]> fixtures = new java.util.ArrayList<>(); // bright spots of the room's own lights
 
     /** GL thread: switch the lighting preview on/off. On: a seated person and key + fill (from the shot plan if there is one). */
@@ -383,10 +427,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         float fy = lighting.floorY;
         for (Lighting.Prop p : ps) {
+            if(!lighting.enabled && p.catalog == null) continue;
             // people turn to the camera
             float yaw = p.yawDeg;
             if (p.isPerson() && lighting.haveCam) yaw = (float) Math.toDegrees(Math.atan2(lighting.camX - p.x, lighting.camZ - p.z));
             switch (p.kind) {
+                case CATALOG:
+                    double[] size = p.size();
+                    propBox(m, p, yaw, 0, p.bottom + (float)size[1] / 2, 0, (float)size[0], (float)size[1], (float)size[2], new float[]{0.22f,0.65f,0.75f}, fy);
+                    break;
                 case PERSON_STANDING:
                     propBox(m, p, yaw, 0, 0.45f, 0, 0.32f, 0.9f, 0.2f, TROUSERS, fy);
                     propBox(m, p, yaw, 0, 1.18f, 0, 0.42f, 0.56f, 0.24f, CLOTH, fy);
@@ -504,7 +553,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             Lighting.Prop p = ps.get(i);
             float h = p.faceH() + 0.25f;
             if (ls.size() + i == sel) planDraw(m, new float[]{p.x, fy + 0.02f, p.z}, GLES20.GL_POINTS, SEL_COL, 40 * dens);
-            drawLabel(m, p.x, fy + h, p.z, p.kind.label, true);
+            drawLabel(m, p.x, fy + h, p.z, p.label(), true);
         }
         for (float[] f : fixtures) {
             planDraw(m, new float[]{f[0], f[1], f[2]}, GLES20.GL_POINTS, FIXTURE_COL, 26 * dens);
@@ -565,7 +614,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized (lighting) { lighting.moveSelected(w[0] + dragDX, w[1] + dragDZ); }
     }
 
-    void lightingDragEnd() { lightingStatus(); }
+    void lightingDragEnd() { lightingStatus(); planningChanged(); }
 
     /** Where the finger's ray meets the floor (x, z), or null. */
     private float[] floorAt(float tx, float ty) {
@@ -662,7 +711,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         lastPlanes = new java.util.ArrayList<>();
         currentDir = dir;
         activity.updateStatus("Opening the scan...");
-        appendSaved(dir, true, () -> { enterViewer(); if (done != null) done.run(); });
+        appendSaved(dir, true, () -> { enterViewer(); loadPlanning(dir); if (done != null) done.run(); });
     }
 
     /**
@@ -1962,7 +2011,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float dens = height / 1000f;
         GLES20.glLineWidth((live ? 3f : 2.5f) * dens);
         for (RoomModel.Box b : boxes) {
-            if (!live && cutHides(b)) continue;
+            if (!live && !planningPreview && cutHides(b)) continue;
             if ("noise".equals(b.kind)) continue;
             if (recognised(b)) { drawCartoon(m, b); continue; }
             boolean item = b.depth > 0;
@@ -1971,7 +2020,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         int labels = 0;
         for (RoomModel.Box b : boxes) {
-            if (!live && cutHides(b)) continue;
+            if (!live && !planningPreview && cutHides(b)) continue;
             if ("noise".equals(b.kind)) continue;
             if (labels++ > 40) break;
             String where = b.where();
@@ -2457,11 +2506,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final java.util.List<byte[]> jpgs;
         try { jpgs = ScanExport.readKeyframes(photos, width, height); }
         catch (Throwable e) { fail.accept("photo readback failed: " + e); return; }
+        final String planningJson;
+        try { if(currentDir != null && roomReady) requirePlanningScan(); planningJson = roomEdits.encode(lighting); } catch(Exception e) { fail.accept("Planning export failed: " + e.getMessage()); return; }
         final String log = report();
         final int n = count;
         final String name = "cinex-scan-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(new java.util.Date()) + ".zip";
         new Thread(() -> {
-            try { ScanExport.claudeJson = claudeObjs.has() ? claudeObjs.toJson() : null; done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log, poseLog, sensors)); }
+            try { ScanExport.claudeJson = claudeObjs.has() ? claudeObjs.toJson() : null; done.accept(ScanExport.write(activity, name, recs, photos, jpgs, pos, col, n, log, poseLog, sensors, planningJson)); }
             catch (Throwable e) { fail.accept(String.valueOf(e)); }
         }).start();
     }
@@ -2474,6 +2525,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void reset() {
+        roomEdits.clear(); planningPreview = false; planningLoadError = null; planningScanKey = null;
+        synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
         surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; training = false; trainer = null; trainViews = null;
@@ -2700,7 +2753,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "}");
         propProg = program(
                 "uniform mat4 uMvp; uniform vec3 uAlb; attribute vec3 aPos; attribute vec3 aN; varying vec3 vC;" + LIGHT_GLSL +
-                "void main(){ gl_Position = uMvp * vec4(aPos, 1.0);" +
+                "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); if (uLit < 0.5) { vC = uAlb; return; }" +
                 "  vec3 E = vec3(uRoom * 0.7) + gear(aPos, aN, 1.0, 0.0);" +
                 "  vC = tone(pow(uAlb, vec3(2.2)) * E * uExpo); }",
                 "precision mediump float; varying vec3 vC; void main(){ gl_FragColor = vec4(vC, 1.0); }");
@@ -3848,14 +3901,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (SHOW_OBJECTS) updateHideList(); else hideN = 0;
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         boolean simple = viewMode == 0 && roomReady && room.hasLayout;
-        if (simple) {
+        if (planningPreview && roomReady) {
+            drawRoom(mvp, false);
+        } else if (simple) {
             if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         } else if (style == 0 && photos.ready && meshTris > 0)
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
-        else if (roomReady) drawRoom(mvp, simple);
+        else { drawProps(mvp); if (roomReady && !planningPreview) drawRoom(mvp, simple); }
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         drawPath(mvp);
@@ -3939,7 +3994,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (room.hasLayout) continue; // the fitted layout replaces ARCore's wall patches
                 if (cutActive && ((sf.cx - roomCenter[0]) * cutDirX + (sf.cz - roomCenter[2]) * cutDirZ) > cutD * 0.5f) continue;
                 fill = WALL_COL;
-            } else if (sf.kind == RoomModel.Surface.Kind.TABLE) { if (claudeObjs.has()) continue; fill = TABLE_COL; } // Claude's objects replace the plane guesses
+            } else if (sf.kind == RoomModel.Surface.Kind.TABLE) { if (planningPreview || claudeObjs.has()) continue; fill = TABLE_COL; } // Claude's objects replace the plane guesses
             else continue;
             planDraw(m, sf.poly, GLES20.GL_TRIANGLE_FAN, fill, 1);
             planDraw(m, sf.poly, GLES20.GL_LINE_LOOP, sf.kind == RoomModel.Surface.Kind.WALL ? WALL_EDGE : TABLE_COL, 1);
@@ -3960,9 +4015,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             planDraw(m, outline, GLES20.GL_LINE_LOOP, WALL_EDGE, 1);
         }
         // objects: furniture and the things on it, as boxes and cylinders
-        if (SHOW_OBJECTS) drawObjects(m, room.boxes, false);
-        cutouts.draw(m);
-        for (Cutouts.Cutout c : cutouts.snapshot())
+        if(planningPreview) {
+            java.util.List<RoomModel.Box> visible = new java.util.ArrayList<>();
+            for(RoomEdits.Detected d:roomEdits.visible()) visible.add(d.box());
+            drawObjects(m, visible, false);
+            RoomEdits.Detected selected = roomEdits.find(roomEdits.selectedId);
+            if(selected != null && !roomEdits.hidden.contains(selected.id)) planDraw(m, objEdges(selected.box()), GLES20.GL_LINES, SEL_COL, 1);
+        } else if (SHOW_OBJECTS) drawObjects(m, room.boxes, false);
+        if(!planningPreview) cutouts.draw(m);
+        if(!planningPreview) for (Cutouts.Cutout c : cutouts.snapshot())
             drawLabel(m, c.x, c.bottomY + c.height + 0.04f, c.z, String.format(java.util.Locale.US, "%s · %.0f cm tall", c.name, c.height * 100), false);
         GLES20.glDepthMask(true);
         GLES20.glDisable(GLES20.GL_BLEND);

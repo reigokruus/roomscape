@@ -37,9 +37,16 @@ with zipfile.ZipFile(p) as z:
         assert name in z.namelist(), f'Missing native app component: {name}'
     assert z.getinfo('assets/depth_anything_v2_small.tflite').compress_type == zipfile.ZIP_STORED, 'Depth model must be uncompressed for memory-mapping'
     assert any(n.startswith('lib/arm64-v8a/') for n in z.namelist()), 'Missing native ARM64 libraries'
+    catalog = json.loads(z.read('assets/equipment-catalog.json'))
+    assert catalog['schemaVersion'] == 1 and 1 <= len(catalog['items']) <= 200
+    assert len({row['id'] for row in catalog['items']}) == len(catalog['items'])
+    dex_files = [z.read(n) for n in z.namelist() if n.startswith('classes') and n.endswith('.dex')]
+    for name in ('ItemCatalog','CatalogStore','RoomEdits','RoomEditStore','NativePlanningUi'):
+        assert any(('Lcom/hackathon/setscan/'+name+';').encode() in dex for dex in dex_files), 'Missing packaged native feature: '+name
+    print(f'Bundled catalog: {len(catalog["items"])} source records; native catalog/removal classes found in DEX')
 digest = hashlib.sha256(p.read_bytes()).hexdigest()
 p.with_suffix('.apk.sha256').write_text(digest+'  '+p.name+'\n')
-p.with_suffix('.verification.json').write_text(json.dumps({'apk':p.name,'sourceCommit':subprocess.check_output(['git','-C',sys.argv[3],'rev-parse','HEAD'],text=True).strip(),'bytes':p.stat().st_size,'sha256':digest,'androidJvmTests':tests,'failures':failures,'errors':errors,'physicalDeviceTested':False},indent=2)+'\n')
+p.with_suffix('.verification.json').write_text(json.dumps({'apk':p.name,'sourceCommit':subprocess.check_output(['git','-C',sys.argv[3],'rev-parse','HEAD'],text=True).strip(),'sourceDirty':bool(subprocess.check_output(['git','-C',sys.argv[3],'status','--porcelain'],text=True).strip()),'catalogItems':len(catalog['items']),'bytes':p.stat().st_size,'sha256':digest,'androidJvmTests':tests,'failures':failures,'errors':errors,'physicalDeviceTested':False},indent=2)+'\n')
 print('Native APK verified:',p)
 print('No physical-device run or room-scanning validation has been performed by this script.')
 PY

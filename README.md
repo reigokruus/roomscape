@@ -6,6 +6,11 @@
 
 See [Android APK install/build instructions and the iOS hardware/build gate](docs/testable-app.md) and [actual compile/test evidence](docs/testable-build-evidence.md). The Android APK is native ARCore code, not the browser prototype; the iOS Swift storyboard additions are a separate feature set and are not in that APK.
 
+## Internet-sourced item catalog and scanned-item planning (Android)
+
+[Catalog / scanned-item feature and validation guide](docs/catalog-and-scanned-items.md): offline searchable real-model dimensions with provenance, explicit internet JSON-feed/local-file imports, physical-size placement/manual overrides, and non-destructive hide/restore/undo of detected furniture shapes in a separate planning view. Original fused scans/photos are preserved; no mesh erasure, unseen-surface reconstruction or iOS feature-parity claim.
+
+
 ## Status
 **v0.1 (hackathon prototype):** the scan works. Apple RoomPlan captures the room, and it comes back as a 3D model with windows (natural light), doors and furniture picked out, plus a room summary and a top-down view.
 
