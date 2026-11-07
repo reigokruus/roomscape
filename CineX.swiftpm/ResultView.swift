@@ -31,6 +31,8 @@ struct ResultView: View {
     @State private var claudeChecked = false
     @State private var selectedObject: UUID?
     @State private var objectsScene: ObjectsScene?
+    /// The same edits on RoomPlan's boxes, for the Model view.
+    @State private var modelObjects: ModelObjects?
     @State private var surfels: [SurfelRecord] = []
     @State private var finding: String?
     @State private var findError: String?
@@ -75,7 +77,7 @@ struct ResultView: View {
                 LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }))
                     .frame(maxHeight: 340)
             } else if let room {
-                RoomSummary(room: room, capture: capture, foundWindows: foundWindows)
+                RoomSummary(room: room, capture: capture, foundWindows: foundWindows, objects: objects)
                     .frame(maxHeight: 260)
             }
         }
@@ -87,11 +89,12 @@ struct ResultView: View {
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             if let room {
-                NavigationLink(destination: PlanningLaunchView(room: room, scan: scan)) {
+                NavigationLink(destination: PlanningLaunchView(room: room, scan: scan, objects: objects)) {
                     Label("Storyboard", systemImage: "rectangle.stack")
                 }
                 NavigationLink(destination: ShootPlannerView(
-                    room: room, extraWindowAreas: foundWindows.filter { !$0.matchesRoomPlan }.map(\.area))) {
+                    room: room, extraWindowAreas: foundWindows.filter { !$0.matchesRoomPlan }.map(\.area),
+                    objects: objects)) {
                     Label("Plan a Shoot", systemImage: "sparkles")
                 }
             }
@@ -102,6 +105,7 @@ struct ResultView: View {
         }
         .onChange(of: objects) { _, objects in
             objectsScene?.apply(objects, selected: selectedObject)
+            modelObjects?.apply(objects)
             RoomObjects.save(ObjectsFile(claudeChecked: claudeChecked, objects: objects), for: scan)
         }
         .onChange(of: selectedObject) { _, id in
@@ -172,6 +176,11 @@ struct ResultView: View {
             splatGroup = splats
             self.surfels = surfels
             self.objectsScene = objectsScene
+            if let modelGroup {
+                let modelObjects = ModelObjects(model: modelGroup)
+                modelObjects.apply(objects)
+                self.modelObjects = modelObjects
+            }
             self.objects = objects
             claudeChecked = saved?.claudeChecked ?? false
             let lightingScene = LightingScene()
@@ -485,6 +494,8 @@ struct RoomSummary: View {
     let room: CapturedRoom
     var capture: CaptureMeta?
     var foundWindows: [WindowFinder.Found] = []
+    /// The Objects panel's list, with the user's edits. Empty for scans without points: then RoomPlan's own objects.
+    var objects: [RoomObject] = []
 
     private var missedWindows: [WindowFinder.Found] { foundWindows.filter { !$0.matchesRoomPlan } }
 
@@ -516,10 +527,16 @@ struct RoomSummary: View {
                     LabeledContent("Photos", value: capture.keyframeCount.formatted())
                 }
             }
-            if !room.objects.isEmpty {
-                Section("Furniture & objects") {
+            if !objectCounts.isEmpty || removedCount > 0 {
+                Section {
                     ForEach(objectCounts, id: \.0) { item in
-                        LabeledContent(item.0.capitalized, value: "\(item.1)")
+                        LabeledContent(item.0, value: "\(item.1)")
+                    }
+                } header: {
+                    Text("Furniture & objects")
+                } footer: {
+                    if removedCount > 0 {
+                        Text("\(removedCount) removed in Objects, not counted.")
                     }
                 }
             }
@@ -527,10 +544,19 @@ struct RoomSummary: View {
         .listStyle(.insetGrouped)
     }
 
+    private var removedCount: Int { objects.filter(\.removed).count }
+
+    /// Counts by type: from the Objects list (removed ones left out) when there is one, else from RoomPlan.
     private var objectCounts: [(String, Int)] {
         var counts: [String: Int] = [:]
-        for object in room.objects {
-            counts[String(describing: object.category), default: 0] += 1
+        if objects.isEmpty {
+            for object in room.objects {
+                counts[String(describing: object.category).capitalized, default: 0] += 1
+            }
+        } else {
+            for object in objects where !object.removed {
+                counts[object.kind.label, default: 0] += 1
+            }
         }
         return counts.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
