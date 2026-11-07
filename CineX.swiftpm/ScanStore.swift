@@ -8,6 +8,9 @@ struct SavedScan: Identifiable, Hashable {
     let dataURL: URL
     let date: Date
     var id: String { name }
+    /// LiDAR points and photos from the scan (see `CaptureMeta`). Missing for scans made before they were saved.
+    var captureURL: URL { modelURL.deletingLastPathComponent().appendingPathComponent(name + ".capture") }
+    var thumbnailURL: URL { modelURL.deletingLastPathComponent().appendingPathComponent(name + ".thumb.jpg") }
 }
 
 enum ScanStore {
@@ -21,14 +24,28 @@ enum ScanStore {
         return f
     }()
 
-    static func save(_ room: CapturedRoom) throws -> SavedScan {
+    static func save(_ room: CapturedRoom, capture: CaptureSnapshot?) throws -> SavedScan {
         let date = Date()
         let name = "Scan_" + nameFormatter.string(from: date)
         let model = directory.appendingPathComponent(name + ".usdz")
         let data = directory.appendingPathComponent(name + ".json")
         try room.export(to: model)
         try JSONEncoder().encode(room).write(to: data)
-        return SavedScan(name: name, modelURL: model, dataURL: data, date: date)
+        let scan = SavedScan(name: name, modelURL: model, dataURL: data, date: date)
+        if let capture, capture.pointCount > 0 || !capture.keyframes.isEmpty {
+            try CaptureStore.write(capture, to: scan.captureURL)
+        }
+        _ = ensureThumbnail(scan)
+        return scan
+    }
+
+    /// The scan's thumbnail, rendered and saved the first time it's needed. Slow: call off the main thread.
+    static func ensureThumbnail(_ scan: SavedScan) -> URL? {
+        let url = scan.thumbnailURL
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        guard let jpeg = ScanThumbnail.render(modelURL: scan.modelURL),
+              (try? jpeg.write(to: url, options: .atomic)) != nil else { return nil }
+        return url
     }
 
     static func list() -> [SavedScan] {
@@ -53,5 +70,7 @@ enum ScanStore {
     static func delete(_ scan: SavedScan) {
         try? FileManager.default.removeItem(at: scan.modelURL)
         try? FileManager.default.removeItem(at: scan.dataURL)
+        try? FileManager.default.removeItem(at: scan.captureURL)
+        try? FileManager.default.removeItem(at: scan.thumbnailURL)
     }
 }

@@ -8,6 +8,7 @@ struct ResultView: View {
     let scan: SavedScan
     @State private var scene: SCNScene?
     @State private var room: CapturedRoom?
+    @State private var capture: CaptureMeta?
     @State private var topView = false
     @State private var loadError: String?
 
@@ -16,7 +17,6 @@ struct ResultView: View {
             ZStack(alignment: .topTrailing) {
                 if let scene {
                     RoomSceneView(scene: scene, topView: topView)
-                        .background(Color.black)
                 } else if let loadError {
                     Text(loadError).padding()
                 } else {
@@ -30,15 +30,22 @@ struct ResultView: View {
                 .frame(width: 140)
                 .padding(10)
             }
-            .frame(maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            // The 3D area is always black, so its controls use dark styling even when the phone is in light mode.
+            .environment(\.colorScheme, .dark)
 
             if let room {
-                RoomSummary(room: room)
+                RoomSummary(room: room, capture: capture)
                     .frame(maxHeight: 260)
             }
         }
         .navigationTitle(scan.date.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
+        // Black bar above the black 3D view, with light title, buttons and status bar in light mode too.
+        .toolbarBackground(Color.black, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             if let room {
                 NavigationLink(destination: ShootPlannerView(room: room)) {
@@ -50,6 +57,7 @@ struct ResultView: View {
         .task {
             // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
             let scan = scan
+            capture = await Task.detached(priority: .utility) { CaptureStore.loadMeta(scan.captureURL) }.value
             let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<SCNScene, Error>) in
                 let room = ScanStore.loadRoom(scan)
                 let result = Result { () throws -> SCNScene in
@@ -116,42 +124,58 @@ struct RoomSceneView: UIViewRepresentable {
         view.backgroundColor = .black
         view.antialiasingMode = .multisampling4X
 
-        let (minB, maxB) = scene.rootNode.boundingBox
-        let center = SCNVector3((minB.x + maxB.x) / 2, (minB.y + maxB.y) / 2, (minB.z + maxB.z) / 2)
-        let size = max(maxB.x - minB.x, max(maxB.y - minB.y, maxB.z - minB.z))
-        let extent = Float(size.isFinite && size > 0 ? size : 5)
-
-        func makeCamera() -> SCNCamera {
-            let cam = SCNCamera()
-            cam.zNear = 0.05
-            cam.zFar = 500
-            cam.fieldOfView = 60
-            return cam
-        }
+        let framing = Self.framing(of: scene)
+        let center = framing.center
 
         let orbit = context.coordinator.orbitCamera
-        orbit.camera = makeCamera()
-        orbit.position = SCNVector3(center.x + extent * 0.9, center.y + extent * 0.8, center.z + extent * 0.9)
+        orbit.camera = Self.makeCamera()
+        orbit.position = Self.orbitPosition(framing)
         orbit.look(at: center)
         scene.rootNode.addChildNode(orbit)
 
         let top = context.coordinator.topCamera
-        top.camera = makeCamera()
-        top.position = SCNVector3(center.x, center.y + extent * 1.4, center.z)
+        top.camera = Self.makeCamera()
+        top.position = SCNVector3(center.x, center.y + framing.extent * 1.4, center.z)
         top.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
         scene.rootNode.addChildNode(top)
 
-        // Soft ambient light so the model reads well from every side.
-        let ambient = SCNNode()
-        ambient.light = SCNLight()
-        ambient.light?.type = .ambient
-        ambient.light?.intensity = 500
-        scene.rootNode.addChildNode(ambient)
+        Self.addAmbientLight(to: scene)
 
         view.defaultCameraController.target = center
         view.pointOfView = orbit
         context.coordinator.lastTop = false
         return view
+    }
+
+    /// The model's centre and its largest dimension.
+    nonisolated static func framing(of scene: SCNScene) -> (center: SCNVector3, extent: Float) {
+        let (minB, maxB) = scene.rootNode.boundingBox
+        let center = SCNVector3((minB.x + maxB.x) / 2, (minB.y + maxB.y) / 2, (minB.z + maxB.z) / 2)
+        let size = max(maxB.x - minB.x, max(maxB.y - minB.y, maxB.z - minB.z))
+        return (center, Float(size.isFinite && size > 0 ? size : 5))
+    }
+
+    /// Where the 3D view's camera starts: above and to one side, looking at the centre.
+    nonisolated static func orbitPosition(_ framing: (center: SCNVector3, extent: Float)) -> SCNVector3 {
+        let (c, e) = framing
+        return SCNVector3(c.x + e * 0.9, c.y + e * 0.8, c.z + e * 0.9)
+    }
+
+    nonisolated static func makeCamera() -> SCNCamera {
+        let cam = SCNCamera()
+        cam.zNear = 0.05
+        cam.zFar = 500
+        cam.fieldOfView = 60
+        return cam
+    }
+
+    /// Soft ambient light so the model reads well from every side.
+    nonisolated static func addAmbientLight(to scene: SCNScene) {
+        let ambient = SCNNode()
+        ambient.light = SCNLight()
+        ambient.light?.type = .ambient
+        ambient.light?.intensity = 500
+        scene.rootNode.addChildNode(ambient)
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
@@ -167,6 +191,7 @@ struct RoomSceneView: UIViewRepresentable {
 /// Plain-language summary of what was found: size, light sources (windows), doors and furniture.
 struct RoomSummary: View {
     let room: CapturedRoom
+    var capture: CaptureMeta?
 
     var body: some View {
         List {
@@ -177,6 +202,12 @@ struct RoomSummary: View {
                 LabeledContent("Doors", value: "\(room.doors.count)")
                 if !room.openings.isEmpty {
                     LabeledContent("Openings", value: "\(room.openings.count)")
+                }
+            }
+            if let capture {
+                Section("Capture") {
+                    LabeledContent("Points", value: capture.pointCount.formatted())
+                    LabeledContent("Photos", value: capture.keyframeCount.formatted())
                 }
             }
             if !room.objects.isEmpty {

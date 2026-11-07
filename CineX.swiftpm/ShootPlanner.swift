@@ -81,7 +81,10 @@ private struct RoomFacts {
         largestWindowArea = room.windows.map { $0.dimensions.x * $0.dimensions.y }.max() ?? 0
 
         let cats = Set(room.objects.map { $0.category })
-        hasTable = cats.contains(.table) || cats.contains(.storage)
+        // RoomPlan reports desks and counters as tables. Storage counts too when its top is at table height
+        // (a dresser or sideboard), but not wardrobes or tall shelves. Storage stands on the floor, so its height is its top.
+        hasTable = cats.contains(.table)
+            || room.objects.contains { $0.category == .storage && (0.6...1.1).contains($0.dimensions.y) }
         hasChair = cats.contains(.chair)
         hasSofa  = cats.contains(.sofa)
     }
@@ -299,7 +302,7 @@ private extension ShootPlanner {
 
     static func lifestyle(_ r: RoomFacts, _ g: GearFacts) -> ShootPlan {
         var tips: [PlacementTip] = []
-        var notes: [String] = []
+        let notes: [String] = []
 
         let cameraInstr = g.hasTripod
             ? "On the tripod, eye level or slightly above. Leave more room in the frame than you think — lifestyle shots breathe better with space."
