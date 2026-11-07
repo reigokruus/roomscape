@@ -34,6 +34,11 @@ struct ResultView: View {
     /// The same edits on RoomPlan's boxes, for the Model view.
     @State private var modelObjects: ModelObjects?
     @State private var surfels: [SurfelRecord] = []
+    /// Splat training (task 6), once the splats are built.
+    @State private var training: SplatTrainingRun?
+    @State private var rebuildingSplats = false
+    @State private var pendingSplats: [SurfelRecord]?
+    @Environment(\.scenePhase) private var scenePhase
     @State private var finding: String?
     @State private var findError: String?
 
@@ -63,6 +68,13 @@ struct ResultView: View {
                     }
                 }
                 .padding(10)
+            }
+            .overlay(alignment: .bottom) {
+                if let training {
+                    TrainingStatus(run: training)
+                        .padding(10)
+                        .allowsHitTesting(false)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
@@ -99,6 +111,10 @@ struct ResultView: View {
                 }
             }
             ShareLink(item: scan.modelURL)
+        }
+        .onDisappear { training?.pause() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { training?.pause() }
         }
         .onChange(of: lighting) { _, setup in
             if lightingOn { lightingScene?.apply(setup) }
@@ -161,12 +177,14 @@ struct ResultView: View {
             // Objects: what was saved (with the user's edits), else RoomPlan's furniture.
             let saved = RoomObjects.load(scan)
             let objects = saved?.objects ?? RoomObjects.fromRoomPlan(room)
-            let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], ObjectsScene.Built)? in
-                guard let surfels = ScanStore.loadSurfels(scan, room: room), !surfels.isEmpty else { return nil }
-                return (surfels, ObjectsScene.build(surfels, objects: objects, floorY: shell.floorY))
+            // Shown: the trained splats when the scan was trained before, else the raw ones (also the training's start).
+            let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], [SurfelRecord], ObjectsScene.Built)? in
+                guard let base = ScanStore.loadSurfels(scan, room: room), !base.isEmpty else { return nil }
+                let shown = ScanStore.loadTrainedSurfels(scan) ?? base
+                return (base, shown, ObjectsScene.build(shown, objects: objects, floorY: shell.floorY))
             }.value
             buildingSplats = false
-            guard let (surfels, parts) = built else { return }
+            guard let (base, surfels, parts) = built else { return }
             let splats = SCNNode()
             splats.addChildNode(SplatScene.shellNode(shell))
             let objectsScene = ObjectsScene()
@@ -190,6 +208,9 @@ struct ResultView: View {
             self.lightingScene = lightingScene
             self.shell = shell
             style = .splats
+            let training = SplatTrainingRun(scan: scan, base: base, shell: shell)
+            training.onPreview = { showSplats($0) }
+            self.training = training
             #if DEBUG
             // UI checks in the Simulator: -openPanel lighting | objects
             let args = ProcessInfo.processInfo.arguments
@@ -233,9 +254,55 @@ struct ResultView: View {
                           "model hidden:", modelGroup?.isHidden as Any)
                 }
             }
+            // Training on the phone without taps: -train <seconds> [-snapshotPhoto <n>] trains, pauses, and with a photo
+            // number saves Documents/debug-before.png and debug-after.png, the splats seen from that photo's camera.
+            if let i = args.firstIndex(of: "-train"), i + 1 < args.count, let seconds = Double(args[i + 1]) {
+                let photo = args.firstIndex(of: "-snapshotPhoto").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil }
+                if let photo {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000) // SceneKit's first frames skip the splat shaders
+                    debugSnapshot(scene, photo: photo, name: "before")
+                }
+                training.start()
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+                let live = training.progress
+                training.pause()
+                while training.state == .training || training.state == .preparing {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+                try? await Task.sleep(nanoseconds: 3_000_000_000) // the last splats swap in
+                let report = "training \(training.state): \(live) / \(training.progress), showing \(self.surfels.count) splats"
+                print("debug: \(report)")
+                try? report.write(to: URL.documentsDirectory.appendingPathComponent("debug-training.txt"), atomically: true, encoding: .utf8)
+                if let photo { debugSnapshot(scene, photo: photo, name: "after") }
+            }
             #endif
         }
     }
+
+    #if DEBUG
+    /// Renders the 3D view from a keyframe photo's camera into Documents/debug-<name>.png.
+    private func debugSnapshot(_ scene: SCNScene, photo index: Int, name: String) {
+        guard let data = try? Data(contentsOf: scan.captureURL.appendingPathComponent("keyframes.json")),
+              let records = try? JSONDecoder().decode([KeyframeRecord].self, from: data), index < records.count else { return }
+        let r = records[index], m = r.cameraToWorld
+        let camera = SCNNode()
+        camera.camera = RoomSceneView.makeCamera()
+        camera.camera?.projectionDirection = .vertical
+        camera.camera?.fieldOfView = CGFloat(2 * atan(Float(r.height) / 2 / r.fy) * 180 / .pi)
+        camera.simdTransform = simd_float4x4(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
+                                             SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15]))
+        scene.rootNode.addChildNode(camera)
+        let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
+        renderer.scene = scene
+        renderer.pointOfView = camera
+        renderer.autoenablesDefaultLighting = true
+        let image = renderer.snapshot(atTime: 0, with: CGSize(width: r.width, height: r.height), antialiasingMode: .none)
+        camera.removeFromParentNode()
+        let url = URL.documentsDirectory.appendingPathComponent("debug-\(name).png")
+        try? image.pngData()?.write(to: url)
+        print("debug: saved \(url.lastPathComponent) from photo \(r.file)")
+    }
+    #endif
 
     /// Lighting and objects toggles (only once the splats are ready), or the "building" note.
     @ViewBuilder private var modeButtons: some View {
@@ -256,6 +323,9 @@ struct ResultView: View {
             .buttonStyle(.bordered)
             .tint(objectsOn ? .yellow : nil)
             .accessibilityLabel(objectsOn ? "Close objects" : "Objects in the room")
+            if let training {
+                TrainButton(run: training) { style = .splats }
+            }
         } else if buildingSplats {
             Label("Building splats…", systemImage: "circle.dotted")
                 .font(.caption.weight(.medium))
@@ -319,6 +389,33 @@ struct ResultView: View {
             } catch {
                 finding = nil
                 findError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Shows new splats (from training): split them by object again and swap them in. While one swap is being built,
+    /// only the newest waiting set is kept.
+    private func showSplats(_ splats: [SurfelRecord]) {
+        guard let shell, !rebuildingSplats else {
+            pendingSplats = splats
+            return
+        }
+        rebuildingSplats = true
+        let current = objects
+        Task {
+            let parts = await Task.detached(priority: .userInitiated) {
+                ObjectsScene.build(splats, objects: current, floorY: shell.floorY)
+            }.value
+            objectsScene?.install(parts, objects: current)
+            objectsScene?.apply(objects, selected: selectedObject)
+            surfels = splats
+            if let splatGroup { lightingScene?.reregister(splatGroup) }
+            if lighting != nil { refreshRoomLight() }
+            if lightingOn { lightingScene?.apply(lighting) }
+            rebuildingSplats = false
+            if let next = pendingSplats {
+                pendingSplats = nil
+                showSplats(next)
             }
         }
     }
@@ -634,5 +731,50 @@ struct RoomSummary: View {
             height = max(height, wall.dimensions.y)
         }
         return String(format: "%.1f × %.1f m, %.1f m high", maxX - minX, maxZ - minZ, height)
+    }
+}
+
+/// Starts splat training, or pauses it (task 6).
+private struct TrainButton: View {
+    @ObservedObject var run: SplatTrainingRun
+    var onStart: () -> Void
+
+    var body: some View {
+        Button {
+            if !run.isTraining { onStart() }
+            run.toggle()
+        } label: {
+            Image(systemName: run.isTraining ? "pause.fill" : "wand.and.stars")
+        }
+        .buttonStyle(.bordered)
+        .tint(run.isTraining ? .yellow : nil)
+        .accessibilityLabel(run.isTraining ? "Pause training" : "Train the splats against the photos")
+    }
+}
+
+/// What the training is doing, over the bottom of the 3D view.
+private struct TrainingStatus: View {
+    @ObservedObject var run: SplatTrainingRun
+
+    var body: some View {
+        Group {
+            switch run.state {
+            case .idle:
+                EmptyView()
+            case .preparing:
+                Label("Getting the photos ready…", systemImage: "photo.stack")
+            case .training:
+                Label(run.progress.isEmpty ? "Training the splats…" : run.progress, systemImage: "wand.and.stars")
+            case .paused:
+                Label(run.progress + ". Saved.", systemImage: "pause.circle")
+            case .done:
+                Label(run.progress + ". Saved.", systemImage: "checkmark.circle")
+            case .failed(let message):
+                Label(message, systemImage: "exclamationmark.triangle")
+            }
+        }
+        .font(.caption.weight(.medium))
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(.regularMaterial, in: Capsule())
     }
 }
