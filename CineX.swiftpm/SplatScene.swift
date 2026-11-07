@@ -10,6 +10,12 @@ enum SplatScene {
     /// The discs are drawn in one opaque pass (writing depth), each a hard-edged disc of 1.4x its density radius,
     /// so neighbouring discs overlap into a closed surface. (A blended gaussian halo pass like Android's was tried:
     /// SceneKit's transparent pass washed the colours out to white, so it was dropped.)
+    /// sRGB byte → linear light (the exact sRGB curve).
+    static let linear: [Float] = (0..<256).map { i in
+        let c = Float(i) / 255
+        return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
     static func splatNode(_ surfels: [SurfelRecord]) -> SCNNode {
         let n = surfels.count
         // One interleaved vertex buffer, 4 vertices per surfel (all at its centre; the shader opens them up):
@@ -25,8 +31,10 @@ enum SplatScene {
                 var i = 0
                 while i < n {
                     let s = S[i]
-                    let r = Float(s.rgba & 0xFF) / 255, g = Float((s.rgba >> 8) & 0xFF) / 255,
-                        b = Float((s.rgba >> 16) & 0xFF) / 255
+                    // The camera's colours are sRGB-encoded; SceneKit treats vertex colours as linear light and encodes
+                    // them again on output, which washed everything out ((220, 120, 80) showed as (243, 195, 168)).
+                    let r = linear[Int(s.rgba & 0xFF)], g = linear[Int((s.rgba >> 8) & 0xFF)],
+                        b = linear[Int((s.rgba >> 16) & 0xFF)]
                     var corner = 0
                     while corner < 4 {
                         let o = (i * 4 + corner) * floatsPerVertex
@@ -71,7 +79,9 @@ enum SplatScene {
     private static let geometryModifier = """
     #pragma arguments
     float splatScale;
+    \(LightingShader.arguments)
     #pragma body
+    \(LightingShader.splatBody)
     float2 c = _geometry.texcoords[0] * 2.0 - 1.0;
     float rad = _geometry.texcoords[1].x;
     float3 n = _geometry.normal;
@@ -116,6 +126,7 @@ enum SplatScene {
         m.blendMode = .replace
         m.shaderModifiers = [.geometry: geometryModifier, .fragment: discFragment]
         m.setValue(NSNumber(value: scale), forKey: "splatScale")
+        LightingShader.apply(nil, to: m)
         return m
     }
 
@@ -176,6 +187,9 @@ enum SplatScene {
         m.diffuse.contents = color
         m.lightingModel = .lambert
         m.cullMode = .back
+        // Lit by the lighting preview when it's on (see LightingScene).
+        m.shaderModifiers = [.surface: LightingShader.surfaceModifier]
+        LightingShader.apply(nil, to: m)
         g.materials = [m]
         return SCNNode(geometry: g)
     }
