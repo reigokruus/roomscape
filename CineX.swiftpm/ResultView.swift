@@ -187,6 +187,37 @@ struct ResultView: View {
                 if args[i + 1] == "lighting" { toggleLighting() }
                 if args[i + 1] == "objects" { toggleObjects() }
             }
+            if args.contains("-replayFind"), let saved {
+                // Replays the end of a Claude search with the saved result, starting from RoomPlan's objects only.
+                let found = saved.objects
+                let roomPlanOnly = RoomObjects.fromRoomPlan(room)
+                let built0 = await Task.detached { ObjectsScene.build(surfels, objects: roomPlanOnly, floorY: shell.floorY) }.value
+                objectsScene.install(built0, objects: roomPlanOnly)
+                self.objects = roomPlanOnly
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                print("debug: replaying find with \(found.count) objects")
+                await applyFound(found, previousCount: roomPlanOnly.count, surfels: surfels, floorY: shell.floorY)
+                print("debug: find applied")
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            if let i = args.firstIndex(of: "-selectKind"), i + 1 < args.count {
+                for kind in args[i + 1].split(separator: ",") {
+                    print("debug: selecting first \(kind)")
+                    selectedObject = objects.first { $0.kind.rawValue == kind }?.id
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    print("debug: selected \(kind), still alive")
+                }
+            }
+            if args.contains("-styleModel") {
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    print("debug: switching to model; splatGroup hidden before:", splatGroup?.isHidden as Any)
+                    style = .model
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    print("debug: after switch: style", style, "splatGroup hidden:", splatGroup?.isHidden as Any,
+                          "model hidden:", modelGroup?.isHidden as Any)
+                }
+            }
             #endif
         }
     }
@@ -269,23 +300,27 @@ struct ResultView: View {
                 let found = try await ObjectFinder.find(scan: scan, room: room, objects: current) { p in
                     Task { @MainActor in finding = "Claude is looking at the photos… \(p.done)/\(p.total)" }
                 }
-                finding = "Placing what it found…"
-                let parts = await Task.detached(priority: .userInitiated) {
-                    ObjectsScene.build(surfels, objects: found, floorY: shell.floorY)
-                }.value
-                objectsScene?.install(parts, objects: found)
-                if let splatGroup { lightingScene?.reregister(splatGroup) }
-                if lightingOn { lightingScene?.apply(lighting) }
-                claudeChecked = true
-                objects = found
-                let added = found.count - current.count
-                finding = nil
-                if added == 0 { findError = "Claude found nothing new." }
+                await applyFound(found, previousCount: current.count, surfels: surfels, floorY: shell.floorY)
             } catch {
                 finding = nil
                 findError = error.localizedDescription
             }
         }
+    }
+
+    /// After a Claude search: split the splats for the new set of objects and show them.
+    private func applyFound(_ found: [RoomObject], previousCount: Int, surfels: [SurfelRecord], floorY: Float) async {
+        finding = "Placing what it found…"
+        let parts = await Task.detached(priority: .userInitiated) {
+            ObjectsScene.build(surfels, objects: found, floorY: floorY)
+        }.value
+        objectsScene?.install(parts, objects: found)
+        if let splatGroup { lightingScene?.reregister(splatGroup) }
+        if lightingOn { lightingScene?.apply(lighting) }
+        claudeChecked = true
+        objects = found
+        finding = nil
+        if found.count == previousCount { findError = "Claude found nothing new." }
     }
 
     private func toggleLighting() {
