@@ -87,7 +87,8 @@ enum ScanStore {
         let points = loadPoints(scan)
         guard !points.isEmpty else { return nil }
         let start = Date()
-        var (surfels, stats) = Surfels.build(points)
+        let voxel = CaptureStore.loadMeta(scan.captureURL)?.voxelSize ?? LiveCloud.voxel
+        var (surfels, stats) = Surfels.build(points, voxel: voxel)
         let snapped = Surfels.snap(&surfels, to: RoomShell(room: room))
         print("splats: \(surfels.count) from \(points.count) points (\(stats.flat) flat, \(stats.curved) curved, "
               + "\(stats.lonely) lonely, \(snapped) on walls/floor) in \(Int(Date().timeIntervalSince(start) * 1000)) ms")

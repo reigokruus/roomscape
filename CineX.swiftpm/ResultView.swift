@@ -20,12 +20,22 @@ struct ResultView: View {
     @State private var modelGroup: SCNNode?
     @State private var splatGroup: SCNNode?
     @State private var buildingSplats = false
+    /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
+    @State private var lightingOn = false
+    @State private var lighting: LightingSetup?
+    @State private var lightingScene: LightingScene?
+    @State private var shell: RoomShell?
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
                 if let scene {
-                    RoomSceneView(scene: scene, topView: topView)
+                    RoomSceneView(scene: scene, topView: topView,
+                                  floorY: lightingOn ? lighting?.floorY : nil,
+                                  onFloorTap: { p in
+                                      lighting?.subjectX = p.x
+                                      lighting?.subjectZ = p.z
+                                  })
                 } else if let loadError {
                     Text(loadError).padding()
                 } else {
@@ -33,6 +43,15 @@ struct ResultView: View {
                 }
                 HStack {
                     if splatGroup != nil {
+                        Button {
+                            toggleLighting()
+                        } label: {
+                            Image(systemName: lightingOn ? "lightbulb.fill" : "lightbulb")
+                                .frame(width: 32, height: 28)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(lightingOn ? .yellow : nil)
+                        .accessibilityLabel(lightingOn ? "Turn off the lighting preview" : "Lighting preview")
                         Picker("Style", selection: $style) {
                             Text("Splats").tag(Style.splats)
                             Text("Model").tag(Style.model)
@@ -60,7 +79,10 @@ struct ResultView: View {
             // The 3D area is always black, so its controls use dark styling even when the phone is in light mode.
             .environment(\.colorScheme, .dark)
 
-            if let room {
+            if lightingOn, lighting != nil {
+                LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }))
+                    .frame(maxHeight: 340)
+            } else if let room {
                 RoomSummary(room: room, capture: capture, foundWindows: foundWindows)
                     .frame(maxHeight: 260)
             }
@@ -83,7 +105,12 @@ struct ResultView: View {
             }
             ShareLink(item: scan.modelURL)
         }
+        .onChange(of: lighting) { _, setup in
+            if lightingOn { lightingScene?.apply(setup) }
+        }
         .onChange(of: style) { _, newStyle in
+            // The preview lights the splats; RoomPlan's model has no colours to light.
+            if newStyle == .model, lightingOn { toggleLighting() }
             modelGroup?.isHidden = newStyle == .splats
             splatGroup?.isHidden = newStyle == .model
         }
@@ -137,8 +164,32 @@ struct ResultView: View {
             splats.isHidden = true
             scene.rootNode.addChildNode(splats)
             splatGroup = splats
+            let lightingScene = LightingScene()
+            lightingScene.register(splats)
+            scene.rootNode.addChildNode(lightingScene.root)
+            self.lightingScene = lightingScene
+            shell = RoomShell(room: room)
             style = .splats
         }
+    }
+
+    private func toggleLighting() {
+        lightingOn.toggle()
+        guard lightingOn else {
+            lightingScene?.apply(nil)
+            return
+        }
+        style = .splats
+        if lighting == nil, let shell {
+            // Start in the middle of the room with the longest wall behind the person as the background.
+            let center = shell.walls.reduce(SIMD3<Float>(), { $0 + $1.center }) / Float(max(1, shell.walls.count))
+            let facing: Float = shell.walls.max(by: { $0.halfWidth < $1.halfWidth }).map {
+                atan2($0.inward.x, $0.inward.z) * 180 / .pi
+            } ?? 0
+            lighting = .starting(subjectX: center.x, subjectZ: center.z, facing: facing, floorY: shell.floorY,
+                                 gear: GearStore.load())
+        }
+        lightingScene?.apply(lighting)
     }
 
     /// Tints RoomPlan's grey boxes by type so windows (natural light) and doors stand out.
@@ -173,13 +224,33 @@ struct ResultView: View {
 struct RoomSceneView: UIViewRepresentable {
     let scene: SCNScene
     let topView: Bool
+    /// When set, a tap on the 3D view reports where it hits the floor plane at this height.
+    var floorY: Float? = nil
+    var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator {
+    final class Coordinator: NSObject {
         var orbitCamera = SCNNode()
         var topCamera = SCNNode()
         var lastTop: Bool?
+        var floorY: Float?
+        var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
+
+        /// Intersects the tapped ray with the floor plane. (SceneKit's hit test can't see the splats: their discs
+        /// are opened up in the shader, so on the CPU they have no area.)
+        @objc func tapped(_ gesture: UITapGestureRecognizer) {
+            guard let floorY, let view = gesture.view as? SCNView else { return }
+            let p = gesture.location(in: view)
+            let near = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 0))
+            let far = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 1))
+            let a = SIMD3<Float>(near.x, near.y, near.z), b = SIMD3<Float>(far.x, far.y, far.z)
+            let dy = b.y - a.y
+            guard abs(dy) > 1e-5 else { return }
+            let t = (floorY - a.y) / dy
+            guard t > 0, t < 1 else { return }
+            onFloorTap(a + (b - a) * t)
+        }
     }
 
     func makeUIView(context: Context) -> SCNView {
@@ -210,6 +281,8 @@ struct RoomSceneView: UIViewRepresentable {
         view.defaultCameraController.target = center
         view.pointOfView = orbit
         context.coordinator.lastTop = false
+        view.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator,
+                                                         action: #selector(Coordinator.tapped(_:))))
         return view
     }
 
@@ -245,6 +318,8 @@ struct RoomSceneView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
+        context.coordinator.floorY = floorY
+        context.coordinator.onFloorTap = onFloorTap
         guard context.coordinator.lastTop != topView else { return }
         context.coordinator.lastTop = topView
         SCNTransaction.begin()

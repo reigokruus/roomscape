@@ -212,7 +212,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             let viewMatrix = camera.viewMatrix(for: .portrait)
             let projection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
             let pixelsPerMeter = projection[1][1] * Float(view.drawableSize.height) / 2
-            var uniforms = Uniforms(mvp: projection * viewMatrix, sizeScale: LiveCloud.voxel * 1.6 * pixelsPerMeter)
+            var uniforms = Uniforms(mvp: projection * viewMatrix, sizeScale: cloud.voxelSize * 1.6 * pixelsPerMeter)
             encoder.setRenderPipelineState(pipeline)
             encoder.setDepthStencilState(depthState)
             encoder.setVertexBuffer(cloud.buffer, offset: 0, index: 0)
