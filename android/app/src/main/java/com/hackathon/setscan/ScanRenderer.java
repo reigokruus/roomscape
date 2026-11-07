@@ -1201,7 +1201,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- automatic processing after a scan: depth AI -> clean-up -> splats -> a round of training ----
     static final boolean AUTO_PROCESS = true;
-    static final int AUTO_STEPS = 150;           // training steps (~1 min on the S24)
+    static final int AUTO_STEPS = 400;           // training steps (~4 min on the S24; 150 left the splats blotchy)
     private volatile int autoStage;             // 0 off, 1 depth AI, 2 clean-up, 3 splats, 4 training, 5 done
 
     private void autoProgress(String label, float frac) { activity.updateProcess(label, frac); }
