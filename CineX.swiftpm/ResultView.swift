@@ -4,9 +4,10 @@ import RoomPlan
 import simd
 
 /// Shows a saved scan: as splats (the captured points as discs on their surfaces, inside RoomPlan's walls and floor)
-/// when the scan has points, or as RoomPlan's own 3D model. Below it, a summary of what RoomPlan found.
+/// when the scan has points, or as RoomPlan's own 3D model. The splats show as a white mesh with a grid (Mesh) or in
+/// the scanned colours (Photo). Below it, a summary of what RoomPlan found.
 struct ResultView: View {
-    enum Style: Hashable { case splats, model }
+    enum Style: Hashable { case mesh, photo, model }
 
     let scan: SavedScan
     @State private var scene: SCNScene?
@@ -116,8 +117,9 @@ struct ResultView: View {
             // The preview lights the splats and objects move splats; RoomPlan's model has neither.
             if newStyle == .model, lightingOn { toggleLighting() }
             if newStyle == .model, objectsOn { toggleObjects() }
-            modelGroup?.isHidden = newStyle == .splats
+            modelGroup?.isHidden = newStyle != .model
             splatGroup?.isHidden = newStyle == .model
+            if let splatGroup { SplatScene.setMeshLook(newStyle != .photo, in: splatGroup) }
         }
         .task {
             // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
@@ -189,7 +191,7 @@ struct ResultView: View {
             scene.rootNode.addChildNode(lightingScene.root)
             self.lightingScene = lightingScene
             self.shell = shell
-            style = .splats
+            style = .mesh
             #if DEBUG
             // UI checks in the Simulator: -openPanel lighting | objects
             let args = ProcessInfo.processInfo.arguments
@@ -268,7 +270,8 @@ struct ResultView: View {
     @ViewBuilder private var viewPickers: some View {
         if splatGroup != nil {
             Picker("Style", selection: $style) {
-                Text("Splats").tag(Style.splats)
+                Text("Mesh").tag(Style.mesh)
+                Text("Photo").tag(Style.photo)
                 Text("Model").tag(Style.model)
             }
             .pickerStyle(.segmented)
@@ -297,7 +300,7 @@ struct ResultView: View {
     private func toggleObjects() {
         objectsOn.toggle()
         if objectsOn {
-            style = .splats
+            if style == .model { style = .mesh }
             if lightingOn { toggleLighting() }
         } else {
             selectedObject = nil
@@ -330,7 +333,11 @@ struct ResultView: View {
             ObjectsScene.build(surfels, objects: found, floorY: floorY)
         }.value
         objectsScene?.install(parts, objects: found)
-        if let splatGroup { lightingScene?.reregister(splatGroup) }
+        if let splatGroup {
+            // The new splat nodes start in the mesh look.
+            SplatScene.setMeshLook(style != .photo, in: splatGroup)
+            lightingScene?.reregister(splatGroup)
+        }
         if lightingOn { lightingScene?.apply(lighting) }
         claudeChecked = true
         objects = found
@@ -393,7 +400,7 @@ struct ResultView: View {
             lightingScene?.apply(nil)
             return
         }
-        style = .splats
+        if style == .model { style = .mesh }
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.

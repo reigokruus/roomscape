@@ -15,7 +15,7 @@ struct LightingPanel: View {
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("Tap the floor in the 3D view to move the person. The camera (grey box) is 2 m in front of them, and the picture is exposed for their face.")
+                Text("Tap the floor in the 3D view to move the person. The camera (grey box) is 2 m in front of them, and bright lights on their face stop the picture down. Use Exposure to brighten it.")
             }
 
             Section("Person and camera") {
