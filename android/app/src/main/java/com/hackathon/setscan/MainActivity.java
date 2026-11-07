@@ -686,10 +686,12 @@ public class MainActivity extends Activity {
         });
     }
 
-    void outletsFound(int n, boolean ok) {
+    void outletsFound(int n, int objs, boolean ok) {
         runOnUiThread(() -> {
-            if (!ok) toast(n > 0 ? "Outlet search stopped early (" + n + " found). Check the internet." : "Couldn't search for power outlets. Check the internet.");
-            else toast(n == 0 ? "No power outlets found in the photos." : "⚡ Found " + n + " power outlet" + (n == 1 ? "" : "s") + ". They're marked in orange.");
+            if (!ok) { toast(n > 0 ? "Search stopped early (" + n + " outlets found). Check the internet." : "Couldn't search for outlets and objects. Check the internet."); return; }
+            String o = n == 0 ? "No power outlets" : "⚡ " + n + " power outlet" + (n == 1 ? "" : "s") + " (orange)";
+            String f = objs == 0 ? "" : ", " + objs + " object" + (objs == 1 ? "" : "s") + " in Objects";
+            Toast.makeText(this, o + f + ".", Toast.LENGTH_LONG).show();
         });
     }
 

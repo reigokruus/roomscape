@@ -77,6 +77,26 @@ final class SceneObjects {
         }
     }
 
+    /**
+     * Objects Claude pointed out (RoomItems). The user's edits are kept, and each found object that isn't one of them
+     * is added, so untouched objects come back after a reopen too.
+     */
+    void fromItems(List<RoomItems.Item> items, FloatBuffer pos, ByteBuffer col, int count) {
+        if (!edited) { list.clear(); selected = -1; }
+        for (RoomItems.Item it : items) {
+            boolean known = false;
+            for (Obj e : list) if (!e.fromCatalog && Math.hypot(e.cx - it.cx, e.cz - it.cz) < 0.25f && Math.abs(e.y1 - it.y1) < 0.4f) { known = true; break; }
+            if (known) continue;
+            Obj o = new Obj();
+            o.name = it.name;
+            o.cx = it.cx; o.cz = it.cz; o.cosA = it.cosA; o.sinA = it.sinA; o.hu = it.hu; o.hv = it.hv; o.y0 = it.y0; o.y1 = it.y1;
+            o.onFloor = it.onFloor;
+            extract(o, pos, col, count);
+            if (o.n < 30) continue;
+            list.add(o);
+        }
+    }
+
     private static String nice(RoomModel.Box b) {
         String t = b.title();
         return t.isEmpty() ? "Object" : Character.toUpperCase(t.charAt(0)) + t.substring(1);
