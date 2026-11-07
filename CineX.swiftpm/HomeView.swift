@@ -10,6 +10,17 @@ struct HomeView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
+                // The logo stands in for a title; its asset has a dark-lettered version for light mode.
+                Image("Logo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 120)
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                    .accessibilityLabel("RoomScape")
+                    .accessibilityAddTraits(.isHeader)
+
                 Section {
                     if RoomCaptureSession.isSupported {
                         Button {
@@ -58,7 +69,7 @@ struct HomeView: View {
                     }
                 }
             }
-            .navigationTitle("RoomScape")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: SavedScan.self) { scan in
                 ResultView(scan: scan)
             }
