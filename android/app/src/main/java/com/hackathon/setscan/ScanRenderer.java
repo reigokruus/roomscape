@@ -681,6 +681,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     for (int i = 0; i < sn * 4; i++) { d.splNrm[i] = ss.nrm.get(i); d.splCol[i] = ss.col.get(i); }
                 }
                 try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
+                try { d.outletsChecked = outlets.checked; if (!outlets.list.isEmpty()) d.outlets = outlets.toJson(); } catch (Exception e) { logError("outlets save", e); }
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
@@ -746,6 +747,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 log("opened with " + surfDone.n + " trained splats");
             }
             loadPlanning(dir); if (done != null) done.run();
+            if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
         });
     }
 
@@ -787,6 +789,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         ls.pos.put(d.splPos).position(0); ls.raw.put(d.splPos).position(0); ls.nrm.put(d.splNrm).position(0); ls.col.put(d.splCol).position(0);
                         ls.trained = true; loadedSplats = ls;
                     }
+                    if (replaceMarks) outlets.fromJson(d.outlets, d.outletsChecked);
                     if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
                 int room = Math.max(0, 80 - photos.keyframes.size());
@@ -1204,7 +1207,88 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final int AUTO_STEPS = 400;           // training steps (~4 min on the S24; 150 left the splats blotchy)
     private volatile int autoStage;             // 0 off, 1 depth AI, 2 clean-up, 3 splats, 4 training, 5 done
 
-    private void autoProgress(String label, float frac) { activity.updateProcess(label, frac); }
+    private void autoProgress(String label, float frac) {
+        activity.updateProcess(label, frac);
+        if (frac >= 1f && !outlets.checked) glTasks.add(() -> findOutlets(false));
+    }
+
+    // ---- power outlets: Claude looks for them in the scan's photos, the scan's points place them in the room ----
+    final Outlets outlets = new Outlets();
+    private volatile boolean outletsRunning;
+    static final int OUTLET_PHOTOS = 36, OUTLET_BATCH = 6;
+
+    /** GL thread: search the photos of this scan for power outlets (once per scan; again if forced). */
+    void findOutlets(boolean force) {
+        if (outletsRunning || (outlets.checked && !force) || count == 0) return;
+        final java.util.List<PhotoRoom.Keyframe> all = new java.util.ArrayList<>(photos.keyframes);
+        if (all.isEmpty()) return;
+        final String key = activity.claudeKey();
+        if (key == null) { activity.outletsNeedKey(); return; }
+        try { ScanExport.readKeyframes(photos, width, height); } catch (Throwable e) { logError("outlet jpg", new RuntimeException(e)); return; }
+        // spread the photos over the scan, at most OUTLET_PHOTOS of them
+        final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>();
+        float stepK = Math.max(1f, all.size() / (float) OUTLET_PHOTOS);
+        for (float f = 0; f < all.size() && kfs.size() < OUTLET_PHOTOS; f += stepK) kfs.add(all.get((int) f));
+        final int n0 = count, step = Math.max(1, n0 / 300000);
+        final float[] pts = new float[(n0 / step + 1) * 3];
+        int pn = 0;
+        for (int i = 0; i < n0; i += step) { if (obs[i] == 0) continue; pts[pn * 3] = pos.get(i * 3); pts[pn * 3 + 1] = pos.get(i * 3 + 1); pts[pn * 3 + 2] = pos.get(i * 3 + 2); pn++; }
+        final int ptsN = pn, gen = surfGen;
+        outletsRunning = true;
+        final java.util.List<Outlets.Outlet> before = outlets.snapshot();
+        if (force) synchronized (outlets) { outlets.list.clear(); }
+        new Thread(() -> {
+            int found = 0; boolean ok = true;
+            try {
+                for (int b = 0; b < kfs.size() && gen == surfGen; b += OUTLET_BATCH) {
+                    activity.updateProcess(String.format(java.util.Locale.US, "Finding power outlets (%d/%d photos)", b, kfs.size()), 0.05f + 0.9f * b / kfs.size());
+                    java.util.List<PhotoRoom.Keyframe> batch = new java.util.ArrayList<>();
+                    java.util.List<android.graphics.Matrix> maps = new java.util.ArrayList<>();
+                    java.util.List<int[]> sizes = new java.util.ArrayList<>();
+                    java.util.List<String> b64 = new java.util.ArrayList<>();
+                    for (int j = b; j < Math.min(kfs.size(), b + OUTLET_BATCH); j++) {
+                        PhotoRoom.Keyframe k = kfs.get(j);
+                        if (k.jpg == null) continue;
+                        android.graphics.Matrix map = new android.graphics.Matrix();
+                        android.graphics.Bitmap img = ObjectNamer.uprightFromJpg(k, map);
+                        if (img == null) continue;
+                        batch.add(k); maps.add(map); sizes.add(new int[]{img.getWidth(), img.getHeight()});
+                        b64.add(ClaudeHelper.jpegBase64(img, 1024));
+                        img.recycle();
+                    }
+                    if (b64.isEmpty()) continue;
+                    java.util.List<ClaudeHelper.OutletDet> dets = ClaudeHelper.detectOutlets(key, b64);
+                    for (ClaudeHelper.OutletDet d : dets) {
+                        float[] w = Outlets.lift(batch.get(d.photo), maps.get(d.photo), sizes.get(d.photo)[0], sizes.get(d.photo)[1], d, pts, ptsN);
+                        if (w != null) { outlets.add(w, d); found++; }
+                    }
+                }
+            } catch (Throwable e) {
+                ok = false; logError("outlets", new RuntimeException(e));
+                if (force) synchronized (outlets) { if (outlets.list.isEmpty()) outlets.list.addAll(before); }
+            }
+            outletsRunning = false;
+            if (gen != surfGen) return;
+            if (ok) outlets.checked = true;
+            int n = outlets.list.size();
+            log("outlets: " + found + " sightings -> " + n + " outlets from " + kfs.size() + " photos" + (ok ? "" : " (stopped by an error)"));
+            activity.updateProcess(null, -1);
+            activity.outletsFound(n, ok);
+            if (ok) glTasks.add(this::autosave);
+        }).start();
+    }
+
+    private static final float[] OUTLET_COL = {1f, 0.62f, 0.1f, 1f};
+    private void drawOutlets(float[] m) {
+        java.util.List<Outlets.Outlet> ls = outlets.snapshot();
+        if (ls.isEmpty()) return;
+        float fy = lighting.floorY, dens = height / 1000f;
+        for (Outlets.Outlet o : ls) {
+            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, new float[]{0, 0, 0, 1f}, 30 * dens);
+            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, OUTLET_COL, 22 * dens);
+            drawLabel(m, o.x, o.y + 0.08f, o.z, o.label(fy), false);
+        }
+    }
 
     /** GL thread: run the whole improvement chain on its own, reporting one progress bar. */
     private void startAuto() {
@@ -2597,7 +2681,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;
-        earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false;
+        earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
@@ -4047,6 +4131,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         if (overlays) drawPath(mvp);
+        drawOutlets(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);
         if (lighting.enabled) drawLightGizmos(mvp);
         else if (plan != null && overlays) drawPlan(mvp, plan);

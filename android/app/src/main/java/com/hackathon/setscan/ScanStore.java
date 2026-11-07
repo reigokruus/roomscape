@@ -45,6 +45,7 @@ final class ScanStore {
         float[] floor, ceiling;
         float[] splPos, splNrm; byte[] splCol; int splN; // the trained splats as last shown (so reopening shows the improved model)
         String objects; // SceneObjects edits as a JSON array, or null
+        String outlets; boolean outletsChecked; // power outlets (Outlets JSON) and whether the photos were searched
         float lux; // room light measured from the camera's exposure, 0 = unknown
         Bitmap thumb;
     }
@@ -123,6 +124,8 @@ final class ScanStore {
         m.put("points", d.n); m.put("photos", d.kfs.size());
         if (d.lux > 0) m.put("lux", d.lux);
         if (d.objects != null) m.put("objects", new JSONArray(d.objects));
+        if (d.outlets != null) m.put("outlets", new JSONArray(d.outlets));
+        if (d.outletsChecked) m.put("outletsChecked", true);
         m.put("corners", arr(d.corners)); m.put("walls", arr(d.walls));
         if (d.floor != null) m.put("floor", vec(d.floor));
         if (d.ceiling != null) m.put("ceiling", vec(d.ceiling));
@@ -144,6 +147,9 @@ final class ScanStore {
         d.lux = (float) m.optDouble("lux", 0);
         JSONArray oa = m.optJSONArray("objects");
         d.objects = oa == null ? null : oa.toString();
+        JSONArray ol = m.optJSONArray("outlets");
+        d.outlets = ol == null ? null : ol.toString();
+        d.outletsChecked = m.optBoolean("outletsChecked", false);
         d.corners = list(m.optJSONArray("corners")); d.walls = list(m.optJSONArray("walls"));
         d.floor = m.has("floor") ? vec(m.getJSONArray("floor")) : null;
         d.ceiling = m.has("ceiling") ? vec(m.getJSONArray("ceiling")) : null;

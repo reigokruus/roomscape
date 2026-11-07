@@ -665,6 +665,34 @@ public class MainActivity extends Activity {
 
     /** The renderer saved the scan on its own (after Done, and again after clean-up). */
     private String lastSavedName;
+    /** The Claude key saved on this phone, or null. */
+    String claudeKey() {
+        String k = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
+        return k == null || k.trim().isEmpty() ? null : k.trim();
+    }
+
+    private boolean askedOutletKey;
+    /** Outlets are found by Claude: ask for the key once per app run. */
+    void outletsNeedKey() {
+        runOnUiThread(() -> {
+            if (askedOutletKey || isFinishing()) return;
+            askedOutletKey = true;
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("Find power outlets?")
+                    .setMessage("Claude can look through this scan's photos and mark every power outlet in the room. It needs your Claude API key.")
+                    .setPositiveButton("Add key", (d, w) -> askKey(() -> glView.queueEvent(() -> renderer.findOutlets(false))))
+                    .setNegativeButton("Not now", null)
+                    .show();
+        });
+    }
+
+    void outletsFound(int n, boolean ok) {
+        runOnUiThread(() -> {
+            if (!ok) toast(n > 0 ? "Outlet search stopped early (" + n + " found). Check the internet." : "Couldn't search for power outlets. Check the internet.");
+            else toast(n == 0 ? "No power outlets found in the photos." : "⚡ Found " + n + " power outlet" + (n == 1 ? "" : "s") + ". They're marked in orange.");
+        });
+    }
+
     void autoSaved(String name, String err) {
         runOnUiThread(() -> {
             if (name == null) { toast("Couldn't save the scan: " + err); return; }
