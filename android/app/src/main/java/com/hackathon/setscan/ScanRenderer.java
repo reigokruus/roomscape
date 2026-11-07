@@ -1219,7 +1219,87 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         activity.depthDone();
         activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Cleaning up now...", depthAdded));
         if (autoStage == 1) autoStage = 2;
+        if (DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) { hallDone = true; estimateHall(gen); return; }
         startCleanUp();
+    }
+
+    /**
+     * DEMO (rk, hall from the stage): the depth AI's far distances flatten out (its fit is scaled by near points, and
+     * 1/d = a r + b caps d near 1/b: scan 17:10 had nothing past 8 m in a ~18 m hall). Claude estimates the back wall
+     * from the photos and the measured width; everything beyond 4 m straight ahead is stretched so the far end lands there.
+     */
+    private boolean hallDone;
+    private void estimateHall(int gen) {
+        final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
+        try { ScanExport.readKeyframes(photos, width, height); } catch (Throwable e) { logError("hall jpg", new RuntimeException(e)); }
+        // the main direction the phone looked, and the middle of where it stood
+        float fx = 0, fz = 0, cx = 0, cy = 0, cz = 0;
+        for (PhotoRoom.Keyframe k : kfs) { fx -= k.pose[8]; fz -= k.pose[10]; cx += k.pose[12]; cy += k.pose[13]; cz += k.pose[14]; }
+        float fl = (float) Math.hypot(fx, fz);
+        if (fl < 1e-3f) { startCleanUp(); return; }
+        final float ux = fx / fl, uz = fz / fl, ox = cx / kfs.size(), oy = cy / kfs.size(), oz = cz / kfs.size();
+        final int n = count;
+        float[] al = new float[n], lat = new float[n], ys = new float[n];
+        for (int i = 0; i < n; i++) {
+            float dx = pos.get(i * 3) - ox, dz = pos.get(i * 3 + 2) - oz;
+            al[i] = dx * ux + dz * uz; lat[i] = -dx * uz + dz * ux; ys[i] = pos.get(i * 3 + 1);
+        }
+        float[] sa = al.clone(), sl = lat.clone(), sy = ys.clone();
+        java.util.Arrays.sort(sa); java.util.Arrays.sort(sl); java.util.Arrays.sort(sy);
+        final float farNow = sa[(int) (n * 0.995f)], width = sl[(int) (n * 0.97f)] - sl[(int) (n * 0.03f)];
+        final float floor = roomReady ? room.floorY : sy[(int) (n * 0.01f)], top = sy[(int) (n * 0.99f)];
+        final String measured = String.format(java.util.Locale.US,
+                "- room width across the view (wall to wall where measured): %.1f m\n- camera height above the floor: %.1f m\n"
+                + "- highest measured point above the floor: %.1f m\n- the phone moved %.1f m sideways while scanning\n"
+                + "- the phone's own estimate of the far end (unreliable past 5 m): %.1f m",
+                width, oy - floor, top - floor, sideways(kfs, ux, uz), farNow);
+        // photos looking straight out (level, along the main direction), spread across the stage
+        java.util.List<PhotoRoom.Keyframe> pick = new java.util.ArrayList<>();
+        java.util.List<PhotoRoom.Keyframe> sorted = new java.util.ArrayList<>(kfs);
+        sorted.sort((a, b) -> Float.compare(-(-a.pose[8] * ux - a.pose[10] * uz) + Math.abs(a.pose[9]), -(-b.pose[8] * ux - b.pose[10] * uz) + Math.abs(b.pose[9])));
+        for (PhotoRoom.Keyframe k : sorted) { if (pick.size() >= 4) break; if (k.jpg != null) pick.add(k); }
+        final String key = activity.claudeKey();
+        activity.updateProcess("Claude is estimating how deep the hall is", 0.5f);
+        new Thread(() -> {
+            double[] est = null;
+            try {
+                java.util.List<String> b64 = new java.util.ArrayList<>();
+                for (PhotoRoom.Keyframe k : pick) {
+                    android.graphics.Bitmap img = ObjectNamer.uprightFromJpg(k, new android.graphics.Matrix());
+                    if (img != null) { b64.add(ClaudeHelper.jpegBase64(img, 1280)); img.recycle(); }
+                }
+                if (!b64.isEmpty()) est = ClaudeHelper.estimateHall(key, b64, measured);
+            } catch (Throwable e) { logError("hall estimate", new RuntimeException(e)); }
+            final double[] e = est;
+            glTasks.add(() -> {
+                if (gen != surfGen) return;
+                float target = e == null ? Float.NaN : (float) e[0];
+                log("hall: " + measured.replace("\n", "; ") + " -> Claude: back wall " + target + " m (" + ClaudeHelper.lastHallWhy + ")");
+                final float s0 = 4f;
+                if (!Float.isNaN(target) && farNow > s0 + 0.5f && target > farNow) {
+                    float k = Math.min(4f, (target - s0) / (farNow - s0));
+                    int moved = 0;
+                    for (int i = 0; i < count; i++) {
+                        float dx = pos.get(i * 3) - ox, dz = pos.get(i * 3 + 2) - oz;
+                        float a = dx * ux + dz * uz;
+                        if (a <= s0) continue;
+                        float add = (a - s0) * (k - 1);
+                        pos.put(i * 3, pos.get(i * 3) + ux * add); pos.put(i * 3 + 2, pos.get(i * 3 + 2) + uz * add);
+                        moved++;
+                    }
+                    rebuildVoxelIndex(); uploaded = 0; refineCursor = 0; surfCount = 0;
+                    log(String.format(java.util.Locale.US, "hall: stretched %d far points x%.2f so the back wall is at %.1f m (was %.1f m)", moved, k, target, farNow));
+                    activity.toast(String.format(java.util.Locale.US, "Claude puts the back wall about %.0f m away", target));
+                }
+                startCleanUp();
+            });
+        }).start();
+    }
+
+    private static float sideways(java.util.List<PhotoRoom.Keyframe> kfs, float ux, float uz) {
+        float lo = 1e9f, hi = -1e9f;
+        for (PhotoRoom.Keyframe k : kfs) { float l = -k.pose[12] * uz + k.pose[14] * ux; lo = Math.min(lo, l); hi = Math.max(hi, l); }
+        return hi - lo;
     }
 
     private volatile boolean cleaning;
@@ -2752,7 +2832,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear();
-        roomShown = 0; shownHint = null; tooFast = tooFar = false;
+        roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
