@@ -57,6 +57,21 @@ struct LightingPanel: View {
                 }
             }
 
+            Section {
+                Button {
+                    let gear = GearStore.load()
+                    setup.lights = LightingSetup.starting(subjectX: setup.subjectX, subjectZ: setup.subjectZ,
+                                                          facing: setup.facing, floorY: setup.floorY, gear: gear).lights
+                } label: {
+                    Label("Use the lights from My Gear", systemImage: "arrow.triangle.2.circlepath")
+                }
+                NavigationLink(destination: GearInventoryView()) {
+                    Label("Edit My Gear", systemImage: "checklist")
+                }
+            } footer: {
+                Text("Up to four lights from My Gear are placed as key, fill, back and background light. With none listed, a softbox key and an LED panel fill are used.")
+            }
+
             if setup.lights.count < LightingSetup.maxLights {
                 Button {
                     let n = setup.lights.count + 1

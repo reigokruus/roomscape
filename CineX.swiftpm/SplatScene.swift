@@ -81,6 +81,9 @@ enum SplatScene {
     float splatScale;
     \(LightingShader.arguments)
     #pragma body
+    // World position and normal of the splat's centre: object splats live in their own (movable) node.
+    float3 worldCenter = (scn_node.modelTransform * float4(_geometry.position.xyz, 1.0)).xyz;
+    float3 worldNormal = (scn_node.modelTransform * float4(_geometry.normal, 0.0)).xyz;
     \(LightingShader.splatBody)
     float2 c = _geometry.texcoords[0] * 2.0 - 1.0;
     float rad = _geometry.texcoords[1].x;
@@ -88,9 +91,10 @@ enum SplatScene {
     float3 t1;
     float3 t2;
     if (dot(n, n) < 0.25) {
-        t1 = (scn_frame.inverseViewTransform * float4(1.0, 0.0, 0.0, 0.0)).xyz;
-        t2 = (scn_frame.inverseViewTransform * float4(0.0, 1.0, 0.0, 0.0)).xyz;
-        n = (scn_frame.inverseViewTransform * float4(0.0, 0.0, 1.0, 0.0)).xyz;
+        // Face the camera (camera axes taken into this node's own space).
+        t1 = (scn_node.inverseModelTransform * (scn_frame.inverseViewTransform * float4(1.0, 0.0, 0.0, 0.0))).xyz;
+        t2 = (scn_node.inverseModelTransform * (scn_frame.inverseViewTransform * float4(0.0, 1.0, 0.0, 0.0))).xyz;
+        n = (scn_node.inverseModelTransform * (scn_frame.inverseViewTransform * float4(0.0, 0.0, 1.0, 0.0))).xyz;
     } else {
         float3 a = abs(n.y) < 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
         t1 = normalize(cross(a, n));
@@ -102,7 +106,7 @@ enum SplatScene {
     if (wallAngle > -50.0) {
         float3 inward = float3(cos(wallAngle), 0.0, sin(wallAngle));
         float3 camera = scn_frame.inverseViewTransform[3].xyz;
-        if (dot(camera - _geometry.position.xyz, inward) < 0.0) { rad = 0.0; }
+        if (dot(camera - worldCenter, inward) < 0.0) { rad = 0.0; }
     }
     _geometry.position.xyz += (t1 * c.x + t2 * c.y) * rad * splatScale;
     _geometry.normal = n;

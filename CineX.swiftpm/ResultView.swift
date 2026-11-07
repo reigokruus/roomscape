@@ -25,17 +25,23 @@ struct ResultView: View {
     @State private var lighting: LightingSetup?
     @State private var lightingScene: LightingScene?
     @State private var shell: RoomShell?
+    /// Objects (RoomPlan's furniture, plus what Claude finds in the photos): edited in the Objects panel.
+    @State private var objectsOn = false
+    @State private var objects: [RoomObject] = []
+    @State private var claudeChecked = false
+    @State private var selectedObject: UUID?
+    @State private var objectsScene: ObjectsScene?
+    @State private var surfels: [SurfelRecord] = []
+    @State private var finding: String?
+    @State private var findError: String?
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
                 if let scene {
                     RoomSceneView(scene: scene, topView: topView,
-                                  floorY: lightingOn ? lighting?.floorY : nil,
-                                  onFloorTap: { p in
-                                      lighting?.subjectX = p.x
-                                      lighting?.subjectZ = p.z
-                                  })
+                                  floorY: (lightingOn || objectsOn) ? shell?.floorY : nil,
+                                  onFloorTap: floorTapped)
                 } else if let loadError {
                     Text(loadError).padding()
                 } else {
@@ -52,6 +58,15 @@ struct ResultView: View {
                         .buttonStyle(.bordered)
                         .tint(lightingOn ? .yellow : nil)
                         .accessibilityLabel(lightingOn ? "Turn off the lighting preview" : "Lighting preview")
+                        Button {
+                            toggleObjects()
+                        } label: {
+                            Image(systemName: objectsOn ? "cube.fill" : "cube")
+                                .frame(width: 32, height: 28)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(objectsOn ? .yellow : nil)
+                        .accessibilityLabel(objectsOn ? "Close objects" : "Objects in the room")
                         Picker("Style", selection: $style) {
                             Text("Splats").tag(Style.splats)
                             Text("Model").tag(Style.model)
@@ -79,7 +94,11 @@ struct ResultView: View {
             // The 3D area is always black, so its controls use dark styling even when the phone is in light mode.
             .environment(\.colorScheme, .dark)
 
-            if lightingOn, lighting != nil {
+            if objectsOn, let shell {
+                ObjectsPanel(objects: $objects, selected: $selectedObject, floorY: shell.floorY,
+                             claudeChecked: claudeChecked, finding: finding, error: findError, onFind: findObjects)
+                    .frame(maxHeight: 340)
+            } else if lightingOn, lighting != nil {
                 LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }))
                     .frame(maxHeight: 340)
             } else if let room {
@@ -108,9 +127,17 @@ struct ResultView: View {
         .onChange(of: lighting) { _, setup in
             if lightingOn { lightingScene?.apply(setup) }
         }
+        .onChange(of: objects) { _, objects in
+            objectsScene?.apply(objects, selected: selectedObject)
+            RoomObjects.save(ObjectsFile(claudeChecked: claudeChecked, objects: objects), for: scan)
+        }
+        .onChange(of: selectedObject) { _, id in
+            objectsScene?.apply(objects, selected: id)
+        }
         .onChange(of: style) { _, newStyle in
-            // The preview lights the splats; RoomPlan's model has no colours to light.
+            // The preview lights the splats and objects move splats; RoomPlan's model has neither.
             if newStyle == .model, lightingOn { toggleLighting() }
+            if newStyle == .model, objectsOn { toggleObjects() }
             modelGroup?.isHidden = newStyle == .splats
             splatGroup?.isHidden = newStyle == .model
         }
@@ -152,24 +179,86 @@ struct ResultView: View {
             // instead of RoomPlan's boxes. The Splats / Model switch flips between the two.
             guard let room = loaded.0, let scene, (capture?.pointCount ?? 0) > 0 else { return }
             buildingSplats = true
-            let splats = await Task.detached(priority: .userInitiated) { () -> SCNNode? in
+            let shell = RoomShell(room: room)
+            // Objects: what was saved (with the user's edits), else RoomPlan's furniture.
+            let saved = RoomObjects.load(scan)
+            let objects = saved?.objects ?? RoomObjects.fromRoomPlan(room)
+            let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], ObjectsScene.Built)? in
                 guard let surfels = ScanStore.loadSurfels(scan, room: room), !surfels.isEmpty else { return nil }
-                let node = SCNNode()
-                node.addChildNode(SplatScene.shellNode(RoomShell(room: room)))
-                node.addChildNode(SplatScene.splatNode(surfels))
-                return node
+                return (surfels, ObjectsScene.build(surfels, objects: objects, floorY: shell.floorY))
             }.value
             buildingSplats = false
-            guard let splats else { return }
+            guard let (surfels, parts) = built else { return }
+            let splats = SCNNode()
+            splats.addChildNode(SplatScene.shellNode(shell))
+            let objectsScene = ObjectsScene()
+            objectsScene.install(parts, objects: objects)
+            splats.addChildNode(objectsScene.root)
             splats.isHidden = true
             scene.rootNode.addChildNode(splats)
             splatGroup = splats
+            self.surfels = surfels
+            self.objectsScene = objectsScene
+            self.objects = objects
+            claudeChecked = saved?.claudeChecked ?? false
             let lightingScene = LightingScene()
             lightingScene.register(splats)
             scene.rootNode.addChildNode(lightingScene.root)
             self.lightingScene = lightingScene
-            shell = RoomShell(room: room)
+            self.shell = shell
             style = .splats
+        }
+    }
+
+    private func floorTapped(_ p: SIMD3<Float>) {
+        if objectsOn {
+            // Move the selected object so its centre stands over the tapped spot.
+            guard let id = selectedObject, let i = objects.firstIndex(where: { $0.id == id }),
+                  !objects[i].kind.isMarker, !objects[i].removed else { return }
+            objects[i].offset = SIMD3(p.x - objects[i].center.x, 0, p.z - objects[i].center.z)
+        } else if lightingOn {
+            lighting?.subjectX = p.x
+            lighting?.subjectZ = p.z
+        }
+    }
+
+    private func toggleObjects() {
+        objectsOn.toggle()
+        if objectsOn {
+            style = .splats
+            if lightingOn { toggleLighting() }
+        } else {
+            selectedObject = nil
+        }
+    }
+
+    /// Asks Claude for everything in the photos, then splits the splats again for the new set of objects.
+    private func findObjects() {
+        guard let room, let shell, finding == nil else { return }
+        findError = nil
+        finding = "Preparing photos…"
+        let scan = scan, current = objects, surfels = surfels
+        Task {
+            do {
+                let found = try await ObjectFinder.find(scan: scan, room: room, objects: current) { p in
+                    Task { @MainActor in finding = "Claude is looking at the photos… \(p.done)/\(p.total)" }
+                }
+                finding = "Placing what it found…"
+                let parts = await Task.detached(priority: .userInitiated) {
+                    ObjectsScene.build(surfels, objects: found, floorY: shell.floorY)
+                }.value
+                objectsScene?.install(parts, objects: found)
+                if let splatGroup { lightingScene?.reregister(splatGroup) }
+                if lightingOn { lightingScene?.apply(lighting) }
+                claudeChecked = true
+                objects = found
+                let added = found.count - current.count
+                finding = nil
+                if added == 0 { findError = "Claude found nothing new." }
+            } catch {
+                finding = nil
+                findError = error.localizedDescription
+            }
         }
     }
 
@@ -180,6 +269,7 @@ struct ResultView: View {
             return
         }
         style = .splats
+        if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.
             let center = shell.walls.reduce(SIMD3<Float>(), { $0 + $1.center }) / Float(max(1, shell.walls.count))

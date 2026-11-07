@@ -28,9 +28,14 @@ struct HomeView: View {
                 }
 
                 Section {
+                    NavigationLink(destination: GearInventoryView()) {
+                        Label("My gear", systemImage: "checklist")
+                    }
                     NavigationLink(destination: PlanningLibraryView()) {
                         Label("Planning projects", systemImage: "rectangle.stack")
                     }
+                } footer: {
+                    Text("Your lights, camera and kit. The lighting preview and the shoot planner start from them.")
                 }
 
                 if !scans.isEmpty {
@@ -61,6 +66,7 @@ struct HomeView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink(destination: GearInventoryView()) {
                         Label("My Gear", systemImage: "checklist")
+                            .labelStyle(.titleAndIcon)
                     }
                 }
             }

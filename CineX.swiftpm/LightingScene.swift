@@ -46,12 +46,12 @@ enum LightingShader {
         """
     }
 
-    /// Inserted at the start of the splat geometry modifier's body (before the disc is opened up, so `position` is
-    /// the splat's centre). Writes the lit colour to the vertex colour.
+    /// Inserted at the start of the splat geometry modifier's body (before the disc is opened up), after
+    /// `worldCenter` / `worldNormal` are set. Writes the lit colour to the vertex colour.
     static let splatBody = """
     if (litOn > 0.5) {
-        float3 P = _geometry.position.xyz;
-        float3 N = _geometry.normal;
+        float3 P = worldCenter;
+        float3 N = worldNormal;
         float hasN = dot(N, N) > 0.25 ? 1.0 : 0.0;
         float3 lin = _geometry.color.rgb;
     \(shade(twoSided: true))
@@ -119,6 +119,13 @@ final class LightingScene {
                 if mods[.surface]?.contains("litOn") == true { splatAndShell.append(m); shellMaterials.append(m) }
             }
         }
+    }
+
+    /// Forgets the registered materials and collects them again (after the splat nodes were rebuilt).
+    func reregister(_ node: SCNNode) {
+        splatAndShell = []
+        shellMaterials = []
+        register(node)
     }
 
     /// Shows the setup (or turns the preview off with nil).
