@@ -13,6 +13,8 @@ final class LiveCapture: ObservableObject {
     let cloud: LiveCloud?
     let session: ARSession
     private var link: CADisplayLink?
+    private var discView: LiveDiscsMTKView?
+    private var attachTimer: Timer?
     private let worker = DispatchQueue(label: "CineX.live-cloud", qos: .utility)
     private var busy = false
     private var lastFrameTime: TimeInterval = 0
@@ -33,10 +35,61 @@ final class LiveCapture: ObservableObject {
         self.link = link
     }
 
-    /// Stops taking frames. The cloud keeps what was captured.
+    /// Stops taking frames and removes the discs. The cloud keeps what was captured.
     func stop() {
         link?.invalidate()
         link = nil
+        attachTimer?.invalidate()
+        attachTimer = nil
+        discView?.removeFromSuperview()
+        discView = nil
+    }
+
+    /// Puts the discs inside RoomCaptureView, directly above its camera view, so RoomPlan's own UI (coaching text,
+    /// the dollhouse preview, the glyph) stays on top of them. RoomPlan has no public API for this: its camera view
+    /// is found by class name (the largest subview whose class name contains "ARView"; the dollhouse preview is a
+    /// smaller one). If it isn't there within 3 s, the discs go on top of the whole view instead, as before.
+    func attachDiscs(to captureView: UIView) {
+        guard discView == nil, let view = LiveDiscsMTKView(live: self) else { return }
+        discView = view
+        let started = Date()
+        attachTimer?.invalidate()
+        attachTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, let view = self.discView else { timer.invalidate(); return }
+                if let camera = Self.cameraView(in: captureView), let parent = camera.superview {
+                    view.frame = camera.frame
+                    view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                    parent.insertSubview(view, aboveSubview: camera)
+                } else if Date().timeIntervalSince(started) > 3 {
+                    view.frame = captureView.bounds
+                    view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                    captureView.addSubview(view)
+                } else {
+                    return
+                }
+                timer.invalidate()
+                self.attachTimer = nil
+            }
+        }
+    }
+
+    private static func cameraView(in root: UIView) -> UIView? {
+        var best: UIView?
+        var bestArea: CGFloat = 0
+        func visit(_ v: UIView) {
+            for sub in v.subviews where !(sub is LiveDiscsMTKView) {
+                let area = sub.bounds.width * sub.bounds.height
+                if String(describing: type(of: sub)).contains("ARView"), area > bestArea {
+                    best = sub
+                    bestArea = area
+                }
+                visit(sub)
+            }
+        }
+        visit(root)
+        // Only when it covers most of the screen: otherwise it isn't the camera view (or isn't laid out yet).
+        return bestArea >= root.bounds.width * root.bounds.height * 0.5 && bestArea > 0 ? best : nil
     }
 
     /// The points and photos captured so far, read after any frame still being processed.
@@ -81,33 +134,29 @@ final class LiveCapture: ObservableObject {
     }
 }
 
-/// Transparent Metal overlay that draws every live spot as a disc over the camera image (handoff section 2: live discs).
+/// Transparent Metal view that draws every live spot as a disc over the camera image (handoff section 2: live discs).
 /// The rim goes red (seen once) → yellow → green (solid); solid spots shrink to faint green dots.
-struct LiveDiscsView: UIViewRepresentable {
-    @ObservedObject var live: LiveCapture
+/// Holds its renderer, since an MTKView only keeps a weak reference to its delegate.
+final class LiveDiscsMTKView: MTKView {
+    private let renderer: LiveDiscRenderer
 
-    func makeCoordinator() -> LiveDiscRenderer? {
-        guard let device = live.device, let cloud = live.cloud else { return nil }
-        return LiveDiscRenderer(device: device, cloud: cloud)
+    init?(live: LiveCapture) {
+        guard let device = live.device, let cloud = live.cloud,
+              let renderer = LiveDiscRenderer(device: device, cloud: cloud) else { return nil }
+        self.renderer = renderer
+        super.init(frame: .zero, device: device)
+        isOpaque = false
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        colorPixelFormat = .bgra8Unorm
+        depthStencilPixelFormat = .depth32Float
+        clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        preferredFramesPerSecond = 30
+        renderer.session = live.session
+        delegate = renderer
     }
 
-    func makeUIView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: live.device)
-        view.isOpaque = false
-        view.backgroundColor = .clear
-        view.isUserInteractionEnabled = false
-        view.colorPixelFormat = .bgra8Unorm
-        view.depthStencilPixelFormat = .depth32Float
-        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        view.preferredFramesPerSecond = 30
-        context.coordinator?.session = live.session
-        view.delegate = context.coordinator
-        return view
-    }
-
-    func updateUIView(_ view: MTKView, context: Context) {
-        context.coordinator?.session = live.session
-    }
+    required init(coder: NSCoder) { fatalError("not supported") }
 }
 
 final class LiveDiscRenderer: NSObject, MTKViewDelegate {
@@ -210,8 +259,9 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float3 heat = s < 0.5 ? mix(float3(1.0, 0.15, 0.1), float3(1.0, 0.85, 0.1), s * 2.0)
                               : mix(float3(1.0, 0.85, 0.1), float3(0.15, 1.0, 0.35), s * 2.0 - 1.0);
         // See-through centres (Android uses 0.8): RoomPlan's own guidance text and wall outlines sit underneath.
-        if (r2 > 0.55) return float4(heat, 0.9);
-        return float4(mix(in.color.rgb, heat, 0.25), 0.45);
+        // See-through centres, slightly see-through rims: RoomPlan's white wall outlines are drawn underneath.
+        if (r2 > 0.55) return float4(heat, 0.75);
+        return float4(mix(in.color.rgb, heat, 0.25), 0.3);
     }
     """
 }

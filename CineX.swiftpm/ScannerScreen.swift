@@ -58,6 +58,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         setPhase(.scanning)
         captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
         live.start()
+        live.attachDiscs(to: captureView)
     }
 
     /// User tapped Done. RoomPlan answers through `shouldPresent`, where processing starts.
@@ -223,9 +224,7 @@ struct ScannerScreen: View {
                 .onAppear { controller.start() }
 
             if controller.phase == .scanning {
-                LiveDiscsView(live: controller.live)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
+                // The live discs are drawn inside the capture view, under RoomPlan's own UI (see attachDiscs).
                 LiveStatusLine(live: controller.live)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 60)
