@@ -643,7 +643,7 @@ public class MainActivity extends Activity {
             hudSub.setText(sub == null ? "" : sub);
             hudSub.setVisibility(sub == null ? View.GONE : View.VISIBLE);
             hudDetail.setProgress(Math.round(detail * 1000));
-            hudDetail.setProgressTintList(android.content.res.ColorStateList.valueOf(detail >= 0.7f ? HINT_COLORS[0] : detail >= 0.35f ? HINT_COLORS[1] : HINT_COLORS[2]));
+            hudDetail.setProgressTintList(android.content.res.ColorStateList.valueOf(detail >= ScanRenderer.SPOT_DONE ? HINT_COLORS[0] : detail >= 0.35f ? HINT_COLORS[1] : HINT_COLORS[2]));
             hudDetailPct.setText(Math.round(detail * 100) + "%");
             hudRoom.setProgress(Math.round(room * 1000));
             hudRoomPct.setText(Math.round(room * 100) + "%");

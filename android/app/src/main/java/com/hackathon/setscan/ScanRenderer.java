@@ -3502,7 +3502,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
             if (depthPixelsFrame > 300) { float fs = (float) farPixelsFrame / depthPixelsFrame; farShare = farShare < 0 ? fs : farShare * 0.7f + fs * 0.3f; }
-            if (frameHits > 200) { float f = (float) frameSolid / frameHits; detailHere = detailHere < 0 ? f : detailHere * 0.8f + f * 0.2f; }
+            float cf = centreSolid(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m);
+            if (cf < 0 && frameHits > 200) cf = (float) frameSolid / frameHits;
+            if (cf >= 0) detailHere = detailHere < 0 ? cf : detailHere * 0.7f + cf * 0.3f;
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
             // Close-up held for a moment: make it a detail zone automatically.
             if (depthPixelsFrame > 500 && nearPixelsFrame > depthPixelsFrame / 2) closeFrames++; else closeFrames = 0;
@@ -3606,6 +3608,34 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * Without this, a wrong first reading (e.g. "something" under a chair) could never go away.
      * Checks up to 250k points per depth frame, round-robin.
      */
+    /**
+     * What the "This spot" bar shows: the share of dots in the middle of the screen that are solid (green), counting
+     * every dot the user can see there, not only the ones this depth frame hit (rk: "done" showed with red all over).
+     * -1 when too few dots are in view.
+     */
+    private float centreSolid(ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m) {
+        int n = count, step = Math.max(1, n / 150000), vis = 0;
+        float solid = 0;
+        int u0 = dw / 4, u1 = dw * 3 / 4, v0 = dh / 4, v1 = dh * 3 / 4;
+        for (int i = 0; i < n; i += step) {
+            if (obs[i] == 0) continue;
+            float rx = pos.get(i * 3) - m[12], ry = pos.get(i * 3 + 1) - m[13], rz = pos.get(i * 3 + 2) - m[14];
+            float zc = m[8] * rx + m[9] * ry + m[10] * rz;
+            float d = -zc;
+            if (d < 0.15f || d > 4f) continue;
+            float xc = m[0] * rx + m[1] * ry + m[2] * rz, yc = m[4] * rx + m[5] * ry + m[6] * rz;
+            int u = (int) (fx * xc / d + cx), v = (int) (cy - fy * yc / d);
+            if (u < u0 || u >= u1 || v < v0 || v >= v1) continue;
+            int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
+            if (mm > 0 && d * 1000 > mm + 100 + mm / 20) continue; // hidden behind what the camera sees now
+            int a = col.get(i * 4 + 3) & 0xFF;
+            vis++;
+            // the disc colours as drawn (floor(a*4)/4): red 0, orange 0.25, yellow 0.5, light green 0.75, solid green 1
+            solid += a >= 253 ? 1f : a >= 192 ? 0.75f : a >= 128 ? 0.5f : a >= 64 ? 0.25f : 0f;
+        }
+        return vis < 150 / step + 30 ? -1 : solid / vis;
+    }
+
     private void carve(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int dw, int dh,
                        float fx, float fy, float cx, float cy, float[] m) {
         int n = count;
@@ -4050,6 +4080,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float roomShown;                 // the Room bar never goes down
 
     /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */
+    static final float SPOT_DONE = 0.85f; // "done" only when the middle of the screen is (nearly) all green
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
@@ -4067,7 +4098,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
         else if (tooFast && d < 0.7f) { level = 2; hint = "Too fast. Slow down and sway gently over this spot"; }
         else if (d < 0.35f) { level = 2; hint = "Sway the phone slowly over this spot until the dots turn green"; }
-        else if (d < 0.7f) { level = 1; hint = "Good. Keep swaying gently here a little longer"; }
+        else if (d < SPOT_DONE) { level = 1; hint = "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = "This spot is done. Move on to the next red area"; }
         if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
         else if (photoJustTaken()) sub = "📷 Photo " + photos.keyframes.size() + " taken, keep swaying";
@@ -4091,7 +4122,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float d = detailHere;
         if (d < 0) return "Detail here: point at something";
         int pct = Math.round(d * 100);
-        return pct >= 70 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, keep swaying here" : "🔴 Detail here: " + pct + "% solid, stay here and sway gently";
+        return pct >= 85 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, keep swaying here" : "🔴 Detail here: " + pct + "% solid, stay here and sway gently";
     }
 
     private void drawPointArrays() {
