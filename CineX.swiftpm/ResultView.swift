@@ -105,11 +105,8 @@ struct ResultView: View {
         }
         .onChange(of: objects) { _, objects in
             objectsScene?.apply(objects, selected: selectedObject)
-<<<<<<< HEAD
-            if lighting != nil { refreshRoomLight() }
-=======
             modelObjects?.apply(objects)
->>>>>>> a46a19848736ad497bede8e78c6dba8c1d961b29
+            if lighting != nil { refreshRoomLight() }
             RoomObjects.save(ObjectsFile(claudeChecked: claudeChecked, objects: objects), for: scan)
         }
         .onChange(of: selectedObject) { _, id in
