@@ -681,6 +681,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     for (int i = 0; i < sn * 4; i++) { d.splNrm[i] = ss.nrm.get(i); d.splCol[i] = ss.col.get(i); }
                 }
                 try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
+                d.hall = hallDone;
                 try { d.outletsChecked = outlets.checked; if (!outlets.list.isEmpty()) d.outlets = outlets.toJson(); if (!roomItems.list.isEmpty()) d.items = roomItems.toJson(); } catch (Exception e) { logError("outlets save", e); }
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
@@ -748,6 +749,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             loadPlanning(dir); if (done != null) done.run();
             if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
+            if (DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) // older scans: place the back wall once, no rescan
+                glTasks.add(() -> { if (!hallDone) { hallDone = true; estimateHall(surfGen, false); } });
         });
     }
 
@@ -789,7 +792,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         ls.pos.put(d.splPos).position(0); ls.raw.put(d.splPos).position(0); ls.nrm.put(d.splNrm).position(0); ls.col.put(d.splCol).position(0);
                         ls.trained = true; loadedSplats = ls;
                     }
-                    if (replaceMarks) { outlets.fromJson(d.outlets, d.outletsChecked); roomItems.fromJson(d.items); }
+                    if (replaceMarks) { outlets.fromJson(d.outlets, d.outletsChecked); roomItems.fromJson(d.items); hallDone = d.hall; }
                     if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
                 int room = Math.max(0, 80 - photos.keyframes.size());
@@ -1219,7 +1222,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         activity.depthDone();
         activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Cleaning up now...", depthAdded));
         if (autoStage == 1) autoStage = 2;
-        if (DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) { hallDone = true; estimateHall(gen); return; }
+        if (DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) { hallDone = true; estimateHall(gen, true); return; }
         startCleanUp();
     }
 
@@ -1229,14 +1232,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * from the photos and the measured width; everything beyond 4 m straight ahead is stretched so the far end lands there.
      */
     private boolean hallDone;
-    private void estimateHall(int gen) {
+    private void estimateHall(int gen, boolean thenCleanUp) {
         final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
         try { ScanExport.readKeyframes(photos, width, height); } catch (Throwable e) { logError("hall jpg", new RuntimeException(e)); }
         // the main direction the phone looked, and the middle of where it stood
         float fx = 0, fz = 0, cx = 0, cy = 0, cz = 0;
         for (PhotoRoom.Keyframe k : kfs) { fx -= k.pose[8]; fz -= k.pose[10]; cx += k.pose[12]; cy += k.pose[13]; cz += k.pose[14]; }
         float fl = (float) Math.hypot(fx, fz);
-        if (fl < 1e-3f) { startCleanUp(); return; }
+        if (fl < 1e-3f) { if (thenCleanUp) startCleanUp(); return; }
         final float ux = fx / fl, uz = fz / fl, ox = cx / kfs.size(), oy = cy / kfs.size(), oz = cz / kfs.size();
         final int n = count;
         float[] al = new float[n], lat = new float[n], ys = new float[n];
@@ -1288,10 +1291,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         moved++;
                     }
                     rebuildVoxelIndex(); uploaded = 0; refineCursor = 0; surfCount = 0;
+                    // a reopened scan shows its trained splats: move them the same way
+                    for (Surfels ss : new Surfels[]{surfDone, surfShown, surfBase}) {
+                        if (ss == null || ss.stretched == gen + 1) continue;
+                        ss.stretched = gen + 1;
+                        for (int i = 0; i < ss.n; i++) {
+                            float dx = ss.pos.get(i * 3) - ox, dz = ss.pos.get(i * 3 + 2) - oz;
+                            float a = dx * ux + dz * uz;
+                            if (a <= s0) continue;
+                            float add = (a - s0) * (k - 1);
+                            ss.pos.put(i * 3, ss.pos.get(i * 3) + ux * add); ss.pos.put(i * 3 + 2, ss.pos.get(i * 3 + 2) + uz * add);
+                            ss.raw.put(i * 3, ss.raw.get(i * 3) + ux * add); ss.raw.put(i * 3 + 2, ss.raw.get(i * 3 + 2) + uz * add);
+                        }
+                    }
+                    if (surfDone != null) surfPending = surfDone; // re-send to the GPU
                     log(String.format(java.util.Locale.US, "hall: stretched %d far points x%.2f so the back wall is at %.1f m (was %.1f m)", moved, k, target, farNow));
                     activity.toast(String.format(java.util.Locale.US, "Claude puts the back wall about %.0f m away", target));
                 }
-                startCleanUp();
+                if (thenCleanUp) startCleanUp(); else { activity.updateProcess(null, -1); autosave(); }
             });
         }).start();
     }

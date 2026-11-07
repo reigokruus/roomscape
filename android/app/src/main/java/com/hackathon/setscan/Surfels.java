@@ -23,6 +23,7 @@ final class Surfels {
     final ByteBuffer col;            // rgba, a = opacity
     int n; // may be less than the buffers' capacity (reused by the Trainer)
     int flat, curved, lonely;
+    int stretched;                   // demo hall stretch applied (generation + 1), so it isn't applied twice
     boolean trained;                 // from the Trainer (no settle animation)
 
     private Surfels(int n) {
