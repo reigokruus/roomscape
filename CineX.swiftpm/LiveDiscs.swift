@@ -2,19 +2,22 @@ import ARKit
 import MetalKit
 import SwiftUI
 
-/// Feeds RoomPlan's ARKit frames into a `LiveCloud` while scanning, and publishes the "Detail here" status line.
+/// Feeds RoomPlan's ARKit frames into a `LiveCloud` while scanning.
 ///
 /// It only *reads* `arSession.currentFrame`. It never sets the ARSession's or RoomCaptureSession's delegate:
 /// RoomCaptureView stops working when someone else takes those over.
 @MainActor
-final class LiveCapture: ObservableObject {
-    @Published private(set) var detailLine = LiveCapture.line(for: -1)
+final class LiveCapture {
     let device: MTLDevice?
     let cloud: LiveCloud?
     let session: ARSession
     private var link: CADisplayLink?
     private var discView: LiveDiscsMTKView?
     private var attachTimer: Timer?
+    private var previewTimer: Timer?
+    #if DEBUG
+    private var loggedPreview = false
+    #endif
     private let worker = DispatchQueue(label: "CineX.live-cloud", qos: .utility)
     private var busy = false
     private var lastFrameTime: TimeInterval = 0
@@ -28,7 +31,6 @@ final class LiveCapture: ObservableObject {
     func start() {
         guard link == nil, let cloud else { return }
         worker.async { cloud.reset() }
-        detailLine = Self.line(for: -1)
         let link = CADisplayLink(target: WeakTarget(self), selector: #selector(WeakTarget.tick))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
         link.add(to: .main, forMode: .common)
@@ -55,6 +57,8 @@ final class LiveCapture: ObservableObject {
         link = nil
         attachTimer?.invalidate()
         attachTimer = nil
+        previewTimer?.invalidate()
+        previewTimer = nil
         discView?.removeFromSuperview()
         discView = nil
     }
@@ -86,6 +90,65 @@ final class LiveCapture: ObservableObject {
                 self.attachTimer = nil
             }
         }
+    }
+
+    /// Moves RoomPlan's small 3D preview of the room (normally at the bottom, behind the Cancel and Done buttons)
+    /// to the top right. RoomPlan has no API for this: the preview is found as the smaller 3D view inside
+    /// RoomCaptureView (not the full-screen camera view, not our mesh overlay), lifted to its outermost container
+    /// that's still small, and moved with a transform, which RoomPlan's own layout doesn't reset. Checked twice a
+    /// second, since RoomPlan can lay it out again or create it late.
+    func pinPreviewTopRight(in captureView: UIView) {
+        previewTimer?.invalidate()
+        previewTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self, weak captureView] _ in
+            MainActor.assumeIsolated {
+                guard let self, let captureView, let preview = Self.previewView(in: captureView) else { return }
+                #if DEBUG
+                if !self.loggedPreview {
+                    self.loggedPreview = true
+                    print("LiveCapture: moving RoomPlan preview \(type(of: preview)) \(preview.frame)")
+                }
+                #endif
+                UIView.performWithoutAnimation {
+                    // Where it sits without our transform, in the capture view's coordinates.
+                    let saved = preview.transform
+                    preview.transform = .identity
+                    let frame = preview.convert(preview.bounds, to: captureView)
+                    let margin: CGFloat = 12
+                    let target = CGPoint(x: captureView.bounds.width - margin - frame.width,
+                                         y: captureView.safeAreaInsets.top + margin)
+                    let moved = CGAffineTransform(translationX: target.x - frame.minX, y: target.y - frame.minY)
+                    preview.transform = saved == moved ? saved : moved
+                }
+            }
+        }
+    }
+
+    private static func previewView(in root: UIView) -> UIView? {
+        let screen = root.bounds.width * root.bounds.height
+        guard screen > 0 else { return nil }
+        let camera = cameraView(in: root)
+        var best: UIView?
+        var bestArea: CGFloat = 0
+        func visit(_ v: UIView) {
+            for sub in v.subviews where !(sub is LiveDiscsMTKView) && sub !== camera {
+                let name = String(describing: type(of: sub))
+                let area = sub.bounds.width * sub.bounds.height
+                if !sub.isHidden, area > screen * 0.01, area < screen * 0.45, area > bestArea,
+                   ["ARView", "SCNView", "SceneView", "MTKView", "RealityView"].contains(where: name.contains) {
+                    best = sub
+                    bestArea = area
+                }
+                visit(sub)
+            }
+        }
+        visit(root)
+        // Its outermost container that's still small (so a frame or background around it moves with it).
+        guard var view = best else { return nil }
+        while let parent = view.superview, parent !== root,
+              parent.bounds.width * parent.bounds.height < screen * 0.45 {
+            view = parent
+        }
+        return view
     }
 
     private static func cameraView(in root: UIView) -> UIView? {
@@ -121,23 +184,8 @@ final class LiveCapture: ObservableObject {
         // One frame at a time, released as soon as it's read, so ARKit never runs short of camera buffers.
         worker.async { [weak self] in
             cloud.integrate(frame)
-            let detail = cloud.isFull ? -2 : cloud.detailHere
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.busy = false
-                let line = Self.line(for: detail)
-                if line != self.detailLine { self.detailLine = line }
-            }
+            DispatchQueue.main.async { self?.busy = false }
         }
-    }
-
-    private static func line(for detail: Float) -> String {
-        if detail <= -2 { return "⚪️ Capture memory is full. Tap Done to keep what you have" }
-        guard detail >= 0 else { return "Detail here: point at something" }
-        let percent = Int((detail * 100).rounded())
-        if percent >= 70 { return "🟢 Detail here: \(percent)% solid, move on" }
-        if percent >= 35 { return "🟡 Detail here: \(percent)% solid, hold a bit longer" }
-        return "🔴 Detail here: \(percent)% solid, hold still here"
     }
 
     /// CADisplayLink keeps a strong reference to its target; this keeps it from holding on to LiveCapture.

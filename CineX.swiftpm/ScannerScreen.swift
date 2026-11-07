@@ -59,9 +59,14 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         saved = nil
         endedEarlyReason = nil
         setPhase(.scanning)
-        captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
+        // No coaching overlay (the animated phone over a grid, "Move device to start" and the other prompts): the
+        // live mesh already shows where the scan has been.
+        var configuration = RoomCaptureSession.Configuration()
+        configuration.isCoachingEnabled = false
+        captureView.captureSession.run(configuration: configuration)
         live.start()
         live.attachDiscs(to: captureView)
+        live.pinPreviewTopRight(in: captureView)
         lastMemoryWarning = nil
         // Already warm from a previous scan: start in power saving.
         powerSaving = ProcessInfo.processInfo.thermalState == .serious
@@ -215,19 +220,6 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     }
 }
 
-/// "Detail here: N% solid" while scanning: how much of what the phone points at is captured well.
-private struct LiveStatusLine: View {
-    @ObservedObject var live: LiveCapture
-
-    var body: some View {
-        Text(live.detailLine)
-            .font(.subheadline.weight(.medium))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: Capsule())
-    }
-}
-
 private struct RoomCaptureRepresentable: UIViewRepresentable {
     let controller: ScanController
 
@@ -250,19 +242,11 @@ struct ScannerScreen: View {
                 .ignoresSafeArea()
                 .onAppear { controller.start() }
 
-            if controller.phase == .scanning {
-                // The live discs are drawn inside the capture view, under RoomPlan's own UI (see attachDiscs).
-                LiveStatusLine(live: controller.live)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 60)
-                    .allowsHitTesting(false)
-            }
-
             VStack(spacing: 12) {
                 switch controller.phase {
                 case .scanning:
                     if controller.powerSaving {
-                        Label("The phone is warm, so the live discs update less often. Keep scanning.",
+                        Label("The phone is warm, so the live mesh updates less often. Keep scanning.",
                               systemImage: "thermometer.medium")
                             .font(.footnote)
                             .padding(.horizontal, 12).padding(.vertical, 8)
@@ -281,7 +265,7 @@ struct ScannerScreen: View {
                     HStack(spacing: 16) {
                         Button("Cancel") { close() }
                             .buttonStyle(.bordered)
-                            // Solid backing so the label stays readable over the live discs.
+                            // Solid backing so the label stays readable over the live mesh.
                             .background(.regularMaterial, in: Capsule())
                         Button("Done") { controller.finish() }
                             .buttonStyle(.borderedProminent)
