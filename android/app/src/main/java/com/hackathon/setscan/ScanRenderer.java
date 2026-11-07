@@ -1003,7 +1003,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int X = Math.min(iw - 1, Math.max(0, (int) pt[0])), Y = Math.min(ih - 1, Math.max(0, (int) pt[1]));
                         float r = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))];
                         float inv = ab[0] * r + ab[1] + ab[2] * ((float) X / iw - 0.5f) + ab[3] * ((float) Y / ih - 0.5f);
-                        gd[gv * GU + gu] = inv > 0.15f ? 1f / inv : 0;
+                        float dd = inv > 0.15f ? 1f / inv : 0;
+                        gd[gv * GU + gu] = dd > 0 && fillsGap(cd, cw, chh, X / 8, Y / 8, dd) ? dd : 0;
                         gc[gv * GU + gu] = pix[Y * iw + X];
                     }
                     final float[] P = new float[GU * GV * 3]; final byte[] C = new byte[GU * GV * 3];
@@ -1054,6 +1055,25 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * walls into the AI depth (scan1047 back wall 60 deg off vertical with them, 33-45 deg without and near-weighted).
      * Returns {a, b, c, d, median relative error} or null.
      */
+    /**
+     * The AI's depth only fills gaps: where ARCore measured nothing in this 8 px cell, but a measured cell within
+     * 2 cells agrees with the AI depth (6 % + 3 cm) and none disagrees. Everywhere else ARCore's measurement wins.
+     * Before this, AI points were added on top of measured surfaces and stacked them into layers (scan1150 pillar).
+     */
+    static boolean fillsGap(float[] cd, int cw, int ch, int cx, int cy, float d) {
+        if (d > 3.5f) return false;
+        if (cx < 0 || cy < 0 || cx >= cw || cy >= ch || cd[cy * cw + cx] > 0) return false;
+        boolean ok = false;
+        for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
+            int x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= cw || y >= ch) continue;
+            float n = cd[y * cw + x];
+            if (n <= 0) continue;
+            if (Math.abs(n - d) < 0.03f + 0.06f * d) ok = true; else return false;
+        }
+        return ok;
+    }
+
     static final boolean TILT_FIT = false;
     static float[] fitInverseDepth(float[] cd, float[] cr, float[] cu, float[] cv) {
         int n = 0;
