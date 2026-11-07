@@ -675,6 +675,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try {
                 ScanStore.Data d = ScanStore.load(dir);
                 if (currentName == null || replaceMarks) currentName = d.name;
+                loadedAny = true;
                 if (d.lux > 0) { loadedLux = d.lux; Lighting.ROOM_LUX = d.lux; }
                 glTasks.add(() -> {
                     if (gen != surfGen) return;
@@ -889,6 +890,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
         if (kfs.isEmpty()) { activity.updateStatus("No photos were saved during this scan, so there is nothing for the depth AI to look at."); return "Depth AI"; }
         training = false;
+        // JPEG every photo now (GL thread), so the pass can keep reading photos while the app is in the background
+        try { ScanExport.readKeyframes(photos, width, height); } catch (Throwable e) { logError("depth jpg", new RuntimeException(e)); }
         // ARCore's measured points set the scale of each depth map
         final int n = count, step = Math.max(1, n / 60000);
         final float[] ref = new float[(n / step + 1) * 3];
@@ -907,9 +910,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     final PhotoRoom.Keyframe k = kfs.get(ki);
                     final android.graphics.Bitmap[] img = new android.graphics.Bitmap[1];
                     final android.graphics.Matrix map = new android.graphics.Matrix();
+                    if (k.jpg != null) img[0] = ObjectNamer.uprightFromJpg(k, map);
                     final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-                    glTasks.add(() -> { try { img[0] = ObjectNamer.readUpright(k, width, height, map); } catch (Throwable e) { logError("depth read", new RuntimeException(e)); } finally { latch.countDown(); } });
+                    if (img[0] == null) glTasks.add(() -> { try { img[0] = ObjectNamer.readUpright(k, width, height, map); } catch (Throwable e) { logError("depth read", new RuntimeException(e)); } finally { latch.countDown(); } });
                     boolean got;
+                    if (img[0] != null) latch.countDown();
                     while (!(got = latch.await(5, java.util.concurrent.TimeUnit.SECONDS)) && paused && depthRunning) { /* in the background: wait for the app to come back */ }
                     if (!got || img[0] == null) continue;
                     float[] D = net.run(img[0]);
@@ -1344,6 +1349,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         viewing = true;
         sensors.active = false;
         log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
+        dropEarlyDrift();
         purgeCleared();
         dropNoise();
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
@@ -2474,6 +2480,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;
+        earlyDepthFrames = -1; loadedAny = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
@@ -3080,6 +3087,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
             int dw = depth.getWidth(), dh = depth.getHeight();
             depthFrames++;
+            if (depthFrames == 1) firstDepthMs = System.currentTimeMillis();
+            else if (earlyDepthFrames < 0 && System.currentTimeMillis() - firstDepthMs > EARLY_S * 1000) earlyDepthFrames = depthFrames;
             if (depthFrames == 1) log("first depth image " + dw + "x" + dh + " (raw=" + rawDepth + ")");
             depthSize = dw + "x" + dh;
             CameraIntrinsics ti = camera.getTextureIntrinsics();
@@ -3457,6 +3466,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Drop specks seen only once (noise, flying pixels), unless that would throw away most of a sparse scan. */
     /** Remove the points see-through clearing marked (they stay in place, invisible, until the scan ends). */
+    /**
+     * The first seconds of a scan are measured before ARCore's map has settled, and those points can float in the
+     * wrong place (scan1111: a ghost wall in front of the start). Points that were only ever seen in the first
+     * EARLY_S seconds and never again are cleared; anything the camera came back to is kept.
+     */
+    static final float EARLY_S = 8f;
+    private boolean loadedAny;               // points came from a saved scan (their stamps say nothing about time)
+    private int earlyDepthFrames = -1; private long firstDepthMs;
+    private void dropEarlyDrift() {
+        if (earlyDepthFrames <= 0 || depthFrames < earlyDepthFrames * 4 || improveDir != null || loadedAny) return;
+        int n = 0;
+        for (int i = 0; i < count; i++) if (obs[i] != 0 && seenStamp[i] <= earlyDepthFrames && !inZone(pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2))) { obs[i] = 0; col.put(i * 4 + 3, (byte) 0); n++; }
+        log("start-of-scan drift: cleared " + n + " points only seen in the first " + (int) EARLY_S + " s (" + earlyDepthFrames + " depth frames)");
+    }
+
     private void purgeCleared() {
         int k = 0;
         for (int i = 0; i < count; i++) {

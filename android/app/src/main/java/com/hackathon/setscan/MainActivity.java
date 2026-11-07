@@ -620,6 +620,7 @@ public class MainActivity extends Activity {
     void updateProcess(String label, float frac) {
         runOnUiThread(() -> {
             if (procBox == null) return;
+            if (label == null || frac < 0 || frac >= 1) ProcessingService.stop(this); else ProcessingService.start(this);
             if (label == null || frac < 0) { procBox.setVisibility(View.GONE); return; }
             procBox.setVisibility(scanning ? View.GONE : View.VISIBLE);
             procLabel.setText(frac >= 1 ? "✓ Ready. Tap Lighting to plan your lights" : label + "\nSaved already. You can look around while this runs.");

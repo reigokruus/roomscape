@@ -126,6 +126,18 @@ final class ObjectNamer {
         full.copyPixelsFromBuffer(px);
         Bitmap img = Bitmap.createScaledBitmap(full, 1024, 576, true);
         full.recycle();
+        return upright(img, k, outMap);
+    }
+
+    /** Any thread: the same as readUpright, from the photo's cached JPEG (works while the app is in the background). */
+    static Bitmap uprightFromJpg(PhotoRoom.Keyframe k, android.graphics.Matrix outMap) {
+        Bitmap b = android.graphics.BitmapFactory.decodeByteArray(k.jpg, 0, k.jpg.length);
+        if (b == null) return null;
+        if (b.getWidth() != 1024 || b.getHeight() != 576) { Bitmap s = Bitmap.createScaledBitmap(b, 1024, 576, true); b.recycle(); b = s; }
+        return upright(b, k, outMap);
+    }
+
+    private static Bitmap upright(Bitmap img, PhotoRoom.Keyframe k, android.graphics.Matrix outMap) {
         float ux = k.view[4], uy = k.view[5];
         int rot = Math.round((float) Math.toDegrees(Math.atan2(ux, uy)) / 90f) * 90;
         android.graphics.Matrix m = new android.graphics.Matrix();
