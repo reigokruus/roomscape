@@ -2546,7 +2546,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private float boxHalfX, boxHalfZ, boxMinY, boxMaxY;
     private final float[] roomCenter = new float[3];
-    private volatile boolean cutaway = true;
+    private volatile boolean cutaway = false; // rk 7 Nov: show the whole set, no automatic wall removal
+    volatile boolean overlays;               // room outline, lights, camera path: debug only (rk: "just the model")
     private boolean cutActive;
     private float cutDirX, cutDirZ, cutD, cutFloor, cutCeil, cutDir2X, cutDir2Z, cutD2 = 1e9f;
 
@@ -3921,13 +3922,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         objects.draw(mvp, height, proj[5] * height / 2f);
         if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
-        else if (roomReady) drawRoom(mvp, simple);
+        else if (roomReady && overlays) drawRoom(mvp, simple);
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
-        drawPath(mvp);
+        if (overlays) drawPath(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);
         if (lighting.enabled) drawLightGizmos(mvp);
-        else if (plan != null) drawPlan(mvp, plan);
+        else if (plan != null && overlays) drawPlan(mvp, plan);
         if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
     }
 

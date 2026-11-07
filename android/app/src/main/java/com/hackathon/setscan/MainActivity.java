@@ -526,7 +526,9 @@ public class MainActivity extends Activity {
 
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
-        Button[] viewerMain = {homeButton, exportButton, lightButton, objButton, saveButton};
+        renderer.overlays = debug;
+        Button[] viewerMain = {homeButton, exportButton, objButton, saveButton};
+        lightButton.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // lighting is parked for now (rk: just the model)
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
         improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE);
@@ -636,7 +638,7 @@ public class MainActivity extends Activity {
             if (label == null || frac < 0 || frac >= 1) ProcessingService.stop(this); else ProcessingService.start(this);
             if (label == null || frac < 0) { procBox.setVisibility(View.GONE); return; }
             procBox.setVisibility(scanning ? View.GONE : View.VISIBLE);
-            procLabel.setText(frac >= 1 ? "✓ Ready. Tap Lighting to plan your lights" : label + "\nSaved already. You can look around while this runs.");
+            procLabel.setText(frac >= 1 ? "✓ Ready. Drag to look around, pinch to zoom" : label + "\nSaved already. You can look around while this runs.");
             procBar.setProgress(Math.round(Math.min(1f, frac) * 1000));
             if (frac >= 1) procBox.postDelayed(() -> { if (procBar.getProgress() >= 1000) procBox.setVisibility(View.GONE); }, 6000);
         });
