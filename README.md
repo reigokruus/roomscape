@@ -24,6 +24,13 @@ This is the `CineX.swiftpm` folder. It requires an **iPhone with LiDAR** (iPhone
 
 Apps signed with a free Apple ID stop working after 7 days. Just press Run again to reinstall.
 
+
+## Team work in this repo
+- **Frame check (shot fit):** [`FrameCheck/`](FrameCheck/). See [README_framecheck.md](FrameCheck/README_framecheck.md).
+- **Browser planning prototype:** [`hackathon/ui_prototype.html`](hackathon/ui_prototype.html) covers the storyboard, kit budgets, presets and scale-aware placement on a sample room. Run `node hackathon/verify_v3.mjs` to test it.
+- **Pitch pack:** [`hackathon/pitch_deck.html`](hackathon/pitch_deck.html) and [`hackathon/pitch_script.md`](hackathon/pitch_script.md).
+- **iPhone app additions:** gear inventory, shoot planner, and the mesh overlay while scanning, all in `CineX.swiftpm`.
+
 ## Android version (Samsung and other ARCore phones)
 This is the `android/` folder: a separate Android Studio project, so you can develop on Windows or Linux without a Mac. The iPhone version above is unaffected.
 
