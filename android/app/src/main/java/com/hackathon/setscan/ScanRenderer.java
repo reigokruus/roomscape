@@ -681,7 +681,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     for (int i = 0; i < sn * 4; i++) { d.splNrm[i] = ss.nrm.get(i); d.splCol[i] = ss.col.get(i); }
                 }
                 try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
-                try { d.outletsChecked = outlets.checked; if (!outlets.list.isEmpty()) d.outlets = outlets.toJson(); } catch (Exception e) { logError("outlets save", e); }
+                try { d.outletsChecked = outlets.checked; if (!outlets.list.isEmpty()) d.outlets = outlets.toJson(); if (!roomItems.list.isEmpty()) d.items = roomItems.toJson(); } catch (Exception e) { logError("outlets save", e); }
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
@@ -789,7 +789,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         ls.pos.put(d.splPos).position(0); ls.raw.put(d.splPos).position(0); ls.nrm.put(d.splNrm).position(0); ls.col.put(d.splCol).position(0);
                         ls.trained = true; loadedSplats = ls;
                     }
-                    if (replaceMarks) outlets.fromJson(d.outlets, d.outletsChecked);
+                    if (replaceMarks) { outlets.fromJson(d.outlets, d.outletsChecked); roomItems.fromJson(d.items); }
                     if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
                 int room = Math.max(0, 80 - photos.keyframes.size());
@@ -1214,6 +1214,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- power outlets: Claude looks for them in the scan's photos, the scan's points place them in the room ----
     final Outlets outlets = new Outlets();
+    final RoomItems roomItems = new RoomItems();
     private volatile boolean outletsRunning;
     static final int OUTLET_PHOTOS = 36, OUTLET_BATCH = 6;
 
@@ -1237,8 +1238,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         outletsRunning = true;
         final java.util.List<Outlets.Outlet> before = outlets.snapshot();
         if (force) synchronized (outlets) { outlets.list.clear(); }
+        final float floorY = roomReady ? room.floorY : lighting.floorY;
         new Thread(() -> {
             int found = 0; boolean ok = true;
+            java.util.List<RoomItems.View> objViews = new java.util.ArrayList<>();
             try {
                 for (int b = 0; b < kfs.size() && gen == surfGen; b += OUTLET_BATCH) {
                     activity.updateProcess(String.format(java.util.Locale.US, "Finding power outlets (%d/%d photos)", b, kfs.size()), 0.05f + 0.9f * b / kfs.size());
@@ -1259,6 +1262,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (b64.isEmpty()) continue;
                     java.util.List<ClaudeHelper.OutletDet> dets = ClaudeHelper.detectOutlets(key, b64);
                     for (ClaudeHelper.OutletDet d : dets) {
+                        if (d.object) {
+                            RoomItems.View v = RoomItems.view(batch.get(d.photo), maps.get(d.photo), sizes.get(d.photo)[0], sizes.get(d.photo)[1], d);
+                            if (v != null) objViews.add(v);
+                            continue;
+                        }
                         float[] w = Outlets.lift(batch.get(d.photo), maps.get(d.photo), sizes.get(d.photo)[0], sizes.get(d.photo)[1], d, pts, ptsN);
                         if (w != null) { outlets.add(w, d); found++; }
                     }
@@ -1267,13 +1275,25 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 ok = false; logError("outlets", new RuntimeException(e));
                 if (force) synchronized (outlets) { if (outlets.list.isEmpty()) outlets.list.addAll(before); }
             }
+            if (gen == surfGen && !objViews.isEmpty()) {
+                try {
+                    activity.updateProcess("Separating the objects Claude found", 0.97f);
+                    long t0 = System.currentTimeMillis();
+                    java.util.List<RoomItems.Item> items = RoomItems.build(objViews, pts, ptsN, floorY);
+                    roomItems.set(items);
+                    StringBuilder sb = new StringBuilder();
+                    for (RoomItems.Item it : items) sb.append("\n  ").append(RoomItems.describe(it));
+                    log("objects: " + objViews.size() + " sightings -> " + items.size() + " objects in " + (System.currentTimeMillis() - t0) + " ms" + sb);
+                    glTasks.add(() -> { if (gen == surfGen) objects.fromItems(roomItems.snapshot(), pos, col, count); });
+                } catch (Throwable e) { logError("objects", new RuntimeException(e)); }
+            }
             outletsRunning = false;
             if (gen != surfGen) return;
             if (ok) outlets.checked = true;
             int n = outlets.list.size();
             log("outlets: " + found + " sightings -> " + n + " outlets from " + kfs.size() + " photos" + (ok ? "" : " (stopped by an error)"));
             activity.updateProcess(null, -1);
-            activity.outletsFound(n, ok);
+            activity.outletsFound(n, roomItems.list.size(), ok);
             if (ok) glTasks.add(this::autosave);
         }).start();
     }
@@ -1396,7 +1416,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (trainer == null) {
                 long t0 = System.currentTimeMillis();
                 trainer = Trainer.fromSurfels(base, base.col);
-                log("training: " + trainer.n + " splats from " + base.n + " surfels, " + views.size() + " photos (" + (System.currentTimeMillis() - t0) + " ms)");
+                log("training: " + trainer.n + " splats (" + Math.round(trainer.cell * 1000) + " mm) from " + base.n + " surfels, " + views.size() + " photos (" + (System.currentTimeMillis() - t0) + " ms)");
             }
             Trainer tr = trainer;
             java.util.Random rnd = new java.util.Random();
@@ -2711,7 +2731,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;
-        earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); outletsRunning = false;
+        earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
@@ -2831,7 +2851,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread: object mode on/off. Returns the panel text. */
     String objectsOn(boolean on) {
         objects.active = on;
-        if (on && roomReady && (objects.list.isEmpty() || !objects.edited)) objects.fromRoom(room.boxes, pos, col, count, room.floorY);
+        if (on && !roomItems.list.isEmpty()) objects.fromItems(roomItems.snapshot(), pos, col, count); // Claude-guided: clean, named objects
+        else if (on && roomReady && (objects.list.isEmpty() || !objects.edited)) objects.fromRoom(room.boxes, pos, col, count, room.floorY);
         if (!on) { objects.selected = -1; if (objects.edited) autosave(); }
         return objectInfo();
     }
@@ -2839,7 +2860,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     String objectInfo() {
         SceneObjects.Obj o = objects.sel();
         if (o != null) return o.name + " · " + o.size() + (o.removed ? " · removed" : o.moved() ? " · moved" : "") + (o.removed ? "" : "\nDrag it to move it. Tap empty space to let go.");
-        if (!roomReady) return "Objects appear once the scan has finished processing.";
+        if (!roomReady && objects.list.isEmpty()) return outletsRunning ? "Claude is still looking for objects…" : "Objects appear once the scan has finished processing.";
         if (objects.list.isEmpty()) return "No separate objects found in this scan yet.";
         int rem = 0; for (SceneObjects.Obj x : objects.list) if (x.removed) rem++;
         return objects.list.size() + " objects found" + (rem > 0 ? " (" + rem + " removed)" : "") + ". Tap one to select it.";
@@ -3502,7 +3523,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
             if (depthPixelsFrame > 300) { float fs = (float) farPixelsFrame / depthPixelsFrame; farShare = farShare < 0 ? fs : farShare * 0.7f + fs * 0.3f; }
-            if (frameHits > 200) { float f = (float) frameSolid / frameHits; detailHere = detailHere < 0 ? f : detailHere * 0.8f + f * 0.2f; }
+            float cf = centreSolid(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m);
+            if (cf < 0 && frameHits > 200) cf = (float) frameSolid / frameHits;
+            if (cf >= 0) detailHere = detailHere < 0 ? cf : detailHere * 0.7f + cf * 0.3f;
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
             // Close-up held for a moment: make it a detail zone automatically.
             if (depthPixelsFrame > 500 && nearPixelsFrame > depthPixelsFrame / 2) closeFrames++; else closeFrames = 0;
@@ -3606,6 +3629,34 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * Without this, a wrong first reading (e.g. "something" under a chair) could never go away.
      * Checks up to 250k points per depth frame, round-robin.
      */
+    /**
+     * What the "This spot" bar shows: the share of dots in the middle of the screen that are solid (green), counting
+     * every dot the user can see there, not only the ones this depth frame hit (rk: "done" showed with red all over).
+     * -1 when too few dots are in view.
+     */
+    private float centreSolid(ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m) {
+        int n = count, step = Math.max(1, n / 150000), vis = 0;
+        float solid = 0;
+        int u0 = dw / 4, u1 = dw * 3 / 4, v0 = dh / 4, v1 = dh * 3 / 4;
+        for (int i = 0; i < n; i += step) {
+            if (obs[i] == 0) continue;
+            float rx = pos.get(i * 3) - m[12], ry = pos.get(i * 3 + 1) - m[13], rz = pos.get(i * 3 + 2) - m[14];
+            float zc = m[8] * rx + m[9] * ry + m[10] * rz;
+            float d = -zc;
+            if (d < 0.15f || d > 4f) continue;
+            float xc = m[0] * rx + m[1] * ry + m[2] * rz, yc = m[4] * rx + m[5] * ry + m[6] * rz;
+            int u = (int) (fx * xc / d + cx), v = (int) (cy - fy * yc / d);
+            if (u < u0 || u >= u1 || v < v0 || v >= v1) continue;
+            int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
+            if (mm > 0 && d * 1000 > mm + 100 + mm / 20) continue; // hidden behind what the camera sees now
+            int a = col.get(i * 4 + 3) & 0xFF;
+            vis++;
+            // the disc colours as drawn (floor(a*4)/4): red 0, orange 0.25, yellow 0.5, light green 0.75, solid green 1
+            solid += a >= 253 ? 1f : a >= 192 ? 0.75f : a >= 128 ? 0.5f : a >= 64 ? 0.25f : 0f;
+        }
+        return vis < 150 / step + 30 ? -1 : solid / vis;
+    }
+
     private void carve(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int dw, int dh,
                        float fx, float fy, float cx, float cy, float[] m) {
         int n = count;
@@ -4050,6 +4101,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float roomShown;                 // the Room bar never goes down
 
     /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */
+    static final float SPOT_DONE = 0.85f; // "done" only when the middle of the screen is (nearly) all green
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
@@ -4067,7 +4119,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
         else if (tooFast && d < 0.7f) { level = 2; hint = "Too fast. Slow down and sway gently over this spot"; }
         else if (d < 0.35f) { level = 2; hint = "Sway the phone slowly over this spot until the dots turn green"; }
-        else if (d < 0.7f) { level = 1; hint = "Good. Keep swaying gently here a little longer"; }
+        else if (d < SPOT_DONE) { level = 1; hint = "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = "This spot is done. Move on to the next red area"; }
         if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
         else if (photoJustTaken()) sub = "📷 Photo " + photos.keyframes.size() + " taken, keep swaying";
@@ -4091,7 +4143,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float d = detailHere;
         if (d < 0) return "Detail here: point at something";
         int pct = Math.round(d * 100);
-        return pct >= 70 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, keep swaying here" : "🔴 Detail here: " + pct + "% solid, stay here and sway gently";
+        return pct >= 85 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, keep swaying here" : "🔴 Detail here: " + pct + "% solid, stay here and sway gently";
     }
 
     private void drawPointArrays() {

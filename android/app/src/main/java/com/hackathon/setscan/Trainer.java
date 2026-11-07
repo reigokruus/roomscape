@@ -37,6 +37,7 @@ final class Trainer {
     int iter;
     float lastLoss, firstLoss = -1;
 
+    float cell = CELL; // splat cell size actually used
     private Trainer(int n) {
         this.n = n;
         bx = new float[n]; by = new float[n]; bz = new float[n]; nx = new float[n]; ny = new float[n]; nz = new float[n]; rad0 = new float[n];
@@ -48,15 +49,25 @@ final class Trainer {
     static Trainer fromSurfels(Surfels s, ByteBuffer col) {
         int n = s.n;
         long[] ki = new long[n];
-        for (int i = 0; i < n; i++) {
-            long ix = (long) Math.floor(s.pos.get(i * 3) / CELL) + 4096, iy = (long) Math.floor(s.pos.get(i * 3 + 1) / CELL) + 4096,
-                    iz = (long) Math.floor(s.pos.get(i * 3 + 2) / CELL) + 4096;
-            ki[i] = (((ix & 8191) | ((iy & 8191) << 13) | ((iz & 8191) << 26)) << 21) | i;
+        // 3 cm splats suit a room; a close-up (shoes, scan 13:36: 86k surfels -> 7k splats) needs smaller ones,
+        // so shrink the cell until there are enough splats for the detail that was scanned
+        int target = Math.min(60000, (int) (n * 0.35f)), cells = 0;
+        float cellUsed = CELL;
+        for (float cs : new float[]{CELL, 0.02f, 0.014f, 0.01f}) {
+            cellUsed = cs;
+            for (int i = 0; i < n; i++) {
+                long ix = (long) Math.floor(s.pos.get(i * 3) / cs) + 4096, iy = (long) Math.floor(s.pos.get(i * 3 + 1) / cs) + 4096,
+                        iz = (long) Math.floor(s.pos.get(i * 3 + 2) / cs) + 4096;
+                ki[i] = (((ix & 8191) | ((iy & 8191) << 13) | ((iz & 8191) << 26)) << 21) | i;
+            }
+            Arrays.sort(ki);
+            cells = 0;
+            for (int j = 0; j < n; j++) if (j == 0 || (ki[j] >>> 21) != (ki[j - 1] >>> 21)) cells++;
+            if (cells >= target) break;
         }
-        Arrays.sort(ki);
-        int cells = 0;
-        for (int j = 0; j < n; j++) if (j == 0 || (ki[j] >>> 21) != (ki[j - 1] >>> 21)) cells++;
+        final float cell = cellUsed;
         Trainer tr = new Trainer(cells);
+        tr.cell = cell;
         int c = -1; float rx = 0, ry = 0, rz = 0, sr = 0, sg = 0, sb = 0, snx = 0, sny = 0, snz = 0, srad = 0; int cnt = 0, ncnt = 0;
         float fnx = 0, fny = 0, fnz = 0;
         for (int j = 0; j <= n; j++) {
@@ -66,7 +77,7 @@ final class Trainer {
                 tr.cr[c] = sr / cnt; tr.cg[c] = sg / cnt; tr.cb[c] = sb / cnt;
                 float l = (float) Math.sqrt(snx * snx + sny * sny + snz * snz);
                 if (ncnt * 2 >= cnt && l > ncnt * 0.5f) { tr.nx[c] = snx / l; tr.ny[c] = sny / l; tr.nz[c] = snz / l; }
-                tr.rad0[c] = Math.max(srad / cnt, CELL * 0.6f) * (cnt == 1 ? 0.8f : 1f);
+                tr.rad0[c] = Math.max(srad / cnt, cell * 0.6f) * (cnt == 1 ? 0.8f : 1f);
                 tr.a[c] = 2f; // opacity 0.88
             }
             if (j == n) break;

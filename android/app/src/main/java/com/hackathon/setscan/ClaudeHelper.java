@@ -31,12 +31,16 @@ final class ClaudeHelper {
     /** Estimated spend since the app started, in US dollars (Claude Opus 5.5 list price: $4 in / $20 out per million tokens). */
     static volatile double sessionUsd;
     static volatile int sessionCalls;
+    static volatile Runnable onSpend; // called after every request (any thread), for the money counter
 
     private static void count(BetaMessage msg) {
         com.anthropic.models.beta.messages.BetaUsage u = msg.usage();
         long in = u.inputTokens() + u.cacheCreationInputTokens().orElse(0L), cached = u.cacheReadInputTokens().orElse(0L);
-        sessionUsd += (in * 4.0 + cached * 0.2 + u.outputTokens() * 20.0) / 1_000_000.0;
+        long written = u.cacheCreationInputTokens().orElse(0L);
+        // Opus 5.5: $4 / MTok in, $5 cache writes, $0.20 cache reads, $20 out
+        sessionUsd += ((in - written) * 4.0 + written * 5.0 + cached * 0.2 + u.outputTokens() * 20.0) / 1_000_000.0;
         sessionCalls++;
+        Runnable r = onSpend; if (r != null) r.run();
     }
 
     static String costLine() {
@@ -194,7 +198,7 @@ final class ClaudeHelper {
     }
 
     /** A power outlet Claude found: which photo (0-based), its box (0..1, top-left origin) and what kind. */
-    static final class OutletDet { int photo; float x0, y0, x1, y1; String type = "wall socket"; int sockets = 1; }
+    static final class OutletDet { int photo; float x0, y0, x1, y1; String type = "wall socket"; int sockets = 1; boolean object; }
 
     /** Find every power outlet in a batch of room photos (one request for up to 6 photos). */
     static List<OutletDet> detectOutlets(String apiKey, List<String> photosB64) throws Exception {
@@ -206,16 +210,20 @@ final class ClaudeHelper {
                 content.add(image(photosB64.get(i)));
             }
             content.add(BetaContentBlockParam.ofText(
-                    "These photos come from a phone scanning a room for a film shoot or an interior design job. "
-                    + "Find every electrical power outlet: wall sockets, power strips / extension leads, floor sockets. "
-                    + "Not light switches, network or antenna sockets, chargers, or plugs hanging in the air. Only ones you can actually see.\n"
-                    + "Reply with only JSON, no other text:\n"
-                    + "{\"outlets\": [{\"photo\": 0, \"box\": [x0, y0, x1, y1], \"type\": \"wall socket | power strip | floor socket\", \"sockets\": 1}]}\n"
+                    "These photos come from a phone scanning a room for a film shoot or an interior design job.\n"
+                    + "1. Find every electrical power outlet: wall sockets, power strips / extension leads, floor sockets. "
+                    + "Not light switches, network or antenna sockets, chargers, or plugs hanging in the air.\n"
+                    + "2. Find every movable piece of furniture or large object standing in the room: chairs, tables, desks, sofas, beds, "
+                    + "shelves, cabinets, drawers, floor lamps, plants, boxes, bins, bags, shoes, equipment. Not walls, floors, ceilings, doors, "
+                    + "windows, radiators, curtains, or things fixed into the walls. Give each its own box, even when it touches something else.\n"
+                    + "Only things you can actually see. Reply with only JSON, no other text:\n"
+                    + "{\"outlets\": [{\"photo\": 0, \"box\": [x0, y0, x1, y1], \"type\": \"wall socket | power strip | floor socket\", \"sockets\": 1}], "
+                    + "\"objects\": [{\"photo\": 0, \"box\": [x0, y0, x1, y1], \"name\": \"office chair\"}]}\n"
                     + "box is the tight bounding box in that photo, in thousandths of the image width and height (0-1000, top-left origin). "
-                    + "sockets is how many plug positions it has. An empty list is fine."));
+                    + "sockets is how many plug positions it has. name is 1 to 3 plain words. Empty lists are fine."));
             MessageCreateParams params = MessageCreateParams.builder()
                     .model(MODEL)
-                    .maxTokens(3000L)
+                    .maxTokens(6000L)
                     .outputConfig(com.anthropic.models.beta.messages.BetaOutputConfig.builder()
                             .effort(com.anthropic.models.beta.messages.BetaOutputConfig.Effort.LOW).build())
                     .addUserMessageOfContentBlockParams(content)
@@ -232,10 +240,12 @@ final class ClaudeHelper {
             int a = t.indexOf('{'), b = t.lastIndexOf('}');
             List<OutletDet> out = new ArrayList<>();
             if (a < 0 || b <= a) return out;
-            JSONArray arr = new JSONObject(t.substring(a, b + 1)).optJSONArray("outlets");
-            if (arr == null) return out;
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject o = arr.optJSONObject(i);
+            JSONObject root = new JSONObject(t.substring(a, b + 1));
+            JSONArray outs = root.optJSONArray("outlets"), objs = root.optJSONArray("objects");
+            int no = outs == null ? 0 : outs.length(), nj = objs == null ? 0 : objs.length();
+            for (int i = 0; i < no + nj; i++) {
+                boolean isObj = i >= no;
+                JSONObject o = isObj ? objs.optJSONObject(i - no) : outs.optJSONObject(i);
                 if (o == null) continue;
                 JSONArray bx = o.optJSONArray("box");
                 int ph = o.optInt("photo", -1);
@@ -246,7 +256,8 @@ final class ClaudeHelper {
                 d.x0 = Math.max(0, Math.min(x0, x1)) / 1000f; d.x1 = Math.min(1000, Math.max(x0, x1)) / 1000f;
                 d.y0 = Math.max(0, Math.min(y0, y1)) / 1000f; d.y1 = Math.min(1000, Math.max(y0, y1)) / 1000f;
                 if (d.x1 <= d.x0 || d.y1 <= d.y0) continue;
-                d.type = o.optString("type", "wall socket").trim().toLowerCase(Locale.US);
+                d.object = isObj;
+                d.type = (isObj ? o.optString("name", "object") : o.optString("type", "wall socket")).trim().toLowerCase(Locale.US);
                 d.sockets = Math.max(1, Math.min(12, o.optInt("sockets", 1)));
                 out.add(d);
             }
