@@ -79,6 +79,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // GL objects
     private int bgTex, bgProg, ptProg, posVbo, colVbo;
     // surfel splats (see Surfels): built in the background after a scan, uploaded on the GL thread
+    private int propProg;
     private int surfProg, surfPosVbo, surfNrmVbo, surfColVbo, surfRawVbo, surfCount;
     private boolean surfTrained;
     private volatile Surfels surfPending, surfDone;
@@ -282,6 +283,297 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
                     + (System.currentTimeMillis() - t0) + " ms");
         } catch (Throwable e) { logError("splats", new RuntimeException(e)); } }).start();
+    }
+
+    // ---- shot lighting preview (see Lighting) ----
+    final Lighting lighting = new Lighting();
+    private final java.util.List<float[]> fixtures = new java.util.ArrayList<>(); // bright spots of the room's own lights
+
+    /** GL thread: switch the lighting preview on/off. On: a seated person and key + fill (from the shot plan if there is one). */
+    String toggleLighting() {
+        if (lighting.enabled) { lighting.enabled = false; return "Lighting"; }
+        if (surfCount == 0) { activity.updateStatus("The splats are still being built. Try again in a moment."); return "Lighting"; }
+        synchronized (lighting) {
+            float fy = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
+            if (lighting.props.isEmpty()) {
+                float sx = roomCenter[0], sz = roomCenter[2];
+                lighting.defaultSetup(plan, sx, sz, fy);
+            }
+            lighting.floorY = fy;
+            lighting.selected = 0;
+            lighting.enabled = true;
+        }
+        findFixtures();
+        lightingStatus();
+        return "Lighting: on";
+    }
+
+    void lightingStatus() {
+        String fx = fixtures.isEmpty() ? "" : fixtures.size() + " room light" + (fixtures.size() == 1 ? "" : "s") + " found (yellow). ";
+        activity.updateStatus(lighting.readout() + "\n" + fx + "Selected: " + lighting.selectedLabel() + ". Tap a light or prop to select it, drag it to move.");
+    }
+
+    /** The room's own lamps and windows: clusters of very bright points above 1 m. */
+    private void findFixtures() {
+        fixtures.clear();
+        float fy = lighting.floorY;
+        java.util.HashMap<Long, float[]> cells = new java.util.HashMap<>();
+        for (int i = 0; i < count; i++) {
+            int r = col.get(i * 4) & 255, g = col.get(i * 4 + 1) & 255, b = col.get(i * 4 + 2) & 255;
+            if (r + g + b < 3 * 238) continue;
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            if (y < fy + 1.0f) continue;
+            long k = ((long) Math.floor(x / 0.3f) + 10000) * 100000000L + ((long) Math.floor(y / 0.3f) + 10000) * 10000L + ((long) Math.floor(z / 0.3f) + 10000);
+            float[] c = cells.get(k);
+            if (c == null) cells.put(k, c = new float[4]);
+            c[0] += x; c[1] += y; c[2] += z; c[3]++;
+        }
+        for (float[] c : cells.values()) if (c[3] >= 25) fixtures.add(new float[]{c[0] / c[3], c[1] / c[3], c[2] / c[3], c[3]});
+        fixtures.sort((a, b) -> Float.compare(b[3], a[3]));
+        while (fixtures.size() > 8) fixtures.remove(fixtures.size() - 1);
+        log("lighting: " + fixtures.size() + " bright fixtures/windows found");
+    }
+
+    private void setLightUniforms(int prog) {
+        Lighting L = lighting;
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uLit"), L.enabled ? 1f : 0f);
+        if (!L.enabled) return;
+        float[] pos4 = new float[12], aim4 = new float[12], col4 = new float[12], cone4 = new float[12];
+        for (int i = 0; i < 4; i++) cone4[i * 3 + 1] = 1f; // unused slots: a valid smoothstep range
+        float[] face;
+        synchronized (L) {
+            face = L.subjectFace();
+            int n = Math.min(4, L.lights.size());
+            for (int i = 0; i < n; i++) {
+                Lighting.Light l = L.lights.get(i);
+                float[] t = Lighting.tint(l.kelvin, L.wbKelvin);
+                float k = l.on ? l.lux1m() / Lighting.ROOM_LUX : 0;
+                pos4[i * 3] = l.x; pos4[i * 3 + 1] = l.y; pos4[i * 3 + 2] = l.z;
+                float[] a = face != null ? face : new float[]{l.x, L.floorY + 1f, l.z - 1};
+                aim4[i * 3] = a[0]; aim4[i * 3 + 1] = a[1]; aim4[i * 3 + 2] = a[2];
+                col4[i * 3] = t[0] * k; col4[i * 3 + 1] = t[1] * k; col4[i * 3 + 2] = t[2] * k;
+                cone4[i * 3] = (float) Math.cos(Math.toRadians(l.beamDeg / 2)); cone4[i * 3 + 1] = (float) Math.cos(Math.toRadians(l.beamDeg / 2 * 0.6f)); cone4[i * 3 + 2] = l.type.wrap;
+            }
+        }
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uRoom"), L.roomDimmer);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uExpo"), L.exposure());
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(prog, "uLPos"), 4, pos4, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(prog, "uLAim"), 4, aim4, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(prog, "uLCol"), 4, col4, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(prog, "uLCone"), 4, cone4, 0);
+    }
+
+    // simple low-poly props: each part is a box or a ball, with its own colour
+    private static final float[] SKIN = {0.78f, 0.58f, 0.47f}, CLOTH = {0.22f, 0.27f, 0.36f}, TROUSERS = {0.18f, 0.18f, 0.2f},
+            WOOD = {0.55f, 0.4f, 0.26f}, CHAIR = {0.32f, 0.32f, 0.34f};
+
+    private void drawProps(float[] m) {
+        java.util.List<Lighting.Prop> ps;
+        synchronized (lighting) { ps = new java.util.ArrayList<>(lighting.props); }
+        GLES20.glUseProgram(propProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(propProg, "uMvp"), 1, false, m, 0);
+        setLightUniforms(propProg);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        float fy = lighting.floorY;
+        for (Lighting.Prop p : ps) {
+            // people turn to the camera
+            float yaw = p.yawDeg;
+            if (p.isPerson() && lighting.haveCam) yaw = (float) Math.toDegrees(Math.atan2(lighting.camX - p.x, lighting.camZ - p.z));
+            switch (p.kind) {
+                case PERSON_STANDING:
+                    propBox(m, p, yaw, 0, 0.45f, 0, 0.32f, 0.9f, 0.2f, TROUSERS, fy);
+                    propBox(m, p, yaw, 0, 1.18f, 0, 0.42f, 0.56f, 0.24f, CLOTH, fy);
+                    propBox(m, p, yaw, 0.26f, 1.12f, 0, 0.1f, 0.58f, 0.1f, CLOTH, fy);
+                    propBox(m, p, yaw, -0.26f, 1.12f, 0, 0.1f, 0.58f, 0.1f, CLOTH, fy);
+                    propBall(m, p, 0, 1.6f, 0, 0.11f, SKIN, fy);
+                    break;
+                case PERSON_SEATED:
+                    propBox(m, p, yaw, 0, 0.22f, 0.32f, 0.3f, 0.44f, 0.12f, TROUSERS, fy);   // lower legs
+                    propBox(m, p, yaw, 0, 0.5f, 0.15f, 0.32f, 0.14f, 0.42f, TROUSERS, fy);   // thighs
+                    propBox(m, p, yaw, 0, 0.84f, -0.05f, 0.42f, 0.56f, 0.24f, CLOTH, fy);    // torso
+                    propBox(m, p, yaw, 0.26f, 0.8f, 0.02f, 0.1f, 0.5f, 0.1f, CLOTH, fy);
+                    propBox(m, p, yaw, -0.26f, 0.8f, 0.02f, 0.1f, 0.5f, 0.1f, CLOTH, fy);
+                    propBall(m, p, 0, 1.24f, -0.03f, 0.11f, SKIN, fy);
+                    propBox(m, p, yaw, 0, 0.42f, -0.05f, 0.46f, 0.04f, 0.46f, CHAIR, fy);    // its chair
+                    propBox(m, p, yaw, 0, 0.7f, -0.27f, 0.46f, 0.52f, 0.04f, CHAIR, fy);
+                    break;
+                case TABLE:
+                    propBox(m, p, yaw, 0, 0.74f, 0, 1.2f, 0.04f, 0.75f, WOOD, fy);
+                    for (int sx = -1; sx <= 1; sx += 2) for (int sz = -1; sz <= 1; sz += 2)
+                        propBox(m, p, yaw, sx * 0.55f, 0.36f, sz * 0.32f, 0.05f, 0.72f, 0.05f, WOOD, fy);
+                    break;
+                case CHAIR:
+                    propBox(m, p, yaw, 0, 0.45f, 0, 0.46f, 0.04f, 0.46f, CHAIR, fy);
+                    propBox(m, p, yaw, 0, 0.72f, -0.21f, 0.46f, 0.5f, 0.04f, CHAIR, fy);
+                    for (int sx = -1; sx <= 1; sx += 2) for (int sz = -1; sz <= 1; sz += 2)
+                        propBox(m, p, yaw, sx * 0.2f, 0.22f, sz * 0.2f, 0.04f, 0.44f, 0.04f, CHAIR, fy);
+                    break;
+            }
+        }
+    }
+
+    private final float[] propV = new float[36 * 6];
+    private FloatBuffer propBuf = ByteBuffer.allocateDirect(2048 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+
+    /** A box centred at local (ox, oy above the floor, oz), size (sx, sy, sz), turned by yaw around the prop's spot. */
+    private void propBox(float[] m, Lighting.Prop p, float yawDeg, float ox, float oy, float oz, float sx, float sy, float sz, float[] alb, float fy) {
+        float c = (float) Math.cos(Math.toRadians(yawDeg)), s = (float) Math.sin(Math.toRadians(yawDeg));
+        int[][] faces = {{0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
+        int k = 0;
+        for (int[] fc : faces) {
+            // two in-face axes
+            int[] u = fc[0] != 0 ? new int[]{0, 1, 0} : new int[]{1, 0, 0};
+            int[] v = {fc[1] * u[2] - fc[2] * u[1], fc[2] * u[0] - fc[0] * u[2], fc[0] * u[1] - fc[1] * u[0]};
+            float[][] q = new float[4][];
+            int[][] sg = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+            for (int i = 0; i < 4; i++) {
+                float lx = (fc[0] + u[0] * sg[i][0] + v[0] * sg[i][1]) * sx / 2 + ox;
+                float ly = (fc[1] + u[1] * sg[i][0] + v[1] * sg[i][1]) * sy / 2 + oy;
+                float lz = (fc[2] + u[2] * sg[i][0] + v[2] * sg[i][1]) * sz / 2 + oz;
+                q[i] = new float[]{p.x + c * lx + s * lz, fy + ly, p.z - s * lx + c * lz};
+            }
+            float nx = c * fc[0] + s * fc[2], ny = fc[1], nz = -s * fc[0] + c * fc[2];
+            int[] order = {0, 1, 2, 0, 2, 3};
+            for (int o : order) { propV[k++] = q[o][0]; propV[k++] = q[o][1]; propV[k++] = q[o][2]; propV[k++] = nx; propV[k++] = ny; propV[k++] = nz; }
+        }
+        propDraw(propV, 36, alb);
+    }
+
+    private void propBall(float[] m, Lighting.Prop p, float ox, float oy, float oz, float r, float[] alb, float fy) {
+        int NU = 12, NV = 8;
+        float[] v = new float[NU * NV * 6 * 6];
+        int k = 0;
+        for (int i = 0; i < NU; i++) for (int j = 0; j < NV; j++) {
+            float[][] q = new float[4][];
+            int[][] sg = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+            for (int t = 0; t < 4; t++) {
+                double a = (i + sg[t][0]) * 2 * Math.PI / NU, b = (j + sg[t][1]) * Math.PI / NV - Math.PI / 2;
+                q[t] = new float[]{(float) (Math.cos(b) * Math.cos(a)), (float) Math.sin(b), (float) (Math.cos(b) * Math.sin(a))};
+            }
+            int[] order = {0, 1, 2, 0, 2, 3};
+            for (int o : order) {
+                v[k++] = p.x + ox + q[o][0] * r; v[k++] = fy + oy + q[o][1] * r * 1.15f; v[k++] = p.z + oz + q[o][2] * r;
+                v[k++] = q[o][0]; v[k++] = q[o][1]; v[k++] = q[o][2];
+            }
+        }
+        propDraw(v, k / 6, alb);
+    }
+
+    private void propDraw(float[] v, int verts, float[] alb) {
+        if (propBuf.capacity() < verts * 6) propBuf = ByteBuffer.allocateDirect(verts * 6 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        propBuf.clear(); propBuf.put(v, 0, verts * 6); propBuf.position(0);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(propProg, "uAlb"), alb[0], alb[1], alb[2]);
+        int aPos = GLES20.glGetAttribLocation(propProg, "aPos"), aN = GLES20.glGetAttribLocation(propProg, "aN");
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 24, propBuf);
+        propBuf.position(3);
+        GLES20.glVertexAttribPointer(aN, 3, GLES20.GL_FLOAT, false, 24, propBuf);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aN);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, verts);
+        GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aN);
+    }
+
+    private static final float[] FIXTURE_COL = {1f, 0.92f, 0.3f, 1f}, SEL_COL = {1f, 1f, 1f, 1f};
+
+    /** Light stands, aim lines and names; the room's own lights in yellow. */
+    private void drawLightGizmos(float[] m) {
+        float dens = height / 1000f;
+        java.util.List<Lighting.Light> ls; float[] face; int sel;
+        synchronized (lighting) { ls = new java.util.ArrayList<>(lighting.lights); face = lighting.subjectFace(); sel = lighting.selected; }
+        float fy = lighting.floorY;
+        GLES20.glLineWidth(3f * dens);
+        for (int i = 0; i < ls.size(); i++) {
+            Lighting.Light l = ls.get(i);
+            float[] t = Lighting.kelvin(l.kelvin);
+            float[] c = l.on ? new float[]{t[0], t[1], t[2], 1f} : new float[]{0.4f, 0.4f, 0.4f, 1f};
+            planDraw(m, new float[]{l.x, fy, l.z, l.x, l.y, l.z}, GLES20.GL_LINES, new float[]{0.6f, 0.6f, 0.6f, 1f}, 1);
+            if (face != null && l.on) planDraw(m, new float[]{l.x, l.y, l.z, face[0], face[1], face[2]}, GLES20.GL_LINES, c, 1);
+            if (i == sel) planDraw(m, new float[]{l.x, l.y, l.z}, GLES20.GL_POINTS, SEL_COL, 52 * dens);
+            planDraw(m, new float[]{l.x, l.y, l.z}, GLES20.GL_POINTS, c, 36 * dens);
+            drawLabel(m, l.x, l.y + 0.15f, l.z, String.format(java.util.Locale.US, "%s · %d%% · %.0fK", l.name, Math.round(l.dimmer * 100), l.kelvin), false);
+        }
+        java.util.List<Lighting.Prop> ps;
+        synchronized (lighting) { ps = new java.util.ArrayList<>(lighting.props); }
+        for (int i = 0; i < ps.size(); i++) {
+            Lighting.Prop p = ps.get(i);
+            float h = p.faceH() + 0.25f;
+            if (ls.size() + i == sel) planDraw(m, new float[]{p.x, fy + 0.02f, p.z}, GLES20.GL_POINTS, SEL_COL, 40 * dens);
+            drawLabel(m, p.x, fy + h, p.z, p.kind.label, true);
+        }
+        for (float[] f : fixtures) {
+            planDraw(m, new float[]{f[0], f[1], f[2]}, GLES20.GL_POINTS, FIXTURE_COL, 26 * dens);
+            drawLabel(m, f[0], f[1] + 0.12f, f[2], "room light", false);
+        }
+    }
+
+    /** Screen position of world point, or null if behind the viewer. */
+    private float[] toScreen(float x, float y, float z) {
+        float[] m = viewMvp;
+        float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+        if (cw <= 0.05f) return null;
+        return new float[]{((m[0] * x + m[4] * y + m[8] * z + m[12]) / cw + 1f) * 0.5f * width, (1f - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw) * 0.5f * height};
+    }
+
+    /** Tap: select the light or prop nearest the finger (within ~60 px). Returns true if something was picked. */
+    boolean lightingPick(float tx, float ty) {
+        if (!lighting.enabled) return false;
+        int best = -1; float bd = (70f * height / 1000f) * (70f * height / 1000f);
+        synchronized (lighting) {
+            for (int i = 0; i < lighting.lights.size(); i++) {
+                Lighting.Light l = lighting.lights.get(i);
+                float[] s = toScreen(l.x, l.y, l.z);
+                if (s == null) continue;
+                float d = (s[0] - tx) * (s[0] - tx) + (s[1] - ty) * (s[1] - ty);
+                if (d < bd) { bd = d; best = i; }
+            }
+            for (int i = 0; i < lighting.props.size(); i++) {
+                Lighting.Prop p = lighting.props.get(i);
+                for (float hh : new float[]{0.1f, p.faceH() * 0.5f, p.faceH()}) {
+                    float[] s = toScreen(p.x, lighting.floorY + hh, p.z);
+                    if (s == null) continue;
+                    float d = (s[0] - tx) * (s[0] - tx) + (s[1] - ty) * (s[1] - ty);
+                    if (d < bd) { bd = d; best = lighting.lights.size() + i; }
+                }
+            }
+            if (best >= 0) lighting.selected = best;
+        }
+        if (best >= 0) { activity.lightingSelected(); lightingStatus(); }
+        return best >= 0;
+    }
+
+    private float dragDX, dragDZ;
+
+    /** Finger down: start dragging if it's on the selected item. */
+    boolean lightingDragStart(float tx, float ty) {
+        if (!lighting.enabled) return false;
+        if (!lightingPick(tx, ty)) return false;
+        float[] xz = lighting.selectedXZ(), w = floorAt(tx, ty);
+        if (xz == null || w == null) return false;
+        dragDX = xz[0] - w[0]; dragDZ = xz[1] - w[1];
+        return true;
+    }
+
+    void lightingDragTo(float tx, float ty) {
+        float[] w = floorAt(tx, ty);
+        if (w == null) return;
+        synchronized (lighting) { lighting.moveSelected(w[0] + dragDX, w[1] + dragDZ); }
+    }
+
+    void lightingDragEnd() { lightingStatus(); }
+
+    /** Where the finger's ray meets the floor (x, z), or null. */
+    private float[] floorAt(float tx, float ty) {
+        float[] inv = new float[16];
+        if (!Matrix.invertM(inv, 0, viewMvp, 0)) return null;
+        float nx = tx / width * 2 - 1, ny = 1 - ty / height * 2;
+        float[] a = new float[4], b = new float[4];
+        Matrix.multiplyMV(a, 0, inv, 0, new float[]{nx, ny, -1, 1}, 0);
+        Matrix.multiplyMV(b, 0, inv, 0, new float[]{nx, ny, 1, 1}, 0);
+        for (int i = 0; i < 3; i++) { a[i] /= a[3]; b[i] /= b[3]; }
+        float dy = b[1] - a[1];
+        if (Math.abs(dy) < 1e-6f) return null;
+        float t = (lighting.floorY - a[1]) / dy;
+        if (t < 0) return null;
+        return new float[]{a[0] + (b[0] - a[0]) * t, a[2] + (b[2] - a[2]) * t};
     }
 
     // ---- saved scans (see ScanStore) ----
@@ -930,6 +1222,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uFloor"), cutFloor);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(surfProg, "uCeil"), cutCeil);
         setHideUniforms(surfProg);
+        setLightUniforms(surfProg);
         int aPos = GLES20.glGetAttribLocation(surfProg, "aPos");
         int aCol = GLES20.glGetAttribLocation(surfProg, "aColor");
         int aNrm = GLES20.glGetAttribLocation(surfProg, "aNrm");
@@ -1526,6 +1819,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     // ---- clean view: recognised objects are drawn as simple models and the scan inside them is hidden ----
+    /** Shot lighting (see Lighting): up to 4 gear lights added on top of the room light baked into the scan colours. */
+    static final String LIGHT_GLSL =
+            "uniform float uLit; uniform float uRoom; uniform float uExpo; uniform vec3 uLPos[4]; uniform vec3 uLAim[4]; uniform vec3 uLCol[4]; uniform vec3 uLCone[4];" +
+            "vec3 gear(vec3 p, vec3 n, float hasN, float twoSided) { vec3 E = vec3(0.0);" +
+            "  for (int i = 0; i < 4; i++) { vec3 L = uLPos[i] - p; float d2 = max(0.04, dot(L, L)); L *= inversesqrt(d2);" +
+            "    float ndl = dot(n, L); if (twoSided > 0.5) ndl = abs(ndl); if (hasN < 0.5) ndl = 0.6;" +
+            "    float w = uLCone[i].z; float lam = max(0.0, (ndl + w) / (1.0 + w));" +
+            "    vec3 A = uLAim[i] - uLPos[i]; float al = length(A); float c = al > 0.001 ? dot(-L, A / al) : 1.0;" +
+            "    E += uLCol[i] * smoothstep(uLCone[i].x, uLCone[i].y, c) * lam / d2; }" +
+            "  return E; }" +
+            "vec3 tone(vec3 c) { vec3 s = 0.8 + 0.2 * (1.0 - exp(-(c - 0.8) / 0.2)); return pow(clamp(mix(c, s, step(0.8, c)), 0.0, 1.0), vec3(1.0 / 2.2)); }";
+
     static final String HIDE_DECL = "uniform vec4 uHA[16]; uniform vec4 uHB[16]; uniform float uHN;";
     static final String HIDE_TEST = "for (int i = 0; i < 16; i++) { if (float(i) >= uHN) break; vec2 hd = aPos.xz - uHA[i].xy;"
             + " float hu = dot(hd, uHA[i].zw), hv = dot(hd, vec2(-uHA[i].w, uHA[i].z));"
@@ -2268,7 +2573,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
         surfProg = program(
                 "uniform mat4 uMvp; uniform mat4 uView; uniform float uPx; uniform float uScale; uniform float uT; attribute vec3 aRaw;" +
-                "attribute vec4 aPos; attribute vec4 aColor; attribute vec4 aNrm; varying vec4 vColor; varying vec3 vN;" +
+                "attribute vec4 aPos; attribute vec4 aColor; attribute vec4 aNrm; varying vec4 vColor; varying vec3 vN;" + LIGHT_GLSL +
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
                 HIDE_DECL +
                 "void main(){ float hh = 0.0;" + HIDE_TEST.replace("HIDE", "hh = 1.0;") +
@@ -2280,7 +2585,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 // uT 0 -> 1: the splats settle from the raw noisy points onto their surfaces and grow into discs (shown live)
                 "  vec3 p = mix(aRaw, aPos.xyz, uT); gl_Position = uMvp * vec4(p, 1.0); float w = max(gl_Position.w, 0.05);" +
                 "  gl_PointSize = clamp(2.0 * aNrm.w * uScale * mix(0.45, 1.0, uT) * uPx / w, 1.5, 96.0);" +
-                "  vN = (uView * vec4(aNrm.xyz, 0.0)).xyz; }",
+                "  vN = (uView * vec4(aNrm.xyz, 0.0)).xyz;" +
+                "  if (uLit > 0.5) { vec3 lin = pow(aColor.rgb, vec3(2.2)); float hasN = step(0.25, dot(aNrm.xyz, aNrm.xyz));" +
+                "    vec3 E = vec3(uRoom) + gear(p, aNrm.xyz, hasN, 1.0);" +
+                "    if (dot(lin, vec3(0.3, 0.59, 0.11)) > 0.8) E = vec3(uRoom);" + // lamps and windows: they glow, they aren't lit
+                "    vColor.rgb = tone(lin * E * uExpo); } }",
                 // Surfel: the point sprite becomes a disc lying on the surface (an ellipse on screen), with a gaussian falloff.
                 // uPass 0 = opaque core (writes depth), 1 = soft halo blended on top.
                 "precision mediump float; varying vec4 vColor; varying vec3 vN; uniform float uPass; uniform float uTrained;" +
@@ -2294,6 +2603,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "  if (uPass < 0.5) { if (r2 > 0.45) discard; gl_FragColor = vec4(vColor.rgb, 1.0); }" +
                 "  else { float a = exp(-r2 * 2.5) * 0.85; gl_FragColor = vec4(vColor.rgb * a, a); }" +
                 "}");
+        propProg = program(
+                "uniform mat4 uMvp; uniform vec3 uAlb; attribute vec3 aPos; attribute vec3 aN; varying vec3 vC;" + LIGHT_GLSL +
+                "void main(){ gl_Position = uMvp * vec4(aPos, 1.0);" +
+                "  vec3 E = vec3(uRoom * 0.7) + gear(aPos, aN, 1.0, 0.0);" +
+                "  vC = tone(pow(uAlb, vec3(2.2)) * E * uExpo); }",
+                "precision mediump float; varying vec3 vC; void main(){ gl_FragColor = vec4(vC, 1.0); }");
         int[] sb = new int[4];
         GLES20.glGenBuffers(4, sb, 0);
         surfPosVbo = sb[0]; surfNrmVbo = sb[1]; surfColVbo = sb[2]; surfRawVbo = sb[3]; surfCount = 0;
@@ -3156,14 +3471,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         } else if (style == 0 && photos.ready && meshTris > 0)
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
-        else if (style == 1 && surfCount > 0 && !depthRunning) drawSurfels(mvp);
+        else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
-        if (roomReady) drawRoom(mvp, simple);
+        if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
+        else if (roomReady) drawRoom(mvp, simple);
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         drawPath(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);
-        if (plan != null) drawPlan(mvp, plan);
+        if (lighting.enabled) drawLightGizmos(mvp);
+        else if (plan != null) drawPlan(mvp, plan);
         if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
     }
 

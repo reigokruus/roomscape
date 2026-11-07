@@ -32,13 +32,18 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button saveButton, homeButton, improveButton, cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
+    private Button lightButton, saveButton, homeButton, improveButton, cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
     private ScaleGestureDetector scaleDetector;
     private float lastX, lastY;
     private int lastPointerCount;
+    private boolean lightDragging;
+    private LinearLayout lightPanel;
+    private android.widget.SeekBar powerBar, kelvinBar, heightBar, roomBar, expoBar;
+    private TextView selLabel;
+    private boolean syncingBars;
 
     /** Lets the user type the room size they already know; empty fields stay measured by the scan. */
     private void askRoomSize() {
@@ -238,6 +243,14 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> depthButton.setText(label));
         }));
         bar.addView(depthButton);
+        lightButton = new Button(this);
+        lightButton.setText("Lighting");
+        lightButton.setVisibility(View.GONE);
+        lightButton.setOnClickListener(v -> glView.queueEvent(() -> {
+            String label = renderer.toggleLighting();
+            runOnUiThread(() -> { lightButton.setText(label); lightPanel.setVisibility(renderer.lighting.enabled ? View.VISIBLE : View.GONE); lightingSelected(); });
+        }));
+        bar.addView(lightButton);
         saveButton = new Button(this);
         saveButton.setText("Save");
         saveButton.setVisibility(View.GONE);
@@ -328,7 +341,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{homeButton, mainButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{homeButton, mainButton, lightButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
             ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -340,6 +353,11 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
         chrome.addView(bars, blp);
+        lightPanel = buildLightPanel();
+        lightPanel.setVisibility(View.GONE);
+        FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        llp.bottomMargin = dp(150);
+        chrome.addView(lightPanel, llp);
         root.addView(chrome, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(buildHome(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         scanChrome.setVisibility(View.GONE);
@@ -372,6 +390,19 @@ public class MainActivity extends Activity {
                     glView.queueEvent(() -> renderer.requestRescan(tx, ty));
                 }
                 return true;
+            }
+            if (renderer.lighting.enabled) {
+                // a finger that lands on a light or prop selects and drags it; anywhere else it orbits as usual
+                int act = e.getActionMasked();
+                if (act == MotionEvent.ACTION_DOWN) lightDragging = renderer.lightingDragStart(e.getX(), e.getY());
+                if (lightDragging) {
+                    if (e.getPointerCount() > 1) lightDragging = false;
+                    else {
+                        if (act == MotionEvent.ACTION_MOVE) renderer.lightingDragTo(e.getX(), e.getY());
+                        else if (act == MotionEvent.ACTION_UP) { lightDragging = false; renderer.lightingDragEnd(); }
+                        return true;
+                    }
+                }
             }
             scaleDetector.onTouchEvent(e);
             int pc = e.getPointerCount();
@@ -429,8 +460,11 @@ public class MainActivity extends Activity {
     /** Buttons for scanning. */
     private void scanUi() {
         mainButton.setText("Finish scan");
-        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton, improveButton})
+        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton, improveButton, lightButton})
             b.setVisibility(View.GONE);
+        renderer.lighting.enabled = false;
+        lightButton.setText("Lighting");
+        if (lightPanel != null) lightPanel.setVisibility(View.GONE);
         topButton.setText("Top view");
         trainButton.setText("Train splats");
         depthButton.setText("Depth AI");
@@ -440,7 +474,7 @@ public class MainActivity extends Activity {
     /** Buttons for looking at a finished or opened scan. */
     private void viewerUi() {
         mainButton.setText("New scan");
-        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton})
+        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton, lightButton})
             b.setVisibility(View.VISIBLE);
         improveButton.setVisibility(renderer.currentDir != null ? View.VISIBLE : View.GONE);
     }
@@ -639,6 +673,152 @@ public class MainActivity extends Activity {
             String hint = renderer.improveHint();
             runOnUiThread(() -> { scanUi(); updateStatus(hint); resumeSession(); });
         });
+    }
+
+    private LinearLayout buildLightPanel() {
+        LinearLayout p = new LinearLayout(this);
+        p.setOrientation(LinearLayout.VERTICAL);
+        p.setBackgroundColor(0xCC101216);
+        p.setPadding(dp(10), dp(6), dp(10), dp(6));
+        selLabel = new TextView(this);
+        selLabel.setTextColor(Color.WHITE);
+        selLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        p.addView(selLabel);
+        FlowRow row = new FlowRow(this, dp(4));
+        String[] names = {"+ Light", "+ Person", "+ Seated", "+ Table", "+ Chair", "Type", "On/Off", "Delete"};
+        for (int i = 0; i < names.length; i++) {
+            Button b = new Button(this);
+            b.setText(names[i]); b.setAllCaps(false); b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            b.setMinHeight(0); b.setMinimumHeight(0); b.setMinWidth(0); b.setMinimumWidth(0);
+            b.setPadding(dp(10), dp(4), dp(10), dp(4));
+            final int which = i;
+            b.setOnClickListener(v -> lightAction(which));
+            row.addView(b);
+        }
+        p.addView(row);
+        powerBar = slider(p, "Power", 100);
+        kelvinBar = slider(p, "Colour temp", 100);
+        heightBar = slider(p, "Height", 100);
+        roomBar = slider(p, "Room light", 100);
+        expoBar = slider(p, "Exposure", 60);
+        return p;
+    }
+
+    private android.widget.SeekBar slider(LinearLayout parent, String label, int max) {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        TextView t = new TextView(this);
+        t.setText(label); t.setTextColor(0xFFCCCCCC); t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        r.addView(t, new LinearLayout.LayoutParams(dp(84), LinearLayout.LayoutParams.WRAP_CONTENT));
+        android.widget.SeekBar sb = new android.widget.SeekBar(this);
+        sb.setMax(max);
+        sb.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(android.widget.SeekBar b, int v, boolean user) { if (user && !syncingBars) sliderChanged(); }
+            public void onStartTrackingTouch(android.widget.SeekBar b) { }
+            public void onStopTrackingTouch(android.widget.SeekBar b) { glView.queueEvent(() -> renderer.lightingStatus()); }
+        });
+        r.addView(sb, new LinearLayout.LayoutParams(0, dp(32), 1f));
+        parent.addView(r);
+        return sb;
+    }
+
+    private void sliderChanged() {
+        Lighting L = renderer.lighting;
+        synchronized (L) {
+            if (L.selected >= 0 && L.selected < L.lights.size()) {
+                Lighting.Light l = L.lights.get(L.selected);
+                l.dimmer = powerBar.getProgress() / 100f;
+                l.kelvin = 2700 + kelvinBar.getProgress() * 38f; // 2700 .. 6500 K
+                l.y = L.floorY + 0.3f + heightBar.getProgress() * 0.03f; // 0.3 .. 3.3 m
+            }
+            L.roomDimmer = roomBar.getProgress() / 100f;
+            L.exposureEv = (expoBar.getProgress() - 30) / 10f; // -3 .. +3 EV
+        }
+        selLabel.setText(selectedText());
+    }
+
+    private String selectedText() {
+        Lighting L = renderer.lighting;
+        synchronized (L) {
+            if (L.selected >= 0 && L.selected < L.lights.size()) {
+                Lighting.Light l = L.lights.get(L.selected);
+                return String.format(java.util.Locale.US, "%s (%s): %d%%, %.0f K, %.1f m high, %s", l.name, l.type.label, Math.round(l.dimmer * 100), l.kelvin, l.y - L.floorY, l.on ? "on" : "off");
+            }
+            return "Selected: " + L.selectedLabel() + ". Drag it on the floor to move it.";
+        }
+    }
+
+    /** Called when a light or prop gets selected: put its values on the sliders. */
+    void lightingSelected() {
+        runOnUiThread(() -> {
+            if (powerBar == null) return;
+            Lighting L = renderer.lighting;
+            syncingBars = true;
+            synchronized (L) {
+                boolean isLight = L.selected >= 0 && L.selected < L.lights.size();
+                if (isLight) {
+                    Lighting.Light l = L.lights.get(L.selected);
+                    powerBar.setProgress(Math.round(l.dimmer * 100));
+                    kelvinBar.setProgress(Math.round((l.kelvin - 2700) / 38f));
+                    heightBar.setProgress(Math.round((l.y - L.floorY - 0.3f) / 0.03f));
+                }
+                powerBar.setEnabled(isLight); kelvinBar.setEnabled(isLight); heightBar.setEnabled(isLight);
+                roomBar.setProgress(Math.round(L.roomDimmer * 100));
+                expoBar.setProgress(Math.round(L.exposureEv * 10 + 30));
+            }
+            syncingBars = false;
+            selLabel.setText(selectedText());
+        });
+    }
+
+    private void lightAction(int which) {
+        Lighting L = renderer.lighting;
+        synchronized (L) {
+            float[] face = L.subjectFace();
+            float cx = face != null ? face[0] : 0, cz = face != null ? face[2] : 0;
+            switch (which) {
+                case 0: {
+                    if (L.lights.size() >= 4) { toast("Up to 4 lights for now."); break; }
+                    Lighting.Light l = new Lighting.Light();
+                    l.type = Lighting.Type.PANEL; l.beamDeg = l.type.beamDeg;
+                    l.name = new String[]{"Key light", "Fill", "Back light", "Light 4"}[Math.min(3, L.lights.size())];
+                    double a = Math.toRadians(60 + 90 * L.lights.size());
+                    l.x = cx + 1.5f * (float) Math.cos(a); l.z = cz + 1.5f * (float) Math.sin(a); l.y = L.floorY + 1.9f;
+                    L.lights.add(l);
+                    L.selected = L.lights.size() - 1;
+                    break;
+                }
+                case 1: case 2: case 3: case 4: {
+                    Lighting.PropKind k = which == 1 ? Lighting.PropKind.PERSON_STANDING : which == 2 ? Lighting.PropKind.PERSON_SEATED : which == 3 ? Lighting.PropKind.TABLE : Lighting.PropKind.CHAIR;
+                    float ox = L.props.isEmpty() ? 0 : 0.9f;
+                    L.props.add(new Lighting.Prop(k, cx + ox, cz + (which == 3 ? 0.6f : 0), 0));
+                    L.selected = L.lights.size() + L.props.size() - 1;
+                    break;
+                }
+                case 5:
+                    if (L.selected >= 0 && L.selected < L.lights.size()) {
+                        Lighting.Light l = L.lights.get(L.selected);
+                        l.type = Lighting.Type.values()[(l.type.ordinal() + 1) % Lighting.Type.values().length];
+                        l.beamDeg = l.type.beamDeg;
+                        if (l.type == Lighting.Type.PRACTICAL) l.kelvin = 2900;
+                    } else if (L.selected >= L.lights.size()) {
+                        Lighting.Prop p = L.props.get(L.selected - L.lights.size());
+                        p.yawDeg += 45; // turn tables and chairs
+                    }
+                    break;
+                case 6:
+                    if (L.selected >= 0 && L.selected < L.lights.size()) L.lights.get(L.selected).on = !L.lights.get(L.selected).on;
+                    break;
+                case 7:
+                    if (L.selected >= 0 && L.selected < L.lights.size()) L.lights.remove(L.selected);
+                    else if (L.selected >= L.lights.size() && L.selected - L.lights.size() < L.props.size()) L.props.remove(L.selected - L.lights.size());
+                    L.selected = L.lights.isEmpty() && L.props.isEmpty() ? -1 : 0;
+                    break;
+            }
+        }
+        lightingSelected();
+        glView.queueEvent(() -> renderer.lightingStatus());
     }
 
     private int dp(int v) {
