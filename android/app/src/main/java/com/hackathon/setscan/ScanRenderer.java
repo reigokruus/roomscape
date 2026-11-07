@@ -2594,7 +2594,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
         surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
+        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false;
@@ -3259,7 +3259,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Image depth = null, conf = null;
         try {
             depth = rawDepth ? frame.acquireRawDepthImage16Bits() : frame.acquireDepthImage16Bits();
-            if (depth.getTimestamp() == lastDepthTs) return;
+            // Only newer depth: near the end of scan1240 ARCore cycled through 4 old depth images (timestamps
+            // 73.4, 73.7, 74.0, 74.3 s, again and again) while the camera kept moving, and fusing them at the new
+            // poses threw chunks of points into mid-air. So: skip anything not newer than the last one, or stale.
+            if (depth.getTimestamp() <= lastDepthTs) { if (depth.getTimestamp() < lastDepthTs && depthStale++ == 0) log("stale depth: ARCore repeated an older depth image, skipping"); return; }
             lastDepthTs = depth.getTimestamp();
             if (rawDepth) conf = frame.acquireRawDepthConfidenceImage();
             try { cpuImage = frame.acquireCameraImage(); } catch (NotYetAvailableException e) { cpuImage = null; }
@@ -3450,7 +3453,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private String diagnostics() {
         return "[mode " + modeLabel + " " + depthSize + " | frames " + depthFrames
                 + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf + " | edges " + depthRejectedEdge
-                + " | not ready " + depthNotYet + " | refined " + refinedTotal + String.format(java.util.Locale.US, " | gain %.2f", colorGain) + " | photos " + photos.keyframes.size() + " | surface voxels " + tsdf.size() + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
+                + " | not ready " + depthNotYet + " | stale " + depthStale + " | refined " + refinedTotal + String.format(java.util.Locale.US, " | gain %.2f", colorGain) + " | photos " + photos.keyframes.size() + " | surface voxels " + tsdf.size() + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 
     private void sampleColor(float fu, float fv, int[] out) {
@@ -3600,6 +3603,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final float FAR_M = 2.3f;        // beyond this the S24's depth from motion bends flat walls (scan1047)
     private float farShare = -1;            // smoothed share of this view's depth further than FAR_M
     private int farPixelsFrame;
+    private int depthStale;                  // depth images skipped for being older than ones already used
     private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
     private float detailHere = -1;           // smoothed share of solid points where the phone points
     private int solidCount, hudCalls;        // points seen often enough to count as solid
