@@ -13,7 +13,7 @@ final class LiveCapture: ObservableObject {
     let cloud: LiveCloud?
     let session: ARSession
     private var link: CADisplayLink?
-    private let worker = DispatchQueue(label: "CineX.live-cloud", qos: .userInitiated)
+    private let worker = DispatchQueue(label: "CineX.live-cloud", qos: .utility)
     private var busy = false
     private var lastFrameTime: TimeInterval = 0
 

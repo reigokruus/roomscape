@@ -62,9 +62,16 @@ final class LiveCloud: @unchecked Sendable {
     private var lastPosition: SIMD3<Float>?
     private var lastTime: TimeInterval = 0
     private var pausedUntil: TimeInterval = 0
-    private var keyframes: [Keyframe] = []
+    /// Finished photos. Appended on `photoQueue`, read by `snapshot`.
+    private let keyframes = OSAllocatedUnfairLock(initialState: [Keyframe]())
+    /// Photos started (worker only), counted against `maxKeyframes` before they finish encoding.
+    private var keyframesTaken = 0
     private var lastKeyframePose: simd_float4x4?
-    private lazy var imageContext = CIContext(options: [.cacheIntermediates: false])
+    /// Since when tracking has been normal without a break (worker only).
+    private var trackingNormalSince: TimeInterval?
+    /// Scaling and JPEG encoding happen here, at low priority, so they never compete with ARKit's tracking.
+    private let photoQueue = DispatchQueue(label: "CineX.keyframe-photos", qos: .background)
+    private lazy var imageContext = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
     /// Smoothed share of solid spots where the phone points, 0…1, or -1 before there is enough to say.
     private(set) var detailHere: Float = -1
 
@@ -85,15 +92,19 @@ final class LiveCloud: @unchecked Sendable {
         lastPosition = nil
         pausedUntil = 0
         detailHere = -1
-        keyframes.removeAll()
+        photoQueue.sync {}
+        keyframes.withLock { $0.removeAll() }
+        keyframesTaken = 0
         lastKeyframePose = nil
+        trackingNormalSince = nil
     }
 
-    /// Copies out the points and keyframes captured so far. Call on the worker queue.
+    /// Copies out the points and keyframes captured so far, after photos still being encoded. Call on the worker queue.
     func snapshot() -> CaptureSnapshot {
+        photoQueue.sync {}
         let n = count
         return CaptureSnapshot(points: Data(bytes: points, count: n * MemoryLayout<LivePoint>.stride),
-                               pointCount: n, keyframes: keyframes)
+                               pointCount: n, keyframes: keyframes.withLock { $0 })
     }
 
     // MARK: Integration
@@ -103,12 +114,16 @@ final class LiveCloud: @unchecked Sendable {
 
     /// Adds one ARKit frame's LiDAR depth. Reads the frame's buffers and returns without keeping the frame.
     func integrate(_ frame: ARFrame) {
-        guard case .normal = frame.camera.trackingState,
-              let sceneDepth = frame.sceneDepth,
+        let time = frame.timestamp
+        guard case .normal = frame.camera.trackingState else {
+            trackingNormalSince = nil
+            return
+        }
+        if trackingNormalSince == nil { trackingNormalSince = time }
+        guard let sceneDepth = frame.sceneDepth,
               let confidence = sceneDepth.confidenceMap else { return }
 
         // When ARKit corrects its map, the pose jumps. Capturing right then doubles walls, so pause for a moment.
-        let time = frame.timestamp
         let pose = frame.camera.transform
         let position = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
         if let lastPosition, simd_distance(lastPosition, position) > 0.15, time - lastTime < 0.25 {
@@ -229,8 +244,13 @@ final class LiveCloud: @unchecked Sendable {
     }
 
     /// Keeps a photo each time the phone has moved 20 cm or turned 15° since the last one, up to `maxKeyframes`.
+    ///
+    /// Only the pixel copy happens here, so ARKit's camera frame is let go within a millisecond or two. Scaling and
+    /// JPEG encoding run later on `photoQueue`.
     private func captureKeyframeIfMoved(_ frame: ARFrame, pose: simd_float4x4) {
-        guard keyframes.count < Self.maxKeyframes else { return }
+        guard keyframesTaken < Self.maxKeyframes else { return }
+        // Not while tracking is still settling: that's when extra work can make ARKit lose track.
+        guard let since = trackingNormalSince, frame.timestamp - since >= 1 else { return }
         if let last = lastKeyframePose {
             let moved = simd_distance(SIMD3(last.columns.3.x, last.columns.3.y, last.columns.3.z),
                                       SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z))
@@ -239,22 +259,60 @@ final class LiveCloud: @unchecked Sendable {
             let turnedDegrees = acos(max(-1, min(1, simd_dot(lookA, lookB)))) * 180 / .pi
             guard moved >= 0.2 || turnedDegrees >= 15 else { return }
         }
-        let image = frame.capturedImage
-        let iw = CVPixelBufferGetWidth(image), ih = CVPixelBufferGetHeight(image)
-        let scale = Float(Self.photoWidth) / Float(iw)
-        let scaled = CIImage(cvPixelBuffer: image)
-            .transformed(by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
-        guard let sRGB = CGColorSpace(name: CGColorSpace.sRGB),
-              let jpeg = imageContext.jpegRepresentation(
-                of: scaled, colorSpace: sRGB,
-                options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8])
-        else { return }
-        let k = frame.camera.intrinsics
-        keyframes.append(Keyframe(timestamp: frame.timestamp, cameraToWorld: pose,
-                                  fx: k[0][0] * scale, fy: k[1][1] * scale, cx: k[2][0] * scale, cy: k[2][1] * scale,
-                                  width: Int((Float(iw) * scale).rounded()), height: Int((Float(ih) * scale).rounded()),
-                                  jpeg: jpeg))
+        guard let pixels = Self.copy(frame.capturedImage) else { return }
+        keyframesTaken += 1
         lastKeyframePose = pose
+        let timestamp = frame.timestamp
+        let k = frame.camera.intrinsics
+
+        photoQueue.async { [self] in
+            let iw = CVPixelBufferGetWidth(pixels), ih = CVPixelBufferGetHeight(pixels)
+            let scale = Float(Self.photoWidth) / Float(iw)
+            let scaled = CIImage(cvPixelBuffer: pixels)
+                .transformed(by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
+            guard let sRGB = CGColorSpace(name: CGColorSpace.sRGB),
+                  let jpeg = imageContext.jpegRepresentation(
+                    of: scaled, colorSpace: sRGB,
+                    options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8])
+            else { return }
+            let keyframe = Keyframe(timestamp: timestamp, cameraToWorld: pose,
+                                    fx: k[0][0] * scale, fy: k[1][1] * scale, cx: k[2][0] * scale, cy: k[2][1] * scale,
+                                    width: Int((Float(iw) * scale).rounded()), height: Int((Float(ih) * scale).rounded()),
+                                    jpeg: jpeg)
+            keyframes.withLock { $0.append(keyframe) }
+        }
+    }
+
+    /// A copy of a camera image in a buffer we own, so ARKit gets its own buffer back straight away.
+    private static func copy(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        var copy: CVPixelBuffer?
+        let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [String: Any]()] as CFDictionary
+        guard CVPixelBufferCreate(nil, CVPixelBufferGetWidth(source), CVPixelBufferGetHeight(source),
+                                  CVPixelBufferGetPixelFormatType(source), attributes, &copy) == kCVReturnSuccess,
+              let copy else { return nil }
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(copy, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(copy, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+        for plane in 0..<CVPixelBufferGetPlaneCount(source) {
+            guard let from = CVPixelBufferGetBaseAddressOfPlane(source, plane),
+                  let to = CVPixelBufferGetBaseAddressOfPlane(copy, plane) else { return nil }
+            let fromRow = CVPixelBufferGetBytesPerRowOfPlane(source, plane)
+            let toRow = CVPixelBufferGetBytesPerRowOfPlane(copy, plane)
+            let rows = CVPixelBufferGetHeightOfPlane(source, plane)
+            if fromRow == toRow {
+                memcpy(to, from, fromRow * rows)
+            } else {
+                for row in 0..<rows {
+                    memcpy(to + row * toRow, from + row * fromRow, min(fromRow, toRow))
+                }
+            }
+        }
+        // Keeps the colour information (YCbCr matrix, colour space) so the photo converts to RGB correctly.
+        CVBufferPropagateAttachments(source, copy)
+        return copy
     }
 
     private static func key(_ x: Float, _ y: Float, _ z: Float) -> Int64 {
