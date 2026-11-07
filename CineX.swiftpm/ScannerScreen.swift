@@ -1,6 +1,7 @@
 import SwiftUI
 import RoomPlan
 import os
+import Metal
 
 private let log = Logger(subsystem: "SetScan", category: "scan")
 
@@ -33,6 +34,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
     @Published var endedEarlyReason: String?
     @Published var scanStats = ScanStats()
     let captureView: RoomCaptureView
+    /// LiDAR point cloud with seen counters, drawn as live discs over the camera. Nil if Metal is unavailable.
+    let liveCloud: LiveCloud?
     private var running = false
     private var processingTask: Task<Void, Never>?
     /// The session delegate RoomCaptureView had before we took over (see init). Set once, then only read.
@@ -40,6 +43,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
 
     override init() {
         captureView = RoomCaptureView(frame: .zero)
+        liveCloud = MTLCreateSystemDefaultDevice().flatMap { LiveCloud(device: $0) }
         super.init()
         captureView.delegate = self
         // We listen to the session for live counts. RoomCaptureView may rely on the session's delegate itself,
@@ -64,6 +68,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
         saved = nil
         endedEarlyReason = nil
         scanStats = ScanStats()
+        liveCloud?.reset()
         setPhase(.scanning)
         captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
     }
@@ -257,6 +262,31 @@ private struct ScanStatsHUD: View {
     }
 }
 
+/// "Detail here: N% solid" for the spot the camera is looking at, refreshed three times a second.
+private struct DetailLine: View {
+    let cloud: LiveCloud
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.33)) { _ in
+            let stats = cloud.stats
+            let text: String = {
+                if !stats.hasDepth { return "Point the phone at the room…" }
+                if stats.detailHere < 0 { return "Walk slowly. Hold still where discs are red or yellow." }
+                let pct = Int((stats.detailHere * 100).rounded())
+                return pct >= 70
+                    ? "Detail here: \(pct)% solid. Move on to the next area."
+                    : "Detail here: \(pct)% solid. Sway the phone gently here until the discs turn green."
+            }()
+            Text(text)
+                .font(.callout.weight(.medium))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+        }
+    }
+}
+
 private struct RoomCaptureRepresentable: UIViewRepresentable {
     let controller: ScanController
 
@@ -280,6 +310,11 @@ struct ScannerScreen: View {
                 .onAppear { controller.start() }
 
             if controller.phase == .scanning {
+                if let cloud = controller.liveCloud {
+                    LiveDiscsOverlay(cloud: cloud, session: controller.captureView.captureSession.arSession)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
                 ScanStatsHUD(stats: controller.scanStats)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 60)
@@ -289,6 +324,9 @@ struct ScannerScreen: View {
             VStack(spacing: 12) {
                 switch controller.phase {
                 case .scanning:
+                    if let cloud = controller.liveCloud {
+                        DetailLine(cloud: cloud)
+                    }
                     TimelineView(.periodic(from: controller.phaseStarted, by: 1)) { context in
                         let elapsed = context.date.timeIntervalSince(controller.phaseStarted)
                         if elapsed > ScanController.suggestedMaxScanSeconds {
