@@ -39,6 +39,14 @@ final class LiveCapture: ObservableObject {
         link = nil
     }
 
+    /// The points and photos captured so far, read after any frame still being processed.
+    func snapshot() async -> CaptureSnapshot? {
+        guard let cloud else { return nil }
+        return await withCheckedContinuation { continuation in
+            worker.async { continuation.resume(returning: cloud.snapshot()) }
+        }
+    }
+
     fileprivate func tick() {
         guard !busy, let cloud, let frame = session.currentFrame, frame.timestamp != lastFrameTime else { return }
         lastFrameTime = frame.timestamp

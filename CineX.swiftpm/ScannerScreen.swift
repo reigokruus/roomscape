@@ -154,8 +154,9 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                     self.setPhase(.failed("No walls were found in this scan. Stand inside the room, point the camera at a wall from 1–3 m away, and turn slowly until white outlines appear on every wall."))
                     return
                 }
+                let capture = await self.live.snapshot()
                 let saved = try await Task.detached(priority: .userInitiated) {
-                    try ScanStore.save(room)
+                    try ScanStore.save(room, capture: capture)
                 }.value
                 try Task.checkCancellation()
                 log.info("saved \(saved.name, privacy: .public)")

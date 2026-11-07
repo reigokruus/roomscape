@@ -1,4 +1,5 @@
 import ARKit
+import CoreImage
 import Metal
 import os
 import simd
@@ -8,6 +9,26 @@ struct LivePoint {
     var x: Float, y: Float, z: Float
     /// Bytes r, g, b = colour from the camera; a = how solid the spot is (1…255, 255 = solid).
     var rgba: UInt32
+}
+
+/// A photo taken during the scan, with what's needed to project the room into it (handoff: keyframes).
+/// The photo keeps the camera sensor's landscape orientation, the same frame as `cameraToWorld` and the intrinsics.
+struct Keyframe: Sendable {
+    var timestamp: TimeInterval
+    /// ARKit camera transform: x right, y up, looking down -z, metres.
+    var cameraToWorld: simd_float4x4
+    /// Intrinsics for the saved photo size, in pixels.
+    var fx: Float, fy: Float, cx: Float, cy: Float
+    var width: Int, height: Int
+    var jpeg: Data
+}
+
+/// Everything captured alongside RoomPlan's model, copied out for saving.
+struct CaptureSnapshot: Sendable {
+    /// `pointCount` × `LivePoint` (16 bytes each).
+    var points: Data
+    var pointCount: Int
+    var keyframes: [Keyframe]
 }
 
 /// The live point cloud built from LiDAR depth while RoomPlan scans (handoff section 2: live capture + seen counter).
@@ -23,6 +44,9 @@ final class LiveCloud: @unchecked Sendable {
     /// We sample about 15 depth frames per second, so this is about 1 s of sightings.
     static let solidFrames = 15
     static let maxPoints = 400_000
+    /// Keyframe budget from the handoff: more costs memory without a visible gain.
+    static let maxKeyframes = 80
+    static let photoWidth = 1024
 
     let buffer: MTLBuffer
     private let points: UnsafeMutablePointer<LivePoint>
@@ -38,6 +62,9 @@ final class LiveCloud: @unchecked Sendable {
     private var lastPosition: SIMD3<Float>?
     private var lastTime: TimeInterval = 0
     private var pausedUntil: TimeInterval = 0
+    private var keyframes: [Keyframe] = []
+    private var lastKeyframePose: simd_float4x4?
+    private lazy var imageContext = CIContext(options: [.cacheIntermediates: false])
     /// Smoothed share of solid spots where the phone points, 0…1, or -1 before there is enough to say.
     private(set) var detailHere: Float = -1
 
@@ -58,6 +85,15 @@ final class LiveCloud: @unchecked Sendable {
         lastPosition = nil
         pausedUntil = 0
         detailHere = -1
+        keyframes.removeAll()
+        lastKeyframePose = nil
+    }
+
+    /// Copies out the points and keyframes captured so far. Call on the worker queue.
+    func snapshot() -> CaptureSnapshot {
+        let n = count
+        return CaptureSnapshot(points: Data(bytes: points, count: n * MemoryLayout<LivePoint>.stride),
+                               pointCount: n, keyframes: keyframes)
     }
 
     // MARK: Integration
@@ -189,6 +225,36 @@ final class LiveCloud: @unchecked Sendable {
             let share = Float(frameSolid) / Float(frameHits)
             detailHere = detailHere < 0 ? share : detailHere * 0.8 + share * 0.2
         }
+        captureKeyframeIfMoved(frame, pose: pose)
+    }
+
+    /// Keeps a photo each time the phone has moved 20 cm or turned 15° since the last one, up to `maxKeyframes`.
+    private func captureKeyframeIfMoved(_ frame: ARFrame, pose: simd_float4x4) {
+        guard keyframes.count < Self.maxKeyframes else { return }
+        if let last = lastKeyframePose {
+            let moved = simd_distance(SIMD3(last.columns.3.x, last.columns.3.y, last.columns.3.z),
+                                      SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z))
+            let lookA = simd_normalize(SIMD3(last.columns.2.x, last.columns.2.y, last.columns.2.z))
+            let lookB = simd_normalize(SIMD3(pose.columns.2.x, pose.columns.2.y, pose.columns.2.z))
+            let turnedDegrees = acos(max(-1, min(1, simd_dot(lookA, lookB)))) * 180 / .pi
+            guard moved >= 0.2 || turnedDegrees >= 15 else { return }
+        }
+        let image = frame.capturedImage
+        let iw = CVPixelBufferGetWidth(image), ih = CVPixelBufferGetHeight(image)
+        let scale = Float(Self.photoWidth) / Float(iw)
+        let scaled = CIImage(cvPixelBuffer: image)
+            .transformed(by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
+        guard let sRGB = CGColorSpace(name: CGColorSpace.sRGB),
+              let jpeg = imageContext.jpegRepresentation(
+                of: scaled, colorSpace: sRGB,
+                options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8])
+        else { return }
+        let k = frame.camera.intrinsics
+        keyframes.append(Keyframe(timestamp: frame.timestamp, cameraToWorld: pose,
+                                  fx: k[0][0] * scale, fy: k[1][1] * scale, cx: k[2][0] * scale, cy: k[2][1] * scale,
+                                  width: Int((Float(iw) * scale).rounded()), height: Int((Float(ih) * scale).rounded()),
+                                  jpeg: jpeg))
+        lastKeyframePose = pose
     }
 
     private static func key(_ x: Float, _ y: Float, _ z: Float) -> Int64 {
