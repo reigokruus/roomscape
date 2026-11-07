@@ -3645,11 +3645,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
-        if (ts != TrackingState.TRACKING) { level = 2; hint = "Lost track. Point at something with detail and hold still"; }
-        else if (d < 0 || count < 3000) { level = 1; hint = "Walk slowly around the room. Wherever the bar turns red, stop and hold still"; }
-        else if (moveSpeed > 0.35f && d < 0.7f) { level = 2; hint = "Too fast. Stand still right here and sweep slowly"; }
-        else if (d < 0.35f) { level = 2; hint = "New area. Stand still right here until the bar fills"; }
-        else if (d < 0.7f) { level = 1; hint = "Good. Keep holding here a little longer"; }
+        if (ts != TrackingState.TRACKING) { level = 2; hint = "Lost track. Point at something with detail and move slowly"; }
+        else if (d < 0 || count < 3000) { level = 1; hint = "Walk slowly around the room. Wherever the bar turns red, stay there and sway the phone gently"; }
+        else if (moveSpeed > 0.35f && d < 0.7f) { level = 2; hint = "Too fast. Stay right here and sway the phone slowly"; }
+        else if (d < 0.35f) { level = 2; hint = "New area. Stay here and sway the phone gently side to side until the bar fills"; }
+        else if (d < 0.7f) { level = 1; hint = "Good. Keep swaying gently here a little longer"; }
         else { level = 0; hint = "This spot is done. Move on to the next area"; }
         if (improveDir != null) sub = "Tap 2 room corners to line this pass up with the saved scan";
         else if (guideText != null && level == 0) sub = guideText;
@@ -3666,7 +3666,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float d = detailHere;
         if (d < 0) return "Detail here: point at something";
         int pct = Math.round(d * 100);
-        return pct >= 70 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, hold a bit longer" : "🔴 Detail here: " + pct + "% solid, hold still here";
+        return pct >= 70 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, keep swaying here" : "🔴 Detail here: " + pct + "% solid, stay here and sway gently";
     }
 
     private void drawPointArrays() {

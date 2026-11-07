@@ -557,7 +557,7 @@ public class MainActivity extends Activity {
         hudHint = new TextView(this);
         hudHint.setTextColor(Color.WHITE); hudHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
         hudHint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        hudHint.setText("Point at the room and hold still for a moment");
+        hudHint.setText("Point at the room and move the phone slowly");
         hud.addView(hudHint);
         hudSub = new TextView(this);
         hudSub.setTextColor(0xCCFFFFFF); hudSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
