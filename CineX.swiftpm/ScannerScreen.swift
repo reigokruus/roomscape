@@ -26,11 +26,14 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     /// Set when the app ended the scan by itself (memory or heat), so the user knows why.
     @Published var endedEarlyReason: String?
     let captureView: RoomCaptureView
+    /// LiDAR points and live discs, read from RoomPlan's own ARKit session.
+    let live: LiveCapture
     private var running = false
     private var processingTask: Task<Void, Never>?
 
     override init() {
         captureView = RoomCaptureView(frame: .zero)
+        live = LiveCapture(session: captureView.captureSession.arSession)
         super.init()
         captureView.delegate = self
         // Don't set captureView.captureSession.delegate: taking it over stops RoomCaptureView's live outlines,
@@ -54,6 +57,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         endedEarlyReason = nil
         setPhase(.scanning)
         captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
+        live.start()
     }
 
     /// User tapped Done. RoomPlan answers through `shouldPresent`, where processing starts.
@@ -61,6 +65,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         guard phase == .scanning, running else { return }
         setPhase(.processing)
         running = false
+        live.stop()
         captureView.captureSession.stop()
     }
 
@@ -68,6 +73,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         log.info("cancel")
         processingTask?.cancel()
         processingTask = nil
+        live.stop()
         if running {
             running = false
             captureView.captureSession.stop()
@@ -128,6 +134,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     private func process(_ data: CapturedRoomData, sessionError: Error?) {
         log.info("session ended, error: \(String(describing: sessionError), privacy: .public)")
         running = false
+        live.stop()
         // The session ended with an error and the user didn't ask to finish. Let them decide.
         if let sessionError, phase == .scanning {
             setPhase(.failed(Self.message(for: sessionError)))
@@ -179,6 +186,19 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     }
 }
 
+/// "Detail here: N% solid" while scanning: how much of what the phone points at is captured well.
+private struct LiveStatusLine: View {
+    @ObservedObject var live: LiveCapture
+
+    var body: some View {
+        Text(live.detailLine)
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: Capsule())
+    }
+}
+
 private struct RoomCaptureRepresentable: UIViewRepresentable {
     let controller: ScanController
 
@@ -201,6 +221,16 @@ struct ScannerScreen: View {
                 .ignoresSafeArea()
                 .onAppear { controller.start() }
 
+            if controller.phase == .scanning {
+                LiveDiscsView(live: controller.live)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                LiveStatusLine(live: controller.live)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 60)
+                    .allowsHitTesting(false)
+            }
+
             VStack(spacing: 12) {
                 switch controller.phase {
                 case .scanning:
@@ -217,6 +247,8 @@ struct ScannerScreen: View {
                     HStack(spacing: 16) {
                         Button("Cancel") { close() }
                             .buttonStyle(.bordered)
+                            // Solid backing so the label stays readable over the live discs.
+                            .background(.regularMaterial, in: Capsule())
                         Button("Done") { controller.finish() }
                             .buttonStyle(.borderedProminent)
                     }
