@@ -280,9 +280,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             Surfels s = Surfels.build(snap, colSnap, n);
             if (gen != surfGen) return;
             surfDone = s; surfBase = s; surfPending = s;
+            if (autoStage == 3) glTasks.add(() -> {
+                if (autoStage != 3) return;
+                autoStage = 4; autoProgress("Training splats against the photos", 0.65f);
+                String l = toggleTraining();
+                activity.trainingLabel(l);
+                if (!training) { autoStage = 5; autoProgress("Done", 1f); }
+            });
             log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
                     + (System.currentTimeMillis() - t0) + " ms");
-        } catch (Throwable e) { logError("splats", new RuntimeException(e)); } }).start();
+        } catch (Throwable e) { logError("splats", new RuntimeException(e)); if (autoStage == 3) { autoStage = 5; autoProgress("Done", 1f); } } }).start();
     }
 
     // ---- shot lighting preview (see Lighting) ----
@@ -825,6 +832,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             currentDir = null; currentName = null; // keep it as its own scan
             activity.toast("Not lined up with the saved scan (no matching corners), so this is kept as a new scan.");
             enterViewer();
+            startAuto();
             return;
         }
         float c = t[0], sn = t[1];
@@ -856,6 +864,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         currentDir = dir;
         appendSaved(dir, true, () -> {
             enterViewer();
+            startAuto();
             activity.updateStatus(String.format(java.util.Locale.US, "Merged: %,d points from this pass + the saved scan = %,d points, %d photos. Run Depth AI and Clean up, then Save.\n%s",
                     added, count, photos.keyframes.size(), roomReady ? room.summary : ""));
         });
@@ -954,6 +963,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     }
                     final int mm = m; final float camX = pm[12], camY = pm[13], camZ = pm[14];
                     glTasks.add(() -> addDepthPoints(P, C, mm, camX, camY, camZ));
+                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Improving depth with AI: photo %d of %d", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
                     float each = (System.currentTimeMillis() - t0) / 1000f / (ki + 1);
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Depth AI: photo %d of %d (%.1f s each). Each photo's depth is guessed by a neural net and scaled with ARCore's measurements (agrees to %.0f%%). %,d points so far.",
@@ -964,6 +974,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             } catch (Throwable e) {
                 logError("depth AI", new RuntimeException(e));
                 activity.updateStatus("Depth AI failed: " + e);
+                autoFailed("depth AI");
             } finally {
                 if (net != null) net.close();
                 depthRunning = false;
@@ -1056,10 +1067,36 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Throwable e) { logError("depth surface", new RuntimeException(e)); }
         activity.depthDone();
         activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Cleaning up now...", depthAdded));
+        if (autoStage == 1) autoStage = 2;
         startCleanUp();
     }
 
     private volatile boolean cleaning;
+
+    // ---- automatic processing after a scan: depth AI -> clean-up -> splats -> a round of training ----
+    static final boolean AUTO_PROCESS = true;
+    static final int AUTO_STEPS = 150;           // training steps (~1 min on the S24)
+    private volatile int autoStage;             // 0 off, 1 depth AI, 2 clean-up, 3 splats, 4 training, 5 done
+
+    private void autoProgress(String label, float frac) { activity.updateProcess(label, frac); }
+
+    /** GL thread: run the whole improvement chain on its own, reporting one progress bar. */
+    private void startAuto() {
+        if (!AUTO_PROCESS || count == 0) return;
+        autoStage = 1;
+        autoProgress("Improving depth with AI", 0.02f);
+        if (photos.keyframes.isEmpty()) { autoStage = 2; startCleanUp(); return; }
+        toggleDepthAI();
+        if (!depthRunning) { autoStage = 2; startCleanUp(); }
+    }
+
+    private void autoFailed(String what) {
+        if (autoStage == 0 || autoStage == 5) return;
+        log("auto: " + what + " failed, skipping ahead");
+        if (autoStage == 1) glTasks.add(() -> { autoStage = 2; startCleanUp(); });
+        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Building splats", 0.6f); buildSurfels(); });
+        else { autoStage = 5; autoProgress("Done", 1f); }
+    }
 
     /** GL thread: snap the scan onto its floor, ceiling and marked walls, drop specks, fill gaps (see CleanUp). */
     void startCleanUp() {
@@ -1077,12 +1114,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         final float[][] walls = uw;
         activity.updateStatus("Cleaning up the scan: finding floor, ceiling and walls...");
+        if (autoStage == 2) autoProgress("Cleaning up: floor, walls, specks", 0.52f);
         new Thread(() -> { try {
             long t0 = System.currentTimeMillis();
             CleanUp c = CleanUp.run(ps, cs, n, walls);
             log(c.summary + " (" + (System.currentTimeMillis() - t0) + " ms) " + c.debug);
             glTasks.add(() -> applyCleanUp(c, gen));
-        } catch (Throwable e) { cleaning = false; logError("clean-up", new RuntimeException(e)); } }).start();
+        } catch (Throwable e) { cleaning = false; logError("clean-up", new RuntimeException(e)); autoFailed("clean-up"); } }).start();
     }
 
     private void applyCleanUp(CleanUp c, int gen) {
@@ -1097,6 +1135,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = n; uploaded = 0; refineCursor = 0;
         rebuildVoxelIndex();
         analyseRoom();
+        if (autoStage == 2) { autoStage = 3; autoProgress("Building splats", 0.6f); }
         buildSurfels();
         activity.updateStatus(c.summary + "\nBuilding splats now (a few seconds), then you can Train splats.\n" + (roomReady ? room.summary : ""));
     }
@@ -1130,7 +1169,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             java.util.Random rnd = new java.util.Random();
             long lastPub = 0, t0 = System.currentTimeMillis(); int it0 = tr.iter;
             float base0 = -1, ema = -1;
+            final boolean auto = autoStage == 4;
             while (training && gen == surfGen) {
+                if (auto && tr.iter - it0 >= AUTO_STEPS) { training = false; break; }
                 float l = tr.step(views.get(rnd.nextInt(views.size())));
                 ema = ema < 0 ? l : ema * 0.95f + l * 0.05f;
                 if (tr.iter <= 20) base0 = base0 < 0 ? l : base0 + (l - base0) / tr.iter;
@@ -1140,6 +1181,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     surfPending = tr.toSurfels();
                     float better = base0 > 0 ? Math.max(0, 1 - ema / base0) * 100 : 0;
                     float ms = (now - t0) / (float) Math.max(1, tr.iter - it0);
+                    if (auto) autoProgress(String.format(java.util.Locale.US, "Training splats: %.0f%% closer to the photos", better), 0.65f + 0.35f * Math.min(1f, (tr.iter - it0) / (float) AUTO_STEPS));
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Training splats on the phone: step %d (%.0f ms each), %d splats vs %d photos.\nMatches the photos %.0f%% better than the raw scan. Tap Pause any time, or let it keep honing.",
                             tr.iter, ms, tr.n, views.size(), better));
@@ -1147,7 +1189,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             if (gen == surfGen) surfPending = tr.toSurfels();
             log("training paused at step " + tr.iter + ", error " + tr.lastLoss);
-        } catch (Throwable e) { training = false; logError("training", new RuntimeException(e)); } }).start();
+            if (auto && autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); activity.trainingLabel("Train splats"); }
+        } catch (Throwable e) { training = false; logError("training", new RuntimeException(e)); if (autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); } } }).start();
         return "Pause training";
     }
 
@@ -1281,6 +1324,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         lastPlanes = planes;
         if (improveDir != null) { mergeImprove(); return; }
         enterViewer();
+        startAuto();
     }
 
     /** GL thread: room, splats and camera for the viewer, from whatever is in the scan now. */
@@ -2394,7 +2438,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; autoStage = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -2719,6 +2763,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float dot = curPose[8] * prevPose[8] + curPose[9] * prevPose[9] + curPose[10] * prevPose[10];
                 frameTurn = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, dot))));
             }
+            moveSpeed = moveSpeed * 0.9f + Math.min(frameMove, 0.15f) * 30f * 0.1f;
             // A sudden jump means ARCore just corrected its map: the next moment's poses can't be trusted yet.
             if (havePrevPose && frameMove > 0.15f) { settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); }
             System.arraycopy(curPose, 0, prevPose, 0, 16);
@@ -2769,6 +2814,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + "\nWalk slowly. Hold still where discs are red or yellow until they turn green. Tap Finish when done.";
             }
             activity.updateStatus(s);
+            postHud(ts);
         }
     }
 
@@ -3206,6 +3252,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final int[] seenStamp = new int[MAX_POINTS];
     private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
     private float detailHere = -1;           // smoothed share of solid points where the phone points
+    private int solidCount, hudCalls;        // points seen often enough to count as solid
+    private float moveSpeed;                 // smoothed phone speed, m/s
 
     private void addPoint(float x, float y, float z, int[] rgb) {
         int i = count * 3;
@@ -3484,6 +3532,27 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glColorMask(true, true, true, true);
         GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+    }
+
+    /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */
+    private void postHud(TrackingState ts) {
+        int level; String hint, sub = null;
+        float d = detailHere;
+        if (ts != TrackingState.TRACKING) { level = 2; hint = "Lost track. Point at something with detail and hold still"; }
+        else if (d < 0) { level = 1; hint = "Point at the room and hold still for a moment"; }
+        else if (moveSpeed > 0.35f && d < 0.7f) { level = 2; hint = "Too fast. Stand still right here and sweep slowly"; }
+        else if (d < 0.35f) { level = 2; hint = "New area. Stand still right here until the bar fills"; }
+        else if (d < 0.7f) { level = 1; hint = "Good. Keep holding here a little longer"; }
+        else { level = 0; hint = "This spot is done. Move on to the next area"; }
+        if (improveDir != null) sub = "Tap 2 room corners to line this pass up with the saved scan";
+        else if (guideText != null && level == 0) sub = guideText;
+        if (++hudCalls % 4 == 1) { // recount every ~2 s (points get merged, dropped and loaded in other places)
+            int n = count, sc = 0;
+            for (int i = 0; i < n; i++) if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++;
+            solidCount = sc;
+        }
+        float room = count > 0 ? Math.min(1f, (float) solidCount / count) : 0f;
+        activity.updateHud(hint, sub, level, Math.max(0f, d), room, count);
     }
 
     private String detailLine() {

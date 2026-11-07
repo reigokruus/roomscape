@@ -358,6 +358,16 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
         chrome.addView(bars, blp);
+        sizeBtn = sizeButton; logBtn = logButton;
+        try { debug = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("debug", false); } catch (Exception ignored) { }
+        mainButton.setOnLongClickListener(v -> {
+            debug = !debug;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("debug", debug).apply();
+            toast(debug ? "Debug tools on" : "Debug tools off");
+            applyUi();
+            return true;
+        });
+        buildHud(chrome);
         lightPanel = buildLightPanel();
         lightPanel.setVisibility(View.GONE);
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
@@ -367,6 +377,7 @@ public class MainActivity extends Activity {
         bars.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             int want = dp(56) + (b - t);
             if (llp.bottomMargin != want) { llp.bottomMargin = want; lightPanel.post(() -> lightPanel.setLayoutParams(llp)); }
+            if (procLp != null && procLp.bottomMargin != want + dp(8)) { procLp.bottomMargin = want + dp(8); procBox.post(() -> procBox.setLayoutParams(procLp)); }
         });
         root.addView(chrome, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(buildHome(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -469,9 +480,9 @@ public class MainActivity extends Activity {
 
     /** Buttons for scanning. */
     private void scanUi() {
+        scanning = true;
         mainButton.setText("Finish scan");
-        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton, improveButton, lightButton})
-            b.setVisibility(View.GONE);
+        applyUi();
         renderer.lighting.enabled = false;
         lightButton.setText("Lighting");
         if (lightPanel != null) lightPanel.setVisibility(View.GONE);
@@ -483,11 +494,136 @@ public class MainActivity extends Activity {
 
     /** Buttons for looking at a finished or opened scan. */
     private void viewerUi() {
+        scanning = false;
         mainButton.setText("New scan");
-        for (Button b : new Button[]{topButton, planButton, cutButton, viewButton, exportButton, claudeButton, trainButton, depthButton, cleanButton, saveButton, lightButton})
-            b.setVisibility(View.VISIBLE);
-        improveButton.setVisibility(renderer.currentDir != null ? View.VISIBLE : View.GONE);
+        applyUi();
     }
+
+    // ---------------- minimal UI: the scan shows only guidance and progress; tools are behind debug ----------------
+    private boolean scanning = true, debug;
+    private Button sizeBtn, logBtn;
+    private LinearLayout hud, procBox;
+    private FrameLayout.LayoutParams procLp;
+    private TextView hudHint, hudSub, hudDetailPct, hudRoomPct, procLabel;
+    private android.widget.ProgressBar hudDetail, hudRoom, procBar;
+
+    /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
+    private void applyUi() {
+        Button[] viewerMain = {homeButton, lightButton, saveButton, planButton, cutButton, topButton, claudeButton};
+        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, exportButton, liveClaudeButton, logBtn};
+        for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
+        improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE);
+        for (Button b : tools) {
+            boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn;
+            b.setVisibility(debug && (!scanning || scanTool) ? View.VISIBLE : View.GONE);
+        }
+        mainButton.setVisibility(View.VISIBLE);
+        status.setVisibility(scanning && !debug ? View.GONE : View.VISIBLE);
+        if (hud != null) hud.setVisibility(scanning ? View.VISIBLE : View.GONE);
+        if (procBox != null && scanning) procBox.setVisibility(View.GONE);
+    }
+
+    private android.widget.ProgressBar bar(int color) {
+        android.widget.ProgressBar p = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        p.setMax(1000);
+        p.setProgressTintList(android.content.res.ColorStateList.valueOf(color));
+        p.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(0x55FFFFFF));
+        return p;
+    }
+
+    private LinearLayout barRow(String label, android.widget.ProgressBar p, TextView pct) {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        TextView l = new TextView(this);
+        l.setText(label); l.setTextColor(0xCCFFFFFF); l.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        r.addView(l, new LinearLayout.LayoutParams(dp(92), LinearLayout.LayoutParams.WRAP_CONTENT));
+        r.addView(p, new LinearLayout.LayoutParams(0, dp(10), 1f));
+        pct.setTextColor(Color.WHITE); pct.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12); pct.setGravity(Gravity.END);
+        r.addView(pct, new LinearLayout.LayoutParams(dp(44), LinearLayout.LayoutParams.WRAP_CONTENT));
+        return r;
+    }
+
+    private void buildHud(FrameLayout chrome) {
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xB0101418); bg.setCornerRadius(dp(14));
+        hud = new LinearLayout(this);
+        hud.setOrientation(LinearLayout.VERTICAL);
+        hud.setBackground(bg);
+        hud.setPadding(dp(16), dp(12), dp(16), dp(14));
+        hudHint = new TextView(this);
+        hudHint.setTextColor(Color.WHITE); hudHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
+        hudHint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        hudHint.setText("Point at the room and hold still for a moment");
+        hud.addView(hudHint);
+        hudSub = new TextView(this);
+        hudSub.setTextColor(0xCCFFFFFF); hudSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        hudSub.setVisibility(View.GONE);
+        hud.addView(hudSub);
+        hudDetail = bar(0xFF33D17A); hudDetailPct = new TextView(this);
+        hudRoom = bar(0xFF5BB3CF); hudRoomPct = new TextView(this);
+        LinearLayout r1 = barRow("Detail here", hudDetail, hudDetailPct), r2 = barRow("Whole scan", hudRoom, hudRoomPct);
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rp.topMargin = dp(10);
+        hud.addView(r1, rp);
+        LinearLayout.LayoutParams rp2 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rp2.topMargin = dp(6);
+        hud.addView(r2, rp2);
+        hud.setOnLongClickListener(v -> { mainButton.performLongClick(); return true; });
+        FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP);
+        hp.topMargin = dp(40); hp.leftMargin = dp(12); hp.rightMargin = dp(12);
+        chrome.addView(hud, hp);
+
+        android.graphics.drawable.GradientDrawable bg2 = new android.graphics.drawable.GradientDrawable();
+        bg2.setColor(0xD0101418); bg2.setCornerRadius(dp(12));
+        procBox = new LinearLayout(this);
+        procBox.setOrientation(LinearLayout.VERTICAL);
+        procBox.setBackground(bg2);
+        procBox.setPadding(dp(14), dp(10), dp(14), dp(12));
+        procLabel = new TextView(this);
+        procLabel.setTextColor(Color.WHITE); procLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        procBox.addView(procLabel);
+        procBar = bar(0xFF5BB3CF);
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(10));
+        pp.topMargin = dp(8);
+        procBox.addView(procBar, pp);
+        procBox.setVisibility(View.GONE);
+        procLp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        procLp.bottomMargin = dp(150); procLp.leftMargin = dp(12); procLp.rightMargin = dp(12);
+        chrome.addView(procBox, procLp);
+    }
+
+    private static final int[] HINT_COLORS = {0xFF33D17A, 0xFFF5C542, 0xFFFF6B5B};
+
+    /** From the renderer, ~2x a second while scanning. level 0 ok, 1 hold on, 2 stop and stay here. */
+    void updateHud(String hint, String sub, int level, float detail, float room, int points) {
+        runOnUiThread(() -> {
+            if (hud == null) return;
+            hudHint.setText(hint);
+            hudHint.setTextColor(level == 0 ? Color.WHITE : HINT_COLORS[Math.min(2, level)]);
+            hudSub.setText(sub == null ? "" : sub);
+            hudSub.setVisibility(sub == null ? View.GONE : View.VISIBLE);
+            hudDetail.setProgress(Math.round(detail * 1000));
+            hudDetail.setProgressTintList(android.content.res.ColorStateList.valueOf(detail >= 0.7f ? HINT_COLORS[0] : detail >= 0.35f ? HINT_COLORS[1] : HINT_COLORS[2]));
+            hudDetailPct.setText(Math.round(detail * 100) + "%");
+            hudRoom.setProgress(Math.round(room * 1000));
+            hudRoomPct.setText(Math.round(room * 100) + "%");
+        });
+    }
+
+    /** The automatic processing after a scan: label + progress 0..1; null/negative hides it, 1 shows Done briefly. */
+    void updateProcess(String label, float frac) {
+        runOnUiThread(() -> {
+            if (procBox == null) return;
+            if (label == null || frac < 0) { procBox.setVisibility(View.GONE); return; }
+            procBox.setVisibility(scanning ? View.GONE : View.VISIBLE);
+            procLabel.setText(frac >= 1 ? "✓ Scan improved" : label + "…");
+            procBar.setProgress(Math.round(Math.min(1f, frac) * 1000));
+            if (frac >= 1) procBox.postDelayed(() -> { if (procBar.getProgress() >= 1000) procBox.setVisibility(View.GONE); }, 3000);
+        });
+    }
+
+    void trainingLabel(String l) { runOnUiThread(() -> trainButton.setText(l)); }
 
     // ---------------- home screen and saved scans ----------------
 
