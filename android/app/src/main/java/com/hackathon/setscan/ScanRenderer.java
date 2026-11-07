@@ -604,6 +604,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 ScanStore.Data d = new ScanStore.Data();
                 d.name = name;
                 d.lux = roomLux() > 0 ? roomLux() : loadedLux;
+                try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
@@ -698,6 +699,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         cornerList.addAll(d.corners); wallList.addAll(d.walls);
                         markFloor = d.floor; markCeiling = d.ceiling;
                     }
+                    if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
                 int room = Math.max(0, 80 - photos.keyframes.size());
                 for (int i = 0; i < d.kfs.size() && i < room; i++) {
@@ -2480,7 +2482,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;
-        earlyDepthFrames = -1; loadedAny = false;
+        earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
@@ -2592,6 +2594,68 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     boolean toggleTopView() { topView = !topView; return topView; }
+
+    // ---- scene objects: remove, move, put back, catalogue (see SceneObjects) ----
+    final SceneObjects objects = new SceneObjects();
+
+    /** GL thread: object mode on/off. Returns the panel text. */
+    String objectsOn(boolean on) {
+        objects.active = on;
+        if (on && roomReady && (objects.list.isEmpty() || !objects.edited)) objects.fromRoom(room.boxes, pos, col, count, room.floorY);
+        if (!on) { objects.selected = -1; if (objects.edited) autosave(); }
+        return objectInfo();
+    }
+
+    String objectInfo() {
+        SceneObjects.Obj o = objects.sel();
+        if (o != null) return o.name + " · " + o.size() + (o.removed ? " · removed" : o.moved() ? " · moved" : "") + (o.removed ? "" : "\nDrag it to move it. Tap empty space to let go.");
+        if (!roomReady) return "Objects appear once the scan has finished processing.";
+        if (objects.list.isEmpty()) return "No separate objects found in this scan yet.";
+        int rem = 0; for (SceneObjects.Obj x : objects.list) if (x.removed) rem++;
+        return objects.list.size() + " objects found" + (rem > 0 ? " (" + rem + " removed)" : "") + ". Tap one to select it.";
+    }
+
+    /** Any thread: which object is under the finger (-1 = none). */
+    int objectHit(float x, float y) { return objects.pick(viewMvp, width, height, x, y); }
+
+    void objectDrag(float dx, float dy) {
+        SceneObjects.Obj o = objects.sel();
+        if (o == null || o.removed) return;
+        float s = dist * 2f * (float) Math.tan(Math.toRadians(30)) / height;
+        if (topView) { o.ox += dx * s; o.oz += dy * s; }
+        else {
+            float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
+            o.ox += (dx * cy + dy * sy) * s; o.oz += (-dx * sy + dy * cy) * s;
+        }
+        objects.edited = true;
+    }
+
+    void objectTurn() { SceneObjects.Obj o = objects.sel(); if (o != null && !o.removed) { o.turn += (float) Math.toRadians(15); objects.edited = true; } }
+
+    /** Remove the selected object, or put it back where it was. */
+    void objectRemoveToggle() {
+        SceneObjects.Obj o = objects.sel();
+        if (o == null) return;
+        if (o.removed || o.moved()) { o.removed = false; o.ox = o.oz = 0; o.turn = 0; }
+        else if (o.fromCatalog) { objects.list.remove(o); objects.selected = -1; }
+        else o.removed = true;
+        objects.edited = true;
+    }
+
+    void objectPutBack(int k) {
+        if (k < 0 || k >= objects.list.size()) return;
+        SceneObjects.Obj o = objects.list.get(k);
+        o.removed = false; o.ox = o.oz = 0; o.turn = 0; objects.selected = k; objects.edited = true;
+    }
+
+    /** GL thread: bring a catalogue item into this scan, on the floor in the middle of the view. */
+    void objectPlace(SceneObjects.Item it) {
+        try {
+            float fy = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
+            SceneObjects.Obj o = SceneObjects.loadItem(it, target[0], fy, target[2]);
+            objects.list.add(o); objects.selected = objects.list.size() - 1; objects.edited = true; objects.active = true;
+        } catch (Exception e) { logError("catalog place", e); }
+    }
 
     void orbit(float dx, float dy) {
         yaw -= dx * 0.008f;
@@ -3846,6 +3910,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
         updateCutaway(ex, ez, topView);
         if (SHOW_OBJECTS) updateHideList(); else hideN = 0;
+        hideN = objects.addHides(hideA, hideB, hideN);
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         boolean simple = viewMode == 0 && roomReady && room.hasLayout;
         if (simple) {
@@ -3854,6 +3919,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
+        objects.draw(mvp, height, proj[5] * height / 2f);
         if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
         else if (roomReady) drawRoom(mvp, simple);
         cutActive = false;

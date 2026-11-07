@@ -256,6 +256,11 @@ public class MainActivity extends Activity {
             });
         });
         bar.addView(lightButton);
+        objButton = new Button(this);
+        objButton.setText("Objects");
+        objButton.setVisibility(View.GONE);
+        objButton.setOnClickListener(v -> setObjectMode(objPanel.getVisibility() != View.VISIBLE));
+        bar.addView(objButton);
         saveButton = new Button(this);
         saveButton.setText("Rename");
         saveButton.setVisibility(View.GONE);
@@ -375,10 +380,16 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         llp.bottomMargin = dp(150);
         chrome.addView(lightPanel, llp);
+        objPanel = buildObjPanel();
+        objPanel.setVisibility(View.GONE);
+        FrameLayout.LayoutParams olp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        olp.bottomMargin = dp(150);
+        chrome.addView(objPanel, olp);
         // keep the panel just above the button rows, however many rows they wrap into
         bars.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             int want = dp(56) + (b - t);
             if (llp.bottomMargin != want) { llp.bottomMargin = want; lightPanel.post(() -> lightPanel.setLayoutParams(llp)); }
+            if (olp.bottomMargin != want) { olp.bottomMargin = want; objPanel.post(() -> objPanel.setLayoutParams(olp)); }
             if (procLp != null && procLp.bottomMargin != want + dp(8)) { procLp.bottomMargin = want + dp(8); procBox.post(() -> procBox.setLayoutParams(procLp)); }
         });
         root.addView(chrome, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -414,6 +425,7 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
+            if (objPanel.getVisibility() == View.VISIBLE && objectTouch(e)) return true;
             if (renderer.lighting.enabled) {
                 // a finger that lands on a light or prop selects and drags it; anywhere else it orbits as usual
                 int act = e.getActionMasked();
@@ -488,6 +500,7 @@ public class MainActivity extends Activity {
         renderer.lighting.enabled = false;
         lightButton.setText("Lighting");
         if (lightPanel != null) lightPanel.setVisibility(View.GONE);
+        if (objPanel != null) objPanel.setVisibility(View.GONE);
         topButton.setText("Top view");
         trainButton.setText("Train splats");
         depthButton.setText("Depth AI");
@@ -513,7 +526,7 @@ public class MainActivity extends Activity {
 
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
-        Button[] viewerMain = {homeButton, exportButton, lightButton, saveButton};
+        Button[] viewerMain = {homeButton, exportButton, lightButton, objButton, saveButton};
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
         improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE);
@@ -835,6 +848,154 @@ public class MainActivity extends Activity {
             String hint = renderer.improveHint();
             runOnUiThread(() -> { scanUi(); updateStatus(hint); Toast.makeText(this, hint, Toast.LENGTH_LONG).show(); resumeSession(); });
         });
+    }
+
+    // ---------------- objects: remove / move / put back / catalogue (core feature) ----------------
+    private Button objButton, objRemoveBtn;
+    private LinearLayout objPanel;
+    private TextView objLabel;
+    private boolean objDragging, objMoved;
+    private float objLastX, objLastY, objDownX, objDownY;
+    private long objDownT;
+
+    private void setObjectMode(boolean on) {
+        objPanel.setVisibility(on ? View.VISIBLE : View.GONE);
+        if (on && lightPanel != null) lightPanel.setVisibility(View.GONE);
+        glView.queueEvent(() -> { String t = renderer.objectsOn(on); runOnUiThread(() -> objPanelText(t)); });
+    }
+
+    private void refreshObjPanel() { glView.queueEvent(() -> { String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }); }
+
+    private void objPanelText(String t) {
+        objLabel.setText(t);
+        SceneObjects.Obj o = renderer.objects.sel();
+        objRemoveBtn.setText(o == null ? "Remove" : o.removed || o.moved() ? "Put back" : "Remove");
+    }
+
+    /** Object mode touches: a finger on the selected object drags it; a tap selects; everything else orbits as usual. */
+    private boolean objectTouch(MotionEvent e) {
+        int act = e.getActionMasked();
+        if (e.getPointerCount() > 1) { objDragging = false; return false; }
+        if (act == MotionEvent.ACTION_DOWN) {
+            objDownX = objLastX = e.getX(); objDownY = objLastY = e.getY(); objDownT = e.getEventTime(); objMoved = false;
+            int hit = renderer.objectHit(e.getX(), e.getY());
+            objDragging = hit >= 0 && hit == renderer.objects.selected;
+            if (!objDragging) return false;
+            return true;
+        }
+        if (act == MotionEvent.ACTION_MOVE && objDragging) {
+            float dx = e.getX() - objLastX, dy = e.getY() - objLastY;
+            objLastX = e.getX(); objLastY = e.getY();
+            if (Math.hypot(e.getX() - objDownX, e.getY() - objDownY) > dp(6)) objMoved = true;
+            glView.queueEvent(() -> renderer.objectDrag(dx, dy));
+            return true;
+        }
+        if (act == MotionEvent.ACTION_UP) {
+            boolean tap = e.getEventTime() - objDownT < 300 && Math.hypot(e.getX() - objDownX, e.getY() - objDownY) < dp(12);
+            boolean wasDrag = objDragging;
+            objDragging = false;
+            if (tap) {
+                int hit = renderer.objectHit(e.getX(), e.getY());
+                renderer.objects.selected = hit;
+                refreshObjPanel();
+                lastPointerCount = 0;
+                return true;
+            }
+            if (wasDrag) { refreshObjPanel(); lastPointerCount = 0; return true; }
+        }
+        return false;
+    }
+
+    private LinearLayout buildObjPanel() {
+        LinearLayout p = new LinearLayout(this);
+        p.setOrientation(LinearLayout.VERTICAL);
+        p.setBackgroundColor(0xCC101216);
+        p.setPadding(dp(10), dp(6), dp(10), dp(6));
+        objLabel = new TextView(this);
+        objLabel.setTextColor(Color.WHITE);
+        objLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(objLabel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button close = smallButton("✕ Done");
+        close.setOnClickListener(v -> setObjectMode(false));
+        head.addView(close);
+        p.addView(head);
+        FlowRow row = new FlowRow(this, dp(4));
+        objRemoveBtn = smallButton("Remove");
+        objRemoveBtn.setOnClickListener(v -> glView.queueEvent(() -> { renderer.objectRemoveToggle(); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }));
+        row.addView(objRemoveBtn);
+        Button turn = smallButton("Turn 15°");
+        turn.setOnClickListener(v -> glView.queueEvent(() -> { renderer.objectTurn(); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }));
+        row.addView(turn);
+        Button removed = smallButton("Removed…");
+        removed.setOnClickListener(v -> showRemoved());
+        row.addView(removed);
+        Button save = smallButton("Save to catalogue");
+        save.setOnClickListener(v -> saveObjectToCatalog());
+        row.addView(save);
+        Button cat = smallButton("Catalogue…");
+        cat.setOnClickListener(v -> showCatalog());
+        row.addView(cat);
+        p.addView(row);
+        return p;
+    }
+
+    private Button smallButton(String text) {
+        Button b = new Button(this);
+        b.setText(text); b.setAllCaps(false); b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        b.setMinHeight(0); b.setMinimumHeight(0); b.setMinWidth(0); b.setMinimumWidth(0);
+        b.setPadding(dp(10), dp(4), dp(10), dp(4));
+        return b;
+    }
+
+    private void showRemoved() {
+        java.util.List<Integer> idx = new java.util.ArrayList<>();
+        java.util.List<String> names = new java.util.ArrayList<>();
+        for (int i = 0; i < renderer.objects.list.size(); i++) {
+            SceneObjects.Obj o = renderer.objects.list.get(i);
+            if (o.removed) { idx.add(i); names.add(o.name + " · " + o.size()); }
+        }
+        if (idx.isEmpty()) { toast("Nothing removed yet"); return; }
+        new android.app.AlertDialog.Builder(this).setTitle("Put back")
+                .setItems(names.toArray(new String[0]), (d, w) -> { int k = idx.get(w); glView.queueEvent(() -> { renderer.objectPutBack(k); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }); })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private void saveObjectToCatalog() {
+        SceneObjects.Obj o = renderer.objects.sel();
+        if (o == null) { toast("Tap an object first"); return; }
+        android.widget.EditText in = new android.widget.EditText(this);
+        in.setText(o.name); in.setSelectAllOnFocus(true);
+        new android.app.AlertDialog.Builder(this).setTitle("Save to catalogue").setMessage(o.size()).setView(in)
+                .setPositiveButton("Save", (d, w) -> {
+                    String name = in.getText().toString().trim().isEmpty() ? o.name : in.getText().toString().trim();
+                    o.name = name;
+                    String from = renderer.currentName;
+                    new Thread(() -> {
+                        try { SceneObjects.saveToCatalog(this, o, name, from); toast("Saved \"" + name + "\" to the catalogue"); }
+                        catch (Exception e) { toast("Couldn't save: " + e.getMessage()); }
+                    }).start();
+                    refreshObjPanel();
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private void showCatalog() {
+        java.util.List<SceneObjects.Item> items = SceneObjects.listCatalog(this);
+        if (items.isEmpty()) { toast("The catalogue is empty. Select an object and tap Save to catalogue."); return; }
+        String[] names = new String[items.size()];
+        for (int i = 0; i < items.size(); i++) {
+            SceneObjects.Item it = items.get(i);
+            names[i] = String.format(java.util.Locale.US, "%s · %.0f × %.0f × %.0f cm%s", it.name, it.w * 100, it.d * 100, it.h * 100, it.from.isEmpty() ? "" : "\nfrom " + it.from);
+        }
+        new android.app.AlertDialog.Builder(this).setTitle("Catalogue: tap to place")
+                .setItems(names, (d, w) -> {
+                    SceneObjects.Item it = items.get(w);
+                    glView.queueEvent(() -> { renderer.objectPlace(it); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); });
+                })
+                .setNegativeButton("Close", null).show();
     }
 
     private LinearLayout buildLightPanel() {

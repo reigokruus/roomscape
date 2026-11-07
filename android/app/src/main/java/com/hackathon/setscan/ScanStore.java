@@ -43,6 +43,7 @@ final class ScanStore {
         float[] path = new float[0];
         List<float[]> corners = new ArrayList<>(), walls = new ArrayList<>();
         float[] floor, ceiling;
+        String objects; // SceneObjects edits as a JSON array, or null
         float lux; // room light measured from the camera's exposure, 0 = unknown
         Bitmap thumb;
     }
@@ -114,6 +115,7 @@ final class ScanStore {
         m.put("name", d.name); m.put("created", d.created > 0 ? d.created : now); m.put("modified", now);
         m.put("points", d.n); m.put("photos", d.kfs.size());
         if (d.lux > 0) m.put("lux", d.lux);
+        if (d.objects != null) m.put("objects", new JSONArray(d.objects));
         m.put("corners", arr(d.corners)); m.put("walls", arr(d.walls));
         if (d.floor != null) m.put("floor", vec(d.floor));
         if (d.ceiling != null) m.put("ceiling", vec(d.ceiling));
@@ -133,6 +135,8 @@ final class ScanStore {
         JSONObject m = new JSONObject(readText(new File(dir, "meta.json")));
         d.name = m.optString("name"); d.created = m.optLong("created");
         d.lux = (float) m.optDouble("lux", 0);
+        JSONArray oa = m.optJSONArray("objects");
+        d.objects = oa == null ? null : oa.toString();
         d.corners = list(m.optJSONArray("corners")); d.walls = list(m.optJSONArray("walls"));
         d.floor = m.has("floor") ? vec(m.getJSONArray("floor")) : null;
         d.ceiling = m.has("ceiling") ? vec(m.getJSONArray("ceiling")) : null;
