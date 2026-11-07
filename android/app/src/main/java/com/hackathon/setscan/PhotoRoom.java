@@ -83,12 +83,11 @@ final class PhotoRoom {
         ready = false; texturedTris = plainTris = 0;
     }
 
-    /** Should we keep this frame? Far enough (30 cm or 15°) from every keyframe so far, and the phone is steady. */
-    boolean wants(float[] pose, float moveSinceLastFrame, float turnSinceLastFrameDeg, boolean nearDetail) {
+    /** Is this a view we have no photo of yet? Far enough (25 cm or 12°) from every keyframe so far. Blur is checked by the caller. */
+    boolean novel(float[] pose, boolean nearDetail) {
         if (keyframes.size() >= MAX_KEYFRAMES && !nearDetail) return false; // full: only close-ups may replace a wide shot
         if (!nearDetail && keyframes.size() >= MAX_KEYFRAMES - 15) return false; // keep room for close-ups of detail zones
-        float minMove = nearDetail ? 0.1f : 0.3f, maxDot = nearDetail ? 0.985f : 0.966f;
-        if (moveSinceLastFrame > 0.012f || turnSinceLastFrameDeg > 1.2f) return false; // blur risk
+        float minMove = nearDetail ? 0.1f : 0.25f, maxDot = nearDetail ? 0.985f : 0.978f;
         float fx = -pose[8], fy = -pose[9], fz = -pose[10];
         for (Keyframe k : keyframes) {
             float dx = pose[12] - k.px, dy = pose[13] - k.py, dz = pose[14] - k.pz;

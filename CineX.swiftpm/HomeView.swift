@@ -37,9 +37,12 @@ struct HomeView: View {
                     Section("Saved scans") {
                         ForEach(scans) { scan in
                             NavigationLink(value: scan) {
-                                VStack(alignment: .leading) {
-                                    Text(scan.date.formatted(date: .abbreviated, time: .shortened))
-                                    Text(scan.name).font(.caption).foregroundStyle(.secondary)
+                                HStack(spacing: 12) {
+                                    ScanThumbnailView(scan: scan)
+                                    VStack(alignment: .leading) {
+                                        Text(scan.date.formatted(date: .abbreviated, time: .shortened))
+                                        Text(scan.name).font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -78,6 +81,32 @@ struct HomeView: View {
                     onCancel: { scanning = false }
                 )
             }
+        }
+    }
+}
+
+/// A saved scan's thumbnail. Older scans get theirs rendered the first time they're shown.
+private struct ScanThumbnailView: View {
+    let scan: SavedScan
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            }
+        }
+        .frame(width: 88, height: 66)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .task(id: scan.id) {
+            let scan = scan
+            image = await Task.detached(priority: .utility) { () -> UIImage? in
+                guard let url = ScanStore.ensureThumbnail(scan) else { return nil }
+                return UIImage(contentsOfFile: url.path)
+            }.value
         }
     }
 }

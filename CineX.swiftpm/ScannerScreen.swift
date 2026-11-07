@@ -4,19 +4,13 @@ import os
 
 private let log = Logger(subsystem: "SetScan", category: "scan")
 
-/// Live counts shown while scanning.
-struct ScanStats: Equatable {
-    var walls = 0, floors = 0, doors = 0, windows = 0, objects = 0
-    var isEmpty: Bool { walls + floors + doors + windows + objects == 0 }
-}
-
 /// Drives RoomPlan's RoomCaptureView for the live scan, then builds and saves the room model itself.
 ///
 /// We don't let RoomCaptureView present its own result: we return `false` from `shouldPresent` and run
 /// `RoomBuilder` ourselves. That way every outcome (success, tracking failure, processing error) reaches
 /// our code, and the UI can never get stuck waiting for a callback that doesn't come.
 @MainActor
-final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate, RoomCaptureSessionDelegate {
+final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate {
     enum Phase: Equatable {
         case scanning
         case processing
@@ -31,21 +25,19 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
     @Published var phaseStarted = Date()
     /// Set when the app ended the scan by itself (memory or heat), so the user knows why.
     @Published var endedEarlyReason: String?
-    @Published var scanStats = ScanStats()
     let captureView: RoomCaptureView
+    /// LiDAR points and live discs, read from RoomPlan's own ARKit session.
+    let live: LiveCapture
     private var running = false
     private var processingTask: Task<Void, Never>?
-    /// The session delegate RoomCaptureView had before we took over (see init). Set once, then only read.
-    nonisolated(unsafe) private var forwardSessionEvents: RoomCaptureSessionDelegate?
 
     override init() {
         captureView = RoomCaptureView(frame: .zero)
+        live = LiveCapture(session: captureView.captureSession.arSession)
         super.init()
         captureView.delegate = self
-        // We listen to the session for live counts. RoomCaptureView may rely on the session's delegate itself,
-        // so keep whatever delegate it set and pass every event on to it; otherwise its UI could stop updating.
-        forwardSessionEvents = captureView.captureSession.delegate
-        captureView.captureSession.delegate = self
+        // Don't set captureView.captureSession.delegate: taking it over stops RoomCaptureView's live outlines,
+        // and the view then never reports the end of the scan, so the app hangs after Done.
         NotificationCenter.default.addObserver(self, selector: #selector(memoryWarning),
                                                name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(thermalStateChanged),
@@ -63,9 +55,9 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
         running = true
         saved = nil
         endedEarlyReason = nil
-        scanStats = ScanStats()
         setPhase(.scanning)
         captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
+        live.start()
     }
 
     /// User tapped Done. RoomPlan answers through `shouldPresent`, where processing starts.
@@ -73,6 +65,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
         guard phase == .scanning, running else { return }
         setPhase(.processing)
         running = false
+        live.stop()
         captureView.captureSession.stop()
     }
 
@@ -80,6 +73,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
         log.info("cancel")
         processingTask?.cancel()
         processingTask = nil
+        live.stop()
         if running {
             running = false
             captureView.captureSession.stop()
@@ -123,44 +117,6 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
         }
     }
 
-    // MARK: RoomCaptureSessionDelegate
-
-    nonisolated func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
-        forwardSessionEvents?.captureSession(session, didUpdate: room)
-        let stats = ScanStats(
-            walls: room.walls.count,
-            floors: room.floors.count,
-            doors: room.doors.count,
-            windows: room.windows.count,
-            objects: room.objects.count
-        )
-        Task { @MainActor in self.scanStats = stats }
-    }
-
-    nonisolated func captureSession(_ session: RoomCaptureSession, didAdd room: CapturedRoom) {
-        forwardSessionEvents?.captureSession(session, didAdd: room)
-    }
-
-    nonisolated func captureSession(_ session: RoomCaptureSession, didChange room: CapturedRoom) {
-        forwardSessionEvents?.captureSession(session, didChange: room)
-    }
-
-    nonisolated func captureSession(_ session: RoomCaptureSession, didRemove room: CapturedRoom) {
-        forwardSessionEvents?.captureSession(session, didRemove: room)
-    }
-
-    nonisolated func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
-        forwardSessionEvents?.captureSession(session, didProvide: instruction)
-    }
-
-    nonisolated func captureSession(_ session: RoomCaptureSession, didStartWith configuration: RoomCaptureSession.Configuration) {
-        forwardSessionEvents?.captureSession(session, didStartWith: configuration)
-    }
-
-    nonisolated func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: Error?) {
-        forwardSessionEvents?.captureSession(session, didEndWith: data, error: error)
-    }
-
     // MARK: RoomCaptureViewDelegate
 
     /// Called whenever the session ends: after Done, or on its own after an error such as world tracking failure.
@@ -178,6 +134,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
     private func process(_ data: CapturedRoomData, sessionError: Error?) {
         log.info("session ended, error: \(String(describing: sessionError), privacy: .public)")
         running = false
+        live.stop()
         // The session ended with an error and the user didn't ask to finish. Let them decide.
         if let sessionError, phase == .scanning {
             setPhase(.failed(Self.message(for: sessionError)))
@@ -197,8 +154,9 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
                     self.setPhase(.failed("No walls were found in this scan. Stand inside the room, point the camera at a wall from 1–3 m away, and turn slowly until white outlines appear on every wall."))
                     return
                 }
+                let capture = await self.live.snapshot()
                 let saved = try await Task.detached(priority: .userInitiated) {
-                    try ScanStore.save(room)
+                    try ScanStore.save(room, capture: capture)
                 }.value
                 try Task.checkCancellation()
                 log.info("saved \(saved.name, privacy: .public)")
@@ -229,31 +187,16 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate,
     }
 }
 
-private struct ScanStatsHUD: View {
-    let stats: ScanStats
+/// "Detail here: N% solid" while scanning: how much of what the phone points at is captured well.
+private struct LiveStatusLine: View {
+    @ObservedObject var live: LiveCapture
 
     var body: some View {
-        if !stats.isEmpty {
-            HStack(spacing: 14) {
-                if stats.walls > 0 {
-                    Label("^[\(stats.walls) wall](inflect: true)", systemImage: "rectangle.portrait")
-                }
-                if stats.doors > 0 {
-                    Label("^[\(stats.doors) door](inflect: true)", systemImage: "door.left.hand.open")
-                }
-                if stats.windows > 0 {
-                    Label("^[\(stats.windows) window](inflect: true)", systemImage: "rectangle.inset.filled")
-                }
-                if stats.objects > 0 {
-                    Label("^[\(stats.objects) object](inflect: true)", systemImage: "cube")
-                }
-            }
+        Text(live.detailLine)
             .font(.subheadline.weight(.medium))
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .background(.regularMaterial, in: Capsule())
-            .transition(.opacity.combined(with: .scale(scale: 0.92)))
-        }
     }
 }
 
@@ -280,10 +223,13 @@ struct ScannerScreen: View {
                 .onAppear { controller.start() }
 
             if controller.phase == .scanning {
-                ScanStatsHUD(stats: controller.scanStats)
+                LiveDiscsView(live: controller.live)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                LiveStatusLine(live: controller.live)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 60)
-                    .animation(.easeInOut(duration: 0.25), value: controller.scanStats)
+                    .allowsHitTesting(false)
             }
 
             VStack(spacing: 12) {
@@ -302,6 +248,8 @@ struct ScannerScreen: View {
                     HStack(spacing: 16) {
                         Button("Cancel") { close() }
                             .buttonStyle(.bordered)
+                            // Solid backing so the label stays readable over the live discs.
+                            .background(.regularMaterial, in: Capsule())
                         Button("Done") { controller.finish() }
                             .buttonStyle(.borderedProminent)
                     }

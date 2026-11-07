@@ -7,6 +7,10 @@
     <!-- ARCore below is required; do not implicitly require the legacy rear-camera/autofocus feature. -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <!-- Keep processing a finished scan while the app is in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
     <application android:label="CineX" android:largeHeap="true"
@@ -21,5 +25,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name=".ProcessingService" android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
