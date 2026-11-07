@@ -21,6 +21,21 @@ struct Keyframe: Sendable {
     var fx: Float, fy: Float, cx: Float, cy: Float
     var width: Int, height: Int
     var jpeg: Data
+    /// How the camera exposed this photo, so pixel values can be turned back into how bright the scene really was
+    /// (a daylit window is many times brighter than an LED-lit white wall, which auto-exposure hides).
+    var exposure: PhotoExposure?
+}
+
+/// ARKit's exposure and light estimate for one photo.
+struct PhotoExposure: Codable, Sendable {
+    /// Seconds.
+    var duration: TimeInterval
+    /// Exposure bias ARKit applied, in EV.
+    var offset: Float
+    /// ARKit light estimate: ~1000 for a well-lit scene (lumens), and colour temperature in kelvin
+    /// (daylight ~5500–6500 K, indoor LEDs ~2700–4000 K).
+    var ambientIntensity: Float?
+    var ambientKelvin: Float?
 }
 
 /// Everything captured alongside RoomPlan's model, copied out for saving.
@@ -287,6 +302,9 @@ final class LiveCloud: @unchecked Sendable {
         lastKeyframePose = pose
         let timestamp = frame.timestamp
         let k = frame.camera.intrinsics
+        let exposure = PhotoExposure(duration: frame.camera.exposureDuration, offset: frame.camera.exposureOffset,
+                                     ambientIntensity: frame.lightEstimate.map { Float($0.ambientIntensity) },
+                                     ambientKelvin: frame.lightEstimate.map { Float($0.ambientColorTemperature) })
 
         photoQueue.async { [self] in
             let iw = CVPixelBufferGetWidth(pixels), ih = CVPixelBufferGetHeight(pixels)
@@ -301,7 +319,7 @@ final class LiveCloud: @unchecked Sendable {
             let keyframe = Keyframe(timestamp: timestamp, cameraToWorld: pose,
                                     fx: k[0][0] * scale, fy: k[1][1] * scale, cx: k[2][0] * scale, cy: k[2][1] * scale,
                                     width: Int((Float(iw) * scale).rounded()), height: Int((Float(ih) * scale).rounded()),
-                                    jpeg: jpeg)
+                                    jpeg: jpeg, exposure: exposure)
             keyframes.withLock { $0.append(keyframe) }
         }
     }

@@ -56,6 +56,16 @@ enum WindowFinder {
         /// Mean brightness change between neighbouring 10 cm cells inside, across (x) and along (y) the wall.
         /// Curtain pleats and blind slats make stripes; a wall lit by a lamp is smooth.
         var textureAcross: Float, textureUp: Float
+        /// Share of neighbouring cell pairs (in the stripier direction) that differ by more than 0.02. Pleats and
+        /// slats make most pairs differ; a few cables or panel seams on a smooth wall raise the mean texture but
+        /// leave most pairs alike.
+        var stripeShare: Float
+        /// LiDAR surface inside: mean distance in front of the wall plane, and how much it varies (both metres).
+        /// Curtains fold (several cm of relief) and often hang in front of the wall; walls and doors are flat.
+        var surfaceOffset: Float, surfaceRelief: Float
+        /// Median over cells of the depth spread *within* each 10 cm cell (m): curtain folds show up inside a cell,
+        /// a flat wall only shows LiDAR noise (~1 cm), and things standing in front only affect a few cells.
+        var localRelief: Float
         /// True when it overlaps a window RoomPlan reported.
         var matchesRoomPlan: Bool
 
@@ -73,6 +83,8 @@ enum WindowFinder {
         var views: [Int]
         var brightViews: [Int] // views in which the cell looked bright (≥ brightAbsolute)
         var onWall: [Int]     // LiDAR points on the wall plane
+        var offSum: [Float]   // sum and sum of squares of those points' distance in front of the plane (m)
+        var offSq: [Float]
         var behind: [Int]     // LiDAR points seen through it
         var typical: Float    // the wall's median luminance
         var bright: [Bool]
@@ -109,7 +121,9 @@ enum WindowFinder {
                 let minUp = Float(rect.r0) * cell - wall.halfHeight, maxUp = Float(rect.r1 + 1) * cell - wall.halfHeight
                 var lumSum: Float = 0, lumN = 0, through = 0, cells = 0, blown = 0, solidCells = 0
                 var views = 0, brightViews = 0
-                var dx: Float = 0, dxN = 0, dy: Float = 0, dyN = 0
+                var dx: Float = 0, dxN = 0, dy: Float = 0, dyN = 0, dxBig = 0, dyBig = 0
+                var offN = 0, offS: Float = 0, offQ: Float = 0
+                var cellRelief: [Float] = []
                 for r in rect.r0...rect.r1 {
                     for c in rect.c0...rect.c1 {
                         let i = r * grid.cols + c
@@ -117,11 +131,22 @@ enum WindowFinder {
                         if grid.lum[i] >= 0 { lumSum += grid.lum[i]; lumN += 1 }
                         if grid.lum[i] >= 0.95 { blown += 1 }
                         if grid.onWall[i] >= 2 { solidCells += 1 }
+                        offN += grid.onWall[i]; offS += grid.offSum[i]; offQ += grid.offSq[i]
+                        if grid.onWall[i] >= 4 {
+                            let n = Float(grid.onWall[i]), m = grid.offSum[i] / n
+                            cellRelief.append(max(0, grid.offSq[i] / n - m * m).squareRoot())
+                        }
                         if grid.bright[i] { views += grid.views[i]; brightViews += grid.brightViews[i] }
                         if grid.lum[i] >= 0 {
-                            if c < rect.c1, grid.lum[i + 1] >= 0 { dx += abs(grid.lum[i + 1] - grid.lum[i]); dxN += 1 }
+                            if c < rect.c1, grid.lum[i + 1] >= 0 {
+                                let d = abs(grid.lum[i + 1] - grid.lum[i])
+                                dx += d; dxN += 1
+                                if d > 0.02 { dxBig += 1 }
+                            }
                             if r < rect.r1, grid.lum[i + grid.cols] >= 0 {
-                                dy += abs(grid.lum[i + grid.cols] - grid.lum[i]); dyN += 1
+                                let d = abs(grid.lum[i + grid.cols] - grid.lum[i])
+                                dy += d; dyN += 1
+                                if d > 0.02 { dyBig += 1 }
                             }
                         }
                         if grid.behind[i] > max(2, grid.onWall[i]) { through += 1 }
@@ -139,6 +164,10 @@ enum WindowFinder {
                                    solid: Float(solidCells) / Float(max(1, cells)),
                                    consistency: Float(brightViews) / Float(max(1, views)),
                                    textureAcross: dx / Float(max(1, dxN)), textureUp: dy / Float(max(1, dyN)),
+                                   stripeShare: max(Float(dxBig) / Float(max(1, dxN)), Float(dyBig) / Float(max(1, dyN))),
+                                   surfaceOffset: offN > 0 ? offS / Float(offN) : 0,
+                                   surfaceRelief: offN > 1 ? max(0, offQ / Float(offN) - (offS / Float(offN)) * (offS / Float(offN))).squareRoot() : 0,
+                                   localRelief: cellRelief.isEmpty ? 0 : cellRelief.sorted()[cellRelief.count / 2],
                                    matchesRoomPlan: matches)
                 candidates.append(candidate)
                 if let kind = classify(candidate) {
@@ -170,10 +199,14 @@ enum WindowFinder {
     ///   A lit glass partition is bright but has no surface (glass gives no LiDAR return); glare is blown out; a
     ///   white wall lit by a ceiling light is smooth (texture 0.003–0.034 measured, curtains 0.061–0.063), and
     ///   bright from every angle, so view consistency can't tell it apart.
+    /// - curtains also fold: their LiDAR surface varies by 5.5–6.2 cm across the patch. A white wall with vertical
+    ///   cable conduits (which fooled the texture test in a second room) is flat: 3.7–4.9 cm, including things in
+    ///   front of it. The margin is thin; absolute brightness from `PhotoExposure` (saved from now on) should
+    ///   separate daylight from lamplight much more clearly once there are scans to tune it on.
     static func classify(_ f: Found) -> Kind? {
         if f.blownOut >= 0.2 && f.seeThrough >= 0.15 { return .clearGlass }
         if f.solid >= 0.4 && f.brightness >= 0.70 && f.blownOut < 0.12 && f.area >= 1.5
-            && max(f.textureAcross, f.textureUp) >= 0.045 { return .curtained }
+            && max(f.textureAcross, f.textureUp) >= 0.045 && f.surfaceRelief >= 0.05 { return .curtained }
         return nil
     }
 
@@ -189,6 +222,7 @@ enum WindowFinder {
         var g = WallGrid(cols: cols, rows: rows, lum: [Float](repeating: -1, count: cols * rows),
                          views: [Int](repeating: 0, count: cols * rows),
                          brightViews: [Int](repeating: 0, count: cols * rows), onWall: [Int](repeating: 0, count: cols * rows),
+                         offSum: [Float](repeating: 0, count: cols * rows), offSq: [Float](repeating: 0, count: cols * rows),
                          behind: [Int](repeating: 0, count: cols * rows), typical: 0,
                          bright: [Bool](repeating: false, count: cols * rows))
 
@@ -200,7 +234,14 @@ enum WindowFinder {
             guard off > -6, off < 0.25 else { continue }
             let c = Int((along + wall.halfWidth) / cell), r = Int((up + wall.halfHeight) / cell)
             guard c >= 0, c < cols, r >= 0, r < rows else { continue }
-            if off > -0.08 { g.onWall[r * cols + c] += 1 } else if off < -0.2 { g.behind[r * cols + c] += 1 }
+            if off > -0.08 {
+                let i = r * cols + c
+                g.onWall[i] += 1
+                g.offSum[i] += off
+                g.offSq[i] += off * off
+            } else if off < -0.2 {
+                g.behind[r * cols + c] += 1
+            }
         }
 
         // Photos: every cell centre seen from inside the room, not too obliquely.
