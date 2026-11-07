@@ -42,7 +42,7 @@ final class LiveCapture {
     func setPowerSaving(_ on: Bool) {
         link?.preferredFrameRateRange = on ? CAFrameRateRange(minimum: 3, maximum: 5, preferred: 5)
                                            : CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
-        discView?.preferredFramesPerSecond = on ? 10 : 20
+        discView?.preferredFramesPerSecond = on ? 6 : 12
         if let cloud { worker.async { cloud.setPowerSaving(on) } }
     }
 
@@ -197,9 +197,9 @@ final class LiveCapture {
 }
 
 /// Transparent Metal view that draws the live capture over the camera image as a white mesh with a grid: every
-/// captured spot is a small white disc lying on its surface (its normal comes from the LiDAR depth), and grid lines
-/// every `LiveDiscRenderer.cell` run across them in world space. Fresh spots are faint; they brighten as they
-/// become solid, so what's still thin stays visible without colour coding.
+/// captured spot is a small white square tile lying on its surface (its normal comes from the LiDAR depth), and
+/// grid lines every `LiveDiscRenderer.cell` run across them in world space. Fresh spots are faint; they brighten as
+/// they become solid, so what's still thin stays visible without colour coding.
 /// Holds its renderer, since an MTKView only keeps a weak reference to its delegate.
 final class LiveDiscsMTKView: MTKView {
     private let renderer: LiveDiscRenderer
@@ -216,9 +216,10 @@ final class LiveDiscsMTKView: MTKView {
         depthStencilPixelFormat = .depth32Float
         clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         // Drawing at 1x instead of the screen's 3x is 9x fewer pixels for the GPU (which is also running the camera
-        // and RoomPlan); the grid lines are anti-aliased, so it still looks clean. 20 fps is plenty for feedback.
+        // and RoomPlan); the grid lines are anti-aliased, so it still looks clean. 12 fps is enough for feedback
+        // and keeps the phone cooler (6 when it's warm, see `LiveCapture.setPowerSaving`).
         contentScaleFactor = 1
-        preferredFramesPerSecond = 20
+        preferredFramesPerSecond = 12
         renderer.session = live.session
         delegate = renderer
     }
@@ -226,6 +227,10 @@ final class LiveDiscsMTKView: MTKView {
     required init(coder: NSCoder) { fatalError("not supported") }
 }
 
+/// Kept cheap for the GPU, which is also running the camera, ARKit and RoomPlan: tiles are built in the vertex
+/// shader (no discard, no depth written from the fragment shader, which would turn off the GPU's hidden-surface
+/// removal), a depth-only pass with no fragment shader finds the nearest tile per pixel, and the colour pass then
+/// shades only that tile, so each pixel is shaded about once and overlapping tiles never blend twice.
 final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     /// Grid size, metres.
     static let cell: Float = 0.1
@@ -233,8 +238,6 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     weak var session: ARSession?
     private let cloud: LiveCloud
     private let queue: MTLCommandQueue
-    /// Two passes, so overlapping discs never blend twice (which made the fill blotchy): depth only, then colour
-    /// where a disc is the nearest surface. Both use the same shaders, so their depths match exactly.
     private let depthPipeline: MTLRenderPipelineState
     private let colorPipeline: MTLRenderPipelineState
     private let depthWrite: MTLDepthStencilState
@@ -242,28 +245,28 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
 
     private struct Uniforms {
         var viewProjection: simd_float4x4
-        var inverseViewProjection: simd_float4x4
         var cameraPosition: SIMD4<Float>
-        var viewport: SIMD2<Float>
-        var radius: Float
-        var pixelsPerMeter: Float
+        var halfSize: Float
         var cell: Float
     }
 
     init?(device: MTLDevice, cloud: LiveCloud) {
+        let options = MTLCompileOptions()
+        // Both passes must put every tile at exactly the same depth.
+        options.preserveInvariance = true
         guard let queue = device.makeCommandQueue(),
-              let library = try? device.makeLibrary(source: Self.shaderSource, options: nil),
+              let library = try? device.makeLibrary(source: Self.shaderSource, options: options),
               let vertex = library.makeFunction(name: "tileVertex"),
               let fragment = library.makeFunction(name: "tileFragment") else { return nil }
-        func pipeline(colorWrites: Bool) -> MTLRenderPipelineState? {
+        func pipeline(fragment: MTLFunction?) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertex
             descriptor.fragmentFunction = fragment
             descriptor.depthAttachmentPixelFormat = .depth32Float
             let color = descriptor.colorAttachments[0]!
             color.pixelFormat = .bgra8Unorm
-            color.writeMask = colorWrites ? .all : []
-            color.isBlendingEnabled = colorWrites
+            color.writeMask = fragment == nil ? [] : .all
+            color.isBlendingEnabled = fragment != nil
             // Premultiplied result over a transparent background, so the overlay composites cleanly over the camera.
             color.sourceRGBBlendFactor = .sourceAlpha
             color.destinationRGBBlendFactor = .oneMinusSourceAlpha
@@ -277,7 +280,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             depth.isDepthWriteEnabled = write
             return device.makeDepthStencilState(descriptor: depth)
         }
-        guard let depthPipeline = pipeline(colorWrites: false), let colorPipeline = pipeline(colorWrites: true),
+        guard let depthPipeline = pipeline(fragment: nil), let colorPipeline = pipeline(fragment: fragment),
               let depthWrite = depthState(.less, write: true),
               let depthEqual = depthState(.lessEqual, write: false) else { return nil }
         self.cloud = cloud
@@ -300,32 +303,27 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
             let viewMatrix = camera.viewMatrix(for: .portrait)
             let projection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
-            let size = view.drawableSize
-            let viewProjection = projection * viewMatrix
-            let eye = viewMatrix.inverse.columns.3
-            var uniforms = Uniforms(viewProjection: viewProjection, inverseViewProjection: viewProjection.inverse,
-                                    cameraPosition: eye, viewport: SIMD2(Float(size.width), Float(size.height)),
-                                    radius: cloud.voxelSize * 0.9,
-                                    pixelsPerMeter: projection[1][1] * Float(size.height) / 2, cell: Self.cell)
+            var uniforms = Uniforms(viewProjection: projection * viewMatrix,
+                                    cameraPosition: viewMatrix.inverse.columns.3,
+                                    halfSize: cloud.voxelSize * 0.7, cell: Self.cell)
             encoder.setVertexBuffer(cloud.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(cloud.normalBuffer, offset: 0, index: 1)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
             encoder.setRenderPipelineState(depthPipeline)
             encoder.setDepthStencilState(depthWrite)
-            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
             encoder.setRenderPipelineState(colorPipeline)
             encoder.setDepthStencilState(depthEqual)
-            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
         }
         encoder.endEncoding()
         commands.present(drawable)
         commands.commit()
     }
 
-    /// Each spot is one point sprite big enough to hold its disc. The fragment shader casts the pixel's ray onto
-    /// the spot's plane, keeps it if it lands within `radius` of the centre, and writes that hit's real depth, so
-    /// neighbouring discs meet like a surface and the grid is drawn where the hit is in the room.
+    /// One instance per spot, four vertices each: a square tile on the spot's plane, edges along the wall and up on
+    /// walls, along x and z on floors, so neighbouring tiles line up.
     private static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
@@ -333,78 +331,55 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     struct LivePoint { packed_float3 position; uchar4 color; };
     struct Uniforms {
         float4x4 viewProjection;
-        float4x4 inverseViewProjection;
         float4 cameraPosition;
-        float2 viewport;
-        float radius;
-        float pixelsPerMeter;
+        float halfSize;
         float cell;
     };
     struct TileOut {
-        float4 position [[position]];
-        float pointSize [[point_size]];
-        float3 center [[flat]];
+        float4 position [[position, invariant]];
+        float3 world;
         float3 normal [[flat]];
         float solid [[flat]];
     };
-    struct TileColor {
-        float4 color [[color(0)]];
-        float depth [[depth(any)]];
-    };
 
-    vertex TileOut tileVertex(uint id [[vertex_id]],
+    vertex TileOut tileVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                               const device LivePoint *points [[buffer(0)]],
                               const device char4 *normals [[buffer(1)]],
                               constant Uniforms &u [[buffer(2)]]) {
-        LivePoint p = points[id];
+        LivePoint p = points[iid];
         float3 c = float3(p.position);
-        float3 n = float3(normals[id].xyz) / 127.0;
-        // No normal yet: a disc facing the camera.
+        float3 n = float3(normals[iid].xyz) / 127.0;
+        // No normal yet: a tile facing the camera.
         n = dot(n, n) > 0.25 ? normalize(n) : normalize(u.cameraPosition.xyz - c);
+        float3 a = abs(n.y) < 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+        float3 t1 = normalize(cross(a, n));
+        float3 t2 = cross(n, t1);
+        float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
+        float3 world = c + (t1 * corner.x + t2 * corner.y) * u.halfSize;
         TileOut out;
-        out.position = u.viewProjection * float4(c, 1.0);
-        float w = max(out.position.w, 0.05);
-        out.pointSize = clamp(2.4 * u.radius * u.pixelsPerMeter / w, 1.0, 64.0); // 1x pixels
-        out.center = c;
+        out.position = u.viewProjection * float4(world, 1.0);
+        out.world = world;
         out.normal = n;
         out.solid = float(p.color.a) / 255.0;
         return out;
     }
 
-    fragment TileColor tileFragment(TileOut in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {
-        // The pixel's ray, from the near to the far plane.
-        float2 ndc = float2(in.position.x / u.viewport.x * 2.0 - 1.0, 1.0 - in.position.y / u.viewport.y * 2.0);
-        float4 a = u.inverseViewProjection * float4(ndc, 0.0, 1.0);
-        float4 b = u.inverseViewProjection * float4(ndc, 1.0, 1.0);
-        float3 o = a.xyz / a.w;
-        float3 dir = b.xyz / b.w - o;
-        float3 n = in.normal;
-        float denom = dot(dir, n);
-        float t = abs(denom) > 1e-6 ? dot(in.center - o, n) / denom : -1.0;
-        float3 hit = o + dir * t;
-
+    fragment float4 tileFragment(TileOut in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {
         // Grid on the plane the surface faces: x-z on floors and tabletops, along the wall and up on walls.
+        float3 n = in.normal;
         float2 uv;
         if (abs(n.y) > 0.7) {
-            uv = hit.xz;
+            uv = in.world.xz;
         } else {
             float2 along = normalize(float2(-n.z, n.x) + float2(1e-6, 0.0));
-            uv = float2(dot(hit.xz, along), hit.y);
+            uv = float2(dot(in.world.xz, along), in.world.y);
         }
         uv /= u.cell;
         float2 fw = max(fwidth(uv), float2(1e-4));
         float2 g = abs(fract(uv - 0.5) - 0.5) / fw;
         float line = (1.0 - min(min(g.x, g.y), 1.0)) * (1.0 - smoothstep(0.15, 0.4, max(fw.x, fw.y)));
-
-        if (t <= 0.0 || length(hit - in.center) > u.radius) discard_fragment();
-        float4 clip = u.viewProjection * float4(hit, 1.0);
         float s = in.solid;
-        float fill = mix(0.05, 0.14, s);
-        float stroke = mix(0.3, 0.85, s);
-        TileColor out;
-        out.color = float4(1.0, 1.0, 1.0, max(fill, line * stroke));
-        out.depth = clip.z / clip.w;
-        return out;
+        return float4(1.0, 1.0, 1.0, max(mix(0.05, 0.14, s), line * mix(0.3, 0.85, s)));
     }
     """
 }
