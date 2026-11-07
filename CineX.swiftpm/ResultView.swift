@@ -40,38 +40,39 @@ struct ResultView: View {
         .navigationTitle(scan.date.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if let room {
+                NavigationLink(destination: ShootPlannerView(room: room)) {
+                    Label("Plan a Shoot", systemImage: "sparkles")
+                }
+            }
             ShareLink(item: scan.modelURL)
         }
         .task {
-            room = ScanStore.loadRoom(scan)
-            do {
-                let s = try SCNScene(url: scan.modelURL, options: nil)
-                Self.colorize(s.rootNode)
-                scene = s
-            } catch {
-                loadError = "Could not open the 3D model: \(error.localizedDescription)"
+            // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
+            let scan = scan
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<SCNScene, Error>) in
+                let room = ScanStore.loadRoom(scan)
+                let result = Result { () throws -> SCNScene in
+                    let s = try SCNScene(url: scan.modelURL, options: nil)
+                    ResultView.colorize(s.rootNode)
+                    return s
+                }
+                return (room, result)
+            }.value
+            room = loaded.0
+            switch loaded.1 {
+            case .success(let s): scene = s
+            case .failure(let error): loadError = "Could not open the 3D model: \(error.localizedDescription)"
             }
         }
     }
 
     /// Tints RoomPlan's grey boxes by type so windows (natural light) and doors stand out.
-    static func colorize(_ node: SCNNode) {
-        let name = (node.name ?? "").lowercased()
-        var color: UIColor?
-        if name.contains("window") { color = UIColor(red: 0.45, green: 0.75, blue: 1.0, alpha: 0.85) }
-        else if name.contains("door") { color = UIColor(red: 0.65, green: 0.45, blue: 0.3, alpha: 1) }
-        else if name.contains("opening") { color = UIColor(red: 0.5, green: 0.9, blue: 0.6, alpha: 0.7) }
-        else if name.contains("wall") { color = UIColor(white: 0.85, alpha: 1) }
-        else if name.contains("floor") { color = UIColor(white: 0.45, alpha: 1) }
-        if let color {
-            applyColor(color, to: node)
-        } else {
-            node.childNodes.forEach(colorize)
-        }
-    }
-
-    private static func applyColor(_ color: UIColor, to node: SCNNode) {
-        if let geometry = node.geometry {
+    ///
+    /// Each piece is colored by its own name ("Wall0", "Door0", "Window0"…), not its group's: RoomPlan puts a wall's
+    /// doors and windows inside that wall's "Wall_N_grp" group, so coloring whole groups would paint them as walls.
+    nonisolated static func colorize(_ node: SCNNode) {
+        if let geometry = node.geometry, let color = color(forPartNamed: node.name ?? "") {
             let m = SCNMaterial()
             m.diffuse.contents = color
             m.lightingModel = .physicallyBased
@@ -80,7 +81,17 @@ struct ResultView: View {
             node.geometry = geometry.copy() as? SCNGeometry
             node.geometry?.materials = [m]
         }
-        node.childNodes.forEach { applyColor(color, to: $0) }
+        node.childNodes.forEach(colorize)
+    }
+
+    nonisolated private static func color(forPartNamed rawName: String) -> UIColor? {
+        let name = rawName.lowercased()
+        if name.contains("window") { return UIColor(red: 0.45, green: 0.75, blue: 1.0, alpha: 0.85) }
+        if name.contains("door") { return UIColor(red: 0.65, green: 0.45, blue: 0.3, alpha: 1) }
+        if name.contains("opening") { return UIColor(red: 0.5, green: 0.9, blue: 0.6, alpha: 0.7) }
+        if name.contains("wall") { return UIColor(white: 0.85, alpha: 1) }
+        if name.contains("floor") { return UIColor(white: 0.45, alpha: 1) }
+        return nil
     }
 }
 

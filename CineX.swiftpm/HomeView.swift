@@ -5,6 +5,7 @@ struct HomeView: View {
     @State private var scans: [SavedScan] = []
     @State private var path: [SavedScan] = []
     @State private var scanning = false
+    @State private var justSaved: SavedScan?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -47,13 +48,26 @@ struct HomeView: View {
             .navigationDestination(for: SavedScan.self) { scan in
                 ResultView(scan: scan)
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(destination: GearInventoryView()) {
+                        Label("My Gear", systemImage: "checklist")
+                    }
+                }
+            }
             .onAppear { scans = ScanStore.list() }
-            .fullScreenCover(isPresented: $scanning) {
+            .fullScreenCover(isPresented: $scanning, onDismiss: {
+                // Open the result only after the scanner has fully closed, so the two transitions don't collide.
+                scans = ScanStore.list()
+                if let saved = justSaved {
+                    justSaved = nil
+                    path = [saved]
+                }
+            }) {
                 ScannerScreen(
                     onFinished: { saved in
+                        justSaved = saved
                         scanning = false
-                        scans = ScanStore.list()
-                        path = [saved]
                     },
                     onCancel: { scanning = false }
                 )
