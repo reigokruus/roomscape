@@ -96,6 +96,17 @@ enum ScanStore {
         return surfels
     }
 
+    /// Where splat training saves its result (see `SplatTrainingRun`).
+    static func trainedSurfelsURL(_ scan: SavedScan) -> URL {
+        scan.captureURL.appendingPathComponent("trained.bin")
+    }
+
+    /// The trained splats, when the scan was trained before.
+    static func loadTrainedSurfels(_ scan: SavedScan) -> [SurfelRecord]? {
+        guard let splats = Surfels.read(from: trainedSurfelsURL(scan)), !splats.isEmpty else { return nil }
+        return splats
+    }
+
     static func delete(_ scan: SavedScan) {
         try? FileManager.default.removeItem(at: scan.modelURL)
         try? FileManager.default.removeItem(at: scan.dataURL)
