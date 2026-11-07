@@ -1338,7 +1338,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             if (gen == surfGen) surfPending = tr.toSurfels();
             log("training paused at step " + tr.iter + ", error " + tr.lastLoss);
-            if (auto && autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); activity.trainingLabel("Train splats"); }
+            if (auto && autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); activity.trainingLabel("Train splats"); glTasks.add(this::autosave); } // keep the improved model
         } catch (Throwable e) { training = false; logError("training", new RuntimeException(e)); if (autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); } } }).start();
         return "Pause training";
     }
