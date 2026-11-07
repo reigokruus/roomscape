@@ -31,7 +31,7 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
-    private Button depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
+    private Button cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
     private boolean multiTouch;
@@ -235,6 +235,11 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> depthButton.setText(label));
         }));
         bar.addView(depthButton);
+        cleanButton = new Button(this);
+        cleanButton.setText("Clean up");
+        cleanButton.setVisibility(View.GONE);
+        cleanButton.setOnClickListener(v -> glView.queueEvent(() -> renderer.startCleanUp()));
+        bar.addView(cleanButton);
         trainButton = new Button(this);
         trainButton.setText("Train splats");
         trainButton.setVisibility(View.GONE);
@@ -306,7 +311,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{mainButton, depthButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{mainButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
             ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -392,6 +397,7 @@ public class MainActivity extends Activity {
             trainButton.setVisibility(View.GONE);
             trainButton.setText("Train splats");
             depthButton.setVisibility(View.GONE);
+            cleanButton.setVisibility(View.GONE);
             depthButton.setText("Depth AI");
             planButton.setText("Plan shot");
             resumeSession();
@@ -409,6 +415,7 @@ public class MainActivity extends Activity {
                     claudeButton.setVisibility(View.VISIBLE);
                     trainButton.setVisibility(View.VISIBLE);
                     depthButton.setVisibility(View.VISIBLE);
+                    cleanButton.setVisibility(View.VISIBLE);
                 });
             });
         }

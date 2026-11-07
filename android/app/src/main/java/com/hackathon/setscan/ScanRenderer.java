@@ -476,11 +476,51 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             meshTris = tsdf.extractMesh();
             meshPosAll = null;
         } catch (Throwable e) { logError("depth surface", new RuntimeException(e)); }
+        activity.depthDone();
+        activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Cleaning up now...", depthAdded));
+        startCleanUp();
+    }
+
+    private volatile boolean cleaning;
+
+    /** GL thread: snap the scan onto its floor, ceiling and marked walls, drop specks, fill gaps (see CleanUp). */
+    void startCleanUp() {
+        if (cleaning || count == 0) return;
+        cleaning = true; training = false;
+        final int n = count, gen = surfGen;
+        final FloatBuffer ps = FloatBuffer.allocate(n * 3);
+        for (int i = 0; i < n * 3; i++) ps.put(i, pos.get(i));
+        final ByteBuffer cs = ByteBuffer.allocate(n * 4);
+        for (int i = 0; i < n * 4; i++) cs.put(i, col.get(i));
+        float[][] uw = null;
+        if (roomReady && room.fromCorners && !room.layout.isEmpty()) {
+            uw = new float[room.layout.size()][];
+            for (int i = 0; i < uw.length; i++) { RoomModel.Wall w = room.layout.get(i); uw[i] = new float[]{w.x0, w.z0, w.x1, w.z1}; }
+        }
+        final float[][] walls = uw;
+        activity.updateStatus("Cleaning up the scan: finding floor, ceiling and walls...");
+        new Thread(() -> { try {
+            long t0 = System.currentTimeMillis();
+            CleanUp c = CleanUp.run(ps, cs, n, walls);
+            log(c.summary + " (" + (System.currentTimeMillis() - t0) + " ms) " + c.debug);
+            glTasks.add(() -> applyCleanUp(c, gen));
+        } catch (Throwable e) { cleaning = false; logError("clean-up", new RuntimeException(e)); } }).start();
+    }
+
+    private void applyCleanUp(CleanUp c, int gen) {
+        cleaning = false;
+        if (gen != surfGen) return;
+        int n = Math.min(c.n, MAX_POINTS);
+        for (int i = 0; i < n; i++) {
+            pos.put(i * 3, c.pos[i * 3]); pos.put(i * 3 + 1, c.pos[i * 3 + 1]); pos.put(i * 3 + 2, c.pos[i * 3 + 2]);
+            col.put(i * 4, c.col[i * 3]); col.put(i * 4 + 1, c.col[i * 3 + 1]); col.put(i * 4 + 2, c.col[i * 3 + 2]); col.put(i * 4 + 3, (byte) 255);
+            obs[i] = 2;
+        }
+        count = n; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
         analyseRoom();
         buildSurfels();
-        activity.depthDone();
-        activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Building splats now (a few seconds), then you can Train splats.\n%s",
-                depthAdded, roomReady ? room.summary : ""));
+        activity.updateStatus(c.summary + "\nBuilding splats now (a few seconds), then you can Train splats.\n" + (roomReady ? room.summary : ""));
     }
 
     // ---- on-phone splat training (see Trainer) ----
@@ -1743,7 +1783,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
-        depthRunning = false; glTasks.clear();
+        depthRunning = false; cleaning = false; glTasks.clear();
         surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
