@@ -153,14 +153,14 @@ public class MainActivity extends Activity {
 
     private void exportScan() {
         exportButton.setEnabled(false);
-        Toast.makeText(this, "Packing the scan (" + renderer.recordedFrames() + " depth frames)...", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "Packing the scan...", Toast.LENGTH_SHORT).show();
         glView.queueEvent(() -> renderer.exportScan(uri -> runOnUiThread(() -> {
             exportButton.setEnabled(true);
             long size = -1;
             try (android.content.res.AssetFileDescriptor fd = getContentResolver().openAssetFileDescriptor(uri, "r")) { if (fd != null) size = fd.getLength(); }
             catch (Exception ignored) { }
             if (size > 25L * 1024 * 1024) { bigExport(uri, size); return; }
-            Toast.makeText(this, "Saved to Downloads/CineX. Pick Claude to send it.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Saved to Downloads/CineX. Pick an app to send it.", Toast.LENGTH_LONG).show();
             shareScan(uri);
         }), err -> runOnUiThread(() -> {
             exportButton.setEnabled(true);
@@ -224,7 +224,7 @@ public class MainActivity extends Activity {
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER);
         mainButton = new Button(this);
-        mainButton.setText("Finish scan");
+        mainButton.setText("Done");
         mainButton.setOnClickListener(v -> onMainButton());
         topButton = new Button(this);
         topButton.setText("Top view");
@@ -252,7 +252,7 @@ public class MainActivity extends Activity {
             if (renderer.lighting.enabled && lightPanel.getVisibility() != View.VISIBLE) { lightPanel.setVisibility(View.VISIBLE); lightingSelected(); return; }
             glView.queueEvent(() -> {
             String label = renderer.toggleLighting();
-            runOnUiThread(() -> { lightButton.setText(label); lightPanel.setVisibility(renderer.lighting.enabled ? View.VISIBLE : View.GONE); lightingSelected(); });
+            runOnUiThread(() -> { lightButton.setText(label); lightPanel.setVisibility(renderer.lighting.enabled ? View.VISIBLE : View.GONE); lightingSelected(); applyUi(); });
             });
         });
         bar.addView(lightButton);
@@ -284,7 +284,7 @@ public class MainActivity extends Activity {
         }));
         bar.addView(trainButton);
         exportButton = new Button(this);
-        exportButton.setText("Export");
+        exportButton.setText("Share");
         exportButton.setVisibility(View.GONE);
         exportButton.setOnClickListener(v -> exportScan());
         bar.addView(mainButton);
@@ -368,6 +368,8 @@ public class MainActivity extends Activity {
             return true;
         });
         buildHud(chrome);
+        exportButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF1D6B86));
+        exportButton.setTextColor(Color.WHITE);
         lightPanel = buildLightPanel();
         lightPanel.setVisibility(View.GONE);
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
@@ -481,7 +483,7 @@ public class MainActivity extends Activity {
     /** Buttons for scanning. */
     private void scanUi() {
         scanning = true;
-        mainButton.setText("Finish scan");
+        mainButton.setText("Done");
         applyUi();
         renderer.lighting.enabled = false;
         lightButton.setText("Lighting");
@@ -509,8 +511,8 @@ public class MainActivity extends Activity {
 
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
-        Button[] viewerMain = {homeButton, lightButton, saveButton, planButton, cutButton, topButton, claudeButton};
-        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, exportButton, liveClaudeButton, logBtn};
+        Button[] viewerMain = {homeButton, exportButton, lightButton, saveButton};
+        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
         improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE);
         for (Button b : tools) {
@@ -518,7 +520,8 @@ public class MainActivity extends Activity {
             b.setVisibility(debug && (!scanning || scanTool) ? View.VISIBLE : View.GONE);
         }
         mainButton.setVisibility(View.VISIBLE);
-        status.setVisibility(scanning && !debug ? View.GONE : View.VISIBLE);
+        // the text panel is for debugging; testers see it only for the lighting readout
+        status.setVisibility(debug || (!scanning && renderer.lighting.enabled) ? View.VISIBLE : View.GONE);
         if (hud != null) hud.setVisibility(scanning ? View.VISIBLE : View.GONE);
         if (procBox != null && scanning) procBox.setVisibility(View.GONE);
     }

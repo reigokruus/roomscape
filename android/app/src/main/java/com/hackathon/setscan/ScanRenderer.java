@@ -2814,8 +2814,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + "\nWalk slowly. Hold still where discs are red or yellow until they turn green. Tap Finish when done.";
             }
             activity.updateStatus(s);
-            postHud(ts);
         }
+        if (frameNo % 5 == 0) postHud(ts);
     }
 
     // ---------------- "scan over there" guide ----------------
@@ -3539,14 +3539,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int level; String hint, sub = null;
         float d = detailHere;
         if (ts != TrackingState.TRACKING) { level = 2; hint = "Lost track. Point at something with detail and hold still"; }
-        else if (d < 0) { level = 1; hint = "Point at the room and hold still for a moment"; }
+        else if (d < 0 || count < 3000) { level = 1; hint = "Walk slowly around the room. Wherever the bar turns red, stop and hold still"; }
         else if (moveSpeed > 0.35f && d < 0.7f) { level = 2; hint = "Too fast. Stand still right here and sweep slowly"; }
         else if (d < 0.35f) { level = 2; hint = "New area. Stand still right here until the bar fills"; }
         else if (d < 0.7f) { level = 1; hint = "Good. Keep holding here a little longer"; }
         else { level = 0; hint = "This spot is done. Move on to the next area"; }
         if (improveDir != null) sub = "Tap 2 room corners to line this pass up with the saved scan";
         else if (guideText != null && level == 0) sub = guideText;
-        if (++hudCalls % 4 == 1) { // recount every ~2 s (points get merged, dropped and loaded in other places)
+        if (++hudCalls % 12 == 1) { // recount every ~2 s (points get merged, dropped and loaded in other places)
             int n = count, sc = 0;
             for (int i = 0; i < n; i++) if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++;
             solidCount = sc;
