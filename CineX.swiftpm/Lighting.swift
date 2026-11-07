@@ -98,6 +98,28 @@ enum SubjectPose: String, CaseIterable, Codable, Identifiable {
     var faceHeight: Float { self == .seated ? 1.18 : 1.62 }
 }
 
+/// A light source that was already in the room when it was scanned: a ceiling or wall light or lamp (from the
+/// objects found in the photos), or a window (daylight). The scan's colours contain their light; knowing where they
+/// are lets the preview tell, for every surface, how much of its light came from which kind (see `roomShape`).
+struct RoomLightSource: Equatable {
+    enum Kind: Equatable { case ceiling, wall, lamp, window }
+    var kind: Kind
+    var label: String
+    var position: SIMD3<Float>
+    /// Unit vector it shines towards (down for a ceiling light, into the room for a window), or zero for all round.
+    var direction: SIMD3<Float>
+    /// Relative strength. Guesses, only their ratios matter: a fitting 1, a lamp 0.5, a window 3 per m² of glass.
+    var strength: Float
+
+    var isWindow: Bool { kind == .window }
+}
+
+/// A place to plug in, from the objects found in the photos.
+struct PowerPoint: Equatable {
+    var label: String
+    var position: SIMD3<Float>
+}
+
 struct LightingSetup: Equatable {
     /// Room light in the scan (handoff: assume 250 lx).
     static let roomLux: Float = 250
@@ -109,8 +131,16 @@ struct LightingSetup: Equatable {
     var subjectZ: Float
     var facing: Float
     var floorY: Float
-    /// 0 = room lights off, 1 = as scanned.
+    /// 0 = room lights off, 1 = as scanned. With known sources this dims only the fittings' share of the light.
     var roomDimmer: Float = 1
+    /// 0 = no daylight (night), 1 = as scanned: dims the windows' share of the light.
+    var daylight: Float = 1
+    /// The room's own light sources (at most `maxRoomSources`); empty = the room light is one flat level.
+    var roomSources: [RoomLightSource] = []
+    /// Scales the sources' summed shape so a typical scanned surface gets `roomLux` (set by `calibrate`).
+    var roomScale: Float = 1
+    /// Sockets and power strips, for the cable run to each light.
+    var power: [PowerPoint] = []
     /// + brighter.
     var exposureEV: Float = 0
     var whiteBalance: Float = 5600
@@ -118,6 +148,7 @@ struct LightingSetup: Equatable {
     var shutter: Float = 1.0 / 50
 
     static let maxLights = 4
+    static let maxRoomSources = 8
 
     var faceCenter: SIMD3<Float> { SIMD3(subjectX, floorY + pose.faceHeight, subjectZ) }
 
@@ -153,31 +184,97 @@ struct LightingSetup: Equatable {
         return light.luxAt1m * cone * lambert / d2
     }
 
+    // MARK: The room's own light
+
+    /// How strongly one room source lights a surface at `p` facing `n` (relative units). Mirrored exactly in the
+    /// shader (`LightingShader`): inverse square (min distance² 0.09, 0.25 for a window), soft wrap-lambert (0.5),
+    /// and emission towards its direction (a window: cosine; a fitting: 30% all round + 70% cosine).
+    static func roomShape(_ s: RoomLightSource, at p: SIMD3<Float>, normal n: SIMD3<Float>) -> Float {
+        var l = s.position - p
+        let d2 = max(s.isWindow ? 0.25 : 0.09, simd_length_squared(l))
+        l /= d2.squareRoot()
+        let lambert = max(0, (simd_dot(n, l) + 0.5) / 1.5)
+        let emit: Float
+        if s.isWindow {
+            emit = max(0, simd_dot(-l, s.direction))
+        } else if simd_length_squared(s.direction) < 0.25 {
+            emit = 1
+        } else {
+            emit = 0.3 + 0.7 * max(0, simd_dot(-l, s.direction))
+        }
+        return s.strength * emit * lambert / d2
+    }
+
+    /// The fittings' and the windows' shape at a point.
+    func roomShares(at p: SIMD3<Float>, normal n: SIMD3<Float>) -> (fittings: Float, daylight: Float) {
+        var f: Float = 0, d: Float = 0
+        for s in roomSources {
+            let e = Self.roomShape(s, at: p, normal: n)
+            if s.isWindow { d += e } else { f += e }
+        }
+        return (f, d)
+    }
+
+    /// Room light on a surface that wasn't scanned (the person), in lux: placed sources if known, else flat.
+    func roomLux(at p: SIMD3<Float>, normal n: SIMD3<Float>) -> (fittings: Float, daylight: Float) {
+        guard !roomSources.isEmpty else { return (Self.roomLux * roomDimmer * 0.7, 0) }
+        let s = roomShares(at: p, normal: n)
+        return (Self.roomLux * roomScale * roomDimmer * s.fittings, Self.roomLux * roomScale * daylight * s.daylight)
+    }
+
+    /// Sets `roomScale` so the average of `samples` (scanned surfaces: position, normal) gets `roomLux`.
+    mutating func calibrate(_ samples: [(p: SIMD3<Float>, n: SIMD3<Float>)]) {
+        guard !roomSources.isEmpty, !samples.isEmpty else { roomScale = 1; return }
+        let mean = samples.reduce(Float(0)) { sum, x in
+            let s = roomShares(at: x.p, normal: x.n)
+            return sum + s.fittings + s.daylight
+        } / Float(samples.count)
+        roomScale = mean > 1e-6 ? 1 / mean : 1
+    }
+
+    // MARK: Power
+
+    /// Cable from the light stand's foot to the nearest socket: along the floor, then up to the socket, plus 30 cm.
+    func powerRun(for light: ShotLight) -> (meters: Float, to: PowerPoint)? {
+        let lp = position(of: light)
+        return power.map { pt -> (Float, PowerPoint) in
+            let flat = simd_distance(SIMD2(lp.x, lp.z), SIMD2(pt.position.x, pt.position.z))
+            return (flat + max(0, pt.position.y - floorY) + 0.3, pt)
+        }.min { $0.0 < $1.0 }.map { (meters: $0.0, to: $0.1) }
+    }
+
     /// Light on the subject's face (facing the camera) from the room and from each gear light.
-    var faceLux: (room: Float, gear: [(name: String, lux: Float)]) {
+    var faceLux: (room: Float, daylight: Float, gear: [(name: String, lux: Float)]) {
         let n = facingDirection
         let gear = lights.filter(\.on).map { ($0.name, lux(from: $0, at: faceCenter, normal: n)) }
-        // The room light on a face is about 70% of what the walls got (handoff readout).
-        return (Self.roomLux * roomDimmer * 0.7, gear)
+        let room = roomLux(at: faceCenter, normal: n)
+        return (room.fittings, room.daylight, gear)
     }
 
     /// Exposure multiplier that brings the face back to how the room looked in the scan, then ± exposureEV.
     var exposure: Float {
         let n = facingDirection
-        let onFace = Self.roomLux * roomDimmer + lights.reduce(0) { $0 + lux(from: $1, at: faceCenter, normal: n) }
+        let room: Float
+        if roomSources.isEmpty {
+            room = Self.roomLux * roomDimmer
+        } else {
+            let r = roomLux(at: faceCenter, normal: n)
+            room = r.fittings + r.daylight
+        }
+        let onFace = room + lights.reduce(0) { $0 + lux(from: $1, at: faceCenter, normal: n) }
         return Self.roomLux / max(5, onFace) * pow(2, exposureEV)
     }
 
     /// Incident-meter f-stop for the face: N = √(E · t · ISO / 250), then the EV offset.
     var fStop: Float {
         let f = faceLux
-        let e = f.room + f.gear.reduce(0) { $0 + $1.lux }
+        let e = f.room + f.daylight + f.gear.reduce(0) { $0 + $1.lux }
         return (e * shutter * iso / 250).squareRoot() * pow(2, -exposureEV / 2)
     }
 
     var readout: String {
         let f = faceLux
-        let total = f.room + f.gear.reduce(0) { $0 + $1.lux }
+        let total = f.room + f.daylight + f.gear.reduce(0) { $0 + $1.lux }
         let n = fStop
         let stop = n < 0.9 ? "below f/1 (too dark)" : "f/\(Self.nearestStop(n))"
         return String(format: "Face %.0f lx → %@ at ISO %.0f, 1/%.0f s", total, stop, iso, 1 / shutter)
@@ -185,7 +282,9 @@ struct LightingSetup: Equatable {
 
     var breakdown: String {
         let f = faceLux
-        let parts = f.gear.map { String(format: "%@ %.0f", $0.name, $0.lux) } + [String(format: "room %.0f", f.room)]
+        var parts = f.gear.map { String(format: "%@ %.0f", $0.name, $0.lux) }
+        parts.append(String(format: roomSources.isEmpty ? "room %.0f" : "room lights %.0f", f.room))
+        if roomSources.contains(where: \.isWindow) { parts.append(String(format: "daylight %.0f", f.daylight)) }
         return parts.joined(separator: " · ") + " lx"
     }
 

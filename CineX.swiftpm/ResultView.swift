@@ -102,6 +102,7 @@ struct ResultView: View {
         }
         .onChange(of: objects) { _, objects in
             objectsScene?.apply(objects, selected: selectedObject)
+            if lighting != nil { refreshRoomLight() }
             RoomObjects.save(ObjectsFile(claudeChecked: claudeChecked, objects: objects), for: scan)
         }
         .onChange(of: selectedObject) { _, id in
@@ -184,7 +185,12 @@ struct ResultView: View {
             // UI checks in the Simulator: -openPanel lighting | objects
             let args = ProcessInfo.processInfo.arguments
             if let i = args.firstIndex(of: "-openPanel"), i + 1 < args.count {
-                if args[i + 1] == "lighting" { toggleLighting() }
+                if args[i + 1] == "lighting" {
+                    toggleLighting()
+                    if let j = args.firstIndex(of: "-roomDimmer"), j + 1 < args.count, let v = Float(args[j + 1]) {
+                        lighting?.roomDimmer = v
+                    }
+                }
                 if args[i + 1] == "objects" { toggleObjects() }
             }
             if args.contains("-replayFind"), let saved {
@@ -323,6 +329,55 @@ struct ResultView: View {
         if found.count == previousCount { findError = "Claude found nothing new." }
     }
 
+    /// The room's own light sources and power points for the lighting preview: room lights and lamps from the
+    /// objects (as they stand after the user's edits; removed ones are off), windows from RoomPlan and the photos.
+    /// Calibrated against a sample of the scanned splats so a typical surface gets the scan's 250 lx.
+    private func refreshRoomLight() {
+        guard var setup = lighting, let shell else { return }
+        var sources: [RoomLightSource] = []
+        for o in shell.openings where o.wall.halfWidth > 0 && o.isWindow {
+            sources.append(RoomLightSource(kind: .window, label: "Window", position: o.wall.center,
+                                           direction: o.wall.inward,
+                                           strength: 3 * 4 * o.wall.halfWidth * o.wall.halfHeight))
+        }
+        for w in foundWindows where !w.matchesRoomPlan && w.wallIndex < shell.walls.count {
+            let wall = shell.walls[w.wallIndex]
+            let c = wall.center + wall.right * ((w.minAlong + w.maxAlong) / 2) + wall.up * ((w.minUp + w.maxUp) / 2)
+            sources.append(RoomLightSource(kind: .window, label: w.label, position: c, direction: wall.inward,
+                                           strength: 3 * w.area))
+        }
+        sources.sort { $0.strength > $1.strength }
+        sources = Array(sources.prefix(3))
+        var fittings: [RoomLightSource] = []
+        for o in objects where !o.removed {
+            let p = o.center + o.offset
+            switch o.kind {
+            case .ceilingLight:
+                fittings.append(RoomLightSource(kind: .ceiling, label: o.label, position: p, direction: SIMD3(0, -1, 0), strength: 1))
+            case .wallLight:
+                fittings.append(RoomLightSource(kind: .wall, label: o.label, position: p, direction: .zero, strength: 1))
+            case .lamp:
+                fittings.append(RoomLightSource(kind: .lamp, label: o.label, position: p + SIMD3(0, o.halfExtents.y, 0),
+                                                direction: .zero, strength: 0.5))
+            default: break
+            }
+        }
+        // The shader takes eight: windows first, then the fittings nearest the person.
+        let face = setup.faceCenter
+        fittings.sort { simd_distance($0.position, face) < simd_distance($1.position, face) }
+        sources += fittings.prefix(LightingSetup.maxRoomSources - sources.count)
+        setup.roomSources = sources
+        setup.power = objects.filter { $0.kind.isPower && !$0.removed }.map { PowerPoint(label: $0.label, position: $0.center) }
+        let step = max(1, surfels.count / 2000)
+        let samples = Swift.stride(from: 0, to: surfels.count, by: step).compactMap { i -> (p: SIMD3<Float>, n: SIMD3<Float>)? in
+            let s = surfels[i]
+            let n = SIMD3(s.nx, s.ny, s.nz)
+            return simd_length_squared(n) > 0.25 ? (SIMD3(s.x, s.y, s.z), n) : nil
+        }
+        setup.calibrate(samples)
+        if setup != lighting { lighting = setup }
+    }
+
     private func toggleLighting() {
         lightingOn.toggle()
         guard lightingOn else {
@@ -340,6 +395,7 @@ struct ResultView: View {
             lighting = .starting(subjectX: center.x, subjectZ: center.z, facing: facing, floorY: shell.floorY,
                                  gear: GearStore.load())
         }
+        refreshRoomLight()
         lightingScene?.apply(lighting)
     }
 

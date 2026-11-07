@@ -24,7 +24,10 @@ struct LightingPanel: View {
                 }
                 .pickerStyle(.segmented)
                 SliderRow(title: "Facing", value: $setup.facing, range: -180...180, step: 5) { "\(Int($0))°" }
-                SliderRow(title: "Room lights", value: $setup.roomDimmer, range: 0...1, step: 0.05) { "\(Int($0 * 100))%" }
+                SliderRow(title: roomLightsTitle, value: $setup.roomDimmer, range: 0...1, step: 0.05) { "\(Int($0 * 100))%" }
+                if setup.roomSources.contains(where: \.isWindow) {
+                    SliderRow(title: "Daylight", value: $setup.daylight, range: 0...1, step: 0.05) { "\(Int($0 * 100))%" }
+                }
                 SliderRow(title: "Exposure", value: $setup.exposureEV, range: -3...3, step: 0.25) {
                     String(format: "%+.2g EV", $0)
                 }
@@ -41,6 +44,7 @@ struct LightingPanel: View {
                     SliderRow(title: "Distance", value: $light.distance, range: 0.5...4, step: 0.1) { String(format: "%.1f m", $0) }
                     SliderRow(title: "Height", value: $light.height, range: 0.3...3.5, step: 0.1) { String(format: "%.1f m", $0) }
                     SliderRow(title: "Colour", value: $light.kelvin, range: 2700...6500, step: 100) { "\(Int($0)) K" }
+                    powerRow(light)
                 } header: {
                     HStack {
                         Text(light.name)
@@ -83,6 +87,29 @@ struct LightingPanel: View {
             }
         }
         .listStyle(.insetGrouped)
+    }
+}
+
+private extension LightingPanel {
+    var roomLightsTitle: String {
+        let n = setup.roomSources.filter { !$0.isWindow }.count
+        return n == 0 ? "Room lights" : "Room lights (\(n) found)"
+    }
+
+    /// Cable run from the stand to the nearest socket found in the scan.
+    @ViewBuilder func powerRow(_ light: ShotLight) -> some View {
+        if let run = setup.powerRun(for: light) {
+            let long = run.meters > 3
+            Label(String(format: "%.1f m of cable to %@%@", run.meters, run.to.label.lowercased(),
+                         long ? ": bring an extension lead" : ""),
+                  systemImage: long ? "exclamationmark.triangle" : "powerplug")
+                .font(.caption)
+                .foregroundStyle(long ? Color.orange : Color.secondary)
+        } else if setup.power.isEmpty {
+            Label("No sockets known yet: use Objects → Find with Claude", systemImage: "powerplug")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

@@ -6,13 +6,16 @@ import simd
 /// Up to four lights. Colours are linear here; SceneKit encodes the output.
 enum LightingShader {
     static let maxLights = LightingSetup.maxLights
+    static let maxRoom = LightingSetup.maxRoomSources
 
     /// Declarations for `#pragma arguments`.
-    static let arguments: String = {
-        var s = "float litOn;\nfloat roomDimmer;\nfloat expo;\n"
-        for i in 0..<maxLights { s += "float4 lPos\(i);\nfloat4 lAim\(i);\nfloat4 lCol\(i);\nfloat4 lCone\(i);\n" }
-        return s
-    }()
+    static let arguments: String =
+        // SceneKit binds every argument as its own Metal constant buffer, and a shader may use at most 31, so they're
+        // packed: litA = (on, room dimmer, daylight dimmer, room source count), litB = (room scale, exposure, -, -);
+        // one 4x4 matrix per light property (column i = light i); room sources in two matrices each
+        // (rPos.w = 1 for a window; rDir.xyz = direction or zero for all round, rDir.w = strength).
+        "float4 litA;\nfloat4 litB;\nfloat4x4 lPosM;\nfloat4x4 lAimM;\nfloat4x4 lColM;\nfloat4x4 lConeM;\n"
+            + "float4x4 rPosA;\nfloat4x4 rPosB;\nfloat4x4 rDirA;\nfloat4x4 rDirB;\n"
 
     /// Adds every gear light's illuminance to `E` for a point `P` with normal `N` (`hasN` = 0: no normal).
     /// Inverse square (min d² 0.04), beam cone smoothstep, wrap-lambert; `twoSided` uses |n·l| (splat normals from
@@ -21,26 +24,56 @@ enum LightingShader {
         (0..<maxLights).map { i in
             """
             {
-                float3 L = lPos\(i).xyz - P; float d2 = max(0.04, dot(L, L)); L *= rsqrt(d2);
+                float3 L = lPosM[\(i)].xyz - P; float d2 = max(0.04, dot(L, L)); L *= rsqrt(d2);
                 float ndl = hasN > 0.5 ? \(twoSided ? "abs(dot(N, L))" : "dot(N, L)") : 0.6;
-                float w = lCone\(i).z; float lam = max(0.0, (ndl + w) / (1.0 + w));
-                float3 A = lAim\(i).xyz - lPos\(i).xyz; float al = length(A);
+                float w = lConeM[\(i)].z; float lam = max(0.0, (ndl + w) / (1.0 + w));
+                float3 A = lAimM[\(i)].xyz - lPosM[\(i)].xyz; float al = length(A);
                 float cc = al > 0.001 ? dot(-L, A / al) : 1.0;
-                E += lCol\(i).rgb * smoothstep(lCone\(i).x, lCone\(i).y, cc) * lam / d2;
+                E += lColM[\(i)].rgb * smoothstep(lConeM[\(i)].x, lConeM[\(i)].y, cc) * lam / d2;
             }
             """
         }.joined(separator: "\n")
     }
 
+    /// The room's own light at `P`: the fittings' and windows' shapes (same maths as `LightingSetup.roomShape`),
+    /// combined into `roomFactor`. A scanned surface (`baked`) already shows the room light, so it keeps the share
+    /// each kind gave it, dimmed by its slider; an unscanned one (the person) gets the absolute, calibrated amount.
+    /// With no known sources the room light is flat: `litA.y`.
+    private static func rPos(_ i: Int) -> String { i < 4 ? "rPosA[\(i)]" : "rPosB[\(i - 4)]" }
+    private static func rDir(_ i: Int) -> String { i < 4 ? "rDirA[\(i)]" : "rDirB[\(i - 4)]" }
+
+    static func room(twoSided: Bool, baked: Bool) -> String {
+        var s = "float Ef = 0.0; float Ew = 0.0;\n"
+        for i in 0..<maxRoom {
+            s += """
+            if (litA.w > \(i).5) {
+                float3 L = \(rPos(i)).xyz - P; float d2 = max(\(rPos(i)).w > 0.5 ? 0.25 : 0.09, dot(L, L)); L *= rsqrt(d2);
+                float ndl = hasN > 0.5 ? \(twoSided ? "abs(dot(N, L))" : "dot(N, L)") : 0.6;
+                float lam = max(0.0, (ndl + 0.5) / 1.5);
+                float3 D = \(rDir(i)).xyz;
+                float emit = \(rPos(i)).w > 0.5 ? max(0.0, dot(-L, D)) : (dot(D, D) < 0.25 ? 1.0 : 0.3 + 0.7 * max(0.0, dot(-L, D)));
+                float e = \(rDir(i)).w * emit * lam / d2;
+                if (\(rPos(i)).w > 0.5) { Ew += e; } else { Ef += e; }
+            }
+
+            """
+        }
+        s += baked
+            ? "float roomFactor = (Ef + Ew) > 1e-6 ? (litA.y * Ef + litA.z * Ew) / (Ef + Ew) : (litA.w > 0.5 ? 0.5 * (litA.y + litA.z) : litA.y);\n"
+            : "float roomFactor = litA.w > 0.5 ? litB.x * (litA.y * Ef + litA.z * Ew) : litA.y * 0.7;\n"
+        return s
+    }
+
     /// `lin` (linear albedo × room light as scanned) → lit, exposed, with a highlight shoulder above 0.8.
     /// Bright spots (luminance > 0.8: lamps, windows) glow by themselves and aren't lit by gear.
-    static func shade(twoSided: Bool) -> String {
+    static func shade(twoSided: Bool, baked: Bool = true) -> String {
         """
-        float3 E = float3(roomDimmer);
+        \(room(twoSided: twoSided, baked: baked))
+        float3 E = float3(roomFactor);
         if (dot(lin, float3(0.3, 0.59, 0.11)) < 0.8) {
         \(gear(twoSided: twoSided))
         }
-        float3 v = lin * E * expo;
+        float3 v = lin * E * litB.y;
         float3 shoulder = 0.8 + 0.2 * (1.0 - exp(-(v - 0.8) / 0.2));
         v = clamp(select(v, shoulder, v > 0.8), 0.0, 1.0);
         """
@@ -49,7 +82,7 @@ enum LightingShader {
     /// Inserted at the start of the splat geometry modifier's body (before the disc is opened up), after
     /// `worldCenter` / `worldNormal` are set. Writes the lit colour to the vertex colour.
     static let splatBody = """
-    if (litOn > 0.5) {
+    if (litA.x > 0.5) {
         float3 P = worldCenter;
         float3 N = worldNormal;
         float hasN = dot(N, N) > 0.25 ? 1.0 : 0.0;
@@ -59,45 +92,70 @@ enum LightingShader {
     }
     """
 
-    /// Surface modifier for the room shell and the props: per pixel, in world space.
-    static let surfaceModifier = """
-    #pragma arguments
-    \(arguments)
-    #pragma body
-    if (litOn > 0.5) {
-        float3 P = (scn_frame.inverseViewTransform * float4(_surface.position, 1.0)).xyz;
-        float3 N = normalize((scn_frame.inverseViewTransform * float4(_surface.normal, 0.0)).xyz);
-        float hasN = 1.0;
-        float3 lin = _surface.diffuse.rgb;
-    \(shade(twoSided: false))
-        _surface.diffuse.rgb = v;
+    /// Surface modifiers, per pixel in world space: the room shell (stands in for scanned surfaces, so `baked`)
+    /// and the props (the person and stool, not scanned).
+    static let surfaceModifier = surface(baked: true)
+    static let propSurfaceModifier = surface(baked: false)
+
+    private static func surface(baked: Bool) -> String {
+        """
+        #pragma arguments
+        \(arguments)
+        #pragma body
+        if (litA.x > 0.5) {
+            float3 P = (scn_frame.inverseViewTransform * float4(_surface.position, 1.0)).xyz;
+            float3 N = normalize((scn_frame.inverseViewTransform * float4(_surface.normal, 0.0)).xyz);
+            float hasN = 1.0;
+            float3 lin = _surface.diffuse.rgb;
+        \(shade(twoSided: false, baked: baked))
+            _surface.diffuse.rgb = v;
+        }
+        """
     }
-    """
 
     /// Sets a lit material's light values (off when `setup` is nil). Every argument is always set: with only some
     /// set, SceneKit didn't bind them at all and the splats rendered black.
     static func apply(_ setup: LightingSetup?, to m: SCNMaterial) {
-        m.setValue(NSNumber(value: setup == nil ? 0 : 1), forKey: "litOn")
-        m.setValue(NSNumber(value: setup?.roomDimmer ?? 1), forKey: "roomDimmer")
-        m.setValue(NSNumber(value: setup?.exposure ?? 1), forKey: "expo")
+        let room = setup?.roomSources ?? []
+        func vec(_ v: SIMD4<Float>) -> NSValue { NSValue(scnVector4: SCNVector4(v.x, v.y, v.z, v.w)) }
+        func mat(_ c: [SIMD4<Float>]) -> NSValue {
+            NSValue(scnMatrix4: SCNMatrix4(simd_float4x4(c[0], c[1], c[2], c[3])))
+        }
+        m.setValue(vec(SIMD4(setup == nil ? 0 : 1, setup?.roomDimmer ?? 1, setup?.daylight ?? 1, Float(room.count))),
+                   forKey: "litA")
+        m.setValue(vec(SIMD4(setup?.roomScale ?? 1, setup?.exposure ?? 1, 0, 0)), forKey: "litB")
         let face = setup?.faceCenter ?? SIMD3(0, 0, 0)
+        var pos = [SIMD4<Float>](), aim = [SIMD4<Float>](), col = [SIMD4<Float>](), cone = [SIMD4<Float>]()
         for i in 0..<maxLights {
-            var pos = SIMD3<Float>(0, 10, 0), col = SIMD3<Float>(0, 0, 0)
             // Unused slots: a valid cone range and an aim that isn't the light's own position.
-            var cone = SIMD3<Float>(0, 1, 0), aim = SIMD3<Float>(0, 0, 0)
             if let setup, i < setup.lights.count {
                 let l = setup.lights[i]
-                pos = setup.position(of: l)
-                aim = face
-                col = LightingSetup.tint(l.kelvin, whiteBalance: setup.whiteBalance) * (l.luxAt1m / LightingSetup.roomLux)
                 let half = l.type.beamDegrees / 2 * .pi / 180
-                cone = SIMD3(cos(half), cos(half * 0.6), l.type.wrap)
+                pos.append(SIMD4(setup.position(of: l), 1))
+                aim.append(SIMD4(face, 1))
+                col.append(SIMD4(LightingSetup.tint(l.kelvin, whiteBalance: setup.whiteBalance) * (l.luxAt1m / LightingSetup.roomLux), 1))
+                cone.append(SIMD4(cos(half), cos(half * 0.6), l.type.wrap, 0))
+            } else {
+                pos.append(SIMD4(0, 10, 0, 1)); aim.append(SIMD4(0, 0, 0, 1)); col.append(.zero); cone.append(SIMD4(0, 1, 0, 0))
             }
-            m.setValue(NSValue(scnVector4: SCNVector4(pos.x, pos.y, pos.z, 1)), forKey: "lPos\(i)")
-            m.setValue(NSValue(scnVector4: SCNVector4(aim.x, aim.y, aim.z, 1)), forKey: "lAim\(i)")
-            m.setValue(NSValue(scnVector4: SCNVector4(col.x, col.y, col.z, 1)), forKey: "lCol\(i)")
-            m.setValue(NSValue(scnVector4: SCNVector4(cone.x, cone.y, cone.z, 0)), forKey: "lCone\(i)")
         }
+        m.setValue(mat(pos), forKey: "lPosM")
+        m.setValue(mat(aim), forKey: "lAimM")
+        m.setValue(mat(col), forKey: "lColM")
+        m.setValue(mat(cone), forKey: "lConeM")
+        var rp = [SIMD4<Float>](), rd = [SIMD4<Float>]()
+        for i in 0..<maxRoom {
+            if i < room.count {
+                rp.append(SIMD4(room[i].position, room[i].isWindow ? 1 : 0))
+                rd.append(SIMD4(room[i].direction, room[i].strength))
+            } else {
+                rp.append(SIMD4(0, 10, 0, 0)); rd.append(.zero)
+            }
+        }
+        m.setValue(mat(Array(rp[0..<4])), forKey: "rPosA")
+        m.setValue(mat(Array(rp[4..<8])), forKey: "rPosB")
+        m.setValue(mat(Array(rd[0..<4])), forKey: "rDirA")
+        m.setValue(mat(Array(rd[4..<8])), forKey: "rDirB")
     }
 }
 
@@ -115,8 +173,8 @@ final class LightingScene {
         node.enumerateHierarchy { n, _ in
             for m in n.geometry?.materials ?? [] {
                 guard let mods = m.shaderModifiers else { continue }
-                if mods[.geometry]?.contains("litOn") == true { splatAndShell.append(m) }
-                if mods[.surface]?.contains("litOn") == true { splatAndShell.append(m); shellMaterials.append(m) }
+                if mods[.geometry]?.contains("litA") == true { splatAndShell.append(m) }
+                if mods[.surface]?.contains("litA") == true { splatAndShell.append(m); shellMaterials.append(m) }
             }
         }
     }
@@ -138,7 +196,10 @@ final class LightingScene {
         guard let setup else { return }
         root.addChildNode(subject(setup))
         root.addChildNode(cameraMarker(setup))
-        for light in setup.lights { root.addChildNode(fixture(light, setup)) }
+        for light in setup.lights {
+            root.addChildNode(fixture(light, setup))
+            if light.on, let run = setup.powerRun(for: light) { root.addChildNode(cable(light, to: run.to, setup)) }
+        }
         for m in propMaterials { LightingShader.apply(setup, to: m) }
     }
 
@@ -148,7 +209,7 @@ final class LightingScene {
         let m = SCNMaterial()
         m.diffuse.contents = UIColor(red: r, green: g, blue: b, alpha: 1)
         m.lightingModel = .constant
-        m.shaderModifiers = [.surface: LightingShader.surfaceModifier]
+        m.shaderModifiers = [.surface: LightingShader.propSurfaceModifier]
         propMaterials.append(m)
         return m
     }
@@ -200,6 +261,21 @@ final class LightingScene {
         n.simdPosition = s.cameraPosition
         n.simdLook(at: s.faceCenter)
         return n
+    }
+
+    /// An orange cable from the stand's foot along the floor to below the socket, then up to it.
+    private func cable(_ light: ShotLight, to socket: PowerPoint, _ s: LightingSetup) -> SCNNode {
+        let lp = s.position(of: light)
+        let y = s.floorY + 0.01
+        let points = [SCNVector3(lp.x, y, lp.z), SCNVector3(socket.position.x, y, socket.position.z),
+                      SCNVector3(socket.position.x, socket.position.y, socket.position.z)]
+        let g = SCNGeometry(sources: [SCNGeometrySource(vertices: points)],
+                            elements: [SCNGeometryElement(indices: [UInt16(0), 1, 1, 2], primitiveType: .line)])
+        let m = SCNMaterial()
+        m.diffuse.contents = UIColor.systemOrange
+        m.lightingModel = .constant
+        g.materials = [m]
+        return SCNNode(geometry: g)
     }
 
     /// A glowing head on a stand, tinted by its colour temperature, dim when switched off.
