@@ -81,10 +81,11 @@ public class MainActivity extends Activity {
     }
 
     /** After a tap while scanning: what did you tap? */
-    void askTapKind() {
+    void askTapKind(boolean cornersOnly) {
         runOnUiThread(() -> {
-            String[] items = {"Room corner (where floor meets walls)", "Wall", "Floor", "Ceiling", "Object: cut it out and place it", "Undo my last mark"};
-            int[] kinds = {1, 3, 2, 4, 0, 5};
+            String[] items = cornersOnly ? new String[]{"Room corner (where floor meets walls)", "Undo my last mark"}
+                    : new String[]{"Room corner (where floor meets walls)", "Wall", "Floor", "Ceiling", "Object: cut it out and place it", "Undo my last mark"};
+            int[] kinds = cornersOnly ? new int[]{1, 5} : new int[]{1, 3, 2, 4, 0, 5};
             new android.app.AlertDialog.Builder(this)
                     .setTitle("What did you tap?")
                     .setItems(items, (d, which) -> glView.queueEvent(() -> renderer.applyTap(kinds[which])))

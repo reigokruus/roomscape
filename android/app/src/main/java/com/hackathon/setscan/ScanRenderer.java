@@ -1396,7 +1396,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         TapInfo old = lastTap;
         lastTap = t;
         if (old != null && old.img != null) old.img.recycle();
-        activity.askTapKind();
+        activity.askTapKind(!ROOM_TAPS);
     }
 
     /** GL thread: the user said what the tap was. kind: 0 object, 1 corner, 2 floor, 3 wall, 4 ceiling, 5 undo, -1 cancel. */
@@ -1624,7 +1624,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private int rescanFound;       // fresh points in it so far
     private static final float RESCAN_R = 0.35f;
 
-    void requestRescan(float x, float y) { pendingTap = new float[]{x, y}; }
+    /** Room marks by tapping (corner, wall, floor, ceiling, object) were too far off (rk, 7 Nov): off, except corners when improving a saved scan. */
+    static final boolean ROOM_TAPS = false;
+
+    void requestRescan(float x, float y) {
+        if (!ROOM_TAPS && improveDir == null) return;
+        pendingTap = new float[]{x, y};
+    }
 
     /** GL thread: find what was tapped, wipe the points and surface around it, and mark it until it's rescanned. */
     private void handleRescanTap(Frame frame, Camera camera, float x, float y) {
@@ -2732,6 +2738,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             uploadNew();
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
+            if (LIVE_DISCS) drawLiveDiscs(mvp);
             float[] tap = pendingTap;
             if (tap != null) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
             maybeStartLiveRoom(nowMs);
@@ -2757,7 +2764,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         + diagnostics();
             } else {
                 s = "Scanning: " + photos.keyframes.size() + " photos · " + cutouts.size() + " objects placed\n" + liveRoomLine() + (hintText != null ? "\n👀 " + hintText : guideText != null ? "\n➜ " + guideText : "") + (claudeLiveKey != null && claudeLine != null ? "\n" + claudeLine : "") + (ClaudeHelper.sessionCalls > 0 ? "\n💰 " + ClaudeHelper.costLine() : "")
-                        + "\n" + marksLine() + "\nWalk slowly round the room. Tap anything: a room corner, a wall, the floor, the ceiling or an object, and say which it is. Tap Finish when done.";
+                        + "\n" + detailLine() + (ROOM_TAPS || improveDir != null ? "\n" + marksLine() : "")
+                        + (improveDir != null ? "\nTap 2 room corners to line this pass up with the saved scan." : ROOM_TAPS ? "\nTap anything: a room corner, a wall, the floor, the ceiling or an object, and say which it is." : "")
+                        + "\nWalk slowly. Hold still where discs are red or yellow until they turn green. Tap Finish when done.";
             }
             activity.updateStatus(s);
         }
@@ -3013,6 +3022,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
             int[] rgb = new int[3];
+            frameHits = 0; frameSolid = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
             // Record the raw frame for export (replaying the scan off the phone).
             if (recs.size() < ScanExport.MAX_RECS) {
@@ -3089,12 +3099,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     tsdf.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
                     if (fine) detail.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
                     if (weak) continue;
+                    if (hit < 0 || seenStamp[hit] != depthFrames) frameHits++;
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
                     voxels.put(vk, count);
                     addPoint(wx, wy, wz, rgb);
                     if (count >= MAX_POINTS) return;
                 }
             }
+            if (frameHits > 200) { float f = (float) frameSolid / frameHits; detailHere = detailHere < 0 ? f : detailHere * 0.8f + f * 0.2f; }
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
             // Close-up held for a moment: make it a detail zone automatically.
             if (depthPixelsFrame > 500 && nearPixelsFrame > depthPixelsFrame / 2) closeFrames++; else closeFrames = 0;
@@ -3188,12 +3200,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         out[2] = clampI((int) b);
     }
 
+    /** Live disc colour code: how many times a spot has been seen, stored in the point colour's alpha (1 = once, 255 = solid). */
+    static final int SOLID_SEEN = 8;
+    private static int seenAlpha(int n) { return Math.min(255, Math.max(1, n * 255 / SOLID_SEEN)); }
+    private final int[] seenStamp = new int[MAX_POINTS];
+    private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
+    private float detailHere = -1;           // smoothed share of solid points where the phone points
+
     private void addPoint(float x, float y, float z, int[] rgb) {
         int i = count * 3;
         pos.put(i, x); pos.put(i + 1, y); pos.put(i + 2, z);
         int j = count * 4;
-        col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) 255);
-        obs[count] = 1;
+        col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) seenAlpha(1));
+        obs[count] = 1; seenStamp[count] = depthFrames;
         count++;
     }
 
@@ -3201,6 +3220,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void refine(int idx, float x, float y, float z, int[] rgb) {
         int n = obs[idx] & 0xFF;
         if (n < 255) obs[idx] = (byte) (n + 1);
+        if (seenStamp[idx] != depthFrames) { // count each depth frame once (many pixels land in one 2 cm spot)
+            seenStamp[idx] = depthFrames;
+            int a = col.get(idx * 4 + 3) & 0xFF;
+            if (a < 255) col.put(idx * 4 + 3, (byte) Math.min(255, a + 255 / SOLID_SEEN + 1));
+            if (a >= 255 - 255 / SOLID_SEEN) frameSolid++;
+        }
         float w = 1f / (Math.min(n, 20) + 1);
         int i = idx * 3;
         pos.put(i, pos.get(i) + (x - pos.get(i)) * w);
@@ -3413,6 +3438,57 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glColorMask(true, true, true, true);
         GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+    }
+
+    /** Live during the scan: every captured spot as a disc over the camera, rimmed red (seen once) -> yellow -> green (solid). */
+    static final boolean LIVE_DISCS = true;
+    private int liveProg;
+
+    private void drawLiveDiscs(float[] m) {
+        if (count == 0) return;
+        if (liveProg == 0) liveProg = program(
+                "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
+                "void main(){ gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
+                "  gl_PointSize = clamp(uSize / w, 3.0, 64.0); vColor = aColor; }",
+                "precision mediump float; varying vec4 vColor;" +
+                "void main(){ vec2 d = gl_PointCoord * 2.0 - 1.0; float r2 = dot(d, d); if (r2 > 1.0) discard;" +
+                "  float s = vColor.a;" + // 0..1 how solid
+                "  vec3 heat = s < 0.5 ? mix(vec3(1.0, 0.15, 0.1), vec3(1.0, 0.85, 0.1), s * 2.0) : mix(vec3(1.0, 0.85, 0.1), vec3(0.15, 1.0, 0.35), s * 2.0 - 1.0);" +
+                "  if (r2 > 0.55) { gl_FragColor = vec4(heat, 1.0); return; }" +
+                "  gl_FragColor = vec4(mix(vColor.rgb, heat, 0.25), 0.8); }");
+        GLES20.glUseProgram(liveProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(liveProg, "uMvp"), 1, false, m, 0);
+        float pxPerMeter = proj[5] * height / 2f; // the camera's own focal length in pixels
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(liveProg, "uSize"), VOXEL * 1.6f * pxPerMeter);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        int aPos = GLES20.glGetAttribLocation(liveProg, "aPos");
+        int aCol = GLES20.glGetAttribLocation(liveProg, "aColor");
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, posVbo);
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
+        GLES20.glVertexAttribPointer(aCol, 4, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
+        GLES20.glEnableVertexAttribArray(aCol);
+        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, uploaded);
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisableVertexAttribArray(aCol);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        // keep the view opaque for the compositor
+        GLES20.glColorMask(false, false, false, true);
+        GLES20.glClearColor(0f, 0f, 0f, 1f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        GLES20.glColorMask(true, true, true, true);
+        GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+    }
+
+    private String detailLine() {
+        float d = detailHere;
+        if (d < 0) return "Detail here: point at something";
+        int pct = Math.round(d * 100);
+        return pct >= 70 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, hold a bit longer" : "🔴 Detail here: " + pct + "% solid, hold still here";
     }
 
     private void drawPointArrays() {
