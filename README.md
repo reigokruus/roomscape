@@ -2,6 +2,10 @@
 
 **A set-up assistant for real rooms.** Scan your room with an iPhone, tell the app what gear you own, pick the kind of scene you want, and it tells you in plain language where to put the camera and lights. It's built for everyday creators, not film crews.
 
+## Test a native app now
+
+See [Android APK install/build instructions and the iOS hardware/build gate](docs/testable-app.md). The Android APK is native ARCore code, not the browser prototype; the iOS Swift storyboard additions are a separate feature set and are not in that APK.
+
 ## Status
 **v0.1 (hackathon prototype):** the scan works. Apple RoomPlan captures the room, and it comes back as a 3D model with windows (natural light), doors and furniture picked out, plus a room summary and a top-down view.
 
