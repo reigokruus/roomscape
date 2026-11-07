@@ -25,6 +25,9 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     @Published var phaseStarted = Date()
     /// Set when the app ended the scan by itself (memory or heat), so the user knows why.
     @Published var endedEarlyReason: String?
+    /// The phone is hot (.serious): the app's capture runs at half rate.
+    @Published var powerSaving = false
+    private var lastMemoryWarning: Date?
     let captureView: RoomCaptureView
     /// LiDAR points and live discs, read from RoomPlan's own ARKit session.
     let live: LiveCapture
@@ -59,6 +62,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
         live.start()
         live.attachDiscs(to: captureView)
+        lastMemoryWarning = nil
+        // Already warm from a previous scan: start in power saving.
+        powerSaving = ProcessInfo.processInfo.thermalState == .serious
+        if powerSaving { live.setPowerSaving(true) }
     }
 
     /// User tapped Done. RoomPlan answers through `shouldPresent`, where processing starts.
@@ -102,18 +109,38 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
 
     // MARK: System pressure
 
+    /// iOS sends memory warnings early, as a cue to free caches. The first one makes the capture give memory back
+    /// (coarser cells, fewer photos); only a second one within 30 s ends the scan.
     @objc nonisolated private func memoryWarning() {
         Task { @MainActor in
-            self.endEarly("The phone was running low on memory, so the scan was finished early and what you scanned so far was kept.")
+            let now = Date()
+            if let last = self.lastMemoryWarning, now.timeIntervalSince(last) < 30 {
+                self.endEarly("The phone was running low on memory, so the scan was finished early and what you scanned so far was kept.")
+            } else {
+                log.warning("memory warning: shedding capture memory")
+                self.live.shedMemory()
+            }
+            self.lastMemoryWarning = now
         }
     }
 
+    /// Apple's guidance: reduce work at .serious, stop at .critical. RoomPlan stops by itself (deviceTooHot) if it
+    /// must; until then the app's own extra work is halved so the scan can be finished.
     @objc nonisolated private func thermalStateChanged() {
         let state = ProcessInfo.processInfo.thermalState
         Task { @MainActor in
             log.info("thermal state \(state.rawValue)")
-            if state == .serious || state == .critical {
-                self.endEarly("The phone got hot, so the scan was finished early and what you scanned so far was kept.")
+            switch state {
+            case .critical:
+                self.endEarly("The phone got too hot, so the scan was finished early and what you scanned so far was kept.")
+            case .serious:
+                self.powerSaving = true
+                self.live.setPowerSaving(true)
+            default:
+                if self.powerSaving {
+                    self.powerSaving = false
+                    self.live.setPowerSaving(false)
+                }
             }
         }
     }
@@ -234,6 +261,13 @@ struct ScannerScreen: View {
             VStack(spacing: 12) {
                 switch controller.phase {
                 case .scanning:
+                    if controller.powerSaving {
+                        Label("The phone is warm, so the live discs update less often. Keep scanning.",
+                              systemImage: "thermometer.medium")
+                            .font(.footnote)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(.regularMaterial, in: Capsule())
+                    }
                     TimelineView(.periodic(from: controller.phaseStarted, by: 1)) { context in
                         let elapsed = context.date.timeIntervalSince(controller.phaseStarted)
                         if elapsed > ScanController.suggestedMaxScanSeconds {

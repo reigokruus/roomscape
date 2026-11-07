@@ -62,11 +62,12 @@ final class LiveCloud: @unchecked Sendable {
     static let voxel: Float = 0.02
     /// Merge into bigger cells at this share of `maxPoints`, leaving room for the next frames.
     static let coarsenAt = 0.95
-    /// We sample about 15 depth frames per second, so this is about 1 s of sightings.
-    static let solidFrames = 15
-    /// About 600 m² of surface at 2 cm: a large room with its floor, walls and some ceiling. 400k filled up after one
-    /// corner of a 14 × 12 m room and silently dropped the rest. Costs ~70 MB (GPU buffer 24 MB, index and counters).
-    static let maxPoints = 1_500_000
+    /// We sample about 10 depth frames per second (5 when the phone is hot), so this is about 1 s of sightings.
+    static let solidFrames = 10
+    /// Point budget. Large rooms are handled by merging into coarser cells at 95% (see `coarsen`), so this doesn't
+    /// need to hold a whole big room at 2 cm. Fixed memory: GPU buffer 19 MB, index ~25 MB (reserved up front, so
+    /// it never doubles while growing), counters 6 MB.
+    static let maxPoints = 1_200_000
     /// Photo budget. The handoff's 80 ran out in a large room; 160 JPEGs are about 16 MB.
     static let maxKeyframes = 160
     static let photoWidth = 1024
@@ -100,7 +101,13 @@ final class LiveCloud: @unchecked Sendable {
     /// Since when tracking has been normal without a break (worker only).
     private var trackingNormalSince: TimeInterval?
     /// Scaling and JPEG encoding happen here, at low priority, so they never compete with ARKit's tracking.
-    private let photoQueue = DispatchQueue(label: "CineX.keyframe-photos", qos: .background)
+    /// Utility, not background: when the phone gets warm iOS throttles background work first, and every photo
+    /// waiting here holds a 4 MB copy of the camera image.
+    private let photoQueue = DispatchQueue(label: "CineX.keyframe-photos", qos: .utility)
+    /// Photos copied but not yet encoded. New photos are skipped while two are waiting.
+    private let pendingPhotos = OSAllocatedUnfairLock(initialState: 0)
+    /// 1 normally, 2 in power saving: photos are taken twice as far apart (worker only).
+    private var photoSpacing: Float = 1
     private lazy var imageContext = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
     /// Smoothed share of solid spots where the phone points, 0…1, or -1 before there is enough to say.
     private(set) var detailHere: Float = -1
@@ -114,7 +121,7 @@ final class LiveCloud: @unchecked Sendable {
         points = buffer.contents().bindMemory(to: LivePoint.self, capacity: Self.maxPoints)
         observations = [UInt8](repeating: 0, count: Self.maxPoints)
         seenStamp = [Int32](repeating: -1, count: Self.maxPoints)
-        index.reserveCapacity(300_000)
+        index.reserveCapacity(Self.maxPoints)
     }
 
     func reset() {
@@ -287,6 +294,8 @@ final class LiveCloud: @unchecked Sendable {
     /// JPEG encoding run later on `photoQueue`.
     private func captureKeyframeIfMoved(_ frame: ARFrame, pose: simd_float4x4) {
         if keyframesTaken >= Self.maxKeyframes { thinPhotos() }
+        // Don't pile up camera-image copies while the encoder is behind (memory).
+        guard pendingPhotos.withLock({ $0 }) < 2 else { return }
         // Not while tracking is still settling: that's when extra work can make ARKit lose track.
         guard let since = trackingNormalSince, frame.timestamp - since >= 1 else { return }
         if let last = lastKeyframePose {
@@ -295,9 +304,10 @@ final class LiveCloud: @unchecked Sendable {
             let lookA = simd_normalize(SIMD3(last.columns.2.x, last.columns.2.y, last.columns.2.z))
             let lookB = simd_normalize(SIMD3(pose.columns.2.x, pose.columns.2.y, pose.columns.2.z))
             let turnedDegrees = acos(max(-1, min(1, simd_dot(lookA, lookB)))) * 180 / .pi
-            guard moved >= photoMove || turnedDegrees >= photoTurn else { return }
+            guard moved >= photoMove * photoSpacing || turnedDegrees >= photoTurn * photoSpacing else { return }
         }
         guard let pixels = Self.copy(frame.capturedImage) else { return }
+        pendingPhotos.withLock { $0 += 1 }
         keyframesTaken += 1
         lastKeyframePose = pose
         let timestamp = frame.timestamp
@@ -307,6 +317,7 @@ final class LiveCloud: @unchecked Sendable {
                                      ambientKelvin: frame.lightEstimate.map { Float($0.ambientColorTemperature) })
 
         photoQueue.async { [self] in
+            defer { pendingPhotos.withLock { $0 -= 1 } }
             let iw = CVPixelBufferGetWidth(pixels), ih = CVPixelBufferGetHeight(pixels)
             let scale = Float(Self.photoWidth) / Float(iw)
             let scaled = CIImage(cvPixelBuffer: pixels)
@@ -403,6 +414,20 @@ final class LiveCloud: @unchecked Sendable {
         countLock.withLock { $0 = kept }
         print("LiveCloud: budget full, merged \(n) points into \(kept) at \(Int((newVoxel * 1000).rounded())) mm cells "
               + "in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+    }
+
+    // MARK: Pressure (call on the worker queue)
+
+    /// When the phone is hot: photos twice as far apart (the caller also samples fewer frames and draws less).
+    func setPowerSaving(_ on: Bool) {
+        photoSpacing = on ? 2 : 1
+    }
+
+    /// iOS says memory is low: give back what we can without losing coverage — merge the points into coarser cells
+    /// (roughly halves them) and keep every other photo.
+    func shedMemory() {
+        if count > 50_000, voxel < 0.06 { coarsen() }
+        if keyframesTaken > 20 { thinPhotos() }
     }
 
     /// The photo budget is used up: keep every other photo and take new ones twice as far apart, so photos cover the

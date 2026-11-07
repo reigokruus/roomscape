@@ -30,9 +30,23 @@ final class LiveCapture: ObservableObject {
         worker.async { cloud.reset() }
         detailLine = Self.line(for: -1)
         let link = CADisplayLink(target: WeakTarget(self), selector: #selector(WeakTarget.tick))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: 15, preferred: 15)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
         link.add(to: .main, forMode: .common)
         self.link = link
+    }
+
+    /// The phone is hot: sample depth and draw discs at half rate, and take photos further apart. RoomPlan keeps
+    /// running at full rate; this only lowers what the app adds on top of it.
+    func setPowerSaving(_ on: Bool) {
+        link?.preferredFrameRateRange = on ? CAFrameRateRange(minimum: 3, maximum: 5, preferred: 5)
+                                           : CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
+        discView?.preferredFramesPerSecond = on ? 10 : 20
+        if let cloud { worker.async { cloud.setPowerSaving(on) } }
+    }
+
+    /// iOS warned about memory: let the cloud give some back.
+    func shedMemory() {
+        if let cloud { worker.async { cloud.shedMemory() } }
     }
 
     /// Stops taking frames and removes the discs. The cloud keeps what was captured.
@@ -151,7 +165,10 @@ final class LiveDiscsMTKView: MTKView {
         colorPixelFormat = .bgra8Unorm
         depthStencilPixelFormat = .depth32Float
         clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        preferredFramesPerSecond = 30
+        // The discs are soft blobs: drawing them at 1x instead of the screen's 3x is 9x fewer pixels for the GPU
+        // (which is also running the camera and RoomPlan) and looks the same. 20 fps is plenty for feedback.
+        contentScaleFactor = 1
+        preferredFramesPerSecond = 20
         renderer.session = live.session
         delegate = renderer
     }
@@ -245,7 +262,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float w = max(out.position.w, 0.05);
         float4 c = float4(p.color) / 255.0;
         float solid = step(0.99, c.a);   // solid spots shrink so they stop hiding the camera
-        out.pointSize = clamp(u.sizeScale / w * mix(1.0, 0.4, solid), 2.0, 64.0);
+        out.pointSize = clamp(u.sizeScale / w * mix(1.0, 0.4, solid), 1.0, 24.0); // 1x pixels
         out.color = c;
         return out;
     }
