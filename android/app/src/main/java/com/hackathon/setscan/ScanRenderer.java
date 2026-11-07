@@ -614,10 +614,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 flip.postScale(sc, -sc);
                 d.thumb = android.graphics.Bitmap.createBitmap(full, 0, 0, width, height, flip, true);
                 full.recycle();
-                d.n = count; d.pos = new float[count * 3]; d.col = new byte[count * 3];
-                for (int i = 0; i < count; i++) {
-                    d.pos[i * 3] = pos.get(i * 3); d.pos[i * 3 + 1] = pos.get(i * 3 + 1); d.pos[i * 3 + 2] = pos.get(i * 3 + 2);
-                    d.col[i * 3] = col.get(i * 4); d.col[i * 3 + 1] = col.get(i * 4 + 1); d.col[i * 3 + 2] = col.get(i * 4 + 2);
+                int live = 0;
+                for (int i = 0; i < count; i++) if (obs[i] != 0) live++;
+                d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
+                for (int i = 0, j = 0; i < count; i++) {
+                    if (obs[i] == 0) continue; // cleared by see-through
+                    d.pos[j * 3] = pos.get(i * 3); d.pos[j * 3 + 1] = pos.get(i * 3 + 1); d.pos[j * 3 + 2] = pos.get(i * 3 + 2);
+                    d.col[j * 3] = col.get(i * 4); d.col[j * 3 + 1] = col.get(i * 4 + 1); d.col[j * 3 + 2] = col.get(i * 4 + 2);
+                    j++;
                 }
                 java.util.List<byte[]> jpgs = ScanExport.readKeyframes(photos, width, height);
                 for (int i = 0; i < photos.keyframes.size() && i < jpgs.size(); i++) {
@@ -1333,7 +1337,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
         sensors.active = false;
-        log("finish: " + count + " points, " + diagnostics());
+        log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
+        purgeCleared();
         dropNoise();
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
         try {
@@ -1765,7 +1770,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
             }
             k++;
         }
@@ -2463,7 +2468,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -3179,6 +3184,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (count >= MAX_POINTS) return;
                 }
             }
+            carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
             if (frameHits > 200) { float f = (float) frameSolid / frameHits; detailHere = detailHere < 0 ? f : detailHere * 0.8f + f * 0.2f; }
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
             // Close-up held for a moment: make it a detail zone automatically.
@@ -3277,6 +3283,55 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final int SOLID_SEEN = 12;
     private static int seenAlpha(int n) { return Math.min(255, Math.max(1, n * 255 / SOLID_SEEN)); }
     private final int[] seenStamp = new int[MAX_POINTS];
+    private final byte[] thru = new byte[MAX_POINTS]; // depth frames that saw clearly past this point
+    private int carveCursor, carvedTotal;
+
+    /**
+     * See-through clearing: a point the camera later sees past (the measured surface is clearly farther away at that pixel,
+     * and at its 4 neighbours) gets a strike; once it has as many strikes as sightings (at least 4), it is removed.
+     * Without this, a wrong first reading (e.g. "something" under a chair) could never go away.
+     * Checks up to 250k points per depth frame, round-robin.
+     */
+    private void carve(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int dw, int dh,
+                       float fx, float fy, float cx, float cy, float[] m) {
+        int n = count;
+        if (n == 0) return;
+        float[] v = new float[16];
+        Matrix.invertM(v, 0, m, 0);
+        int budget = Math.min(n, 250000), removed = 0;
+        for (int it = 0; it < budget; it++) {
+            int i = carveCursor++;
+            if (carveCursor >= n) carveCursor = 0;
+            if (obs[i] == 0 || seenStamp[i] == depthFrames) continue; // dead, or seen in this very frame
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float zc = v[2] * x + v[6] * y + v[10] * z + v[14];
+            float dp = -zc;
+            if (dp < 0.25f || dp > 3.5f) continue;
+            float xc = v[0] * x + v[4] * y + v[8] * z + v[12], yc = v[1] * x + v[5] * y + v[9] * z + v[13];
+            int u = (int) (fx * xc / dp + cx), vv = (int) (cy - fy * yc / dp);
+            if (u < 1 || vv < 1 || u >= dw - 1 || vv >= dh - 1) continue;
+            float lim = dp + Math.max(0.10f, 0.08f * dp);
+            if (!beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv, lim) || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u - 1, vv, lim)
+                    || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u + 1, vv, lim) || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv - 1, lim)
+                    || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv + 1, lim)) continue;
+            int t = Math.min(255, (thru[i] & 0xFF) + 1);
+            thru[i] = (byte) t;
+            int seen = Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f));
+            if (t >= 4 && t >= seen) {
+                obs[i] = 0; thru[i] = 0;
+                col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done
+                removed++;
+            }
+        }
+        if (removed > 0) { refined = true; carvedTotal += removed; }
+    }
+
+    private static boolean beyond(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int u, int v, float lim) {
+        int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
+        if (mm < 200 || mm > 4000) return false;
+        if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) return false;
+        return mm * 0.001f > lim;
+    }
     private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
     private float detailHere = -1;           // smoothed share of solid points where the phone points
     private int solidCount, hudCalls;        // points seen often enough to count as solid
@@ -3287,12 +3342,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         pos.put(i, x); pos.put(i + 1, y); pos.put(i + 2, z);
         int j = count * 4;
         col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) seenAlpha(1));
-        obs[count] = 1; seenStamp[count] = depthFrames;
+        obs[count] = 1; seenStamp[count] = depthFrames; thru[count] = 0;
         count++;
     }
 
     /** A spot seen again: blend the new reading in, so repeated looks clean up a bad first one. */
     private void refine(int idx, float x, float y, float z, int[] rgb) {
+        if (obs[idx] == 0) { // a cleared spot seen solid again: start it fresh
+            pos.put(idx * 3, x); pos.put(idx * 3 + 1, y); pos.put(idx * 3 + 2, z);
+            col.put(idx * 4, (byte) rgb[0]); col.put(idx * 4 + 1, (byte) rgb[1]); col.put(idx * 4 + 2, (byte) rgb[2]); col.put(idx * 4 + 3, (byte) seenAlpha(1));
+            obs[idx] = 1; thru[idx] = 0; seenStamp[idx] = depthFrames; refined = true;
+            return;
+        }
+        if (thru[idx] != 0 && seenStamp[idx] != depthFrames) thru[idx]--;
         int n = obs[idx] & 0xFF;
         if (n < 255) obs[idx] = (byte) (n + 1);
         if (seenStamp[idx] != depthFrames) { // count each depth frame once (many pixels land in one 2 cm spot)
@@ -3315,6 +3377,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** Drop specks seen only once (noise, flying pixels), unless that would throw away most of a sparse scan. */
+    /** Remove the points see-through clearing marked (they stay in place, invisible, until the scan ends). */
+    private void purgeCleared() {
+        int k = 0;
+        for (int i = 0; i < count; i++) {
+            if (obs[i] == 0) continue;
+            if (k != i) {
+                pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
+                for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
+            }
+            k++;
+        }
+        if (k == count) return;
+        count = k; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
+    }
+
     private void dropNoise() {
         int keep = 0;
         boolean[] drop = new boolean[count];
@@ -3332,7 +3411,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
             }
             k++;
         }
@@ -3524,6 +3603,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (liveProg == 0) liveProg = program(
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
                 "void main(){ gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
+                "  if (aColor.a < 0.002) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; }" +
                 "  float solid = step(0.99, aColor.a);" + // done spots shrink to a faint dot so they stop hiding the camera
                 "  gl_PointSize = clamp(uSize / w * mix(1.0, 0.4, solid), 2.0, 64.0); vColor = aColor; }",
                 "precision mediump float; varying vec4 vColor;" +
