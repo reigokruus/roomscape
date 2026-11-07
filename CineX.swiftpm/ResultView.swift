@@ -47,45 +47,18 @@ struct ResultView: View {
                 } else {
                     ProgressView()
                 }
-                HStack {
-                    if splatGroup != nil {
-                        Button {
-                            toggleLighting()
-                        } label: {
-                            Image(systemName: lightingOn ? "lightbulb.fill" : "lightbulb")
-                                .frame(width: 32, height: 28)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(lightingOn ? .yellow : nil)
-                        .accessibilityLabel(lightingOn ? "Turn off the lighting preview" : "Lighting preview")
-                        Button {
-                            toggleObjects()
-                        } label: {
-                            Image(systemName: objectsOn ? "cube.fill" : "cube")
-                                .frame(width: 32, height: 28)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(objectsOn ? .yellow : nil)
-                        .accessibilityLabel(objectsOn ? "Close objects" : "Objects in the room")
-                        Picker("Style", selection: $style) {
-                            Text("Splats").tag(Style.splats)
-                            Text("Model").tag(Style.model)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 160)
-                    } else if buildingSplats {
-                        Label("Building splats…", systemImage: "circle.dotted")
-                            .font(.caption.weight(.medium))
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(.regularMaterial, in: Capsule())
+                // Must fit a 375-pt-wide phone: compact controls in one row, or two rows if they still don't fit
+                // (large text). A row wider than the screen would also push the panel below off both edges.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        modeButtons
+                        Spacer(minLength: 4)
+                        viewPickers
                     }
-                    Spacer()
-                    Picker("View", selection: $topView) {
-                        Text("3D").tag(false)
-                        Text("Top").tag(true)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) { modeButtons }
+                        HStack(spacing: 8) { viewPickers }
                     }
-                    .pickerStyle(.segmented)
-                    .frame(width: 120)
                 }
                 .padding(10)
             }
@@ -106,7 +79,7 @@ struct ResultView: View {
                     .frame(maxHeight: 260)
             }
         }
-        .navigationTitle(scan.date.formatted(date: .abbreviated, time: .shortened))
+        .navigationTitle(scan.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
         .navigationBarTitleDisplayMode(.inline)
         // Black bar above the black 3D view, with light title, buttons and status bar in light mode too.
         .toolbarBackground(Color.black, for: .navigationBar)
@@ -207,7 +180,60 @@ struct ResultView: View {
             self.lightingScene = lightingScene
             self.shell = shell
             style = .splats
+            #if DEBUG
+            // UI checks in the Simulator: -openPanel lighting | objects
+            let args = ProcessInfo.processInfo.arguments
+            if let i = args.firstIndex(of: "-openPanel"), i + 1 < args.count {
+                if args[i + 1] == "lighting" { toggleLighting() }
+                if args[i + 1] == "objects" { toggleObjects() }
+            }
+            #endif
         }
+    }
+
+    /// Lighting and objects toggles (only once the splats are ready), or the "building" note.
+    @ViewBuilder private var modeButtons: some View {
+        if splatGroup != nil {
+            Button {
+                toggleLighting()
+            } label: {
+                Image(systemName: lightingOn ? "lightbulb.fill" : "lightbulb")
+            }
+            .buttonStyle(.bordered)
+            .tint(lightingOn ? .yellow : nil)
+            .accessibilityLabel(lightingOn ? "Turn off the lighting preview" : "Lighting preview")
+            Button {
+                toggleObjects()
+            } label: {
+                Image(systemName: objectsOn ? "cube.fill" : "cube")
+            }
+            .buttonStyle(.bordered)
+            .tint(objectsOn ? .yellow : nil)
+            .accessibilityLabel(objectsOn ? "Close objects" : "Objects in the room")
+        } else if buildingSplats {
+            Label("Building splats…", systemImage: "circle.dotted")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+        }
+    }
+
+    /// Splats / Model (once splats exist) and 3D / top view.
+    @ViewBuilder private var viewPickers: some View {
+        if splatGroup != nil {
+            Picker("Style", selection: $style) {
+                Text("Splats").tag(Style.splats)
+                Text("Model").tag(Style.model)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+        }
+        Picker("View", selection: $topView) {
+            Image(systemName: "rotate.3d").accessibilityLabel("3D view").tag(false)
+            Image(systemName: "square.grid.3x3").accessibilityLabel("Top view").tag(true)
+        }
+        .pickerStyle(.segmented)
+        .fixedSize()
     }
 
     private func floorTapped(_ p: SIMD3<Float>) {

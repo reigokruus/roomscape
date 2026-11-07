@@ -70,7 +70,15 @@ struct HomeView: View {
                     }
                 }
             }
-            .onAppear { scans = ScanStore.list() }
+            .onAppear {
+                scans = ScanStore.list()
+                #if DEBUG
+                // UI checks in the Simulator: launch with -openLatestScan to go straight to the newest scan.
+                if ProcessInfo.processInfo.arguments.contains("-openLatestScan"), path.isEmpty, let latest = scans.first {
+                    path = [latest]
+                }
+                #endif
+            }
             .fullScreenCover(isPresented: $scanning, onDismiss: {
                 // Open the result only after the scanner has fully closed, so the two transitions don't collide.
                 scans = ScanStore.list()
