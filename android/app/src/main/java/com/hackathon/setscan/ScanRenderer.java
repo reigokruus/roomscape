@@ -1526,6 +1526,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (training || (autoStage > 0 && autoStage < 5)) return "Already working on it…";
         if (surfBase == null) return "The model is still loading. Try again in a moment.";
         autoStage = 4;
+        // the photos are the better source here (depth is noisy): let splats move further to match them, starting
+        // fresh from the current model so each Refine builds on the last
+        Trainer.MAX_T = 0.5f; Trainer.POS_LR = 3f; trainer = null;
+        Surfels cur = surfShown;
+        if (cur != null && cur.trained && cur.n > 0) surfBase = cur; // continue from the trained model, not the raw scan
         autoProgress("Refining the model against your photos", 0.65f);
         String l = toggleTraining();
         if (!training) { autoStage = 5; activity.updateProcess(null, -1); return "Couldn't refine: no photos in this scan."; }

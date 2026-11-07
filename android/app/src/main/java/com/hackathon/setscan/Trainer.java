@@ -19,7 +19,8 @@ import java.util.Random;
 final class Trainer {
     static final float CELL = 0.03f;
     static float BG = 0.45f; // background grey behind the splats
-    static final float MAX_T = 0.12f; // splats may move at most 12 cm from where the scan put them
+    static volatile float MAX_T = 0.12f; // splats may move at most this far from where the scan put them (Refine: 50 cm, photos trusted over depth)
+    static volatile float POS_LR = 1f;  // position learning-rate multiplier (Refine: 3x)
     static final int NP = 8;
 
     static final class View {
@@ -219,7 +220,7 @@ final class Trainer {
                 float gq = g[i * NP + q];
                 m1[q][i] = b1 * m1[q][i] + (1 - b1) * gq;
                 m2[q][i] = b2 * m2[q][i] + (1 - b2) * gq * gq;
-                float stepv = lr[q] * (m1[q][i] / c1) / ((float) Math.sqrt(m2[q][i] / c2) + 1e-8f);
+                float stepv = (q >= 5 ? lr[q] * POS_LR : lr[q]) * (m1[q][i] / c1) / ((float) Math.sqrt(m2[q][i] / c2) + 1e-8f);
                 switch (q) {
                     case 0: cr[i] = clamp01(cr[i] - stepv); break;
                     case 1: cg[i] = clamp01(cg[i] - stepv); break;
