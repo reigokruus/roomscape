@@ -2727,7 +2727,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
-        surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
+        surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;
@@ -3144,7 +3144,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             uploadNew();
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
-            if (LIVE_DISCS) drawLiveDiscs(mvp);
+            if (LIVE_MESH) { maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); }
+            else if (LIVE_DISCS) drawLiveDiscs(mvp);
             float[] tap = pendingTap;
             if (tap != null) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
             maybeStartLiveRoom(nowMs);
@@ -4046,6 +4047,98 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
     }
 
+    // ---- live surface mesh (rk, 7 Nov: like the iPhone's LiDAR mesh, polygons on what's detected, not splats) ----
+    static final boolean LIVE_MESH = true;
+    static final long LIVE_MESH_MS = 1200;
+    private volatile boolean liveMeshBusy;
+    private volatile Object[] liveMeshNew;   // {FloatBuffer tris, ByteBuffer conf, FloatBuffer lines, ByteBuffer lineConf, int[] {triVerts, lineVerts}}
+    private long liveMeshAt;
+    private int liveMeshProg, liveMeshTriVerts, liveMeshLineVerts;
+    private final int[] liveMeshVbo = new int[4];
+
+    /** GL thread: every ~1 s, copy the voxels near the phone and build their mesh on another thread. */
+    private void maybeLiveMesh(Camera camera, long nowMs) {
+        if (liveMeshBusy || nowMs - liveMeshAt < LIVE_MESH_MS || tsdf.size() < 50) return;
+        liveMeshAt = nowMs; liveMeshBusy = true;
+        com.google.ar.core.Pose p = camera.getPose();
+        final float px = p.tx(), py = p.ty(), pz = p.tz();
+        final int gen = surfGen;
+        new Thread(() -> {
+            try {
+                Tsdf near = tsdf.copyNear(px, py, pz, 3.5f); // read while the GL thread keeps fusing: fine for a preview
+                int nt = near.extractMesh();
+                int nv = nt * 3;
+                java.nio.FloatBuffer lines = ByteBuffer.allocateDirect(Math.max(1, nt * 6) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+                ByteBuffer lc = ByteBuffer.allocateDirect(Math.max(1, nt * 6)).order(ByteOrder.nativeOrder());
+                float[] v = new float[9]; byte[] c = new byte[3];
+                for (int t = 0; t < nt; t++) {
+                    for (int k = 0; k < 9; k++) v[k] = near.meshPos.get(t * 9 + k);
+                    for (int k = 0; k < 3; k++) c[k] = near.meshConf.get(t * 3 + k);
+                    for (int e = 0; e < 3; e++) {
+                        int a = e, b = (e + 1) % 3;
+                        lines.put(v[a * 3]).put(v[a * 3 + 1]).put(v[a * 3 + 2]).put(v[b * 3]).put(v[b * 3 + 1]).put(v[b * 3 + 2]);
+                        lc.put(c[a]).put(c[b]);
+                    }
+                }
+                lines.position(0); lc.position(0);
+                if (gen == surfGen) liveMeshNew = new Object[]{near.meshPos, near.meshConf, lines, lc, new int[]{nv, nt * 6}};
+            } catch (Throwable e) { logError("live mesh", new RuntimeException(e)); }
+            finally { liveMeshBusy = false; }
+        }).start();
+    }
+
+    /** Light see-through polygons over the camera with a wireframe; new surfaces are tinted orange until well seen. */
+    private void drawLiveMesh(float[] m) {
+        Object[] nm = liveMeshNew;
+        if (nm != null) {
+            liveMeshNew = null;
+            if (liveMeshVbo[0] == 0) GLES20.glGenBuffers(4, liveMeshVbo, 0);
+            int[] counts = (int[]) nm[4];
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[0] * 12, (java.nio.Buffer) nm[0], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[1]);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[0], (java.nio.Buffer) nm[1], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[2]);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[1] * 12, (java.nio.Buffer) nm[2], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[3]);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[1], (java.nio.Buffer) nm[3], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+            liveMeshTriVerts = counts[0]; liveMeshLineVerts = counts[1];
+        }
+        if (liveMeshTriVerts == 0) return;
+        if (liveMeshProg == 0) liveMeshProg = program(
+                "uniform mat4 uMvp; attribute vec3 aPos; attribute float aConf; varying float vConf;" +
+                "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vConf = aConf; }",
+                "precision mediump float; uniform vec4 uCol; uniform vec4 uNew; varying float vConf;" +
+                "void main(){ gl_FragColor = mix(uNew, uCol, smoothstep(0.15, 0.6, vConf)); }");
+        GLES20.glUseProgram(liveMeshProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(liveMeshProg, "uMvp"), 1, false, m, 0);
+        int aPos = GLES20.glGetAttribLocation(liveMeshProg, "aPos"), aConf = GLES20.glGetAttribLocation(liveMeshProg, "aConf");
+        int uCol = GLES20.glGetUniformLocation(liveMeshProg, "uCol"), uNew = GLES20.glGetUniformLocation(liveMeshProg, "uNew");
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aConf);
+        // fill: writes depth so the wireframe behind a wall stays hidden
+        GLES20.glEnable(GLES20.GL_POLYGON_OFFSET_FILL);
+        GLES20.glPolygonOffset(1f, 1f);
+        GLES20.glUniform4f(uCol, 0.92f, 0.94f, 1f, 0.42f);
+        GLES20.glUniform4f(uNew, 1f, 0.55f, 0.15f, 0.40f);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[1]); GLES20.glVertexAttribPointer(aConf, 1, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, liveMeshTriVerts);
+        GLES20.glDisable(GLES20.GL_POLYGON_OFFSET_FILL);
+        // wireframe
+        GLES20.glUniform4f(uCol, 1f, 1f, 1f, 0.75f);
+        GLES20.glUniform4f(uNew, 1f, 0.45f, 0.1f, 0.85f);
+        GLES20.glLineWidth(Math.max(1f, height / 1400f));
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[2]); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[3]); GLES20.glVertexAttribPointer(aConf, 1, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
+        GLES20.glDrawArrays(GLES20.GL_LINES, 0, liveMeshLineVerts);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+        GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aConf);
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
     /** Live during the scan: every captured spot as a disc over the camera, rimmed red (seen once) -> yellow -> green (solid). */
     static final boolean LIVE_DISCS = true;
     private int liveProg;
@@ -4114,12 +4207,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     : lastFail == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_LIGHT ? "Lost track: too dark. Turn on a light"
                     : "Lost track: move slowly, pointing at the floor or furniture";
         }
-        else if (d < 0 || count < 3000) { level = 1; hint = "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
+        else if (d < 0 || count < 3000) { level = 1; hint = LIVE_MESH ? "Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas" : "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
         else if (photoWanted && d >= 0.35f) { level = 1; hint = "Hold still a moment… taking a photo"; }
         else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
         else if (tooFast && d < 0.7f) { level = 2; hint = "Too fast. Slow down and sway gently over this spot"; }
-        else if (d < 0.35f) { level = 2; hint = "Sway the phone slowly over this spot until the dots turn green"; }
-        else if (d < SPOT_DONE) { level = 1; hint = "Good. Keep swaying gently here until the middle is green"; }
+        else if (d < 0.35f) { level = 2; hint = LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
+        else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = "This spot is done. Move on to the next red area"; }
         if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
         else if (photoJustTaken()) sub = "📷 Photo " + photos.keyframes.size() + " taken, keep swaying";

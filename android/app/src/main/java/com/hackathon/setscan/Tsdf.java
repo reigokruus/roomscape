@@ -27,6 +27,7 @@ final class Tsdf {
     private final float[] sdf;
     private final short[] w;
     private final byte[] rgb;
+    private final int[] at; // voxel -> its slot in the hash table (to walk the voxels without scanning the whole table)
     private int n;
 
     Tsdf(int maxVoxels, float voxel, float truncation, float carveDist) {
@@ -39,6 +40,7 @@ final class Tsdf {
         sdf = new float[cap];
         w = new short[cap];
         rgb = new byte[cap * 3];
+        at = new int[cap];
         clear();
     }
 
@@ -68,7 +70,7 @@ final class Tsdf {
         int i = find(k);
         if (keys[i] == k) return slots[i];
         if (n >= cap) return -1;
-        keys[i] = k; slots[i] = n;
+        keys[i] = k; slots[i] = n; at[n] = i;
         sdf[n] = 0; w[n] = 0;
         return n++;
     }
@@ -136,6 +138,43 @@ final class Tsdf {
         }
     }
 
+    /**
+     * A copy of the voxels within r of (x, y, z), for building the live mesh on another thread while scanning
+     * keeps adding to this one.
+     */
+    Tsdf copyNear(float x, float y, float z, float r) {
+        int m = 0;
+        int[] pick = new int[Math.max(16, Math.min(n, 400000))];
+        int nn = n; // may run on another thread while scanning adds voxels: a torn read only costs a wrong preview voxel
+        for (int v = 0; v < nn && m < pick.length; v++) {
+            int t = at[v];
+            if (t < 0 || t >= keys.length) continue;
+            long k = keys[t];
+            if (k == Long.MIN_VALUE || slots[t] < 0 || slots[t] >= cap) continue;
+            float vx = (((int) (k & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs - x;
+            float vy = (((int) ((k >>> 21) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs - y;
+            float vz = (((int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs - z;
+            if (vx * vx + vy * vy + vz * vz > r * r) continue;
+            pick[m++] = t;
+        }
+        Tsdf c = new Tsdf(Math.max(16, m), vs, trunc, carve);
+        c.minW = minW; c.minComponent = minComponent;
+        for (int j = 0; j < m; j++) {
+            int t = pick[j], i = slots[t];
+            long k = keys[t];
+            int s = c.find(k);
+            if (c.keys[s] == k) continue;
+            c.keys[s] = k; c.slots[s] = c.n; c.at[c.n] = s;
+            c.sdf[c.n] = sdf[i]; c.w[c.n] = w[i];
+            c.rgb[c.n * 3] = rgb[i * 3]; c.rgb[c.n * 3 + 1] = rgb[i * 3 + 1]; c.rgb[c.n * 3 + 2] = rgb[i * 3 + 2];
+            c.n++;
+        }
+        return c;
+    }
+
+    /** Per mesh vertex (after extractMesh): how well observed it is, 0..255. */
+    ByteBuffer meshConf;
+
     // ---- mesh extraction (surface nets) ----
 
     FloatBuffer meshPos;
@@ -162,6 +201,7 @@ final class Tsdf {
         int cmask = cellKeys.length - 1;
         float[] vp = new float[Math.max(16, n / 2) * 3];
         byte[] vc = new byte[vp.length];
+        byte[] vw = new byte[vp.length / 3 + 1];
         int nv = 0;
         int[] ci = new int[8];
         int[][] coords = new int[n][];
@@ -195,7 +235,9 @@ final class Tsdf {
             }
             if (cnt == 0) continue;
             for (int c = 0; c < 8; c++) if (Math.abs(sdf[ci[c]]) < best) { best = Math.abs(sdf[ci[c]]); bestJ = ci[c]; }
-            if (nv * 3 + 3 > vp.length) { vp = Arrays.copyOf(vp, vp.length * 2); vc = Arrays.copyOf(vc, vc.length * 2); }
+            if (nv * 3 + 3 > vp.length) { vp = Arrays.copyOf(vp, vp.length * 2); vc = Arrays.copyOf(vc, vc.length * 2); vw = Arrays.copyOf(vw, vp.length / 3 + 1); }
+            int wmin = MAX_W; for (int c = 0; c < 8; c++) wmin = Math.min(wmin, w[ci[c]]);
+            vw[nv] = (byte) Math.min(255, wmin * 255 / MAX_W);
             vp[nv * 3] = (x + 0.5f + sx / cnt) * vs; vp[nv * 3 + 1] = (y + 0.5f + sy / cnt) * vs; vp[nv * 3 + 2] = (z + 0.5f + sz / cnt) * vs;
             vc[nv * 3] = rgb[bestJ * 3]; vc[nv * 3 + 1] = rgb[bestJ * 3 + 1]; vc[nv * 3 + 2] = rgb[bestJ * 3 + 2];
             long ck = key(x, y, z);
@@ -250,6 +292,7 @@ final class Tsdf {
         meshVerts = nt * 3;
         meshPos = ByteBuffer.allocateDirect(Math.max(1, meshVerts) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
         meshCol = ByteBuffer.allocateDirect(Math.max(1, meshVerts) * 4).order(ByteOrder.nativeOrder());
+        meshConf = ByteBuffer.allocateDirect(Math.max(1, meshVerts)).order(ByteOrder.nativeOrder());
         float lx = 0.35f, ly = 0.85f, lz = 0.4f;
         for (int t = 0; t < nt; t++) {
             int a = tris[t * 3], b = tris[t * 3 + 1], c = tris[t * 3 + 2];
@@ -262,9 +305,10 @@ final class Tsdf {
                 meshPos.put(vp[v * 3]).put(vp[v * 3 + 1]).put(vp[v * 3 + 2]);
                 for (int k = 0; k < 3; k++) meshCol.put((byte) Math.min(255, Math.round((vc[v * 3 + k] & 0xFF) * shade)));
                 meshCol.put((byte) 255);
+                meshConf.put(vw[v]);
             }
         }
-        meshPos.position(0); meshCol.position(0);
+        meshPos.position(0); meshCol.position(0); meshConf.position(0);
         return nt;
     }
 
