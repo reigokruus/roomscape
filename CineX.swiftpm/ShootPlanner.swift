@@ -81,7 +81,7 @@ private struct RoomFacts {
         largestWindowArea = room.windows.map { $0.dimensions.x * $0.dimensions.y }.max() ?? 0
 
         let cats = Set(room.objects.map { $0.category })
-        hasTable = cats.contains(.table) || cats.contains(.desk) || cats.contains(.counter)
+        hasTable = cats.contains(.table) || cats.contains(.storage)
         hasChair = cats.contains(.chair)
         hasSofa  = cats.contains(.sofa)
     }
