@@ -91,6 +91,7 @@ final class ObjectsScene {
                 node.isHidden = o.removed
                 node.simdTransform = o.editTransform
             }
+            markerNodes[o.id]?.isHidden = o.removed
         }
         if let id = selected, let o = objects.first(where: { $0.id == id }) {
             outline.isHidden = false

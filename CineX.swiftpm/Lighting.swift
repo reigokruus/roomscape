@@ -151,7 +151,9 @@ struct LightingSetup: Equatable {
     var cameraDistance: Float = 2
     var focalLength: Float = 26
     var vertical = false
-    /// Claude's reasoning and practical tips for the setup it proposed (see `ShotDirector`), or nil.
+    /// Claude's kind of shot ("Interview"…), reasoning and practical tips for the setup it proposed
+    /// (see `ShotDirector`), or nil.
+    var planTitle: String?
     var planNote: String?
     var planTips: [String] = []
 

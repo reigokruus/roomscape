@@ -46,6 +46,9 @@ struct ResultView: View {
     @State private var shotLarge = false
     @State private var planningShot = false
     @State private var planError: String?
+    /// The lighting setup being opened as a new storyboard view.
+    @State private var storyboardSetup: LightingSetup?
+    @State private var openingStoryboard = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -101,7 +104,11 @@ struct ResultView: View {
                     .frame(maxHeight: 340)
             } else if lightingOn, lighting != nil {
                 LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }),
-                              planning: planningShot, planError: planError, onPlan: planShot)
+                              planning: planningShot, planError: planError, onPlan: planShot,
+                              onStoryboard: {
+                                  storyboardSetup = lighting
+                                  openingStoryboard = true
+                              })
                     .frame(maxHeight: 340)
             } else if let room {
                 RoomSummary(room: room, capture: capture, foundWindows: foundWindows, objects: objects)
@@ -130,6 +137,11 @@ struct ResultView: View {
         .onDisappear { training?.pause() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { training?.pause() }
+        }
+        .navigationDestination(isPresented: $openingStoryboard) {
+            if let room, let storyboardSetup {
+                PlanningLaunchView(room: room, scan: scan, objects: objects, addSetup: storyboardSetup)
+            }
         }
         .onChange(of: lighting) { _, setup in
             if lightingOn { lightingScene?.apply(setup) }
@@ -238,6 +250,11 @@ struct ResultView: View {
                     }
                 }
                 if args[i + 1] == "objects" { toggleObjects() }
+                if args.contains("-openStoryboard"), lighting != nil {
+                    // The lighting setup as a new storyboard view.
+                    storyboardSetup = lighting
+                    openingStoryboard = true
+                }
             }
             if args.contains("-replayFind"), let saved {
                 // Replays the end of a Claude search with the saved result, starting from RoomPlan's objects only.
@@ -510,7 +527,7 @@ struct ResultView: View {
     }
 
     /// Asks Claude for a setup for this kind of shot (see `ShotDirector`) and shows it.
-    private func planShot(_ scene: SceneType, wish: String) {
+    private func planShot(_ scene: SceneType?, wish: String) {
         guard let setup = lighting, let shell, !planningShot else { return }
         planningShot = true
         planError = nil

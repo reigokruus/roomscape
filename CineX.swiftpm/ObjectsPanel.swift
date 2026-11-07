@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Objects in the scan: find more with Claude, select, remove / put back, move (tap the floor) and turn movable
-/// things, and see where the room's lights and power sockets are.
+/// things, and see where the room's lights and power sockets are. Swipe a row left to remove it (or put it back),
+/// right to reset it; a selected thing's controls open right under its row.
 struct ObjectsPanel: View {
     @Binding var objects: [RoomObject]
     @Binding var selected: UUID?
@@ -42,48 +43,29 @@ struct ObjectsPanel: View {
                 Text("Claude looks at up to 30 of the scan's photos (about 5 requests on your API key). RoomPlan's furniture is already listed without it.")
             }
 
-            if let id = selected, let i = objects.firstIndex(where: { $0.id == id }), !objects[i].kind.isMarker {
-                Section("Selected: \(objects[i].label)") {
-                    Text(objects[i].removed ? "Removed from the room." : "Tap the floor in the 3D view to move it there.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    if !objects[i].removed {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text("Turn")
-                                Spacer()
-                                Text("\(Int((objects[i].turn * 180 / .pi).rounded()))°").monospacedDigit().foregroundStyle(.secondary)
-                            }
-                            Slider(value: $objects[i].turn, in: -Float.pi...Float.pi, step: Float.pi / 36)
-                        }
-                    }
-                    HStack {
-                        Button(objects[i].removed ? "Put back" : "Remove") { objects[i].removed.toggle() }
-                        Spacer()
-                        if objects[i].isEdited {
-                            Button("Reset") {
-                                objects[i].removed = false
-                                objects[i].offset = .zero
-                                objects[i].turn = 0
-                            }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-
-            Section("Furniture and things") {
+            Section {
                 if movable.isEmpty {
                     Text("Nothing found yet.").foregroundStyle(.secondary)
                 }
                 ForEach(movable) { o in
                     row(o, detail: o.sizeText)
+                    if selected == o.id { editor(o.id) }
+                }
+            } header: {
+                Text("Furniture and things")
+            } footer: {
+                if !movable.isEmpty {
+                    Text("Tap a thing to select it, then tap the floor in the 3D view to move it there. Swipe left to remove it.")
                 }
             }
 
             if !lights.isEmpty {
-                Section("Room lights") {
+                Section {
                     ForEach(lights) { o in row(o, detail: height(o)) }
+                } header: {
+                    Text("Room lights")
+                } footer: {
+                    Text("Swipe left on one that isn't there or doesn't work.")
                 }
             }
             if !power.isEmpty {
@@ -94,6 +76,52 @@ struct ObjectsPanel: View {
         }
         .listStyle(.insetGrouped)
         .sheet(isPresented: $showingKey) { ClaudeKeySheet() }
+    }
+
+    /// Turn and reset for the selected thing, right under its row.
+    @ViewBuilder private func editor(_ id: UUID) -> some View {
+        if let i = objects.firstIndex(where: { $0.id == id }) {
+            if objects[i].removed {
+                Button {
+                    objects[i].removed = false
+                } label: {
+                    Label("Put it back", systemImage: "arrow.uturn.backward")
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Turn")
+                        Spacer()
+                        Text("\(Int((objects[i].turn * 180 / .pi).rounded()))°").monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    Slider(value: $objects[i].turn, in: -Float.pi...Float.pi, step: Float.pi / 36)
+                    HStack(spacing: 12) {
+                        Button(role: .destructive) {
+                            objects[i].removed = true
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                        if objects[i].isEdited {
+                            Button {
+                                reset(id)
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.callout)
+                }
+                .padding(.leading, 38)
+            }
+        }
+    }
+
+    private func reset(_ id: UUID) {
+        guard let i = objects.firstIndex(where: { $0.id == id }) else { return }
+        objects[i].removed = false
+        objects[i].offset = .zero
+        objects[i].turn = 0
     }
 
     private func height(_ o: RoomObject) -> String {
@@ -123,6 +151,25 @@ struct ObjectsPanel: View {
             }
         }
         .foregroundStyle(.primary)
+        // No destructive role: the row stays (struck through) so it can be put back.
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button {
+                if let i = objects.firstIndex(where: { $0.id == o.id }) { objects[i].removed.toggle() }
+            } label: {
+                Label(o.removed ? "Put back" : "Remove", systemImage: o.removed ? "arrow.uturn.backward" : "trash")
+            }
+            .tint(o.removed ? .green : .red)
+        }
+        .swipeActions(edge: .leading) {
+            if o.isEdited {
+                Button {
+                    reset(o.id)
+                } label: {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                }
+                .tint(.gray)
+            }
+        }
     }
 }
 

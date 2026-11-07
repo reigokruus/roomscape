@@ -56,11 +56,14 @@ struct PlanningLaunchView: View {
     let scan:SavedScan
     /// The result screen's Objects list with the user's edits; its changes are applied to the storyboard.
     var objects:[RoomObject] = []
+    /// A lighting setup to add as a new view (see `LightingStoryboard`); the storyboard then opens on it.
+    var addSetup:LightingSetup? = nil
     @State private var project:PlanProject?
+    @State private var shotID:UUID?
     @State private var error:String?
     var body:some View {
         Group {
-            if let project { PlanningEditorView(project:project) }
+            if let project { PlanningEditorView(project:project,shotID:shotID) }
             else if let error { ContentUnavailableView("Could not open planning project",systemImage:"exclamationmark.triangle",description:Text(error)) }
             else { ProgressView("Opening storyboard…") }
         }
@@ -73,7 +76,14 @@ struct PlanningLaunchView: View {
                 let saved = files.projects.first(where:{ $0.scanName == scan.name })
                 var next = try saved ?? RoomPlanningAdapter.makeProject(room:room,scan:scan)
                 let sync = StoryboardObjects.sync(&next,objects:objects,scan:scan)
-                if saved == nil || sync?.changed == true {
+                var added = false
+                if let addSetup {
+                    let shot = try LightingStoryboard.shot(from:addSetup,in:next)
+                    next.shots.append(shot)
+                    shotID = shot.id
+                    added = true
+                }
+                if saved == nil || sync?.changed == true || added {
                     try next.validate()
                     try PlanningStore.disk.save(next)
                 }

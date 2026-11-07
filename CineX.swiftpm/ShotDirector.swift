@@ -19,6 +19,7 @@ enum ShotDirector {
             let height: Double
             let kelvin: Double
         }
+        let shot: String
         let subjectX: Double
         let subjectZ: Double
         let lookTowardX: Double
@@ -41,6 +42,8 @@ enum ShotDirector {
     private static let schema: [String: Any] = [
         "type": "object",
         "properties": [
+            "shot": ["type": "string", "enum": SceneType.allCases.map(\.rawValue),
+                     "description": "The kind of shot this setup is for"],
             "subjectX": number("Where the person stands or sits: x, metres"),
             "subjectZ": number("Where the person stands or sits: z, metres"),
             "lookTowardX": number("A point the person faces (the camera is on this side): x, metres"),
@@ -73,14 +76,15 @@ enum ShotDirector {
             "explanation": ["type": "string", "description": "Two or three plain sentences on why this setup works, for a creator, not a film crew"],
             "tips": ["type": "array", "items": ["type": "string"], "description": "Two to five short, practical things to do on the day"],
         ] as [String: Any],
-        "required": ["subjectX", "subjectZ", "lookTowardX", "lookTowardZ", "pose", "cameraDistance", "lens", "vertical",
+        "required": ["shot", "subjectX", "subjectZ", "lookTowardX", "lookTowardZ", "pose", "cameraDistance", "lens", "vertical",
                      "roomLights", "daylight", "lights", "explanation", "tips"],
         "additionalProperties": false,
     ]
 
-    /// Claude's setup for `scene` in this room, starting from `setup` (which keeps the room's light sources and
-    /// sockets; `refreshRoomLight` updates them for the new spot afterwards).
-    static func propose(scene: SceneType, note: String, setup: LightingSetup, shell: RoomShell,
+    /// Claude's setup for `scene` in this room (or the kind of shot Claude finds suits the room and gear best,
+    /// when nil), starting from `setup` (which keeps the room's light sources and sockets; `refreshRoomLight`
+    /// updates them for the new spot afterwards).
+    static func propose(scene: SceneType?, note: String, setup: LightingSetup, shell: RoomShell,
                         objects: [RoomObject], gear: [GearItem]) async throws -> LightingSetup {
         let text = instructions(scene: scene, note: note, setup: setup, shell: shell, objects: objects, gear: gear)
         let data = try await ClaudeAPI.askAboutPhotos([], instructions: text, schema: schema, effort: "medium")
@@ -95,13 +99,22 @@ enum ShotDirector {
 
     // MARK: The request
 
-    private static func instructions(scene: SceneType, note: String, setup: LightingSetup, shell: RoomShell,
+    private static func instructions(scene: SceneType?, note: String, setup: LightingSetup, shell: RoomShell,
                                      objects: [RoomObject], gear: [GearItem]) -> String {
         func xz(_ p: SIMD3<Float>) -> String { String(format: "(%.2f, %.2f)", p.x, p.z) }
         func up(_ y: Float) -> String { String(format: "%.2f m", y - shell.floorY) }
+        let what: String
+        if let scene {
+            what = "Plan the lighting and camera for a \(scene.rawValue.lowercased()) shot "
+                + "(\(scene.tagline.lowercased())); set \"shot\" to \"\(scene.rawValue)\"."
+        } else {
+            what = "Pick the kind of shot this room and gear suit best ("
+                + SceneType.allCases.map { "\($0.rawValue): \($0.tagline.lowercased())" }.joined(separator: "; ")
+                + "), name it in \"shot\", and plan its lighting and camera."
+        }
         var s = """
-        Plan the lighting and camera for a \(scene.rawValue.lowercased()) shot (\(scene.tagline.lowercased())) in a \
-        room scanned with a phone. The user is an everyday creator, not a film crew, and owns the gear listed below.
+        \(what) The room was scanned with a phone. The user is an everyday creator, not a film crew, and owns the \
+        gear listed below.
 
         Coordinates are metres on the floor plan: x and z; heights are above the floor.
 
@@ -230,6 +243,7 @@ enum ShotDirector {
         }
         s.lights = lights
 
+        s.planTitle = SceneType(rawValue: r.shot)?.rawValue
         let note = r.explanation.trimmingCharacters(in: .whitespacesAndNewlines)
         s.planNote = note.isEmpty ? nil : note
         s.planTips = r.tips.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.prefix(6).map { $0 }

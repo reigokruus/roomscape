@@ -13,12 +13,18 @@ struct PlanningEditorView: View {
     @State private var presetName = ""
     @State private var namingPreset = false
     @State private var confirmingDeleteShot = false
-    @State private var placeCamera = false
+    /// The shot camera is selected on the plan (its actions show in the bar; a floor tap moves it).
+    @State private var cameraSelected = false
     @State private var search = ""
     @State private var category = "All"
     @State private var recent:[UUID] = []
 
-    init(project:PlanProject) { _store = StateObject(wrappedValue:PlanningStore(project:project)) }
+    /// - Parameter shotID: the view to open on (e.g. one just made from a lighting setup); the first one by default.
+    init(project:PlanProject,shotID:UUID? = nil) {
+        let store = PlanningStore(project:project)
+        if let shotID, project.shots.contains(where:{ $0.id == shotID }) { store.selectedShotID = shotID }
+        _store = StateObject(wrappedValue:store)
+    }
     var body:some View {
         ScrollView {
             VStack(alignment:.leading,spacing:14) {
@@ -36,13 +42,17 @@ struct PlanningEditorView: View {
                     Text("Schematic lens preview — measured envelopes, not a photo, AR or a lighting simulation.").font(.caption).foregroundStyle(.secondary)
                 } else {
                     PlanningCanvas(room:store.project.room,shot:store.shot,selectedID:store.selectedItemID,
-                                   select:{ store.selectedItemID = $0 },move:{ store.move($0,to:$1) },
-                                   placeCamera:placeCamera,cameraPoint:{ point in
+                                   cameraSelected:cameraSelected,
+                                   select:{ store.selectedItemID = $0; cameraSelected = false },
+                                   selectCamera:{ store.selectedItemID = nil; cameraSelected = true },
+                                   deselect:{ store.selectedItemID = nil; cameraSelected = false },
+                                   move:{ store.move($0,to:$1) },
+                                   cameraPoint:{ point in
                         guard store.project.room.contains(point) else { store.error = "Camera must be inside the scanned room."; return }
                         store.updateShot { $0.camera.position.x = point.x; $0.camera.position.z = point.z }
-                        placeCamera = false
-                    }).frame(height:290).coordinateSpace(name:"planFloor")
-                    Text("Scanned furniture is grey; planned items are orange; target is green. Drag a footprint to move it on a 10 cm grid. These are dimensioned plans, not realistic assets.")
+                    }).frame(height:330).coordinateSpace(name:"planFloor")
+                        .overlay(alignment:.bottom) { actionBar.padding(8) }
+                    Text("Scanned furniture is grey, things you add are orange, the frame target is green and the camera is cyan. Moves snap to a 10 cm grid. These are measured plans, not realistic models.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Picker("Tools",selection:$panel) {
@@ -116,13 +126,8 @@ struct PlanningEditorView: View {
     }
     private var layoutPanel:some View {
         VStack(alignment:.leading,spacing:12) {
-            Toggle("Tap floor to place shot camera",isOn:$placeCamera)
-            if let item = store.shot.items.first(where:{ $0.id == store.selectedItemID }) {
-                Button("Edit \(item.name) · dimensions / rate / rotation") { editItem = item }
-                Button("Use selected item as frame target") { store.updateShot { $0.targetID = item.id }; panel = 1 }
-                Button("Duplicate selected item") { store.add(item) }
-            }
-            TextField("Quick add: search",text:$search).textFieldStyle(.roundedBorder)
+            Text("Add things").font(.headline)
+            TextField("Search lights, stands, mics…",text:$search).textFieldStyle(.roundedBorder)
             Picker("Category",selection:$category) {
                 Text("All").tag("All")
                 ForEach(PlanItemKind.allCases,id:\.rawValue) { Text($0.rawValue.capitalized).tag($0.rawValue) }
@@ -175,7 +180,7 @@ struct PlanningEditorView: View {
                     store.updateShot { s in let d = item.position-s.camera.position; s.camera.yaw = atan2(-d.x,-d.z) }
                 }
             }
-            Button("Move camera on room plan") { panel = 0; placeCamera = true }
+            Button("Move camera on room plan") { panel = 0; store.selectedItemID = nil; cameraSelected = true }
             switch framing {
             case .success(let fit):
                 Label(fit.fits ? "Fits in this measured plan" : "Not a verified fit — inspect warnings",systemImage:fit.fits ? "checkmark.circle.fill" : "exclamationmark.triangle")
@@ -233,6 +238,67 @@ struct PlanningEditorView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
+    // MARK: Selection actions
+
+    /// Actions for what's selected on the plan, in a bar over its bottom edge.
+    @ViewBuilder private var actionBar:some View {
+        if cameraSelected {
+            bar {
+                Label("Camera · \(Int(store.shot.camera.focalMM)) mm",systemImage:"video").lineLimit(1)
+                Spacer(minLength:4)
+                barButton("rotate.left","Turn left") { turnCamera(15) }
+                barButton("rotate.right","Turn right") { turnCamera(-15) }
+                if store.shot.targetID != nil { barButton("scope","Aim at the target") { aimCamera() } }
+                barButton("camera.aperture","Lens and framing") { panel = 1 }
+            }
+        } else if let item = store.shot.items.first(where:{ $0.id == store.selectedItemID }) {
+            bar {
+                Text(item.name).lineLimit(1)
+                Spacer(minLength:4)
+                barButton("rotate.left","Turn left") { rotate(item.id,by:15) }
+                barButton("rotate.right","Turn right") { rotate(item.id,by:-15) }
+                barButton("plus.square.on.square","Duplicate") { store.add(item) }
+                barButton("scope","Frame the shot on this") { store.updateShot { $0.targetID = item.id }; panel = 1 }
+                barButton("slider.horizontal.3","Edit name, size and rate") { editItem = item }
+                barButton("trash","Delete",tint:.red) { delete(item.id) }
+            }
+        }
+    }
+    private func bar<Content:View>(@ViewBuilder _ content:() -> Content) -> some View {
+        HStack(spacing:2) { content() }
+            .font(.callout)
+            .padding(.leading,12).padding(.trailing,4).padding(.vertical,4)
+            .background(.regularMaterial,in:Capsule())
+            .environment(\.colorScheme,.dark)
+    }
+    private func barButton(_ icon:String,_ label:String,tint:Color = .white,action:@escaping () -> Void) -> some View {
+        Button(action:action) {
+            Image(systemName:icon).foregroundStyle(tint).frame(width:36,height:36).contentShape(Rectangle())
+        }
+        .accessibilityLabel(label)
+    }
+    private func rotate(_ id:UUID,by degrees:Double) {
+        let room = store.project.room
+        store.updateShot { shot in
+            guard let i = shot.items.firstIndex(where:{ $0.id == id }) else { return }
+            var item = shot.items[i]
+            let a = item.yaw+degrees * .pi/180
+            item.yaw = atan2(sin(a),cos(a))
+            guard Placement.canPlace(item,in:room,avoiding:shot.items) else { throw PlanError.invalid("Turning it would hit a wall or another item. Move it first.") }
+            shot.items[i] = item
+        }
+    }
+    private func delete(_ id:UUID) {
+        store.updateShot { $0.items.removeAll { $0.id == id }; if $0.targetID == id { $0.targetID = nil } }
+    }
+    private func turnCamera(_ degrees:Double) {
+        store.updateShot { s in let a = s.camera.yaw+degrees * .pi/180; s.camera.yaw = atan2(sin(a),cos(a)) }
+    }
+    private func aimCamera() {
+        guard let item = store.shot.items.first(where:{ $0.id == store.shot.targetID }) else { return }
+        store.updateShot { s in let d = item.position-s.camera.position; s.camera.yaw = atan2(-d.x,-d.z) }
+    }
+
     private var framing:Result<ShotFit,Error> { Result { try ShotFraming.check(shot:store.shot,room:store.project.room) } }
     private func cameraBinding(_ key:WritableKeyPath<ShotCamera,Double>) -> Binding<Double> {
         Binding(get:{ store.shot.camera[keyPath:key] },set:{ value in store.updateShot { $0.camera[keyPath:key] = value } })

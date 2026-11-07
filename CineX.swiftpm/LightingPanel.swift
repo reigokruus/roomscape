@@ -7,8 +7,11 @@ struct LightingPanel: View {
     /// Claude is working on a setup (see `ShotDirector`).
     var planning = false
     var planError: String?
-    var onPlan: (SceneType, String) -> Void = { _, _ in }
-    @State private var shot: SceneType = .talkingHead
+    /// Plan with Claude: the kind of shot (nil = Claude picks it) and the user's wishes.
+    var onPlan: (SceneType?, String) -> Void = { _, _ in }
+    /// Opens this setup as a new storyboard view.
+    var onStoryboard: () -> Void = {}
+    @State private var shot: SceneType?
     @State private var wish = ""
     @State private var showingKey = false
 
@@ -29,12 +32,13 @@ struct LightingPanel: View {
             planSection
 
             if let note = setup.planNote {
-                Section("Claude's plan") {
+                Section(setup.planTitle.map { "Claude's plan: \($0)" } ?? "Claude's plan") {
                     Text(note)
                     ForEach(setup.planTips, id: \.self) { tip in
                         Label(tip, systemImage: "checkmark.circle")
                             .font(.callout)
                     }
+                    storyboardButton
                 }
             }
 
@@ -103,6 +107,7 @@ struct LightingPanel: View {
                 NavigationLink(destination: GearInventoryView()) {
                     Label("Edit My Gear", systemImage: "checklist")
                 }
+                if setup.planNote == nil { storyboardButton }
             } footer: {
                 Text("Up to four lights from My Gear are placed as key, fill, back and background light. With none listed, a softbox key and an LED panel fill are used.")
             }
@@ -123,10 +128,17 @@ struct LightingPanel: View {
 }
 
 private extension LightingPanel {
+    var storyboardButton: some View {
+        Button(action: onStoryboard) {
+            Label("Open this setup in the Storyboard", systemImage: "rectangle.stack.badge.plus")
+        }
+    }
+
     var planSection: some View {
         Section {
             Picker("Shot", selection: $shot) {
-                ForEach(SceneType.allCases) { Label($0.rawValue, systemImage: $0.icon).tag($0) }
+                Label("Claude decides", systemImage: "sparkles").tag(SceneType?.none)
+                ForEach(SceneType.allCases) { Label($0.rawValue, systemImage: $0.icon).tag(Optional($0)) }
             }
             TextField("Mood or wishes (optional), e.g. warm and moody", text: $wish, axis: .vertical)
                 .lineLimit(1...3)
@@ -139,8 +151,10 @@ private extension LightingPanel {
                 Button {
                     if ClaudeKeyStore.key == nil { showingKey = true } else { onPlan(shot, wish) }
                 } label: {
-                    Label(setup.planNote == nil ? "Plan this shot with Claude" : "Plan again with Claude",
+                    Label(shot == nil ? (setup.planNote == nil ? "Set it up with Claude" : "Set it up again")
+                                      : "Plan this \(shot!.rawValue.lowercased()) with Claude",
                           systemImage: "sparkles")
+                        .font(.body.weight(.semibold))
                 }
             }
             if let planError {
@@ -151,7 +165,7 @@ private extension LightingPanel {
         } header: {
             Text("Plan with Claude")
         } footer: {
-            Text("Claude places the person, your lights from My Gear and the camera for this kind of shot, using the scanned room. Everything stays adjustable below.")
+            Text("One tap: Claude picks a shot that suits the room, then places the person, your lights from My Gear and the camera. Pick a shot type first if you have one in mind. Everything stays adjustable below.")
         }
     }
 
