@@ -8,6 +8,11 @@ struct SurfelRecord {
     var nx: Float, ny: Float, nz: Float
     var radius: Float
     var rgba: UInt32
+    /// Direction (radians, atan2(z, x)) of the inward normal of the RoomPlan wall this splat is on or against
+    /// (within 30 cm), or `noWall`. The viewer hides it while the camera is outside that wall.
+    var wallAngle: Float = SurfelRecord.noWall
+
+    static let noWall: Float = -100
 }
 
 /// On-phone splats without training (port of Android `Surfels.java`): every scanned point becomes a disc lying
@@ -237,6 +242,19 @@ enum Surfels {
                     best = (abs(off), p - wall.inward * (off - nudge), wall.inward)
                 }
             }
+            // Remember the nearest wall within 30 cm (snapped or not: a shelf against the wall counts too).
+            var nearest: (dist: Float, wall: RoomShell.Wall)?
+            for wall in shell.walls {
+                let d = SIMD3(s.x, s.y, s.z) - wall.center
+                let off = simd_dot(d, wall.inward)
+                guard off > -0.1, off < 0.3, abs(simd_dot(d, wall.right)) <= wall.halfWidth + 0.1,
+                      abs(simd_dot(d, wall.up)) <= wall.halfHeight + 0.1 else { continue }
+                if nearest == nil || abs(off) < nearest!.dist { nearest = (abs(off), wall) }
+            }
+            if let wall = nearest?.wall {
+                s.wallAngle = atan2(wall.inward.z, wall.inward.x)
+                surfels[i] = s
+            }
             if let best {
                 s.x = best.point.x; s.y = best.point.y; s.z = best.point.z
                 s.nx = best.normal.x; s.ny = best.normal.y; s.nz = best.normal.z
@@ -249,7 +267,8 @@ enum Surfels {
 
     // MARK: Cache
 
-    private static let magic: UInt32 = 0x3153_5843 // "CXS1"
+    /// "CXS2": records carry `wallAngle`; older "CXS1" caches are rebuilt.
+    private static let magic: UInt32 = 0x3253_5843 // "CXS2"
 
     static func write(_ surfels: [SurfelRecord], to url: URL) {
         var data = Data(capacity: 8 + surfels.count * MemoryLayout<SurfelRecord>.stride)

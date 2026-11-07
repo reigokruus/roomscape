@@ -5,6 +5,8 @@ import simd
 /// SceneKit nodes for the splat view: surfels as soft discs, and RoomPlan's walls and floor as a one-sided
 /// "dollhouse" shell (walls only show their inside, so from outside you look straight into the room).
 enum SplatScene {
+    /// Splats on or against a wall (`SurfelRecord.wallAngle`) vanish while the camera is outside that wall, so the
+    /// near walls never hide the room in the 3D view (the dollhouse cutaway the one-sided shell walls give).
     /// The discs are drawn in one opaque pass (writing depth), each a hard-edged disc of 1.4x its density radius,
     /// so neighbouring discs overlap into a closed surface. (A blended gaussian halo pass like Android's was tried:
     /// SceneKit's transparent pass washed the colours out to white, so it was dropped.)
@@ -33,7 +35,7 @@ enum SplatScene {
                         f[o + 6] = r; f[o + 7] = g; f[o + 8] = b; f[o + 9] = 1
                         f[o + 10] = (corner == 1 || corner == 2) ? 1 : 0
                         f[o + 11] = corner >= 2 ? 1 : 0
-                        f[o + 12] = s.radius; f[o + 13] = 0
+                        f[o + 12] = s.radius; f[o + 13] = s.wallAngle
                         corner += 1
                     }
                     i += 1
@@ -83,6 +85,14 @@ enum SplatScene {
         float3 a = abs(n.y) < 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
         t1 = normalize(cross(a, n));
         t2 = cross(n, t1);
+    }
+    // Dollhouse cutaway: a splat on or against a wall (texcoords[1].y = direction of the wall's inward normal in
+    // the floor plane, -100 = none) is hidden while the camera is outside that wall, like the one-sided shell.
+    float wallAngle = _geometry.texcoords[1].y;
+    if (wallAngle > -50.0) {
+        float3 inward = float3(cos(wallAngle), 0.0, sin(wallAngle));
+        float3 camera = scn_frame.inverseViewTransform[3].xyz;
+        if (dot(camera - _geometry.position.xyz, inward) < 0.0) { rad = 0.0; }
     }
     _geometry.position.xyz += (t1 * c.x + t2 * c.y) * rad * splatScale;
     _geometry.normal = n;
@@ -136,9 +146,9 @@ enum SplatScene {
     }
 
     private static func quad(_ wall: RoomShell.Wall, inset: Float, color: UIColor) -> SCNNode {
-        let c = wall.center + wall.inward * inset
-        let r = wall.right * wall.halfWidth, u = wall.up * wall.halfHeight
-        var v = [c - r - u, c + r - u, c + r + u, c - r + u]
+        let c: SIMD3<Float> = wall.center + wall.inward * inset
+        let r: SIMD3<Float> = wall.right * wall.halfWidth, u: SIMD3<Float> = wall.up * wall.halfHeight
+        var v: [SIMD3<Float>] = [c - r - u, c + r - u, c + r + u, c - r + u]
         // Wind the triangles so the front face looks into the room; the back face is culled.
         if simd_dot(simd_cross(v[1] - v[0], v[2] - v[0]), wall.inward) < 0 { v = [v[0], v[3], v[2], v[1]] }
         return mesh(v, normal: wall.inward, indices: [0, 1, 2, 0, 2, 3], color: color)
