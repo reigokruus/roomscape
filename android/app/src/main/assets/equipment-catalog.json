@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "items": [
+    {
+      "id": "canon-eos-r5-body",
+      "manufacturer": "Canon",
+      "model": "EOS R5 (body only)",
+      "category": "camera",
+      "dimensionKind": "body",
+      "unit": "mm",
+      "width": 138.5,
+      "height": 97.5,
+      "depth": 88,
+      "sourceUrl": "https://www.canon-europe.com/cameras/eos-r5/specifications/",
+      "retrievedDate": "2026-11-07",
+      "sourceQuote": "Dimensions (W x H x D): 138.5 x 97.5 x 88mm",
+      "axisNotes": "X=width, Y=height, Z=depth. Body only; lens, cage, cables and tripod NOT included."
+    },
+    {
+      "id": "aputure-mc-body",
+      "manufacturer": "Aputure",
+      "model": "MC",
+      "category": "light",
+      "dimensionKind": "body",
+      "unit": "mm",
+      "width": 93,
+      "height": 61,
+      "depth": 17,
+      "sourceUrl": "https://www.aputure.com/products/mc/",
+      "retrievedDate": "2026-11-07",
+      "sourceQuote": "Dimension: 93x61x17mm/3.66x2.40x0.67in",
+      "axisNotes": "Source lists three edge lengths without axis names. Planning orientation: long face edge X, short face edge Y, thickness Z. No ball head or stand included. Placement is a size proxy, not a calibrated emitter."
+    },
+    {
+      "id": "manfrotto-1052bac-extended",
+      "manufacturer": "Manfrotto",
+      "model": "1052BAC (fully extended)",
+      "category": "stand",
+      "dimensionKind": "deployed",
+      "unit": "cm",
+      "width": 109,
+      "height": 237,
+      "depth": 109,
+      "sourceUrl": "https://www.manfrotto.com/global-en/compact-photo-stand-air-cushioned-and-portable-1052bac/",
+      "retrievedDate": "2026-11-07",
+      "sourceQuote": "Super wide 109cm footprint; Min Height 101 cm; Maximum Height 237 cm; Closed Length 86 cm.",
+      "axisNotes": "Planning envelope X=Z=109 cm around the deployed footprint, Y=max extended 237 cm. Square bounding proxy, NOT folded dimensions. Fixture and safety clearance not included; actual height adjustable 101\u2013237 cm."
+    },
+    {
+      "id": "ikea-lack-90449905",
+      "manufacturer": "IKEA",
+      "model": "LACK coffee table white 904.499.05",
+      "category": "furniture",
+      "dimensionKind": "assembled",
+      "unit": "in",
+      "width": 35.375,
+      "height": 17.75,
+      "depth": 21.625,
+      "sourceUrl": "https://www.ikea.com/us/en/p/lack-side-table-white-90449905/",
+      "retrievedDate": "2026-11-07",
+      "sourceQuote": "Measurements: Length 35 3/8 in; Width 21 5/8 in; Height 17 3/4 in.",
+      "axisNotes": "Assembled item, NOT Packaging. Source Length maps to X=width, source Width maps to Z=depth; Y=height. Inch fractions converted exactly; manufacturer rounded regional dimensions may differ."
+    },
+    {
+      "id": "blackmagic-pocket-6k-pro",
+      "manufacturer": "Blackmagic Design",
+      "model": "Pocket Cinema Camera 6K Pro",
+      "category": "camera",
+      "dimensionKind": "body",
+      "unit": "mm",
+      "width": null,
+      "height": null,
+      "depth": null,
+      "sourceUrl": "https://www.blackmagicdesign.com/products/blackmagicpocketcinemacamera/techspecs/W-CIN-16",
+      "retrievedDate": "2026-11-07",
+      "sourceQuote": "Product model confirmed; accessible specification text does not supply physical body dimensions.",
+      "axisNotes": "Body dimensions UNKNOWN. Sensor and screen dimensions are NOT body dimensions. Enter explicitly manual dimensions to place; no size inferred."
+    }
+  ]
+}

@@ -122,7 +122,7 @@ final class ScanExport {
 
     /** Writes the zip to Downloads/CineX and returns a shareable uri (or a file uri on old Android). Background thread. */
     static Uri write(Context ctx, String name, List<Rec> recs, PhotoRoom photos, List<byte[]> jpgs,
-                     FloatBuffer pos, ByteBuffer col, int count, String log, PoseLog poses, SensorLog sensors) throws Exception {
+                     FloatBuffer pos, ByteBuffer col, int count, String log, PoseLog poses, SensorLog sensors, String planningJson) throws Exception {
         Uri uri;
         OutputStream os;
         if (Build.VERSION.SDK_INT >= 29) {
@@ -206,6 +206,7 @@ final class ScanExport {
                 ply.put(col.get(i * 4)).put(col.get(i * 4 + 1)).put(col.get(i * 4 + 2));
             }
             put(z, "points.ply", ply.array());
+            if (planningJson != null) put(z, "planning.json", planningJson.getBytes("UTF-8"));
             if (sensors != null) put(z, "sensors.bin", sensors.toBytes());
             if (claudeJson != null) put(z, "claude_objects.json", claudeJson.getBytes("UTF-8"));
             put(z, "log.txt", (log + (sensors != null ? "\n--- sensors ---\n" + sensors.describe() : "")).getBytes("UTF-8"));

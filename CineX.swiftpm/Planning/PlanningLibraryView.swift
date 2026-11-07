@@ -1,0 +1,79 @@
+import SwiftUI
+import UniformTypeIdentifiers
+import RoomPlan
+
+struct PlanningLibraryView: View {
+    @State private var projects:[PlanProject] = []
+    @State private var importing = false
+    @State private var error:String?
+    @State private var warnings:[String] = []
+    var body:some View {
+        List {
+            Section {
+                Button("Import project or view JSON",systemImage:"square.and.arrow.down") { importing = true }
+                Text("Create a project from a saved room: open a scan, then tap Storyboard. Imports include measured geometry, not the USDZ or photos.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Local planning projects") {
+                if projects.isEmpty { Text("No projects yet").foregroundStyle(.secondary) }
+                ForEach(projects) { project in
+                    NavigationLink { PlanningEditorView(project:project) } label: {
+                        VStack(alignment:.leading) {
+                            Text(project.name)
+                            Text("\(project.shots.count) views · \(project.total,format:.currency(code:"EUR")) allocated").font(.caption)
+                        }
+                    }
+                }
+            }
+            if !warnings.isEmpty {
+                Section("Files needing attention — not overwritten") {
+                    ForEach(warnings,id:\.self) { Text($0).font(.caption).foregroundStyle(.red) }
+                }
+            }
+        }
+        .navigationTitle("Planning projects")
+        .onAppear(perform:reload)
+        .fileImporter(isPresented:$importing,allowedContentTypes:[.json]) { result in
+            do {
+                let url = try result.get()
+                let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
+                let project = try PlanFiles.newProject(from:PlanFiles.read(url))
+                try PlanningStore.disk.save(project); reload()
+            } catch { self.error = error.localizedDescription }
+        }
+        .alert("Planning file",isPresented:Binding(get:{ error != nil },set:{ if !$0 { error = nil } })) {
+            Button("OK") { error = nil }
+        } message: { Text(error ?? "") }
+    }
+    private func reload() {
+        do { let result = try PlanningStore.disk.list(); projects = result.projects; warnings = result.errors }
+        catch { self.error = error.localizedDescription }
+    }
+}
+
+struct PlanningLaunchView: View {
+    let room:CapturedRoom
+    let scan:SavedScan
+    @State private var project:PlanProject?
+    @State private var error:String?
+    var body:some View {
+        Group {
+            if let project { PlanningEditorView(project:project) }
+            else if let error { ContentUnavailableView("Could not open planning project",systemImage:"exclamationmark.triangle",description:Text(error)) }
+            else { ProgressView("Opening storyboard…") }
+        }
+        .task {
+            guard project == nil, error == nil else { return }
+            do {
+                let files = try PlanningStore.disk.list()
+                // Never silently create a fresh project over a corrupt local save.
+                guard files.errors.isEmpty else { throw PlanError.invalid("A planning file needs attention. Open Planning projects to inspect it before creating another project.") }
+                if let saved = files.projects.first(where:{ $0.scanName == scan.name }) { project = saved }
+                else {
+                    let next = try RoomPlanningAdapter.makeProject(room:room,scan:scan)
+                    try PlanningStore.disk.save(next); project = next
+                }
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+}

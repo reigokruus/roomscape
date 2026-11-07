@@ -26,6 +26,8 @@ android {
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
     implementation 'com.google.ar:core:1.57.0'
     // on-device image labelling (bundled model, works offline) to name furniture from the scan photos
     implementation 'com.google.mlkit:image-labeling:17.0.9'
@@ -52,3 +54,11 @@ tasks.register('fetchDepthModel') {
     }
 }
 preBuild.dependsOn fetchDepthModel
+
+// Opt-in network check; never part of the deterministic/offline test suite or release publication.
+tasks.register('verifyCatalogFeed', JavaExec) {
+    dependsOn 'compileDebugUnitTestJavaWithJavac'
+    mainClass = 'com.hackathon.setscan.CatalogFeedNetworkSmoke'
+    if (project.hasProperty('catalogSmokeLocal')) args '--local', file('src/main/assets/equipment-catalog.json').absolutePath
+    doFirst { classpath = tasks.named('testDebugUnitTest').get().classpath }
+}

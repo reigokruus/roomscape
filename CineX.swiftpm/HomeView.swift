@@ -27,6 +27,12 @@ struct HomeView: View {
                     Text("Walk slowly around the room and point the phone at every wall, window, door and piece of furniture.")
                 }
 
+                Section {
+                    NavigationLink(destination: PlanningLibraryView()) {
+                        Label("Planning projects", systemImage: "rectangle.stack")
+                    }
+                }
+
                 if !scans.isEmpty {
                     Section("Saved scans") {
                         ForEach(scans) { scan in

@@ -36,16 +36,26 @@ final class Lighting {
     }
 
     enum PropKind {
-        PERSON_STANDING("Person (standing)"), PERSON_SEATED("Person (seated)"), TABLE("Table"), CHAIR("Chair");
+        PERSON_STANDING("Person (standing)"), PERSON_SEATED("Person (seated)"), TABLE("Table"), CHAIR("Chair"), CATALOG("Catalog item");
         final String label; PropKind(String l) { label = l; }
     }
 
     static final class Prop {
         PropKind kind; float x, z, yawDeg;
+        ItemCatalog.Item catalog; String instanceId; double[] manualSize; float bottom;
+        String label() { return catalog==null ? kind.label : catalog.title()+(manualSize==null ? " · sourced size" : " · MANUAL size"); }
+        double[] size() { return manualSize!=null ? manualSize.clone() : new double[]{catalog.width,catalog.height,catalog.depth}; }
         Prop(PropKind k, float x, float z, float yaw) { kind = k; this.x = x; this.z = z; yawDeg = yaw; }
         /** eye / face height above the floor (people), or top height */
-        float faceH() { return kind == PropKind.PERSON_STANDING ? 1.62f : kind == PropKind.PERSON_SEATED ? 1.18f : kind == PropKind.TABLE ? 0.75f : 0.45f; }
+        float faceH() { if(catalog!=null)return bottom+(float)size()[1]; return kind == PropKind.PERSON_STANDING ? 1.62f : kind == PropKind.PERSON_SEATED ? 1.18f : kind == PropKind.TABLE ? 0.75f : 0.45f; }
         boolean isPerson() { return kind == PropKind.PERSON_STANDING || kind == PropKind.PERSON_SEATED; }
+    }
+
+    static Prop catalogProp(ItemCatalog.Item item, double[] manual, float bottom, float x, float z) {
+        ItemCatalog.require(item != null && (item.complete() || manual != null), "Unknown dimensions need an explicit manual size");
+        if(manual != null) { ItemCatalog.require(manual.length == 3, "Manual size needs W,H,D"); for(double v:manual) ItemCatalog.require(Double.isFinite(v) && v >= .001 && v <= 20, "Manual dimensions must be 1 mm–20 m"); }
+        ItemCatalog.require(Float.isFinite(x) && Float.isFinite(z) && Math.abs(x) <= 100 && Math.abs(z) <= 100 && Float.isFinite(bottom) && bottom >= 0 && bottom <= 20, "Invalid placement coordinates");
+        Prop p=new Prop(PropKind.CATALOG,x,z,0);p.catalog=item;p.instanceId=java.util.UUID.randomUUID().toString();p.manualSize=manual == null ? null : manual.clone();p.bottom=bottom;return p;
     }
 
     final List<Light> lights = new ArrayList<>();
@@ -63,7 +73,8 @@ final class Lighting {
     /** the subject: the first person, else the first prop, else null */
     Prop subject() {
         for (Prop p : props) if (p.isPerson()) return p;
-        return props.isEmpty() ? null : props.get(0);
+        for (Prop p : props) if(p.catalog == null) return p;
+        return null;
     }
 
     float[] subjectFace() {
@@ -184,7 +195,7 @@ final class Lighting {
         if (selected < 0) return "nothing";
         if (selected < lights.size()) { Light l = lights.get(selected); return l.name + " · " + l.type.label; }
         int i = selected - lights.size();
-        return i < props.size() ? props.get(i).kind.label : "nothing";
+        return i < props.size() ? props.get(i).label() : "nothing";
     }
 
     /** position of the selected thing (x, z) for dragging; null when nothing is selected */
