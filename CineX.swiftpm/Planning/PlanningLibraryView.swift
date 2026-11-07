@@ -54,6 +54,8 @@ struct PlanningLibraryView: View {
 struct PlanningLaunchView: View {
     let room:CapturedRoom
     let scan:SavedScan
+    /// The result screen's Objects list with the user's edits; its changes are applied to the storyboard.
+    var objects:[RoomObject] = []
     @State private var project:PlanProject?
     @State private var error:String?
     var body:some View {
@@ -68,11 +70,15 @@ struct PlanningLaunchView: View {
                 let files = try PlanningStore.disk.list()
                 // Never silently create a fresh project over a corrupt local save.
                 guard files.errors.isEmpty else { throw PlanError.invalid("A planning file needs attention. Open Planning projects to inspect it before creating another project.") }
-                if let saved = files.projects.first(where:{ $0.scanName == scan.name }) { project = saved }
-                else {
-                    let next = try RoomPlanningAdapter.makeProject(room:room,scan:scan)
-                    try PlanningStore.disk.save(next); project = next
+                let saved = files.projects.first(where:{ $0.scanName == scan.name })
+                var next = try saved ?? RoomPlanningAdapter.makeProject(room:room,scan:scan)
+                let sync = StoryboardObjects.sync(&next,objects:objects,scan:scan)
+                if saved == nil || sync?.changed == true {
+                    try next.validate()
+                    try PlanningStore.disk.save(next)
                 }
+                if let sync { StoryboardObjects.saveSnapshot(sync.snapshot,for:scan) }
+                project = next
             } catch { self.error = error.localizedDescription }
         }
     }
