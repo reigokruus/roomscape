@@ -48,6 +48,13 @@ struct HomeView: View {
             .navigationDestination(for: SavedScan.self) { scan in
                 ResultView(scan: scan)
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(destination: GearInventoryView()) {
+                        Label("My Gear", systemImage: "checklist")
+                    }
+                }
+            }
             .onAppear { scans = ScanStore.list() }
             .fullScreenCover(isPresented: $scanning, onDismiss: {
                 // Open the result only after the scanner has fully closed, so the two transitions don't collide.
