@@ -1521,6 +1521,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     boolean isTraining() { return training; }
 
     /** GL thread: start or pause the training. Returns the button label. */
+    /** GL thread: another round of training on the scan as it is (its photos and splats), then save. Returns a message. */
+    String refineAgain() {
+        if (training || (autoStage > 0 && autoStage < 5)) return "Already working on it…";
+        if (surfBase == null) return "The model is still loading. Try again in a moment.";
+        autoStage = 4;
+        autoProgress("Refining the model against your photos", 0.65f);
+        String l = toggleTraining();
+        if (!training) { autoStage = 5; activity.updateProcess(null, -1); return "Couldn't refine: no photos in this scan."; }
+        activity.trainingLabel(l);
+        return "Refining: about " + AUTO_STEPS + " steps, saved when done";
+    }
+
     String toggleTraining() {
         if (training) { training = false; return "Train splats"; }
         final Surfels base = surfBase;
