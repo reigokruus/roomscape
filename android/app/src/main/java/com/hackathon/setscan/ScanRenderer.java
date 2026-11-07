@@ -1587,8 +1587,38 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             roomCenter[0] = target[0]; roomCenter[1] = target[1]; roomCenter[2] = target[2];
         }
         yaw = 0.6f; pitch = 0.6f;
-        standInRoom();
+        fitView();
         finishStatus();
+    }
+
+    /**
+     * Look at the whole scan from outside, zoomed so it fits the screen: robust bounds (stray points ignored),
+     * facing the way the phone pointed at the end of the scan, slightly from above.
+     */
+    private void fitView() {
+        if (count == 0) return;
+        int step = Math.max(1, count / 50000), m = 0;
+        float[] xs = new float[count / step + 1], ys = new float[xs.length], zs = new float[xs.length];
+        for (int i = 0; i < count; i += step) {
+            if (obs[i] == 0) continue;
+            xs[m] = pos.get(i * 3); ys[m] = pos.get(i * 3 + 1); zs[m] = pos.get(i * 3 + 2); m++;
+        }
+        if (m < 10) return;
+        java.util.Arrays.sort(xs, 0, m); java.util.Arrays.sort(ys, 0, m); java.util.Arrays.sort(zs, 0, m);
+        int lo = (int) (m * 0.02f), hi = (int) (m * 0.98f);
+        float x0 = xs[lo], x1 = xs[hi], y0 = ys[lo], y1 = ys[hi], z0 = zs[lo], z1 = zs[hi];
+        target[0] = (x0 + x1) / 2; target[1] = (y0 + y1) / 2; target[2] = (z0 + z1) / 2;
+        float r = 0.5f * (float) Math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + (z1 - z0) * (z1 - z0));
+        int last = poseLog.n - 1;
+        if (last >= 0) { // stand behind where the phone was looking, so the scanned side faces us
+            float qx = poseLog.p[last * 7 + 3], qy = poseLog.p[last * 7 + 4], qz = poseLog.p[last * 7 + 5], qw = poseLog.p[last * 7 + 6];
+            float fx = -2 * (qx * qz + qw * qy), fz = -(1 - 2 * (qx * qx + qy * qy));
+            if (fx * fx + fz * fz > 1e-4f) yaw = (float) Math.atan2(-fx, -fz);
+        }
+        pitch = 0.3f;
+        float halfV = (float) Math.toRadians(30), aspect = width > 0 && height > 0 ? (float) width / height : 0.5f;
+        float halfH = (float) Math.atan(Math.tan(halfV) * aspect);
+        dist = Math.max(0.5f, r / (float) Math.sin(Math.min(halfV, halfH)) * 1.05f);
     }
 
     /**
@@ -1630,7 +1660,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             objs.append(objs.length() > 0 ? ", " : "").append(bx.title());
             if (bx.parent != null) objs.append(" (on ").append(bx.parent.title()).append(")");
         }
-        activity.updateStatus((claudeAdvice != null ? claudeAdvice : "") + (ClaudeHelper.sessionCalls > 0 ? "💰 " + ClaudeHelper.costLine() + "\n" : "") + (roomReady ? room.summary + "\n" : "") + (cutouts.size() > 0 ? cutouts.describe() + "\n" : "") + (roomReady && room.hasLayout ? "" : "Walls not found clearly, so this shows the raw scan. Scan more of the walls next time.\n") + "Drag to look around, pinch out to see it from outside, two fingers to move.");
+        activity.updateStatus((claudeAdvice != null ? claudeAdvice : "") + (ClaudeHelper.sessionCalls > 0 ? "💰 " + ClaudeHelper.costLine() + "\n" : "") + (roomReady ? room.summary + "\n" : "") + (cutouts.size() > 0 ? cutouts.describe() + "\n" : "") + (roomReady && room.hasLayout ? "" : "Walls not found clearly, so this shows the raw scan. Scan more of the walls next time.\n") + "Drag to turn it, pinch to zoom in, two fingers to move.");
     }
 
     private java.util.List<RoomModel.PlaneData> lastPlanes = new java.util.ArrayList<>();
