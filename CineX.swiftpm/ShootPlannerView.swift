@@ -5,11 +5,13 @@ struct ShootPlannerView: View {
     let room: CapturedRoom
     /// Areas of windows found from the scan's photos that RoomPlan missed (see `WindowDetection`).
     var extraWindowAreas: [Float] = []
+    /// The Objects list with the user's edits (removed furniture doesn't count); empty means RoomPlan's objects.
+    var objects: [RoomObject] = []
     @State private var scene: SceneType = .talkingHead
     @State private var gear: [GearItem] = []
 
     private var plan: ShootPlan {
-        ShootPlanner.plan(scene: scene, room: room, gear: gear, extraWindowAreas: extraWindowAreas)
+        ShootPlanner.plan(scene: scene, room: room, gear: gear, extraWindowAreas: extraWindowAreas, objects: objects)
     }
 
     var body: some View {

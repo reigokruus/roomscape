@@ -53,8 +53,10 @@ struct ShootPlan {
 
 enum ShootPlanner {
     /// - Parameter extraWindowAreas: areas (m²) of windows found from the scan's photos that RoomPlan missed.
-    static func plan(scene: SceneType, room: CapturedRoom, gear: [GearItem], extraWindowAreas: [Float] = []) -> ShootPlan {
-        let r = RoomFacts(room, extraWindowAreas: extraWindowAreas)
+    /// - Parameter objects: the result screen's Objects list with the user's edits; when empty, RoomPlan's objects.
+    static func plan(scene: SceneType, room: CapturedRoom, gear: [GearItem], extraWindowAreas: [Float] = [],
+                     objects: [RoomObject] = []) -> ShootPlan {
+        let r = RoomFacts(room, extraWindowAreas: extraWindowAreas, objects: objects)
         let g = GearFacts(gear)
         switch scene {
         case .talkingHead: return talkingHead(r, g)
@@ -76,12 +78,21 @@ private struct RoomFacts {
     let hasChair: Bool
     let hasSofa: Bool
 
-    init(_ room: CapturedRoom, extraWindowAreas: [Float] = []) {
+    init(_ room: CapturedRoom, extraWindowAreas: [Float] = [], objects: [RoomObject] = []) {
         let areas = room.windows.map { $0.dimensions.x * $0.dimensions.y } + extraWindowAreas
         windowCount = areas.count
         hasWindows  = !areas.isEmpty
         largestWindowArea = areas.max() ?? 0
 
+        if !objects.isEmpty {
+            // What's in the room now: removed objects don't count, Claude's finds do.
+            let kept = objects.filter { !$0.removed }
+            hasTable = kept.contains { $0.kind == .table
+                || ($0.kind == .storage && (0.6...1.1).contains($0.halfExtents.y * 2)) }
+            hasChair = kept.contains { $0.kind == .chair }
+            hasSofa  = kept.contains { $0.kind == .sofa }
+            return
+        }
         let cats = Set(room.objects.map { $0.category })
         // RoomPlan reports desks and counters as tables. Storage counts too when its top is at table height
         // (a dresser or sideboard), but not wardrobes or tall shelves. Storage stands on the floor, so its height is its top.
