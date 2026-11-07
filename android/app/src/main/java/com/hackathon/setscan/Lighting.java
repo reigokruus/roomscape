@@ -8,12 +8,12 @@ import java.util.Locale;
  * Shot lighting preview: gear lights and props in the scanned room.
  *
  * The scan's colours are the room as the phone camera saw it, i.e. already lit by the room's own light
- * (assumed ROOM_LUX, a typical lit interior). So each surface's "albedo" is its scanned colour / ROOM_LUX,
+ * (ROOM_LUX: measured from the camera's own exposure during the scan, 250 lx if unknown). So each surface's "albedo" is its scanned colour / ROOM_LUX,
  * and with gear lights on it shows   colour * (roomDimmer + sum of light lux / ROOM_LUX).
  * The virtual camera is exposed for the subject's face (like a DP would), +- the exposure offset.
  */
 final class Lighting {
-    static final float ROOM_LUX = 250f;
+    static float ROOM_LUX = 250f; // set from ScanRenderer.roomLux() when a scan finishes or loads
 
     enum Type {
         FRESNEL("Fresnel 300 W LED", 20000f, 30f, 0f),

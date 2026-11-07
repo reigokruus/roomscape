@@ -43,6 +43,7 @@ final class ScanStore {
         float[] path = new float[0];
         List<float[]> corners = new ArrayList<>(), walls = new ArrayList<>();
         float[] floor, ceiling;
+        float lux; // room light measured from the camera's exposure, 0 = unknown
         Bitmap thumb;
     }
 
@@ -112,6 +113,7 @@ final class ScanStore {
         long now = System.currentTimeMillis();
         m.put("name", d.name); m.put("created", d.created > 0 ? d.created : now); m.put("modified", now);
         m.put("points", d.n); m.put("photos", d.kfs.size());
+        if (d.lux > 0) m.put("lux", d.lux);
         m.put("corners", arr(d.corners)); m.put("walls", arr(d.walls));
         if (d.floor != null) m.put("floor", vec(d.floor));
         if (d.ceiling != null) m.put("ceiling", vec(d.ceiling));
@@ -130,6 +132,7 @@ final class ScanStore {
         Data d = new Data();
         JSONObject m = new JSONObject(readText(new File(dir, "meta.json")));
         d.name = m.optString("name"); d.created = m.optLong("created");
+        d.lux = (float) m.optDouble("lux", 0);
         d.corners = list(m.optJSONArray("corners")); d.walls = list(m.optJSONArray("walls"));
         d.floor = m.has("floor") ? vec(m.getJSONArray("floor")) : null;
         d.ceiling = m.has("ceiling") ? vec(m.getJSONArray("ceiling")) : null;

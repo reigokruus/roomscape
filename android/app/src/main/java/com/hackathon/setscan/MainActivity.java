@@ -257,7 +257,7 @@ public class MainActivity extends Activity {
         });
         bar.addView(lightButton);
         saveButton = new Button(this);
-        saveButton.setText("Save");
+        saveButton.setText("Rename");
         saveButton.setVisibility(View.GONE);
         saveButton.setOnClickListener(v -> saveScan());
         bar.addView(saveButton);
@@ -495,7 +495,9 @@ public class MainActivity extends Activity {
     }
 
     /** Buttons for looking at a finished or opened scan. */
+    private boolean gestureTipShown;
     private void viewerUi() {
+        if (!gestureTipShown) { gestureTipShown = true; toast("Drag to look around · pinch to zoom · two fingers to pan"); }
         scanning = false;
         mainButton.setText("New scan");
         applyUi();
@@ -565,7 +567,7 @@ public class MainActivity extends Activity {
         hud.addView(hudSub);
         hudDetail = bar(0xFF33D17A); hudDetailPct = new TextView(this);
         hudRoom = bar(0xFF5BB3CF); hudRoomPct = new TextView(this);
-        LinearLayout r1 = barRow("Detail here", hudDetail, hudDetailPct), r2 = barRow("Whole scan", hudRoom, hudRoomPct);
+        LinearLayout r1 = barRow("This spot", hudDetail, hudDetailPct), r2 = barRow("Room", hudRoom, hudRoomPct);
         LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         rp.topMargin = dp(10);
         hud.addView(r1, rp);
@@ -620,17 +622,19 @@ public class MainActivity extends Activity {
             if (procBox == null) return;
             if (label == null || frac < 0) { procBox.setVisibility(View.GONE); return; }
             procBox.setVisibility(scanning ? View.GONE : View.VISIBLE);
-            procLabel.setText(frac >= 1 ? "✓ Scan improved" : label + "…");
+            procLabel.setText(frac >= 1 ? "✓ Ready. Tap Lighting to plan your lights" : label + "\nSaved already. You can look around while this runs.");
             procBar.setProgress(Math.round(Math.min(1f, frac) * 1000));
-            if (frac >= 1) procBox.postDelayed(() -> { if (procBar.getProgress() >= 1000) procBox.setVisibility(View.GONE); }, 3000);
+            if (frac >= 1) procBox.postDelayed(() -> { if (procBar.getProgress() >= 1000) procBox.setVisibility(View.GONE); }, 6000);
         });
     }
 
     /** The renderer saved the scan on its own (after Done, and again after clean-up). */
+    private String lastSavedName;
     void autoSaved(String name, String err) {
         runOnUiThread(() -> {
             if (name == null) { toast("Couldn't save the scan: " + err); return; }
             if (!scanning) improveButton.setVisibility(View.VISIBLE);
+            if (!scanning && !name.equals(lastSavedName)) { lastSavedName = name; toast("Saved as \"" + name + "\". Tap Rename to change it."); }
         });
     }
 
@@ -706,7 +710,7 @@ public class MainActivity extends Activity {
                 homeList.removeAllViews();
                 if (es.isEmpty()) {
                     TextView t = new TextView(this);
-                    t.setText("No saved scans yet. After a scan, tap Save to keep it here.");
+                    t.setText("No scans yet. Scans are saved here automatically.");
                     t.setTextColor(0xFFAAB0BA);
                     t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
                     homeList.addView(t);
@@ -828,7 +832,7 @@ public class MainActivity extends Activity {
         glView.queueEvent(() -> {
             renderer.startImprove(dir);
             String hint = renderer.improveHint();
-            runOnUiThread(() -> { scanUi(); updateStatus(hint); resumeSession(); });
+            runOnUiThread(() -> { scanUi(); updateStatus(hint); Toast.makeText(this, hint, Toast.LENGTH_LONG).show(); resumeSession(); });
         });
     }
 

@@ -282,7 +282,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             surfDone = s; surfBase = s; surfPending = s;
             if (autoStage == 3) glTasks.add(() -> {
                 if (autoStage != 3) return;
-                autoStage = 4; autoProgress("Training splats against the photos", 0.65f);
+                autoStage = 4; autoProgress("Step 4 of 4 · Refining detail against your photos", 0.65f);
                 String l = toggleTraining();
                 activity.trainingLabel(l);
                 if (!training) { autoStage = 5; autoProgress("Done", 1f); }
@@ -603,6 +603,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try {
                 ScanStore.Data d = new ScanStore.Data();
                 d.name = name;
+                d.lux = roomLux() > 0 ? roomLux() : loadedLux;
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
@@ -674,6 +675,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try {
                 ScanStore.Data d = ScanStore.load(dir);
                 if (currentName == null || replaceMarks) currentName = d.name;
+                if (d.lux > 0) { loadedLux = d.lux; Lighting.ROOM_LUX = d.lux; }
                 glTasks.add(() -> {
                     if (gen != surfGen) return;
                     int[] rgb = new int[3];
@@ -969,7 +971,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     }
                     final int mm = m; final float camX = pm[12], camY = pm[13], camZ = pm[14];
                     glTasks.add(() -> addDepthPoints(P, C, mm, camX, camY, camZ));
-                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Improving depth with AI: photo %d of %d", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
+                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Step 1 of 4 · Sharpening depth from your photos (%d/%d)", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
                     float each = (System.currentTimeMillis() - t0) / 1000f / (ki + 1);
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Depth AI: photo %d of %d (%.1f s each). Each photo's depth is guessed by a neural net and scaled with ARCore's measurements (agrees to %.0f%%). %,d points so far.",
@@ -1095,7 +1097,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         autosave(); // right away: Android may close the app in the background, and the scan only lives in memory
         if (!AUTO_PROCESS) return;
         autoStage = 1;
-        autoProgress("Improving depth with AI", 0.02f);
+        autoProgress("Step 1 of 4 · Sharpening depth from your photos", 0.02f);
         if (photos.keyframes.isEmpty()) { autoStage = 2; startCleanUp(); return; }
         toggleDepthAI();
         if (!depthRunning) { autoStage = 2; startCleanUp(); }
@@ -1126,7 +1128,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (autoStage == 0 || autoStage == 5) return;
         log("auto: " + what + " failed, skipping ahead");
         if (autoStage == 1) glTasks.add(() -> { autoStage = 2; startCleanUp(); });
-        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Building splats", 0.6f); buildSurfels(); });
+        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Step 3 of 4 · Building the photo-real 3D view", 0.6f); buildSurfels(); });
         else { autoStage = 5; autoProgress("Done", 1f); }
     }
 
@@ -1146,7 +1148,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         final float[][] walls = uw;
         activity.updateStatus("Cleaning up the scan: finding floor, ceiling and walls...");
-        if (autoStage == 2) autoProgress("Cleaning up: floor, walls, specks", 0.52f);
+        if (autoStage == 2) autoProgress("Step 2 of 4 · Straightening floor and walls", 0.52f);
         new Thread(() -> { try {
             long t0 = System.currentTimeMillis();
             CleanUp c = CleanUp.run(ps, cs, n, walls);
@@ -1167,7 +1169,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = n; uploaded = 0; refineCursor = 0;
         rebuildVoxelIndex();
         analyseRoom();
-        if (autoStage == 2) { autoStage = 3; autoProgress("Building splats", 0.6f); autosave(); }
+        if (autoStage == 2) { autoStage = 3; autoProgress("Step 3 of 4 · Building the photo-real 3D view", 0.6f); autosave(); }
         buildSurfels();
         activity.updateStatus(c.summary + "\nBuilding splats now (a few seconds), then you can Train splats.\n" + (roomReady ? room.summary : ""));
     }
@@ -1213,7 +1215,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     surfPending = tr.toSurfels();
                     float better = base0 > 0 ? Math.max(0, 1 - ema / base0) * 100 : 0;
                     float ms = (now - t0) / (float) Math.max(1, tr.iter - it0);
-                    if (auto) autoProgress(String.format(java.util.Locale.US, "Training splats: %.0f%% closer to the photos", better), 0.65f + 0.35f * Math.min(1f, (tr.iter - it0) / (float) AUTO_STEPS));
+                    if (auto) autoProgress(String.format(java.util.Locale.US, "Step 4 of 4 · Refining detail (%.0f%% sharper)", better), 0.65f + 0.35f * Math.min(1f, (tr.iter - it0) / (float) AUTO_STEPS));
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Training splats on the phone: step %d (%.0f ms each), %d splats vs %d photos.\nMatches the photos %.0f%% better than the raw scan. Tap Pause any time, or let it keep honing.",
                             tr.iter, ms, tr.n, views.size(), better));
@@ -1337,6 +1339,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void finishScan() {
+        if (roomLux() > 0) { Lighting.ROOM_LUX = Math.max(5f, roomLux()); log(String.format(java.util.Locale.US, "room light from camera exposure: %.0f lx (%d samples)", roomLux(), luxSamples.size())); }
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
         sensors.active = false;
@@ -2470,6 +2473,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
+        roomShown = 0; shownHint = null; tooFast = tooFar = false;
+        luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
@@ -2807,6 +2812,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 } catch (Exception e) {
                     logError("integrate", e);
                 }
+                try { if (depthSupported) maybePhoto(frame, camera); } catch (Exception e) { logError("photo", e); }
             }
             updateGuide(camera, nowMs);
             recordPath(camera.getPose());
@@ -2848,7 +2854,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             activity.updateStatus(s);
         }
-        if (frameNo % 5 == 0) postHud(ts);
+        if (frameNo % 5 == 0) { lastFail = camera.getTrackingFailureReason(); postHud(ts); }
         if (ts == TrackingState.TRACKING) maybeAutosaveWhileScanning(nowMs);
         if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
     }
@@ -2898,7 +2904,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         int best = -1; float bw = 0;
         for (int i = 0; i < 12; i++) if (w[i] > bw) { bw = w[i]; best = i; }
-        if (best < 0 || bw < 25) { guideTarget = null; guideText = r.floorCoverage > 0.85f ? "Room looks covered. Fill in details or tap Finish." : null; return; }
+        if (best < 0 || bw < 25) { guideTarget = null; guideText = r.floorCoverage > 0.85f ? "Room looks covered. Fill in details or tap Done." : null; return; }
         float tx = sx[best] / w[best], tz = sz[best] / w[best];
         guideTarget = new float[]{tx, r.floorY + 0.3f, tz};
         guideText = String.format(java.util.Locale.US, "Not scanned yet: about %.1f m², follow the arrow", bw * cell * cell);
@@ -3200,18 +3206,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (!inZone(zx, zy, zz) && zones.size() < 24) {
                     zones.add(new float[]{zx, zy, zz, 0.3f});
                     log(String.format(java.util.Locale.US, "auto detail zone %d at (%.2f, %.2f, %.2f)", zones.size(), zx, zy, zz));
-                    activity.toast("Close-up: adding detail here");
+                    activity.toast("Close-up spotted: sway slowly here for extra detail");
                 }
             }
-            boolean near = lookingAtZone(m);
-            if (photos.wants(m, frameMove, frameTurn, near)) {
-                short[] dcopy = new short[dw * dh];
-                for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) dcopy[v * dw + u] = dbuf.get(v * dRow + u * dPix);
-                int[] td = ti.getImageDimensions();
-                float[] tIntr = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
-                photos.capture(bgTex, m, tIntr, dcopy, dw, dh, new float[]{fx, fy, cx, cy}, colorGain, width, height, near);
-                if (photos.keyframes.size() == 1) log("first photo keyframe (texture " + td[0] + "x" + td[1] + ")");
-            }
+            // Keep this depth image for the next sharp photo (photos are taken on any camera frame, see maybePhoto).
+            short[] dcopy = new short[dw * dh];
+            for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) dcopy[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+            lastDepth = dcopy; lastDw = dw; lastDh = dh; lastDIntr = new float[]{fx, fy, cx, cy};
+            System.arraycopy(m, 0, lastDPose, 0, 16);
+            sampleLux(frame);
         } catch (NotYetAvailableException e) {
             depthNotYet++;
             // no depth yet
@@ -3337,6 +3340,74 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) return false;
         return mm * 0.001f > lim;
     }
+    // ---- Photos: the S24 gives depth only while moving, but sharp photos only while still. ----
+    // So photos are taken on any 30 fps camera frame (not only the ~1.6 Hz depth frames) once the motion blur,
+    // worked out from the gyro-fused pose rate and the camera's real exposure time, is under BLUR_PX.
+    static final float BLUR_PX = 4f;         // blur on the 1920 px camera image (2 px on the saved 1024 px photo)
+    private short[] lastDepth; private int lastDw, lastDh; private float[] lastDIntr; private final float[] lastDPose = new float[16];
+    private long prevFrameTs; private float exposureS = 0.02f; private int isoNow = 400, metaTick;
+    float blurPx;                            // current estimate, for the HUD
+    boolean photoWanted;                     // this view has no photo yet and the phone is moving too much to take one
+    private long photoWantedSince, photoTakenAt;
+    private final java.util.ArrayList<Float> luxSamples = new java.util.ArrayList<>();
+
+    private void maybePhoto(Frame frame, Camera camera) {
+        long ts = frame.getTimestamp();
+        float dt = prevFrameTs > 0 ? Math.max(0.008f, (ts - prevFrameTs) * 1e-9f) : 0.033f;
+        prevFrameTs = ts;
+        if (++metaTick % 6 == 0) try {
+            com.google.ar.core.ImageMetadata md = frame.getImageMetadata();
+            exposureS = Math.max(0.001f, md.getLong(com.google.ar.core.ImageMetadata.SENSOR_EXPOSURE_TIME) * 1e-9f);
+            isoNow = md.getInt(com.google.ar.core.ImageMetadata.SENSOR_SENSITIVITY);
+        } catch (Throwable ignored) { }
+        CameraIntrinsics ti = camera.getTextureIntrinsics();
+        float ftex = ti.getFocalLength()[0];
+        // rotation blur + sideways blur of a surface ~1.5 m away, over one exposure
+        blurPx = ((float) Math.toRadians(frameTurn) / dt + frameMove / dt / 1.5f) * exposureS * ftex;
+        float[] m = curPose;
+        boolean near = lookingAtZone(m);
+        boolean novel = photos.novel(m, near);
+        long now = System.currentTimeMillis();
+        if (novel && blurPx < BLUR_PX) {
+            // the latest depth image goes with the photo only if it was taken from (almost) the same place
+            float dx = m[12] - lastDPose[12], dy = m[13] - lastDPose[13], dz = m[14] - lastDPose[14];
+            float dot = m[8] * lastDPose[8] + m[9] * lastDPose[9] + m[10] * lastDPose[10];
+            boolean depthOk = lastDepth != null && dx * dx + dy * dy + dz * dz < 0.03f * 0.03f && dot > 0.9994f;
+            int[] td = ti.getImageDimensions();
+            float[] tIntr = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
+            photos.capture(bgTex, m.clone(), tIntr, depthOk ? lastDepth : null, depthOk ? lastDw : 0, depthOk ? lastDh : 0,
+                    depthOk ? lastDIntr : new float[4], colorGain, width, height, near);
+            if (photos.keyframes.size() == 1) log("first photo keyframe (texture " + td[0] + "x" + td[1] + ")");
+            if (photos.keyframes.size() % 5 == 1) log(String.format(java.util.Locale.US, "photo %d: blur %.1f px, exposure %.0f ms, ISO %d, depth %s",
+                    photos.keyframes.size(), blurPx, exposureS * 1000, isoNow, depthOk ? "yes" : "no"));
+            photoTakenAt = now; photoWanted = false; photoWantedSince = 0;
+        } else if (novel) {
+            if (photoWantedSince == 0) photoWantedSince = now;
+            photoWanted = now - photoWantedSince > 1500; // only nag after 1.5 s of missing a new view
+        } else { photoWanted = false; photoWantedSince = 0; }
+    }
+
+    boolean photoJustTaken() { return System.currentTimeMillis() - photoTakenAt < 1200; }
+
+    /** Room light from the camera's own exposure: incident lux E = C * N^2 / (t * ISO/100), C ~ 2.5 lx·s at ISO 100, f/1.8. */
+    private void sampleLux(Frame frame) {
+        try {
+            com.google.ar.core.ImageMetadata md = frame.getImageMetadata();
+            float t = md.getLong(com.google.ar.core.ImageMetadata.SENSOR_EXPOSURE_TIME) * 1e-9f;
+            int iso = md.getInt(com.google.ar.core.ImageMetadata.SENSOR_SENSITIVITY);
+            if (t > 0 && iso > 0 && luxSamples.size() < 4000) luxSamples.add(2.5f * 3.24f / t * 100f / iso);
+        } catch (Throwable ignored) { }
+    }
+
+    /** Median measured room light of this scan, or 0 if unknown. */
+    float roomLux() {
+        if (luxSamples.isEmpty()) return 0;
+        java.util.ArrayList<Float> c = new java.util.ArrayList<>(luxSamples);
+        java.util.Collections.sort(c);
+        return c.get(c.size() / 2);
+    }
+    float loadedLux;
+
     static final float FAR_M = 2.3f;        // beyond this the S24's depth from motion bends flat walls (scan1047)
     private float farShare = -1;            // smoothed share of this view's depth further than FAR_M
     private int farPixelsFrame;
@@ -3651,25 +3722,47 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */
+    private com.google.ar.core.TrackingFailureReason lastFail = com.google.ar.core.TrackingFailureReason.NONE;
+    private boolean tooFast, tooFar;         // with hysteresis, so the hint doesn't flicker
+    private String shownHint; private int shownLevel; private long shownAt;
+    private float roomShown;                 // the Room bar never goes down
+
+    /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
-        if (ts != TrackingState.TRACKING) { level = 2; hint = "Lost track. Point at something with detail and move slowly"; }
-        else if (d < 0 || count < 3000) { level = 1; hint = "Walk slowly around the room. Wherever the bar turns red, stay there and sway the phone gently"; }
-        else if (farShare > 0.6f && d < 0.7f) { level = 2; hint = "Too far to measure well. Walk closer, to about 1 to 2 m from it"; }
-        else if (moveSpeed > 0.35f && d < 0.7f) { level = 2; hint = "Too fast. Stay right here and sway the phone slowly"; }
-        else if (d < 0.35f) { level = 2; hint = "New area. Stay here and sway the phone gently side to side until the bar fills"; }
+        tooFast = moveSpeed > (tooFast ? 0.25f : 0.35f);
+        tooFar = farShare > (tooFar ? 0.45f : 0.6f);
+        if (ts != TrackingState.TRACKING) {
+            level = 2;
+            hint = lastFail == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_FEATURES ? "Lost track: point at something with texture, not a plain wall"
+                    : lastFail == com.google.ar.core.TrackingFailureReason.EXCESSIVE_MOTION ? "Lost track: moving too fast. Slow down"
+                    : lastFail == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_LIGHT ? "Lost track: too dark. Turn on a light"
+                    : "Lost track: move slowly, pointing at the floor or furniture";
+        }
+        else if (d < 0 || count < 3000) { level = 1; hint = "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
+        else if (photoWanted && d >= 0.35f) { level = 1; hint = "Hold still a moment… taking a photo"; }
+        else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
+        else if (tooFast && d < 0.7f) { level = 2; hint = "Too fast. Slow down and sway gently over this spot"; }
+        else if (d < 0.35f) { level = 2; hint = "Sway the phone slowly over this spot until the dots turn green"; }
         else if (d < 0.7f) { level = 1; hint = "Good. Keep swaying gently here a little longer"; }
-        else { level = 0; hint = "This spot is done. Move on to the next area"; }
-        if (improveDir != null) sub = "Tap 2 room corners to line this pass up with the saved scan";
+        else { level = 0; hint = "This spot is done. Move on to the next red area"; }
+        if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
+        else if (photoJustTaken()) sub = "📷 Photo " + photos.keyframes.size() + " taken, keep swaying";
         else if (guideText != null && level == 0) sub = guideText;
+        // keep a hint up for 1.5 s, unless something more urgent replaces it
+        long now = System.currentTimeMillis();
+        boolean photoHint = photoWanted || "Hold still a moment… taking a photo".equals(shownHint);
+        if (shownHint != null && !photoHint && !hint.equals(shownHint) && now - shownAt < 1500 && !(level == 2 && shownLevel < 2)) { hint = shownHint; level = shownLevel; }
+        else if (!hint.equals(shownHint)) { shownHint = hint; shownLevel = level; shownAt = now; }
         if (++hudCalls % 12 == 1) { // recount every ~2 s (points get merged, dropped and loaded in other places)
             int n = count, sc = 0;
             for (int i = 0; i < n; i++) if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++;
             solidCount = sc;
         }
         float room = count > 0 ? Math.min(1f, (float) solidCount / count) : 0f;
-        activity.updateHud(hint, sub, level, Math.max(0f, d), room, count);
+        roomShown = Math.max(roomShown, room);
+        activity.updateHud(hint, sub, level, Math.max(0f, d), roomShown, count);
     }
 
     private String detailLine() {
