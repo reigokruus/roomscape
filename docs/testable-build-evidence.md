@@ -1,12 +1,12 @@
 # Actual native test-build evidence
 
-Checked 2026-11-07 11:04 EET (Europe/Tallinn).
+Checked 2026-11-07 11:06 EET (Europe/Tallinn).
 
 ## Native Android binary produced here
 
 - APK: `CineX-android-local-0.1.67.apk`
-- Size: 68,798,853 bytes.
-- SHA-256: `5d07f9c394504ff858ba2381c177eb28bfb319a5de4df027b58ff336dee5ee63`.
+- Size: 68,793,814 bytes.
+- SHA-256: `6a9a939d78dcc0713804e9541ac1f4ec951d54a4aab6632be99796d7d2fc4dc3`.
 - Package: `com.hackathon.setscan`; versionCode 67; versionName 0.1.67.
 - Minimum Android API 24; target/compile API 35; native ABI `arm64-v8a`.
 - This is the real Java/ARCore app, **not HTML, a WebView wrapper or an iOS binary**.
