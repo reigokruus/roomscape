@@ -280,9 +280,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             Surfels s = Surfels.build(snap, colSnap, n);
             if (gen != surfGen) return;
             surfDone = s; surfBase = s; surfPending = s;
+            if (autoStage == 3) glTasks.add(() -> {
+                if (autoStage != 3) return;
+                autoStage = 4; autoProgress("Training splats against the photos", 0.65f);
+                String l = toggleTraining();
+                activity.trainingLabel(l);
+                if (!training) { autoStage = 5; autoProgress("Done", 1f); }
+            });
             log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
                     + (System.currentTimeMillis() - t0) + " ms");
-        } catch (Throwable e) { logError("splats", new RuntimeException(e)); } }).start();
+        } catch (Throwable e) { logError("splats", new RuntimeException(e)); if (autoStage == 3) { autoStage = 5; autoProgress("Done", 1f); } } }).start();
     }
 
     // ---- shot lighting preview (see Lighting) ----
@@ -607,10 +614,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 flip.postScale(sc, -sc);
                 d.thumb = android.graphics.Bitmap.createBitmap(full, 0, 0, width, height, flip, true);
                 full.recycle();
-                d.n = count; d.pos = new float[count * 3]; d.col = new byte[count * 3];
-                for (int i = 0; i < count; i++) {
-                    d.pos[i * 3] = pos.get(i * 3); d.pos[i * 3 + 1] = pos.get(i * 3 + 1); d.pos[i * 3 + 2] = pos.get(i * 3 + 2);
-                    d.col[i * 3] = col.get(i * 4); d.col[i * 3 + 1] = col.get(i * 4 + 1); d.col[i * 3 + 2] = col.get(i * 4 + 2);
+                int live = 0;
+                for (int i = 0; i < count; i++) if (obs[i] != 0) live++;
+                d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
+                for (int i = 0, j = 0; i < count; i++) {
+                    if (obs[i] == 0) continue; // cleared by see-through
+                    d.pos[j * 3] = pos.get(i * 3); d.pos[j * 3 + 1] = pos.get(i * 3 + 1); d.pos[j * 3 + 2] = pos.get(i * 3 + 2);
+                    d.col[j * 3] = col.get(i * 4); d.col[j * 3 + 1] = col.get(i * 4 + 1); d.col[j * 3 + 2] = col.get(i * 4 + 2);
+                    j++;
                 }
                 java.util.List<byte[]> jpgs = ScanExport.readKeyframes(photos, width, height);
                 for (int i = 0; i < photos.keyframes.size() && i < jpgs.size(); i++) {
@@ -825,6 +836,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             currentDir = null; currentName = null; // keep it as its own scan
             activity.toast("Not lined up with the saved scan (no matching corners), so this is kept as a new scan.");
             enterViewer();
+            startAuto();
             return;
         }
         float c = t[0], sn = t[1];
@@ -856,6 +868,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         currentDir = dir;
         appendSaved(dir, true, () -> {
             enterViewer();
+            startAuto();
             activity.updateStatus(String.format(java.util.Locale.US, "Merged: %,d points from this pass + the saved scan = %,d points, %d photos. Run Depth AI and Clean up, then Save.\n%s",
                     added, count, photos.keyframes.size(), roomReady ? room.summary : ""));
         });
@@ -894,7 +907,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     final android.graphics.Matrix map = new android.graphics.Matrix();
                     final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                     glTasks.add(() -> { try { img[0] = ObjectNamer.readUpright(k, width, height, map); } catch (Throwable e) { logError("depth read", new RuntimeException(e)); } finally { latch.countDown(); } });
-                    if (!latch.await(5, java.util.concurrent.TimeUnit.SECONDS) || img[0] == null) continue;
+                    boolean got;
+                    while (!(got = latch.await(5, java.util.concurrent.TimeUnit.SECONDS)) && paused && depthRunning) { /* in the background: wait for the app to come back */ }
+                    if (!got || img[0] == null) continue;
                     float[] D = net.run(img[0]);
                     int iw = img[0].getWidth(), ih = img[0].getHeight();
                     int[] pix = new int[iw * ih];
@@ -954,6 +969,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     }
                     final int mm = m; final float camX = pm[12], camY = pm[13], camZ = pm[14];
                     glTasks.add(() -> addDepthPoints(P, C, mm, camX, camY, camZ));
+                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Improving depth with AI: photo %d of %d", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
                     float each = (System.currentTimeMillis() - t0) / 1000f / (ki + 1);
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Depth AI: photo %d of %d (%.1f s each). Each photo's depth is guessed by a neural net and scaled with ARCore's measurements (agrees to %.0f%%). %,d points so far.",
@@ -964,6 +980,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             } catch (Throwable e) {
                 logError("depth AI", new RuntimeException(e));
                 activity.updateStatus("Depth AI failed: " + e);
+                autoFailed("depth AI");
             } finally {
                 if (net != null) net.close();
                 depthRunning = false;
@@ -974,20 +991,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /**
      * Robust fit of 1/depth = a * disparity + b + c * x + d * y over the filled cells (x, y = photo position, -0.5..0.5).
-     * The x/y terms take out the slight tilt the net puts into some photos (7.6 % -> 6.1 % median error on scan10).
+     * Weighted by 1/depth^2: phone depth-from-motion error grows with distance squared, so the near points set the scale
+     * and the net keeps its own shape further out. The x/y tilt terms are off (TILT_FIT): they copied ARCore's tilted far
+     * walls into the AI depth (scan1047 back wall 60 deg off vertical with them, 33-45 deg without and near-weighted).
      * Returns {a, b, c, d, median relative error} or null.
      */
+    static final boolean TILT_FIT = false;
     static float[] fitInverseDepth(float[] cd, float[] cr, float[] cu, float[] cv) {
         int n = 0;
         for (float d : cd) if (d > 0) n++;
         if (n < 40) return null;
-        int k = n >= 150 ? 4 : 2;
+        int k = TILT_FIT && n >= 150 ? 4 : 2;
         double[][] f = new double[n][];
-        double[] y = new double[n], w = new double[n], e = new double[n];
+        double[] y = new double[n], w = new double[n], w0 = new double[n], e = new double[n];
         int j = 0;
         for (int i = 0; i < cd.length; i++) if (cd[i] > 0) {
             f[j] = k == 4 ? new double[]{cr[i], 1, cu[i], cv[i]} : new double[]{cr[i], 1};
-            y[j] = 1.0 / cd[i]; w[j] = 1; j++;
+            y[j] = 1.0 / cd[i]; w0[j] = 1.0 / (cd[i] * cd[i]); w[j] = w0[j]; j++;
         }
         double[] sol = null;
         for (int iter = 0; iter < 12; iter++) {
@@ -1001,7 +1021,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int i = 0; i < n; i++) { double p = 0; for (int q = 0; q < k; q++) p += sol[q] * f[i][q]; e[i] = Math.abs(p - y[i]); }
             double[] s = e.clone(); java.util.Arrays.sort(s);
             double sc = s[n / 2] * 1.5 + 1e-6;
-            for (int i = 0; i < n; i++) w[i] = 1.0 / Math.max(1, e[i] / sc);
+            for (int i = 0; i < n; i++) w[i] = w0[i] / Math.max(1, e[i] / sc);
         }
         if (sol[0] <= 0) return null; // the net's disparity must grow as things get closer
         double[] rel = new double[n];
@@ -1056,10 +1076,59 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Throwable e) { logError("depth surface", new RuntimeException(e)); }
         activity.depthDone();
         activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Cleaning up now...", depthAdded));
+        if (autoStage == 1) autoStage = 2;
         startCleanUp();
     }
 
     private volatile boolean cleaning;
+
+    // ---- automatic processing after a scan: depth AI -> clean-up -> splats -> a round of training ----
+    static final boolean AUTO_PROCESS = true;
+    static final int AUTO_STEPS = 150;           // training steps (~1 min on the S24)
+    private volatile int autoStage;             // 0 off, 1 depth AI, 2 clean-up, 3 splats, 4 training, 5 done
+
+    private void autoProgress(String label, float frac) { activity.updateProcess(label, frac); }
+
+    /** GL thread: run the whole improvement chain on its own, reporting one progress bar. */
+    private void startAuto() {
+        if (count == 0) return;
+        autosave(); // right away: Android may close the app in the background, and the scan only lives in memory
+        if (!AUTO_PROCESS) return;
+        autoStage = 1;
+        autoProgress("Improving depth with AI", 0.02f);
+        if (photos.keyframes.isEmpty()) { autoStage = 2; startCleanUp(); return; }
+        toggleDepthAI();
+        if (!depthRunning) { autoStage = 2; startCleanUp(); }
+    }
+
+    volatile boolean paused;  // the app is in the background: GL work waits
+
+    /** Save without asking (a dated name the first time, then over the same folder). */
+    private volatile boolean saving;
+    private long lastAutosaveMs; private int lastAutosaveCount;
+    static final long AUTOSAVE_MS = 8000;
+
+    /** While scanning: save every few seconds when there is new data (not during an improve pass, which isn't lined up yet). */
+    private void maybeAutosaveWhileScanning(long nowMs) {
+        if (saving || improveDir != null || count < 2000 || count == lastAutosaveCount || nowMs - lastAutosaveMs < AUTOSAVE_MS) return;
+        lastAutosaveMs = nowMs; lastAutosaveCount = count;
+        autosave();
+    }
+
+    private void autosave() {
+        if (saving) { glTasks.add(() -> { if (!saving) autosave(); }); return; }
+        saving = true;
+        String name = currentName != null ? currentName : "Room " + android.text.format.DateFormat.format("d MMM HH:mm", System.currentTimeMillis());
+        requestSave(name, currentDir, (out, err) -> { saving = false; activity.autoSaved(out != null ? name : null, err); });
+    }
+
+    private void autoFailed(String what) {
+        if (autoStage == 0 || autoStage == 5) return;
+        log("auto: " + what + " failed, skipping ahead");
+        if (autoStage == 1) glTasks.add(() -> { autoStage = 2; startCleanUp(); });
+        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Building splats", 0.6f); buildSurfels(); });
+        else { autoStage = 5; autoProgress("Done", 1f); }
+    }
 
     /** GL thread: snap the scan onto its floor, ceiling and marked walls, drop specks, fill gaps (see CleanUp). */
     void startCleanUp() {
@@ -1077,12 +1146,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         final float[][] walls = uw;
         activity.updateStatus("Cleaning up the scan: finding floor, ceiling and walls...");
+        if (autoStage == 2) autoProgress("Cleaning up: floor, walls, specks", 0.52f);
         new Thread(() -> { try {
             long t0 = System.currentTimeMillis();
             CleanUp c = CleanUp.run(ps, cs, n, walls);
             log(c.summary + " (" + (System.currentTimeMillis() - t0) + " ms) " + c.debug);
             glTasks.add(() -> applyCleanUp(c, gen));
-        } catch (Throwable e) { cleaning = false; logError("clean-up", new RuntimeException(e)); } }).start();
+        } catch (Throwable e) { cleaning = false; logError("clean-up", new RuntimeException(e)); autoFailed("clean-up"); } }).start();
     }
 
     private void applyCleanUp(CleanUp c, int gen) {
@@ -1097,6 +1167,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = n; uploaded = 0; refineCursor = 0;
         rebuildVoxelIndex();
         analyseRoom();
+        if (autoStage == 2) { autoStage = 3; autoProgress("Building splats", 0.6f); autosave(); }
         buildSurfels();
         activity.updateStatus(c.summary + "\nBuilding splats now (a few seconds), then you can Train splats.\n" + (roomReady ? room.summary : ""));
     }
@@ -1130,7 +1201,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             java.util.Random rnd = new java.util.Random();
             long lastPub = 0, t0 = System.currentTimeMillis(); int it0 = tr.iter;
             float base0 = -1, ema = -1;
+            final boolean auto = autoStage == 4;
             while (training && gen == surfGen) {
+                if (auto && tr.iter - it0 >= AUTO_STEPS) { training = false; break; }
                 float l = tr.step(views.get(rnd.nextInt(views.size())));
                 ema = ema < 0 ? l : ema * 0.95f + l * 0.05f;
                 if (tr.iter <= 20) base0 = base0 < 0 ? l : base0 + (l - base0) / tr.iter;
@@ -1140,6 +1213,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     surfPending = tr.toSurfels();
                     float better = base0 > 0 ? Math.max(0, 1 - ema / base0) * 100 : 0;
                     float ms = (now - t0) / (float) Math.max(1, tr.iter - it0);
+                    if (auto) autoProgress(String.format(java.util.Locale.US, "Training splats: %.0f%% closer to the photos", better), 0.65f + 0.35f * Math.min(1f, (tr.iter - it0) / (float) AUTO_STEPS));
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Training splats on the phone: step %d (%.0f ms each), %d splats vs %d photos.\nMatches the photos %.0f%% better than the raw scan. Tap Pause any time, or let it keep honing.",
                             tr.iter, ms, tr.n, views.size(), better));
@@ -1147,7 +1221,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             if (gen == surfGen) surfPending = tr.toSurfels();
             log("training paused at step " + tr.iter + ", error " + tr.lastLoss);
-        } catch (Throwable e) { training = false; logError("training", new RuntimeException(e)); } }).start();
+            if (auto && autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); activity.trainingLabel("Train splats"); }
+        } catch (Throwable e) { training = false; logError("training", new RuntimeException(e)); if (autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); } } }).start();
         return "Pause training";
     }
 
@@ -1265,7 +1340,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
         sensors.active = false;
-        log("finish: " + count + " points, " + diagnostics());
+        log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
+        purgeCleared();
         dropNoise();
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
         try {
@@ -1281,6 +1357,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         lastPlanes = planes;
         if (improveDir != null) { mergeImprove(); return; }
         enterViewer();
+        startAuto();
     }
 
     /** GL thread: room, splats and camera for the viewer, from whatever is in the scan now. */
@@ -1696,7 +1773,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
             }
             k++;
         }
@@ -2394,7 +2471,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
         voxels.clear();
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -2719,6 +2796,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float dot = curPose[8] * prevPose[8] + curPose[9] * prevPose[9] + curPose[10] * prevPose[10];
                 frameTurn = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, dot))));
             }
+            moveSpeed = moveSpeed * 0.9f + Math.min(frameMove, 0.15f) * 30f * 0.1f;
             // A sudden jump means ARCore just corrected its map: the next moment's poses can't be trusted yet.
             if (havePrevPose && frameMove > 0.15f) { settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); }
             System.arraycopy(curPose, 0, prevPose, 0, 16);
@@ -2770,6 +2848,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             activity.updateStatus(s);
         }
+        if (frameNo % 5 == 0) postHud(ts);
+        if (ts == TrackingState.TRACKING) maybeAutosaveWhileScanning(nowMs);
+        if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
     }
 
     // ---------------- "scan over there" guide ----------------
@@ -3022,7 +3103,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
             int[] rgb = new int[3];
-            frameHits = 0; frameSolid = 0;
+            frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
             // Record the raw frame for export (replaying the scan off the phone).
             if (recs.size() < ScanExport.MAX_RECS) {
@@ -3091,6 +3172,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     float wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13];
                     float wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
                     depthPixelsFrame++;
+                    if (d > FAR_M) farPixelsFrame++;
                     if (d < 0.8f) { nearPixelsFrame++; nearSum[0] += wx; nearSum[1] += wy; nearSum[2] += wz; }
                     boolean fine = !zones.isEmpty() && inZone(wx, wy, wz);
                     long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
@@ -3106,6 +3188,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (count >= MAX_POINTS) return;
                 }
             }
+            carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
+            if (depthPixelsFrame > 300) { float fs = (float) farPixelsFrame / depthPixelsFrame; farShare = farShare < 0 ? fs : farShare * 0.7f + fs * 0.3f; }
             if (frameHits > 200) { float f = (float) frameSolid / frameHits; detailHere = detailHere < 0 ? f : detailHere * 0.8f + f * 0.2f; }
             // Keep a sharp HD photo of this view (with its pose) for the photographic room.
             // Close-up held for a moment: make it a detail zone automatically.
@@ -3204,20 +3288,81 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final int SOLID_SEEN = 12;
     private static int seenAlpha(int n) { return Math.min(255, Math.max(1, n * 255 / SOLID_SEEN)); }
     private final int[] seenStamp = new int[MAX_POINTS];
+    private final byte[] thru = new byte[MAX_POINTS]; // depth frames that saw clearly past this point
+    private int carveCursor, carvedTotal;
+
+    /**
+     * See-through clearing: a point the camera later sees past (the measured surface is clearly farther away at that pixel,
+     * and at its 4 neighbours) gets a strike; once it has as many strikes as sightings (at least 4), it is removed.
+     * Without this, a wrong first reading (e.g. "something" under a chair) could never go away.
+     * Checks up to 250k points per depth frame, round-robin.
+     */
+    private void carve(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int dw, int dh,
+                       float fx, float fy, float cx, float cy, float[] m) {
+        int n = count;
+        if (n == 0) return;
+        float[] v = new float[16];
+        Matrix.invertM(v, 0, m, 0);
+        int budget = Math.min(n, 250000), removed = 0;
+        for (int it = 0; it < budget; it++) {
+            int i = carveCursor++;
+            if (carveCursor >= n) carveCursor = 0;
+            if (obs[i] == 0 || seenStamp[i] == depthFrames) continue; // dead, or seen in this very frame
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float zc = v[2] * x + v[6] * y + v[10] * z + v[14];
+            float dp = -zc;
+            if (dp < 0.25f || dp > 3.5f) continue;
+            float xc = v[0] * x + v[4] * y + v[8] * z + v[12], yc = v[1] * x + v[5] * y + v[9] * z + v[13];
+            int u = (int) (fx * xc / dp + cx), vv = (int) (cy - fy * yc / dp);
+            if (u < 1 || vv < 1 || u >= dw - 1 || vv >= dh - 1) continue;
+            float lim = dp + Math.max(0.10f, 0.08f * dp);
+            if (!beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv, lim) || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u - 1, vv, lim)
+                    || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u + 1, vv, lim) || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv - 1, lim)
+                    || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv + 1, lim)) continue;
+            int t = Math.min(255, (thru[i] & 0xFF) + 1);
+            thru[i] = (byte) t;
+            int seen = Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f));
+            if (t >= 4 && t >= seen) {
+                obs[i] = 0; thru[i] = 0;
+                col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done
+                removed++;
+            }
+        }
+        if (removed > 0) { refined = true; carvedTotal += removed; }
+    }
+
+    private static boolean beyond(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int u, int v, float lim) {
+        int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
+        if (mm < 200 || mm > 4000) return false;
+        if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) return false;
+        return mm * 0.001f > lim;
+    }
+    static final float FAR_M = 2.3f;        // beyond this the S24's depth from motion bends flat walls (scan1047)
+    private float farShare = -1;            // smoothed share of this view's depth further than FAR_M
+    private int farPixelsFrame;
     private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
     private float detailHere = -1;           // smoothed share of solid points where the phone points
+    private int solidCount, hudCalls;        // points seen often enough to count as solid
+    private float moveSpeed;                 // smoothed phone speed, m/s
 
     private void addPoint(float x, float y, float z, int[] rgb) {
         int i = count * 3;
         pos.put(i, x); pos.put(i + 1, y); pos.put(i + 2, z);
         int j = count * 4;
         col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) seenAlpha(1));
-        obs[count] = 1; seenStamp[count] = depthFrames;
+        obs[count] = 1; seenStamp[count] = depthFrames; thru[count] = 0;
         count++;
     }
 
     /** A spot seen again: blend the new reading in, so repeated looks clean up a bad first one. */
     private void refine(int idx, float x, float y, float z, int[] rgb) {
+        if (obs[idx] == 0) { // a cleared spot seen solid again: start it fresh
+            pos.put(idx * 3, x); pos.put(idx * 3 + 1, y); pos.put(idx * 3 + 2, z);
+            col.put(idx * 4, (byte) rgb[0]); col.put(idx * 4 + 1, (byte) rgb[1]); col.put(idx * 4 + 2, (byte) rgb[2]); col.put(idx * 4 + 3, (byte) seenAlpha(1));
+            obs[idx] = 1; thru[idx] = 0; seenStamp[idx] = depthFrames; refined = true;
+            return;
+        }
+        if (thru[idx] != 0 && seenStamp[idx] != depthFrames) thru[idx]--;
         int n = obs[idx] & 0xFF;
         if (n < 255) obs[idx] = (byte) (n + 1);
         if (seenStamp[idx] != depthFrames) { // count each depth frame once (many pixels land in one 2 cm spot)
@@ -3240,6 +3385,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** Drop specks seen only once (noise, flying pixels), unless that would throw away most of a sparse scan. */
+    /** Remove the points see-through clearing marked (they stay in place, invisible, until the scan ends). */
+    private void purgeCleared() {
+        int k = 0;
+        for (int i = 0; i < count; i++) {
+            if (obs[i] == 0) continue;
+            if (k != i) {
+                pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
+                for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
+            }
+            k++;
+        }
+        if (k == count) return;
+        count = k; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
+    }
+
     private void dropNoise() {
         int keep = 0;
         boolean[] drop = new boolean[count];
@@ -3257,7 +3419,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
             }
             k++;
         }
@@ -3449,11 +3611,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (liveProg == 0) liveProg = program(
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
                 "void main(){ gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
+                "  if (aColor.a < 0.002) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; }" +
                 "  float solid = step(0.99, aColor.a);" + // done spots shrink to a faint dot so they stop hiding the camera
-                "  gl_PointSize = clamp(uSize / w * mix(1.0, 0.4, solid), 2.0, 64.0); vColor = aColor; }",
+                "  float grow = solid > 0.5 ? 0.4 : mix(1.25, 0.7, aColor.a);" + // red discs start big and visibly shrink with every new look
+                "  gl_PointSize = clamp(uSize / w * grow, 2.0, 64.0); vColor = aColor; }",
                 "precision mediump float; varying vec4 vColor;" +
                 "void main(){ vec2 d = gl_PointCoord * 2.0 - 1.0; float r2 = dot(d, d); if (r2 > 1.0) discard;" +
-                "  float s = vColor.a;" + // 0..1 how solid
+                "  float s = floor(vColor.a * 4.0) / 4.0;" + // 4 clear colour steps (red, orange, yellow, green) so progress pops
                 "  if (s > 0.99) { gl_FragColor = vec4(0.15, 1.0, 0.35, 0.35); return; }" +
                 "  vec3 heat = s < 0.5 ? mix(vec3(1.0, 0.15, 0.1), vec3(1.0, 0.85, 0.1), s * 2.0) : mix(vec3(1.0, 0.85, 0.1), vec3(0.15, 1.0, 0.35), s * 2.0 - 1.0);" +
                 "  if (r2 > 0.55) { gl_FragColor = vec4(heat, 1.0); return; }" +
@@ -3486,11 +3650,33 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
     }
 
+    /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */
+    private void postHud(TrackingState ts) {
+        int level; String hint, sub = null;
+        float d = detailHere;
+        if (ts != TrackingState.TRACKING) { level = 2; hint = "Lost track. Point at something with detail and move slowly"; }
+        else if (d < 0 || count < 3000) { level = 1; hint = "Walk slowly around the room. Wherever the bar turns red, stay there and sway the phone gently"; }
+        else if (farShare > 0.6f && d < 0.7f) { level = 2; hint = "Too far to measure well. Walk closer, to about 1 to 2 m from it"; }
+        else if (moveSpeed > 0.35f && d < 0.7f) { level = 2; hint = "Too fast. Stay right here and sway the phone slowly"; }
+        else if (d < 0.35f) { level = 2; hint = "New area. Stay here and sway the phone gently side to side until the bar fills"; }
+        else if (d < 0.7f) { level = 1; hint = "Good. Keep swaying gently here a little longer"; }
+        else { level = 0; hint = "This spot is done. Move on to the next area"; }
+        if (improveDir != null) sub = "Tap 2 room corners to line this pass up with the saved scan";
+        else if (guideText != null && level == 0) sub = guideText;
+        if (++hudCalls % 12 == 1) { // recount every ~2 s (points get merged, dropped and loaded in other places)
+            int n = count, sc = 0;
+            for (int i = 0; i < n; i++) if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++;
+            solidCount = sc;
+        }
+        float room = count > 0 ? Math.min(1f, (float) solidCount / count) : 0f;
+        activity.updateHud(hint, sub, level, Math.max(0f, d), room, count);
+    }
+
     private String detailLine() {
         float d = detailHere;
         if (d < 0) return "Detail here: point at something";
         int pct = Math.round(d * 100);
-        return pct >= 70 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, hold a bit longer" : "🔴 Detail here: " + pct + "% solid, hold still here";
+        return pct >= 70 ? "🟢 Detail here: " + pct + "% solid, move on" : pct >= 35 ? "🟡 Detail here: " + pct + "% solid, keep swaying here" : "🔴 Detail here: " + pct + "% solid, stay here and sway gently";
     }
 
     private void drawPointArrays() {

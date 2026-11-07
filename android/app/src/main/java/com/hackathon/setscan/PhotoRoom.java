@@ -21,6 +21,7 @@ final class PhotoRoom {
 
     static final class Keyframe {
         int tex;
+        byte[] jpg;                    // the photo as saved (cached, so autosaves don't re-encode it)
         float[] view = new float[16];  // world -> camera
         float[] pose = new float[16];  // camera -> world
         float fx, fy, cx, cy, w, h;   // texture (camera image) intrinsics, pixels
@@ -178,6 +179,7 @@ final class PhotoRoom {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         Keyframe k = new Keyframe();
         k.tex = t[0];
+        k.jpg = d.jpg;
         System.arraycopy(d.view, 0, k.view, 0, 16);
         System.arraycopy(d.pose, 0, k.pose, 0, 16);
         k.fx = d.fx; k.fy = d.fy; k.cx = d.cx; k.cy = d.cy; k.w = d.w; k.h = d.h;
