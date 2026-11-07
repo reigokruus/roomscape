@@ -3,11 +3,13 @@ import RoomPlan
 
 struct ShootPlannerView: View {
     let room: CapturedRoom
+    /// Areas of windows found from the scan's photos that RoomPlan missed (see `WindowDetection`).
+    var extraWindowAreas: [Float] = []
     @State private var scene: SceneType = .talkingHead
     @State private var gear: [GearItem] = []
 
     private var plan: ShootPlan {
-        ShootPlanner.plan(scene: scene, room: room, gear: gear)
+        ShootPlanner.plan(scene: scene, room: room, gear: gear, extraWindowAreas: extraWindowAreas)
     }
 
     var body: some View {

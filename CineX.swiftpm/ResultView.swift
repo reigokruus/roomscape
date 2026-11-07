@@ -12,6 +12,8 @@ struct ResultView: View {
     @State private var scene: SCNScene?
     @State private var room: CapturedRoom?
     @State private var capture: CaptureMeta?
+    /// Windows found from the photos and LiDAR (see `WindowFinder`), including ones RoomPlan also found.
+    @State private var foundWindows: [WindowFinder.Found] = []
     @State private var topView = false
     @State private var loadError: String?
     @State private var style: Style = .model
@@ -59,7 +61,7 @@ struct ResultView: View {
             .environment(\.colorScheme, .dark)
 
             if let room {
-                RoomSummary(room: room, capture: capture)
+                RoomSummary(room: room, capture: capture, foundWindows: foundWindows)
                     .frame(maxHeight: 260)
             }
         }
@@ -74,7 +76,8 @@ struct ResultView: View {
                 NavigationLink(destination: PlanningLaunchView(room: room, scan: scan)) {
                     Label("Storyboard", systemImage: "rectangle.stack")
                 }
-                NavigationLink(destination: ShootPlannerView(room: room)) {
+                NavigationLink(destination: ShootPlannerView(
+                    room: room, extraWindowAreas: foundWindows.filter { !$0.matchesRoomPlan }.map(\.area))) {
                     Label("Plan a Shoot", systemImage: "sparkles")
                 }
             }
@@ -108,6 +111,14 @@ struct ResultView: View {
                 modelGroup = group
             case .failure(let error):
                 loadError = "Could not open the 3D model: \(error.localizedDescription)"
+            }
+
+            // Windows from the photos and LiDAR: RoomPlan misses many (curtained ones especially). Shown on the walls
+            // in both styles, counted in the summary and given to the shoot planner.
+            if let room = loaded.0, let scene, capture != nil {
+                let windows = await Task.detached(priority: .userInitiated) { WindowDetection.load(scan, room: room) }.value
+                foundWindows = windows
+                scene.rootNode.addChildNode(WindowDetection.node(windows, room: room))
             }
 
             // Splats, when the scan has points: built in the background (cached after the first time), then shown
@@ -247,16 +258,30 @@ struct RoomSceneView: UIViewRepresentable {
 struct RoomSummary: View {
     let room: CapturedRoom
     var capture: CaptureMeta?
+    var foundWindows: [WindowFinder.Found] = []
+
+    private var missedWindows: [WindowFinder.Found] { foundWindows.filter { !$0.matchesRoomPlan } }
 
     var body: some View {
         List {
             Section("Room") {
                 LabeledContent("Approx. size", value: sizeText)
                 LabeledContent("Walls", value: "\(room.walls.count)")
-                LabeledContent("Windows (natural light)", value: "\(room.windows.count)")
+                LabeledContent("Windows (natural light)", value: "\(room.windows.count + missedWindows.count)")
                 LabeledContent("Doors", value: "\(room.doors.count)")
                 if !room.openings.isEmpty {
                     LabeledContent("Openings", value: "\(room.openings.count)")
+                }
+            }
+            if !missedWindows.isEmpty {
+                Section {
+                    ForEach(missedWindows.indices, id: \.self) { i in
+                        Label(missedWindows[i].label, systemImage: "sun.max")
+                    }
+                } header: {
+                    Text("Windows found from the photos")
+                } footer: {
+                    Text("RoomPlan missed these. They are bright in the photos and shown in light blue on the walls.")
                 }
             }
             if let capture {
