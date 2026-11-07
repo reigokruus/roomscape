@@ -16,7 +16,6 @@ struct ResultView: View {
             ZStack(alignment: .topTrailing) {
                 if let scene {
                     RoomSceneView(scene: scene, topView: topView)
-                        .background(Color.black)
                 } else if let loadError {
                     Text(loadError).padding()
                 } else {
@@ -30,7 +29,10 @@ struct ResultView: View {
                 .frame(width: 140)
                 .padding(10)
             }
-            .frame(maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            // The 3D area is always black, so its controls use dark styling even when the phone is in light mode.
+            .environment(\.colorScheme, .dark)
 
             if let room {
                 RoomSummary(room: room)
@@ -39,6 +41,10 @@ struct ResultView: View {
         }
         .navigationTitle(scan.date.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
+        // Black bar above the black 3D view, with light title, buttons and status bar in light mode too.
+        .toolbarBackground(Color.black, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             if let room {
                 NavigationLink(destination: ShootPlannerView(room: room)) {
