@@ -126,7 +126,7 @@ final class ScanStore {
         if (d.objects != null) m.put("objects", new JSONArray(d.objects));
         if (d.outlets != null) m.put("outlets", new JSONArray(d.outlets));
         if (d.items != null) m.put("items", new JSONArray(d.items));
-        if (d.hall) m.put("hall", true);
+        if (d.hall) m.put("hall2", true); // back wall placed + rough room filled
         if (d.outletsChecked) m.put("roomPass", 2); // outlets + objects searched
         m.put("corners", arr(d.corners)); m.put("walls", arr(d.walls));
         if (d.floor != null) m.put("floor", vec(d.floor));
@@ -153,7 +153,7 @@ final class ScanStore {
         d.outlets = ol == null ? null : ol.toString();
         JSONArray it = m.optJSONArray("items");
         d.items = it == null ? null : it.toString();
-        d.hall = m.optBoolean("hall", false);
+        d.hall = m.optBoolean("hall2", false); // scans from the first demo (stretch only) get the rough room once
         d.outletsChecked = m.optInt("roomPass", 0) >= 2; // older scans (outlets only) get the object pass once
         d.corners = list(m.optJSONArray("corners")); d.walls = list(m.optJSONArray("walls"));
         d.floor = m.has("floor") ? vec(m.getJSONArray("floor")) : null;

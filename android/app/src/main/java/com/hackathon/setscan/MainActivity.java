@@ -36,6 +36,7 @@ public class MainActivity extends Activity {
     private boolean installRequested;
     private TextView status;
     private Button refineButton;
+    private Button undoButton;
     private Button lightButton, saveButton, homeButton, improveButton, cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
@@ -307,6 +308,11 @@ public class MainActivity extends Activity {
         refineButton.setVisibility(View.GONE);
         refineButton.setOnClickListener(v -> glView.queueEvent(() -> { String m = renderer.refineAgain(); toast(m); }));
         bar.addView(refineButton);
+        undoButton = new Button(this);
+        undoButton.setText("Undo");
+        undoButton.setVisibility(View.GONE);
+        undoButton.setOnClickListener(v -> glView.queueEvent(() -> { String m = renderer.undo(); toast(m); }));
+        bar.addView(undoButton);
         exportButton = new Button(this);
         exportButton.setText("Share");
         exportButton.setVisibility(View.GONE);
@@ -370,7 +376,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{homeButton, mainButton, lightButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, refineButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{homeButton, mainButton, lightButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, refineButton, undoButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
             ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -557,7 +563,7 @@ public class MainActivity extends Activity {
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
         renderer.overlays = debug;
-        Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, refineButton};
+        Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, refineButton, undoButton};
         lightButton.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // lighting is parked for now (rk: just the model)
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};

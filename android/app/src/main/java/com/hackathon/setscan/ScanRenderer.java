@@ -1279,6 +1279,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float target = e == null ? Float.NaN : (float) e[0];
                 log("hall: " + measured.replace("\n", "; ") + " -> Claude: back wall " + target + " m (" + ClaudeHelper.lastHallWhy + ")");
                 final float s0 = 4f;
+                if (!Float.isNaN(target)) takeUndo("Claude's back wall");
                 if (!Float.isNaN(target) && farNow > s0 + 0.5f && target > farNow) {
                     float k = Math.min(4f, (target - s0) / (farNow - s0));
                     int moved = 0;
@@ -1308,9 +1309,139 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     log(String.format(java.util.Locale.US, "hall: stretched %d far points x%.2f so the back wall is at %.1f m (was %.1f m)", moved, k, target, farNow));
                     activity.toast(String.format(java.util.Locale.US, "Claude puts the back wall about %.0f m away", target));
                 }
-                if (thenCleanUp) startCleanUp(); else { activity.updateProcess(null, -1); autosave(); }
+                if (!Float.isNaN(target) && target > 2f) {
+                    double[] ee = e;
+                    roughRoom(ox, oz, ux, uz, target, ee != null && ee.length > 2 ? (float) ee[2] : Float.NaN);
+                }
+                if (thenCleanUp) startCleanUp(); else { activity.updateProcess(null, -1); surfCount = 0; surfShown = null; buildSurfels(); autosave(); }
             });
         }).start();
+    }
+
+    /**
+     * DEMO: commit to a rough box room. The back wall is a plane at Claude's distance (points past it are put onto
+     * it), the side walls sit where the scan saw them, the floor is the floor; every 6 cm patch of those surfaces
+     * that has no scan point within ~10 cm gets one, coloured like the rest of that surface. So the far end is a
+     * best guess that stays put, and the gaps between scanned spots are closed.
+     */
+    private void roughRoom(float ox, float oz, float ux, float uz, float back, float ceilEst) {
+        int n = count;
+        if (n < 1000) return;
+        float[] al = new float[n], lat = new float[n], ys = new float[n];
+        for (int i = 0; i < n; i++) {
+            float dx = pos.get(i * 3) - ox, dz = pos.get(i * 3 + 2) - oz;
+            al[i] = dx * ux + dz * uz; lat[i] = -dx * uz + dz * ux; ys[i] = pos.get(i * 3 + 1);
+        }
+        float[] sl = lat.clone(), sy = ys.clone(), sa = al.clone();
+        java.util.Arrays.sort(sl); java.util.Arrays.sort(sy); java.util.Arrays.sort(sa);
+        float left = sl[(int) (n * 0.02f)], right = sl[(int) (n * 0.98f)];
+        float floor = roomReady ? room.floorY : sy[(int) (n * 0.01f)];
+        float ceil = sy[(int) (n * 0.99f)];
+        if (!Float.isNaN(ceilEst) && ceilEst > 2f && ceilEst < 20f) ceil = Math.max(ceil, floor + ceilEst);
+        float front = Math.max(sa[(int) (n * 0.01f)], -1f);
+        // 1) stick to the back wall: anything past it goes onto it
+        int snapped = 0;
+        for (int i = 0; i < n; i++) {
+            if (al[i] <= back) continue;
+            float add = back - al[i];
+            pos.put(i * 3, pos.get(i * 3) + ux * add); pos.put(i * 3 + 2, pos.get(i * 3 + 2) + uz * add);
+            al[i] = back; snapped++;
+        }
+        // 2) what is there already, in 10 cm cells
+        java.util.HashSet<Long> have = new java.util.HashSet<>();
+        for (int i = 0; i < n; i++) have.add(cell10(al[i], lat[i], ys[i]));
+        // colour of each surface: median of the points near it
+        int[] cBack = surfaceColour(al, lat, ys, n, 0, back, 0.6f), cLeft = surfaceColour(al, lat, ys, n, 1, left, 0.4f),
+              cRight = surfaceColour(al, lat, ys, n, 1, right, 0.4f), cFloor = surfaceColour(al, lat, ys, n, 2, floor, 0.1f);
+        int added = 0; final float st = 0.06f;
+        int[] rgb = new int[3];
+        // back wall (lateral x height), side walls (along x height), floor (along x lateral)
+        for (int pass = 0; pass < 4; pass++) {
+            float a0, a1, b0, b1; int[] c;
+            if (pass == 0) { a0 = left; a1 = right; b0 = floor; b1 = ceil; c = cBack; }
+            else if (pass == 1 || pass == 2) { a0 = Math.max(front, 0.5f); a1 = back; b0 = floor; b1 = ceil; c = pass == 1 ? cLeft : cRight; }
+            else { a0 = Math.max(front, 0.5f); a1 = back; b0 = left; b1 = right; c = cFloor; }
+            for (float a = a0; a <= a1; a += st) for (float b = b0; b <= b1; b += st) {
+                float A, L, Y;
+                if (pass == 0) { A = back; L = a; Y = b; }
+                else if (pass == 1) { A = a; L = left; Y = b; }
+                else if (pass == 2) { A = a; L = right; Y = b; }
+                else { A = a; L = b; Y = floor; }
+                if (near10(have, A, L, Y)) continue;
+                if (count >= MAX_POINTS) break;
+                float x = ox + A * ux - L * uz, z = oz + A * uz + L * ux;
+                float j = ((Float.floatToIntBits(x * 7.3f + z * 3.1f + Y) & 15) - 8) * 1.5f; // a little texture, not flat paint
+                rgb[0] = clamp255(c[0] + j); rgb[1] = clamp255(c[1] + j); rgb[2] = clamp255(c[2] + j);
+                addPoint(x, Y, z, rgb);
+                obs[count - 1] = 2; col.put((count - 1) * 4 + 3, (byte) 255);
+                added++;
+            }
+        }
+        rebuildVoxelIndex(); uploaded = 0; refineCursor = 0;
+        log(String.format(java.util.Locale.US, "rough room: back wall at %.1f m (%d points put onto it), width %.1f m, height %.1f m, %d gap points added",
+                back, snapped, right - left, ceil - floor, added));
+        activity.toast(String.format(java.util.Locale.US, "Rough room: %.0f × %.0f m, back wall about %.0f m away. Tap Undo if it looks wrong.", right - left, back - Math.max(front, 0), back));
+    }
+
+    private static int clamp255(float v) { return v < 0 ? 0 : v > 255 ? 255 : Math.round(v); }
+
+    private static long cell10(float a, float l, float y) {
+        long ia = (long) Math.floor(a / 0.1f) + 100000, il = (long) Math.floor(l / 0.1f) + 100000, iy = (long) Math.floor(y / 0.1f) + 100000;
+        return (ia << 40) | (il << 20) | iy;
+    }
+
+    private static boolean near10(java.util.HashSet<Long> have, float a, float l, float y) {
+        for (int da = -1; da <= 1; da++) for (int dl = -1; dl <= 1; dl++) for (int dy = -1; dy <= 1; dy++)
+            if (have.contains(cell10(a + da * 0.1f, l + dl * 0.1f, y + dy * 0.1f))) return true;
+        return false;
+    }
+
+    /** Median colour of the points within band of a surface (axis 0 = along, 1 = lateral, 2 = height). */
+    private int[] surfaceColour(float[] al, float[] lat, float[] ys, int n, int axis, float at, float band) {
+        int m = 0; int[] r = new int[Math.min(n, 20000)], g = new int[r.length], b = new int[r.length];
+        int step = Math.max(1, n / 200000);
+        for (int i = 0; i < n && m < r.length; i += step) {
+            float v = axis == 0 ? al[i] : axis == 1 ? lat[i] : ys[i];
+            if (Math.abs(v - at) > band) continue;
+            r[m] = col.get(i * 4) & 255; g[m] = col.get(i * 4 + 1) & 255; b[m] = col.get(i * 4 + 2) & 255; m++;
+        }
+        if (m == 0) return new int[]{150, 150, 150};
+        java.util.Arrays.sort(r, 0, m); java.util.Arrays.sort(g, 0, m); java.util.Arrays.sort(b, 0, m);
+        return new int[]{r[m / 2], g[m / 2], b[m / 2]};
+    }
+
+    // ---- undo the last AI change (demo) ----
+    private float[] undoPos; private byte[] undoCol, undoObs; private int undoCount; private Surfels undoSurf; private String undoWhat;
+
+    /** GL thread: remember the scan as it is now, before an AI change. */
+    private void takeUndo(String what) {
+        int n = count;
+        undoPos = new float[n * 3]; undoCol = new byte[n * 4]; undoObs = new byte[n];
+        for (int i = 0; i < n * 3; i++) undoPos[i] = pos.get(i);
+        for (int i = 0; i < n * 4; i++) undoCol[i] = col.get(i);
+        System.arraycopy(obs, 0, undoObs, 0, n);
+        undoCount = n; undoWhat = what;
+        Surfels s = surfShown;
+        undoSurf = s == null ? null : s.copy();
+    }
+
+    /** GL thread: put back what was there before the last AI change. Returns a message. */
+    String undo() {
+        if (undoPos == null) return "Nothing to undo";
+        if (training) training = false;
+        int n = undoCount;
+        for (int i = 0; i < n * 3; i++) pos.put(i, undoPos[i]);
+        for (int i = 0; i < n * 4; i++) col.put(i, undoCol[i]);
+        System.arraycopy(undoObs, 0, obs, 0, n);
+        count = n; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
+        Surfels s = undoSurf;
+        if (s != null) { surfGen++; surfDone = s; surfBase = s; surfPending = s; trainer = null; }
+        else { surfCount = 0; surfShown = null; buildSurfels(); }
+        String what = undoWhat;
+        undoPos = null; undoCol = null; undoObs = null; undoSurf = null; undoWhat = null;
+        autosave();
+        return "Undid: " + what;
     }
 
     private static float sideways(java.util.List<PhotoRoom.Keyframe> kfs, float ux, float uz) {
@@ -1528,6 +1659,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         autoStage = 4;
         // the photos are the better source here (depth is noisy): let splats move further to match them, starting
         // fresh from the current model so each Refine builds on the last
+        takeUndo("Refine");
         Trainer.MAX_T = 0.5f; Trainer.POS_LR = 3f; trainer = null;
         Surfels cur = surfShown;
         if (cur != null && cur.trained && cur.n > 0) surfBase = cur; // continue from the trained model, not the raw scan

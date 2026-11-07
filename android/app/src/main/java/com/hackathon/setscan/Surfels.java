@@ -36,6 +36,17 @@ final class Surfels {
 
     static Surfels empty(int n) { return new Surfels(n); }
 
+    /** A full copy (for Undo). */
+    Surfels copy() {
+        Surfels c = new Surfels(n);
+        FloatBuffer a = pos.duplicate(); a.position(0); a.limit(n * 3); c.pos.put(a); c.pos.position(0);
+        a = raw.duplicate(); a.position(0); a.limit(n * 3); c.raw.put(a); c.raw.position(0);
+        a = nrm.duplicate(); a.position(0); a.limit(n * 4); c.nrm.put(a); c.nrm.position(0);
+        ByteBuffer b = col.duplicate(); b.position(0); b.limit(n * 4); c.col.put(b); c.col.position(0);
+        c.flat = flat; c.curved = curved; c.lonely = lonely; c.stretched = stretched; c.trained = trained;
+        return c;
+    }
+
     /** Surfels for the points src/srcCol (colours copied, opacity 1). */
     static Surfels build(FloatBuffer src, ByteBuffer srcCol, int n) {
         Surfels s = build(src, n);
