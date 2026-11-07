@@ -317,14 +317,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void placeCatalog(ItemCatalog.Item item, double[] manual, float bottom) throws Exception {
         requirePlanningScan(); ItemCatalog.require(item.complete() || manual != null, "Size unknown: supply manual dimensions first");
         ItemCatalog.require(Float.isFinite(bottom) && bottom >= 0 && bottom <= 20, "Base height must be 0–20 m");
-        synchronized(lighting) {
-            int n = 0; for(Lighting.Prop p:lighting.props)if(p.catalog!=null)n++;
-            ItemCatalog.require(n < RoomEdits.MAX_PLACED, "At most 100 placed catalog items");
-            lighting.enabled = true;
-            Lighting.Prop p = Lighting.catalogProp(item, manual, bottom, target[0] + (n % 3) * .3f, target[2] + (n / 3 % 3) * .3f);
-            lighting.props.add(p); lighting.floorY = room.floorY; lighting.selected = lighting.lights.size() + lighting.props.size() - 1;
-        }
-        roomEdits.capture(room.boxes); planningPreview = true; savePlanning(); activity.lightingSelected();
+        // rk 7 Nov: placed gear becomes an Objects item (a see-through box of its real size you can drag and turn),
+        // not a solid Lighting prop: the solid box filled the whole screen when the view was near it.
+        double[] size = Lighting.catalogProp(item, manual, bottom, target[0], target[2]).size(); // {w, h, d} in m
+        float fy = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
+        SceneObjects.Obj o = new SceneObjects.Obj();
+        o.name = item.title(); o.hu = (float) size[0] / 2; o.hv = (float) size[2] / 2;
+        o.y0 = fy + bottom; o.y1 = o.y0 + (float) size[1]; o.cx = target[0]; o.cz = target[2];
+        o.fromCatalog = true; o.onFloor = bottom <= 0.01f; o.n = 0; o.pts = new float[0]; o.cols = new byte[0];
+        objects.list.add(o); objects.selected = objects.list.size() - 1; objects.edited = true; objects.active = true;
+        autosave();
     }
     void focusDetected(String id) {
         RoomEdits.Detected d = roomEdits.find(id); if(d == null)return;
@@ -334,7 +336,26 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         planningScanKey = dir.getName();
         try {
             String json = RoomEditStore.read(activity, dir);
-            if(json != null) { roomEdits = RoomEdits.decode(json, lighting); lighting.floorY = room.floorY; planningPreview = roomEdits.captured; if(!lighting.props.isEmpty()) lighting.enabled = true; activity.planningModeChanged(); }
+            if(json != null) { roomEdits = RoomEdits.decode(json, lighting); lighting.floorY = room.floorY; planningPreview = roomEdits.captured;
+                int migrated = 0;
+                // gear placed with the old solid Lighting props becomes see-through Objects boxes (lighting is parked)
+                synchronized (lighting) {
+                    for (java.util.Iterator<Lighting.Prop> itp = lighting.props.iterator(); itp.hasNext(); ) {
+                        Lighting.Prop pr = itp.next();
+                        if (pr.catalog == null) continue;
+                        double[] sz = pr.size();
+                        SceneObjects.Obj o = new SceneObjects.Obj();
+                        o.name = pr.catalog.title(); o.hu = (float) sz[0] / 2; o.hv = (float) sz[2] / 2;
+                        o.y0 = room.floorY + pr.bottom; o.y1 = o.y0 + (float) sz[1]; o.cx = pr.x; o.cz = pr.z;
+                        o.cosA = (float) Math.cos(Math.toRadians(pr.yawDeg)); o.sinA = (float) Math.sin(Math.toRadians(pr.yawDeg));
+                        o.fromCatalog = true; o.n = 0; o.pts = new float[0]; o.cols = new byte[0];
+                        objects.list.add(o); objects.edited = true; migrated++;
+                        itp.remove();
+                    }
+                    lighting.enabled = false;
+                }
+                if (migrated > 0) { try { savePlanning(); } catch (Exception ignored) { } autosave(); }
+                activity.planningModeChanged(); }
         } catch(Exception e) { planningLoadError = e.getMessage(); activity.updateStatus("Planning overlay could not be opened (original scan intact): " + e.getMessage()); }
     }
 
@@ -653,7 +674,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 ScanStore.Data d = new ScanStore.Data();
                 d.name = name;
                 d.lux = roomLux() > 0 ? roomLux() : loadedLux;
+                Surfels ss = surfShown;
+                if (ss != null && ss.trained && ss.n > 0) {
+                    int sn = ss.n; d.splN = sn; d.splPos = new float[sn * 3]; d.splNrm = new float[sn * 4]; d.splCol = new byte[sn * 4];
+                    for (int i = 0; i < sn * 3; i++) d.splPos[i] = ss.pos.get(i);
+                    for (int i = 0; i < sn * 4; i++) { d.splNrm[i] = ss.nrm.get(i); d.splCol[i] = ss.col.get(i); }
+                }
                 try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
+                try { d.outletsChecked = outlets.checked; if (!outlets.list.isEmpty()) d.outlets = outlets.toJson(); } catch (Exception e) { logError("outlets save", e); }
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
@@ -712,7 +740,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         lastPlanes = new java.util.ArrayList<>();
         currentDir = dir;
         activity.updateStatus("Opening the scan...");
-        appendSaved(dir, true, () -> { enterViewer(); loadPlanning(dir); if (done != null) done.run(); });
+        appendSaved(dir, true, () -> {
+            enterViewer();
+            if (loadedSplats != null) { // show the improved model it was saved with, not a fresh rebuild from the raw points
+                surfGen++; surfDone = loadedSplats; surfBase = loadedSplats; surfPending = loadedSplats; loadedSplats = null;
+                log("opened with " + surfDone.n + " trained splats");
+            }
+            loadPlanning(dir); if (done != null) done.run();
+            if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
+        });
     }
 
     /**
@@ -748,6 +784,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         cornerList.addAll(d.corners); wallList.addAll(d.walls);
                         markFloor = d.floor; markCeiling = d.ceiling;
                     }
+                    if (replaceMarks && d.splN > 0) {
+                        Surfels ls = Surfels.empty(d.splN);
+                        ls.pos.put(d.splPos).position(0); ls.raw.put(d.splPos).position(0); ls.nrm.put(d.splNrm).position(0); ls.col.put(d.splCol).position(0);
+                        ls.trained = true; loadedSplats = ls;
+                    }
+                    if (replaceMarks) outlets.fromJson(d.outlets, d.outletsChecked);
                     if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
                 int room = Math.max(0, 80 - photos.keyframes.size());
@@ -1162,10 +1204,91 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- automatic processing after a scan: depth AI -> clean-up -> splats -> a round of training ----
     static final boolean AUTO_PROCESS = true;
-    static final int AUTO_STEPS = 150;           // training steps (~1 min on the S24)
+    static final int AUTO_STEPS = 400;           // training steps (~4 min on the S24; 150 left the splats blotchy)
     private volatile int autoStage;             // 0 off, 1 depth AI, 2 clean-up, 3 splats, 4 training, 5 done
 
-    private void autoProgress(String label, float frac) { activity.updateProcess(label, frac); }
+    private void autoProgress(String label, float frac) {
+        activity.updateProcess(label, frac);
+        if (frac >= 1f && !outlets.checked) glTasks.add(() -> findOutlets(false));
+    }
+
+    // ---- power outlets: Claude looks for them in the scan's photos, the scan's points place them in the room ----
+    final Outlets outlets = new Outlets();
+    private volatile boolean outletsRunning;
+    static final int OUTLET_PHOTOS = 36, OUTLET_BATCH = 6;
+
+    /** GL thread: search the photos of this scan for power outlets (once per scan; again if forced). */
+    void findOutlets(boolean force) {
+        if (outletsRunning || (outlets.checked && !force) || count == 0) return;
+        final java.util.List<PhotoRoom.Keyframe> all = new java.util.ArrayList<>(photos.keyframes);
+        if (all.isEmpty()) return;
+        final String key = activity.claudeKey();
+        if (key == null) { activity.outletsNeedKey(); return; }
+        try { ScanExport.readKeyframes(photos, width, height); } catch (Throwable e) { logError("outlet jpg", new RuntimeException(e)); return; }
+        // spread the photos over the scan, at most OUTLET_PHOTOS of them
+        final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>();
+        float stepK = Math.max(1f, all.size() / (float) OUTLET_PHOTOS);
+        for (float f = 0; f < all.size() && kfs.size() < OUTLET_PHOTOS; f += stepK) kfs.add(all.get((int) f));
+        final int n0 = count, step = Math.max(1, n0 / 300000);
+        final float[] pts = new float[(n0 / step + 1) * 3];
+        int pn = 0;
+        for (int i = 0; i < n0; i += step) { if (obs[i] == 0) continue; pts[pn * 3] = pos.get(i * 3); pts[pn * 3 + 1] = pos.get(i * 3 + 1); pts[pn * 3 + 2] = pos.get(i * 3 + 2); pn++; }
+        final int ptsN = pn, gen = surfGen;
+        outletsRunning = true;
+        final java.util.List<Outlets.Outlet> before = outlets.snapshot();
+        if (force) synchronized (outlets) { outlets.list.clear(); }
+        new Thread(() -> {
+            int found = 0; boolean ok = true;
+            try {
+                for (int b = 0; b < kfs.size() && gen == surfGen; b += OUTLET_BATCH) {
+                    activity.updateProcess(String.format(java.util.Locale.US, "Finding power outlets (%d/%d photos)", b, kfs.size()), 0.05f + 0.9f * b / kfs.size());
+                    java.util.List<PhotoRoom.Keyframe> batch = new java.util.ArrayList<>();
+                    java.util.List<android.graphics.Matrix> maps = new java.util.ArrayList<>();
+                    java.util.List<int[]> sizes = new java.util.ArrayList<>();
+                    java.util.List<String> b64 = new java.util.ArrayList<>();
+                    for (int j = b; j < Math.min(kfs.size(), b + OUTLET_BATCH); j++) {
+                        PhotoRoom.Keyframe k = kfs.get(j);
+                        if (k.jpg == null) continue;
+                        android.graphics.Matrix map = new android.graphics.Matrix();
+                        android.graphics.Bitmap img = ObjectNamer.uprightFromJpg(k, map);
+                        if (img == null) continue;
+                        batch.add(k); maps.add(map); sizes.add(new int[]{img.getWidth(), img.getHeight()});
+                        b64.add(ClaudeHelper.jpegBase64(img, 1024));
+                        img.recycle();
+                    }
+                    if (b64.isEmpty()) continue;
+                    java.util.List<ClaudeHelper.OutletDet> dets = ClaudeHelper.detectOutlets(key, b64);
+                    for (ClaudeHelper.OutletDet d : dets) {
+                        float[] w = Outlets.lift(batch.get(d.photo), maps.get(d.photo), sizes.get(d.photo)[0], sizes.get(d.photo)[1], d, pts, ptsN);
+                        if (w != null) { outlets.add(w, d); found++; }
+                    }
+                }
+            } catch (Throwable e) {
+                ok = false; logError("outlets", new RuntimeException(e));
+                if (force) synchronized (outlets) { if (outlets.list.isEmpty()) outlets.list.addAll(before); }
+            }
+            outletsRunning = false;
+            if (gen != surfGen) return;
+            if (ok) outlets.checked = true;
+            int n = outlets.list.size();
+            log("outlets: " + found + " sightings -> " + n + " outlets from " + kfs.size() + " photos" + (ok ? "" : " (stopped by an error)"));
+            activity.updateProcess(null, -1);
+            activity.outletsFound(n, ok);
+            if (ok) glTasks.add(this::autosave);
+        }).start();
+    }
+
+    private static final float[] OUTLET_COL = {1f, 0.62f, 0.1f, 1f};
+    private void drawOutlets(float[] m) {
+        java.util.List<Outlets.Outlet> ls = outlets.snapshot();
+        if (ls.isEmpty()) return;
+        float fy = lighting.floorY, dens = height / 1000f;
+        for (Outlets.Outlet o : ls) {
+            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, new float[]{0, 0, 0, 1f}, 30 * dens);
+            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, OUTLET_COL, 22 * dens);
+            drawLabel(m, o.x, o.y + 0.08f, o.z, o.label(fy), false);
+        }
+    }
 
     /** GL thread: run the whole improvement chain on its own, reporting one progress bar. */
     private void startAuto() {
@@ -1299,7 +1422,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             if (gen == surfGen) surfPending = tr.toSurfels();
             log("training paused at step " + tr.iter + ", error " + tr.lastLoss);
-            if (auto && autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); activity.trainingLabel("Train splats"); }
+            if (auto && autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); activity.trainingLabel("Train splats"); glTasks.add(this::autosave); } // keep the improved model
         } catch (Throwable e) { training = false; logError("training", new RuntimeException(e)); if (autoStage == 4) { autoStage = 5; autoProgress("Done", 1f); } } }).start();
         return "Pause training";
     }
@@ -1342,6 +1465,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return out;
     }
 
+    private volatile Surfels surfShown;   // what the viewer shows now (saved with the scan when it's trained)
+    private Surfels loadedSplats;          // trained splats from a saved scan, shown instead of rebuilding
+
     private void uploadSurfels() {
         Surfels s = surfPending;
         if (s == null) return;
@@ -1357,7 +1483,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, s.n * 4, s.col, GLES20.GL_DYNAMIC_DRAW);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         if (!s.trained) surfShownAt = System.currentTimeMillis();
-        surfCount = s.n; surfTrained = s.trained;
+        surfCount = s.n; surfTrained = s.trained; surfShown = s;
     }
     private long surfShownAt;
 
@@ -2551,11 +2677,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
-        surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; training = false; trainer = null; trainViews = null;
-        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; recoveries = 0; lastError = "";
+        surfGen++; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
+        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear();
         roomShown = 0; shownHint = null; tooFast = tooFar = false;
-        earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false;
+        earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
@@ -3217,7 +3343,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Image depth = null, conf = null;
         try {
             depth = rawDepth ? frame.acquireRawDepthImage16Bits() : frame.acquireDepthImage16Bits();
-            if (depth.getTimestamp() == lastDepthTs) return;
+            // Only newer depth: near the end of scan1240 ARCore cycled through 4 old depth images (timestamps
+            // 73.4, 73.7, 74.0, 74.3 s, again and again) while the camera kept moving, and fusing them at the new
+            // poses threw chunks of points into mid-air. So: skip anything not newer than the last one, or stale.
+            if (depth.getTimestamp() <= lastDepthTs) { if (depth.getTimestamp() < lastDepthTs && depthStale++ == 0) log("stale depth: ARCore repeated an older depth image, skipping"); return; }
             lastDepthTs = depth.getTimestamp();
             if (rawDepth) conf = frame.acquireRawDepthConfidenceImage();
             try { cpuImage = frame.acquireCameraImage(); } catch (NotYetAvailableException e) { cpuImage = null; }
@@ -3408,7 +3537,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private String diagnostics() {
         return "[mode " + modeLabel + " " + depthSize + " | frames " + depthFrames
                 + " | valid px " + depthPixels + " | out of range " + depthRejectedRange + " | low conf " + depthRejectedConf + " | edges " + depthRejectedEdge
-                + " | not ready " + depthNotYet + " | refined " + refinedTotal + String.format(java.util.Locale.US, " | gain %.2f", colorGain) + " | photos " + photos.keyframes.size() + " | surface voxels " + tsdf.size() + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
+                + " | not ready " + depthNotYet + " | stale " + depthStale + " | refined " + refinedTotal + String.format(java.util.Locale.US, " | gain %.2f", colorGain) + " | photos " + photos.keyframes.size() + " | surface voxels " + tsdf.size() + (lastError.isEmpty() ? "" : " | err " + lastError) + "]";
     }
 
     private void sampleColor(float fu, float fv, int[] out) {
@@ -3558,6 +3687,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final float FAR_M = 2.3f;        // beyond this the S24's depth from motion bends flat walls (scan1047)
     private float farShare = -1;            // smoothed share of this view's depth further than FAR_M
     private int farPixelsFrame;
+    private int depthStale;                  // depth images skipped for being older than ones already used
     private int frameHits, frameSolid;      // this depth frame: points hit, and how many of them are solid already
     private float detailHere = -1;           // smoothed share of solid points where the phone points
     private int solidCount, hudCalls;        // points seen often enough to count as solid
@@ -4001,6 +4131,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         if (overlays) drawPath(mvp);
+        drawOutlets(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);
         if (lighting.enabled) drawLightGizmos(mvp);
         else if (plan != null && overlays) drawPlan(mvp, plan);

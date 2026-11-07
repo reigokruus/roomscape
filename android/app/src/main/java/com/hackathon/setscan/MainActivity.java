@@ -542,7 +542,7 @@ public class MainActivity extends Activity {
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
-        improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE);
+        improveButton.setVisibility(debug && !scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE); // needs corner taps, which are off
         for (Button b : tools) {
             boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn;
             b.setVisibility(debug && (!scanning || scanTool) ? View.VISIBLE : View.GONE);
@@ -665,10 +665,38 @@ public class MainActivity extends Activity {
 
     /** The renderer saved the scan on its own (after Done, and again after clean-up). */
     private String lastSavedName;
+    /** The Claude key saved on this phone, or null. */
+    String claudeKey() {
+        String k = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
+        return k == null || k.trim().isEmpty() ? null : k.trim();
+    }
+
+    private boolean askedOutletKey;
+    /** Outlets are found by Claude: ask for the key once per app run. */
+    void outletsNeedKey() {
+        runOnUiThread(() -> {
+            if (askedOutletKey || isFinishing()) return;
+            askedOutletKey = true;
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("Find power outlets?")
+                    .setMessage("Claude can look through this scan's photos and mark every power outlet in the room. It needs your Claude API key.")
+                    .setPositiveButton("Add key", (d, w) -> askKey(() -> glView.queueEvent(() -> renderer.findOutlets(false))))
+                    .setNegativeButton("Not now", null)
+                    .show();
+        });
+    }
+
+    void outletsFound(int n, boolean ok) {
+        runOnUiThread(() -> {
+            if (!ok) toast(n > 0 ? "Outlet search stopped early (" + n + " found). Check the internet." : "Couldn't search for power outlets. Check the internet.");
+            else toast(n == 0 ? "No power outlets found in the photos." : "⚡ Found " + n + " power outlet" + (n == 1 ? "" : "s") + ". They're marked in orange.");
+        });
+    }
+
     void autoSaved(String name, String err) {
         runOnUiThread(() -> {
             if (name == null) { toast("Couldn't save the scan: " + err); return; }
-            if (!scanning) improveButton.setVisibility(View.VISIBLE);
+            if (!scanning && debug) improveButton.setVisibility(View.VISIBLE);
             if (!scanning && !name.equals(lastSavedName)) { lastSavedName = name; toast("Saved as \"" + name + "\". Tap Rename to change it."); }
         });
     }
@@ -856,7 +884,7 @@ public class MainActivity extends Activity {
                 if (out != null) {
                     toast("Saved \"" + name + "\"");
                     updateStatus("Saved \"" + name + "\". Improve scan adds a second pass that lines up with this one.");
-                    improveButton.setVisibility(View.VISIBLE);
+                    if (debug) improveButton.setVisibility(View.VISIBLE);
                 } else updateStatus("Save failed: " + err);
             })));
         });
@@ -879,6 +907,9 @@ public class MainActivity extends Activity {
     private boolean objDragging, objMoved;
     private float objLastX, objLastY, objDownX, objDownY;
     private long objDownT;
+
+    /** A catalogue item was just placed: open the Objects panel on it. */
+    void showPlacedObject() { if (objPanel == null) return; objPanel.setVisibility(View.VISIBLE); if (lightPanel != null) lightPanel.setVisibility(View.GONE); refreshObjPanel(); }
 
     private void setObjectMode(boolean on) {
         objPanel.setVisibility(on ? View.VISIBLE : View.GONE);

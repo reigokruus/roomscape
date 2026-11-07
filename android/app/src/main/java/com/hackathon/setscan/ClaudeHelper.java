@@ -193,6 +193,69 @@ final class ClaudeHelper {
         }
     }
 
+    /** A power outlet Claude found: which photo (0-based), its box (0..1, top-left origin) and what kind. */
+    static final class OutletDet { int photo; float x0, y0, x1, y1; String type = "wall socket"; int sockets = 1; }
+
+    /** Find every power outlet in a batch of room photos (one request for up to 6 photos). */
+    static List<OutletDet> detectOutlets(String apiKey, List<String> photosB64) throws Exception {
+        AnthropicClient client = AnthropicOkHttpClient.builder().apiKey(apiKey).build();
+        try {
+            List<BetaContentBlockParam> content = new ArrayList<>();
+            for (int i = 0; i < photosB64.size(); i++) {
+                content.add(BetaContentBlockParam.ofText("Photo " + i + ":"));
+                content.add(image(photosB64.get(i)));
+            }
+            content.add(BetaContentBlockParam.ofText(
+                    "These photos come from a phone scanning a room for a film shoot or an interior design job. "
+                    + "Find every electrical power outlet: wall sockets, power strips / extension leads, floor sockets. "
+                    + "Not light switches, network or antenna sockets, chargers, or plugs hanging in the air. Only ones you can actually see.\n"
+                    + "Reply with only JSON, no other text:\n"
+                    + "{\"outlets\": [{\"photo\": 0, \"box\": [x0, y0, x1, y1], \"type\": \"wall socket | power strip | floor socket\", \"sockets\": 1}]}\n"
+                    + "box is the tight bounding box in that photo, in thousandths of the image width and height (0-1000, top-left origin). "
+                    + "sockets is how many plug positions it has. An empty list is fine."));
+            MessageCreateParams params = MessageCreateParams.builder()
+                    .model(MODEL)
+                    .maxTokens(3000L)
+                    .outputConfig(com.anthropic.models.beta.messages.BetaOutputConfig.builder()
+                            .effort(com.anthropic.models.beta.messages.BetaOutputConfig.Effort.LOW).build())
+                    .addUserMessageOfContentBlockParams(content)
+                    .addBeta("server-side-fallback-2026-07-01")
+                    .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
+                    .build();
+            BetaMessage msg = client.beta().messages().create(params);
+            count(msg);
+            if (msg.stopReason().isPresent() && msg.stopReason().get().equals(BetaStopReason.REFUSAL))
+                throw new IllegalStateException("Claude declined this request");
+            StringBuilder text = new StringBuilder();
+            for (BetaContentBlock b : msg.content()) b.text().ifPresent(x -> text.append(x.text()));
+            String t = text.toString();
+            int a = t.indexOf('{'), b = t.lastIndexOf('}');
+            List<OutletDet> out = new ArrayList<>();
+            if (a < 0 || b <= a) return out;
+            JSONArray arr = new JSONObject(t.substring(a, b + 1)).optJSONArray("outlets");
+            if (arr == null) return out;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.optJSONObject(i);
+                if (o == null) continue;
+                JSONArray bx = o.optJSONArray("box");
+                int ph = o.optInt("photo", -1);
+                if (bx == null || bx.length() != 4 || ph < 0 || ph >= photosB64.size()) continue;
+                OutletDet d = new OutletDet();
+                d.photo = ph;
+                float x0 = (float) bx.optDouble(0, -1), y0 = (float) bx.optDouble(1, -1), x1 = (float) bx.optDouble(2, -1), y1 = (float) bx.optDouble(3, -1);
+                d.x0 = Math.max(0, Math.min(x0, x1)) / 1000f; d.x1 = Math.min(1000, Math.max(x0, x1)) / 1000f;
+                d.y0 = Math.max(0, Math.min(y0, y1)) / 1000f; d.y1 = Math.min(1000, Math.max(y0, y1)) / 1000f;
+                if (d.x1 <= d.x0 || d.y1 <= d.y0) continue;
+                d.type = o.optString("type", "wall socket").trim().toLowerCase(Locale.US);
+                d.sockets = Math.max(1, Math.min(12, o.optInt("sockets", 1)));
+                out.add(d);
+            }
+            return out;
+        } finally {
+            client.close();
+        }
+    }
+
     static List<Det> parseDetect(String text) throws Exception {
         int a = text.indexOf('{'), b = text.lastIndexOf('}');
         if (a < 0 || b <= a) throw new IllegalStateException("no JSON in the reply");

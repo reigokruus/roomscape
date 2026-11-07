@@ -214,7 +214,7 @@ final class Trainer {
                     case 1: cg[i] = clamp01(cg[i] - stepv); break;
                     case 2: cb[i] = clamp01(cb[i] - stepv); break;
                     case 3: a[i] = Math.max(-6, Math.min(6, a[i] - stepv)); break;
-                    case 4: ls[i] = Math.max(-1.2f, Math.min(0.9f, ls[i] - stepv)); break;
+                    case 4: ls[i] = Math.max(-1.2f, Math.min(0.5f, ls[i] - stepv)); // max 1.65x: bigger splats smeared into blotches break;
                     case 5: ox[i] = Math.max(-MAX_T, Math.min(MAX_T, ox[i] - stepv)); break;
                     case 6: oy[i] = Math.max(-MAX_T, Math.min(MAX_T, oy[i] - stepv)); break;
                     default: oz[i] = Math.max(-MAX_T, Math.min(MAX_T, oz[i] - stepv)); break;
