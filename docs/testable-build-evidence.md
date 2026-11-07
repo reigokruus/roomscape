@@ -10,7 +10,7 @@ Checked 2026-11-07 11:04 EET (Europe/Tallinn).
 - Package: `com.hackathon.setscan`; versionCode 67; versionName 0.1.67.
 - Minimum Android API 24; target/compile API 35; native ABI `arm64-v8a`.
 - This is the real Java/ARCore app, **not HTML, a WebView wrapper or an iOS binary**.
-- Repository Android snapshot: `baf8d29b01180ca87bbae8791c3b621385b12cbe`, plus the minimal camera-feature manifest declarations and test/build handoff. Previous Swift integration from `b5a4f21` is preserved separately, not included in the APK.
+- Final source preserves the later teammate main snapshot `89927b632ce77c1f220883751484e07ef542cc2b` (including its Xcode scheme and ShootPlanner correction). Android runtime/build sources are identical to the following tested base before the scoped changes. Repository Android snapshot: `baf8d29b01180ca87bbae8791c3b621385b12cbe`, plus the minimal camera-feature manifest declarations and test/build handoff. Previous Swift integration from `b5a4f21` is preserved separately, not included in the APK.
 - Build tools: Temurin JDK 17.0.21, Gradle wrapper 8.14.3, Android Gradle Plugin 8.13.2, SDK platform/build-tools 35/35.0.0.
 
 ## Executed successfully
@@ -50,4 +50,4 @@ Its published SHA-256 is `41ebc54bcfd757cefd40a9dbbfe6923e8c6a226be2f1d5c1af3eae
 
 Run [the native build script](../scripts/build-android-test.sh) with JDK 17, SDK 35 and BUILD_NUMBER=67. The installer/hardware checklist is [testable-app.md](testable-app.md).
 
-Local toolchain paths on this box: `/workspace/android-native-tools/jdk17`, `/workspace/android-native-tools/sdk` and `/workspace/android-native-tools/gradle-cache`. Build evidence/artifact directory: `/workspace/shootlocal-testable/local-build/`. Full initial failed lint run: `/workspace/shootlocal-testable/initial-build-lint-failure.log`. Preserved Swift log: `/workspace/shootlocal-testable/swift-core-tests.log`.
+Local toolchain paths on this box: `/workspace/android-native-tools/jdk17`, `/workspace/android-native-tools/sdk` and `/workspace/android-native-tools/gradle-cache`. Build evidence/artifact directory: `/workspace/shootlocal-testable/local-build/`. Clean successful rebuild log: `/workspace/shootlocal-testable/local-build/gradle-clean.log`. Full initial failed lint run: `/workspace/shootlocal-testable/initial-build-lint-failure.log`. Preserved Swift log: `/workspace/shootlocal-testable/swift-core-tests.log`.

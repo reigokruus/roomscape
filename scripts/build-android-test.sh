@@ -19,8 +19,8 @@ APK="$OUT/CineX-android-local-0.1.$BUILD_NUMBER.apk"
 cp app/build/outputs/apk/debug/app-debug.apk "$APK"
 "$TOOLS/apksigner" verify --verbose --print-certs "$APK" > "$OUT/apk-signature.txt"
 "$TOOLS/aapt" dump badging "$APK" > "$OUT/apk-badging.txt"
-python3 - "$APK" "$ROOT/android/app/build/test-results/testDebugUnitTest" <<'PY'
-import hashlib,json,pathlib,sys,zipfile,xml.etree.ElementTree as ET
+python3 - "$APK" "$ROOT/android/app/build/test-results/testDebugUnitTest" "$ROOT" <<'PY'
+import hashlib,json,pathlib,subprocess,sys,zipfile,xml.etree.ElementTree as ET
 p = pathlib.Path(sys.argv[1])
 reports = list(pathlib.Path(sys.argv[2]).glob('TEST-*.xml'))
 assert reports, 'No Android unit-test results were produced'
@@ -39,7 +39,7 @@ with zipfile.ZipFile(p) as z:
     assert any(n.startswith('lib/arm64-v8a/') for n in z.namelist()), 'Missing native ARM64 libraries'
 digest = hashlib.sha256(p.read_bytes()).hexdigest()
 p.with_suffix('.apk.sha256').write_text(digest+'  '+p.name+'\n')
-p.with_suffix('.verification.json').write_text(json.dumps({'apk':p.name,'bytes':p.stat().st_size,'sha256':digest,'androidJvmTests':tests,'failures':failures,'errors':errors,'physicalDeviceTested':False},indent=2)+'\n')
+p.with_suffix('.verification.json').write_text(json.dumps({'apk':p.name,'sourceCommit':subprocess.check_output(['git','-C',sys.argv[3],'rev-parse','HEAD'],text=True).strip(),'bytes':p.stat().st_size,'sha256':digest,'androidJvmTests':tests,'failures':failures,'errors':errors,'physicalDeviceTested':False},indent=2)+'\n')
 print('Native APK verified:',p)
 print('No physical-device run or room-scanning validation has been performed by this script.')
 PY

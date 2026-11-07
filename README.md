@@ -4,7 +4,7 @@
 
 ## Test a native app now
 
-See [Android APK install/build instructions and the iOS hardware/build gate](docs/testable-app.md). The Android APK is native ARCore code, not the browser prototype; the iOS Swift storyboard additions are a separate feature set and are not in that APK.
+See [Android APK install/build instructions and the iOS hardware/build gate](docs/testable-app.md) and [actual compile/test evidence](docs/testable-build-evidence.md). The Android APK is native ARCore code, not the browser prototype; the iOS Swift storyboard additions are a separate feature set and are not in that APK.
 
 ## Status
 **v0.1 (hackathon prototype):** the scan works. Apple RoomPlan captures the room, and it comes back as a 3D model with windows (natural light), doors and furniture picked out, plus a room summary and a top-down view.
