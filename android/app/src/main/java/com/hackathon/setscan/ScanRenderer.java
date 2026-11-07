@@ -4052,6 +4052,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final boolean LIVE_MESH = true;
     static final long LIVE_MESH_MS = 1200;
     private volatile boolean liveMeshBusy;
+    private Tsdf liveScratch;                // reused between live mesh builds (only the builder thread touches it)
+    private java.nio.FloatBuffer liveLines; private ByteBuffer liveLineConf;
     private volatile Object[] liveMeshNew;   // {FloatBuffer tris, ByteBuffer conf, FloatBuffer lines, ByteBuffer lineConf, int[] {triVerts, lineVerts}}
     private long liveMeshAt;
     private int liveMeshProg, liveMeshTriVerts, liveMeshLineVerts;
@@ -4059,18 +4061,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** GL thread: every ~1 s, copy the voxels near the phone and build their mesh on another thread. */
     private void maybeLiveMesh(Camera camera, long nowMs) {
-        if (liveMeshBusy || nowMs - liveMeshAt < LIVE_MESH_MS || tsdf.size() < 50) return;
+        if (liveMeshBusy || liveMeshNew != null || nowMs - liveMeshAt < LIVE_MESH_MS || tsdf.size() < 50) return; // the last one is uploaded before its buffers are reused
         liveMeshAt = nowMs; liveMeshBusy = true;
         com.google.ar.core.Pose p = camera.getPose();
         final float px = p.tx(), py = p.ty(), pz = p.tz();
         final int gen = surfGen;
         new Thread(() -> {
             try {
-                Tsdf near = tsdf.copyNear(px, py, pz, 3.5f); // read while the GL thread keeps fusing: fine for a preview
+                Tsdf near = tsdf.copyNear(px, py, pz, 3.5f, liveScratch); // read while the GL thread keeps fusing: fine for a preview
+                liveScratch = near; near.reuseBuffers = true;
                 int nt = near.extractMesh();
                 int nv = nt * 3;
-                java.nio.FloatBuffer lines = ByteBuffer.allocateDirect(Math.max(1, nt * 6) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
-                ByteBuffer lc = ByteBuffer.allocateDirect(Math.max(1, nt * 6)).order(ByteOrder.nativeOrder());
+                if (liveLines == null || liveLines.capacity() < nt * 18) {
+                    int cap = Math.max(1, nt * 6 + nt * 3);
+                    liveLines = ByteBuffer.allocateDirect(cap * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+                    liveLineConf = ByteBuffer.allocateDirect(cap).order(ByteOrder.nativeOrder());
+                }
+                java.nio.FloatBuffer lines = liveLines; ByteBuffer lc = liveLineConf;
+                lines.clear(); lc.clear();
                 float[] v = new float[9]; byte[] c = new byte[3];
                 for (int t = 0; t < nt; t++) {
                     for (int k = 0; k < 9; k++) v[k] = near.meshPos.get(t * 9 + k);
@@ -4081,7 +4089,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         lc.put(c[a]).put(c[b]);
                     }
                 }
-                lines.position(0); lc.position(0);
+                lines.flip(); lc.flip();
                 if (gen == surfGen) liveMeshNew = new Object[]{near.meshPos, near.meshConf, lines, lc, new int[]{nv, nt * 6}};
             } catch (Throwable e) { logError("live mesh", new RuntimeException(e)); }
             finally { liveMeshBusy = false; }

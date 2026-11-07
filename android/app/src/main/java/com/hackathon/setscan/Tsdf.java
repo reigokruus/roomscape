@@ -142,7 +142,10 @@ final class Tsdf {
      * A copy of the voxels within r of (x, y, z), for building the live mesh on another thread while scanning
      * keeps adding to this one.
      */
-    Tsdf copyNear(float x, float y, float z, float r) {
+    Tsdf copyNear(float x, float y, float z, float r) { return copyNear(x, y, z, r, null); }
+
+    /** Same, into `into` when it is big enough (the live mesh reuses one copy instead of allocating ~40 MB a second). */
+    Tsdf copyNear(float x, float y, float z, float r, Tsdf into) {
         int m = 0;
         int[] pick = new int[Math.max(16, Math.min(n, 400000))];
         int nn = n; // may run on another thread while scanning adds voxels: a torn read only costs a wrong preview voxel
@@ -157,7 +160,8 @@ final class Tsdf {
             if (vx * vx + vy * vy + vz * vz > r * r) continue;
             pick[m++] = t;
         }
-        Tsdf c = new Tsdf(Math.max(16, m), vs, trunc, carve);
+        Tsdf c = into != null && into.cap >= m && into.vs == vs ? into : new Tsdf(Math.max(16, m + m / 2), vs, trunc, carve);
+        c.clear();
         c.minW = minW; c.minComponent = minComponent;
         for (int j = 0; j < m; j++) {
             int t = pick[j], i = slots[t];
@@ -171,6 +175,8 @@ final class Tsdf {
         }
         return c;
     }
+
+    boolean reuseBuffers; // keep the mesh buffers between extractions (live preview)
 
     /** Per mesh vertex (after extractMesh): how well observed it is, 0..255. */
     ByteBuffer meshConf;
@@ -204,16 +210,17 @@ final class Tsdf {
         byte[] vw = new byte[vp.length / 3 + 1];
         int nv = 0;
         int[] ci = new int[8];
-        int[][] coords = new int[n][];
+        int[] co = new int[n * 3]; // voxel coords, flat (an int[3] per voxel was 300k little arrays per build)
         // recover voxel coords from keys
         for (int t = 0; t < keys.length; t++) {
             long k = keys[t];
             if (k == Long.MIN_VALUE) continue;
-            coords[slots[t]] = new int[]{(int) (k & 0x1FFFFF) - (1 << 20), (int) ((k >>> 21) & 0x1FFFFF) - (1 << 20), (int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)};
+            int sl = slots[t]; if (sl < 0 || sl >= n) continue;
+            co[sl * 3] = (int) (k & 0x1FFFFF) - (1 << 20); co[sl * 3 + 1] = (int) ((k >>> 21) & 0x1FFFFF) - (1 << 20); co[sl * 3 + 2] = (int) ((k >>> 42) & 0x1FFFFF) - (1 << 20);
         }
         for (int i = 0; i < n; i++) {
             if (!good(i)) continue;
-            int x = coords[i][0], y = coords[i][1], z = coords[i][2];
+            int x = co[i * 3], y = co[i * 3 + 1], z = co[i * 3 + 2];
             boolean ok = true, pos = false, neg = false;
             for (int c = 0; c < 8 && ok; c++) {
                 int j = c == 0 ? i : get(x + CORNER[c][0], y + CORNER[c][1], z + CORNER[c][2]);
@@ -251,7 +258,7 @@ final class Tsdf {
         int[] q = new int[4];
         for (int i = 0; i < n; i++) {
             if (!good(i)) continue;
-            int x = coords[i][0], y = coords[i][1], z = coords[i][2];
+            int x = co[i * 3], y = co[i * 3 + 1], z = co[i * 3 + 2];
             for (int axis = 0; axis < 3; axis++) {
                 int j = get(x + (axis == 0 ? 1 : 0), y + (axis == 1 ? 1 : 0), z + (axis == 2 ? 1 : 0));
                 if (!good(j)) continue;
@@ -290,9 +297,13 @@ final class Tsdf {
         }
         // 3) flat-shaded triangle soup (lighting baked into the colour, two-sided)
         meshVerts = nt * 3;
-        meshPos = ByteBuffer.allocateDirect(Math.max(1, meshVerts) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
-        meshCol = ByteBuffer.allocateDirect(Math.max(1, meshVerts) * 4).order(ByteOrder.nativeOrder());
-        meshConf = ByteBuffer.allocateDirect(Math.max(1, meshVerts)).order(ByteOrder.nativeOrder());
+        if (!reuseBuffers || meshPos == null || meshPos.capacity() < meshVerts * 3) {
+            int cap = Math.max(1, reuseBuffers ? meshVerts + meshVerts / 2 : meshVerts);
+            meshPos = ByteBuffer.allocateDirect(cap * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            meshCol = ByteBuffer.allocateDirect(cap * 4).order(ByteOrder.nativeOrder());
+            meshConf = ByteBuffer.allocateDirect(cap).order(ByteOrder.nativeOrder());
+        }
+        meshPos.clear(); meshCol.clear(); meshConf.clear();
         float lx = 0.35f, ly = 0.85f, lz = 0.4f;
         for (int t = 0; t < nt; t++) {
             int a = tris[t * 3], b = tris[t * 3 + 1], c = tris[t * 3 + 2];
@@ -308,7 +319,7 @@ final class Tsdf {
                 meshConf.put(vw[v]);
             }
         }
-        meshPos.position(0); meshCol.position(0); meshConf.position(0);
+        meshPos.flip(); meshCol.flip(); meshConf.flip();
         return nt;
     }
 
