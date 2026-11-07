@@ -66,6 +66,26 @@ struct PlanRoom: Codable, Equatable {
         return true
     }
     static func distanceXZ(_ a: PlanPoint, _ b: PlanPoint) -> Double { hypot(a.x-b.x, a.z-b.z) }
+    /// Floor-plan distance from `p` to the nearest wall.
+    func distanceToWalls(_ p: PlanPoint) -> Double {
+        walls.map { w in
+            let dx = w.b.x-w.a.x, dz = w.b.z-w.a.z
+            let u = max(0, min(1, ((p.x-w.a.x)*dx+(p.z-w.a.z)*dz)/max(0.000001,dx*dx+dz*dz)))
+            return hypot(p.x-w.a.x-u*dx, p.z-w.a.z-u*dz)
+        }.min() ?? .infinity
+    }
+    /// `p` when it's inside the room and `margin` clear of the walls; otherwise the first such point on the way to
+    /// the room's centre, or the centre itself. Height is kept, within the floor and ceiling. (A bounding-box guess
+    /// such as "near the back edge" lands outside the walls in a rotated or L-shaped room.)
+    func pulledInside(_ p: PlanPoint, margin: Double = 0.3) -> PlanPoint {
+        let y = min(max(p.y, floor+0.05), ceiling-0.05)
+        let start = PlanPoint(x:p.x, y:y, z:p.z), c = PlanPoint(x:center.x, y:y, z:center.z)
+        for step in 0...20 {
+            let q = start+(c-start)*(Double(step)/20)
+            if contains(q) && distanceToWalls(q) >= margin { return q }
+        }
+        return c
+    }
     func contains(_ p: PlanPoint) -> Bool {
         guard p.y >= floor-0.001, p.y <= ceiling+0.001 else { return false }
         var inside = false
@@ -186,7 +206,12 @@ struct PlanProject: Identifiable, Codable, Equatable {
     var total: Double { shots.reduce(0) { $0+$1.total } }
     static func make(name:String, scanName:String?, room:PlanRoom, items:[PlanItem]) -> Self {
         let b = room.bounds
-        let camera = ShotCamera(position:.init(x:room.center.x,y:min(room.ceiling-0.1,room.floor+1.5),z:b.maxZ-0.4))
+        // Near the back of the room, inside its walls, looking at the first item.
+        var camera = ShotCamera(position:room.pulledInside(.init(x:room.center.x,y:min(room.ceiling-0.1,room.floor+1.5),z:b.maxZ-0.4)))
+        if let target = items.first {
+            let d = target.position-camera.position
+            if hypot(d.x,d.z) > 0.01 { camera.yaw = atan2(-d.x,-d.z) }
+        }
         return .init(name:name, scanName:scanName, room:room, shots:[.init(name:"View 1",camera:camera,items:items,targetID:items.first?.id)])
     }
     func validate() throws {

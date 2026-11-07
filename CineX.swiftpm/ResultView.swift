@@ -49,6 +49,10 @@ struct ResultView: View {
     /// The lighting setup being opened as a new storyboard view.
     @State private var storyboardSetup: LightingSetup?
     @State private var openingStoryboard = false
+    /// The scan is loaded once. SwiftUI restarts `.task` when the screen reappears (after the storyboard or the
+    /// shoot planner was pushed on top); loading again built a second scene the 3D view never showed, so the
+    /// Mesh / Photo / Model switch seemed to do nothing.
+    @State private var loadStarted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -139,7 +143,7 @@ struct ResultView: View {
             if phase != .active { training?.pause() }
         }
         .navigationDestination(isPresented: $openingStoryboard) {
-            if let room, let storyboardSetup {
+            if let room {
                 PlanningLaunchView(room: room, scan: scan, objects: objects, addSetup: storyboardSetup)
             }
         }
@@ -164,6 +168,8 @@ struct ResultView: View {
             if let splatGroup { SplatScene.setMeshLook(newStyle != .photo, in: splatGroup) }
         }
         .task {
+            guard !loadStarted else { return }
+            loadStarted = true
             // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
             let scan = scan
             capture = await Task.detached(priority: .utility) { CaptureStore.loadMeta(scan.captureURL) }.value
@@ -250,7 +256,11 @@ struct ResultView: View {
                     }
                 }
                 if args[i + 1] == "objects" { toggleObjects() }
-                if args.contains("-openStoryboard"), lighting != nil {
+                if args.contains("-storyboardView") {
+                    // The storyboard as saved (no new view), opened on the view named after the flag.
+                    storyboardSetup = nil
+                    openingStoryboard = true
+                } else if args.contains("-openStoryboard"), lighting != nil {
                     // The lighting setup as a new storyboard view.
                     storyboardSetup = lighting
                     openingStoryboard = true

@@ -15,6 +15,9 @@ struct PlanningEditorView: View {
     @State private var confirmingDeleteShot = false
     /// The shot camera is selected on the plan (its actions show in the bar; a floor tap moves it).
     @State private var cameraSelected = false
+    /// The scanned room for the frame preview, loaded the first time the Frame tab opens.
+    @StateObject private var frameScene = StoryboardScanScene()
+    @State private var frameMesh = false
     @State private var search = ""
     @State private var category = "All"
     @State private var recent:[UUID] = []
@@ -37,9 +40,7 @@ struct PlanningEditorView: View {
                     Text("\(store.project.shots.count)/50 views")
                 }.font(.caption).foregroundStyle(.secondary)
                 if panel == 1 {
-                    PlanningLensPreview(room:store.project.room,shot:store.shot)
-                        .aspectRatio(store.shot.camera.sensorWidthMM/store.shot.camera.sensorHeightMM,contentMode:.fit).clipShape(RoundedRectangle(cornerRadius:12))
-                    Text("Schematic lens preview — measured envelopes, not a photo, AR or a lighting simulation.").font(.caption).foregroundStyle(.secondary)
+                    framePreview
                 } else {
                     PlanningCanvas(room:store.project.room,shot:store.shot,selectedID:store.selectedItemID,
                                    cameraSelected:cameraSelected,
@@ -81,7 +82,17 @@ struct PlanningEditorView: View {
                 } label:{ Label("Files",systemImage:"square.and.arrow.up") }
             }
         }
-        .onAppear { store.persist() }
+        .onAppear {
+            store.persist()
+            #if DEBUG
+            // UI checks in the Simulator: open on the Frame tab.
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("-framePanel") { panel = 1 }
+            if let i = args.firstIndex(of:"-storyboardView"), i+1 < args.count,
+               let shot = store.project.shots.first(where:{ $0.name == args[i+1] }) { store.selectedShotID = shot.id }
+            #endif
+        }
+        .task(id:panel) { if panel == 1 { await frameScene.load(scanName:store.project.scanName) } }
         .fileImporter(isPresented:$importing,allowedContentTypes:[.json]) { result in
             do { store.importFile(try result.get()) } catch { store.error = error.localizedDescription }
         }
@@ -238,6 +249,28 @@ struct PlanningEditorView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
+    // MARK: Frame preview
+
+    /// The scanned room through the view's camera; the schematic one when the scan isn't on this phone.
+    @ViewBuilder private var framePreview:some View {
+        let aspect = store.shot.camera.sensorWidthMM/store.shot.camera.sensorHeightMM
+        switch frameScene.state {
+        case .ready:
+            StoryboardFramePreview(scan:frameScene,shot:store.shot,meshLook:frameMesh)
+                .aspectRatio(aspect,contentMode:.fit).clipShape(RoundedRectangle(cornerRadius:12))
+            Picker("Look",selection:$frameMesh) { Text("Photo").tag(false); Text("Mesh").tag(true) }.pickerStyle(.segmented)
+            Text("The scanned room through this view's camera and lens. Furniture is the real scan, moved where this view has it; the person, lights and other kit are simple stand-ins at their planned size.")
+                .font(.caption).foregroundStyle(.secondary)
+        case .unavailable:
+            PlanningLensPreview(room:store.project.room,shot:store.shot)
+                .aspectRatio(aspect,contentMode:.fit).clipShape(RoundedRectangle(cornerRadius:12))
+            Text("Schematic preview: this project's scan isn't on this iPhone, so only measured outlines can be shown.").font(.caption).foregroundStyle(.secondary)
+        default:
+            ZStack { Color.black; ProgressView("Loading the scanned room…").tint(.white).foregroundStyle(.white) }
+                .aspectRatio(aspect,contentMode:.fit).clipShape(RoundedRectangle(cornerRadius:12))
+        }
+    }
+
     // MARK: Selection actions
 
     /// Actions for what's selected on the plan, in a bar over its bottom edge.

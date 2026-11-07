@@ -100,6 +100,25 @@ final class PlanningCoreTests:XCTestCase {
         item.position = .init(x:4,y:0,z:4)
         XCTAssertFalse(Placement.canPlace(item,in:r,avoiding:[]))
     }
+    func testNewProjectCameraStartsInsideARotatedRoom() throws {
+        var r = room()
+        r.walls = r.walls.map { .init(a:$0.a.rotated(yaw:.pi/8),b:$0.b.rotated(yaw:.pi/8),bottom:$0.bottom,top:$0.top) }
+        // The bounding box's back edge is outside these walls.
+        XCTAssertFalse(r.contains(.init(x:r.center.x,y:1.5,z:r.bounds.maxZ-0.4)))
+        let p = PlanProject.make(name:"Rotated",scanName:nil,room:r,items:[person()])
+        let camera = p.shots[0].camera
+        XCTAssertTrue(r.contains(camera.position))
+        XCTAssertGreaterThanOrEqual(r.distanceToWalls(camera.position),0.3)
+        XCTAssertNoThrow(try ShotFraming.check(shot:p.shots[0],room:r))
+    }
+    func testPulledInsideKeepsInsidePointsAndRescuesOutsideOnes() {
+        let r = room()
+        let inside = PlanPoint(x:1,y:1.2,z:1)
+        XCTAssertEqual(r.pulledInside(inside),inside)
+        let rescued = r.pulledInside(.init(x:9,y:1.2,z:0))
+        XCTAssertTrue(r.contains(rescued))
+        XCTAssertEqual(rescued.y,1.2,accuracy:0.0001)
+    }
     func testQuickAddFindsClearNonoverlappingPosition() throws {
         var item = PlanCatalog.items[0]
         item.position = try Placement.quickPosition(for:item,in:room(),avoiding:[person()])

@@ -77,6 +77,11 @@ struct PlanningLaunchView: View {
                 var next = try saved ?? RoomPlanningAdapter.makeProject(room:room,scan:scan)
                 let sync = StoryboardObjects.sync(&next,objects:objects,scan:scan)
                 var added = false
+                // Cameras an older version placed outside the walls (rotated rooms) come back inside.
+                for i in next.shots.indices where !next.room.contains(next.shots[i].camera.position) {
+                    next.shots[i].camera.position = next.room.pulledInside(next.shots[i].camera.position)
+                    added = true
+                }
                 if let addSetup {
                     let shot = try LightingStoryboard.shot(from:addSetup,in:next)
                     next.shots.append(shot)
