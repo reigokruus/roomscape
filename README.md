@@ -11,6 +11,10 @@ See [Android APK install/build instructions and the iOS hardware/build gate](doc
 [Catalog / scanned-item feature and validation guide](docs/catalog-and-scanned-items.md): offline searchable real-model dimensions with provenance, explicit internet JSON-feed/local-file imports, physical-size placement/manual overrides, and non-destructive hide/restore/undo of detected furniture shapes in a separate planning view. Original fused scans/photos are preserved; no mesh erasure, unseen-surface reconstruction or iOS feature-parity claim.
 
 
+## Optional paid-pilot interest (Android)
+
+[Local demo notebook and phone acceptance guide](docs/pilot-interest.md): explicit paid-follow-up opt-in, named demo host, editable contacts, revoke/delete, and deliberate consent-only CSV/JSON export. Encrypted app-private storage; **no central collection or automatic team receipt**, payments or tracking. Personal data is separate from room/scan exports. This is interest, not a confirmed paying customer.
+
 ## Status
 **v0.1 (hackathon prototype):** the scan works. Apple RoomPlan captures the room, and it comes back as a 3D model with windows (natural light), doors and furniture picked out, plus a room summary and a top-down view.
 

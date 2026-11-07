@@ -41,9 +41,9 @@ with zipfile.ZipFile(p) as z:
     assert catalog['schemaVersion'] == 1 and 1 <= len(catalog['items']) <= 200
     assert len({row['id'] for row in catalog['items']}) == len(catalog['items'])
     dex_files = [z.read(n) for n in z.namelist() if n.startswith('classes') and n.endswith('.dex')]
-    for name in ('ItemCatalog','CatalogStore','RoomEdits','RoomEditStore','NativePlanningUi'):
+    for name in ('ItemCatalog','CatalogStore','RoomEdits','RoomEditStore','NativePlanningUi','PilotIntake','PilotCipher','PilotIntakeStore','PilotIntakeUi'):
         assert any(('Lcom/hackathon/setscan/'+name+';').encode() in dex for dex in dex_files), 'Missing packaged native feature: '+name
-    print(f'Bundled catalog: {len(catalog["items"])} source records; native catalog/removal classes found in DEX')
+    print(f'Bundled catalog: {len(catalog["items"])} source records; native catalog/removal/pilot classes found in DEX')
 digest = hashlib.sha256(p.read_bytes()).hexdigest()
 p.with_suffix('.apk.sha256').write_text(digest+'  '+p.name+'\n')
 p.with_suffix('.verification.json').write_text(json.dumps({'apk':p.name,'sourceCommit':subprocess.check_output(['git','-C',sys.argv[3],'rev-parse','HEAD'],text=True).strip(),'sourceDirty':bool(subprocess.check_output(['git','-C',sys.argv[3],'status','--porcelain'],text=True).strip()),'catalogItems':len(catalog['items']),'bytes':p.stat().st_size,'sha256':digest,'androidJvmTests':tests,'failures':failures,'errors':errors,'physicalDeviceTested':False},indent=2)+'\n')
