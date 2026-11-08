@@ -189,10 +189,14 @@ enum ImproveHistory {
         if let data = try? Data(contentsOf: url(scan)), let dates = try? JSONDecoder().decode([Date].self, from: data) {
             return dates
         }
-        // Improved before this list existed: an improve rewrites the capture well after the scan was saved.
-        let meta = scan.captureURL.appendingPathComponent("meta.json")
-        if let written = (try? meta.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
-           written.timeIntervalSince(scan.date) > 30 {
+        // Improved before this list existed: an improve rewrites the capture well after the scan was saved. Measured
+        // against the model file, written at the same moment as the capture on save: the scan's date comes from its
+        // name, so a scan copied or restored onto the phone (every file newly dated) would look improved against it.
+        func modified(_ url: URL) -> Date? {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }
+        if let written = modified(scan.captureURL.appendingPathComponent("meta.json")),
+           let saved = modified(scan.modelURL), written.timeIntervalSince(saved) > 30 {
             return [written]
         }
         return []

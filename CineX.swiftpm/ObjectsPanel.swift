@@ -21,6 +21,7 @@ struct ObjectsPanel: View {
     private var power: [RoomObject] { objects.filter { $0.kind.isPower } }
 
     var body: some View {
+        ScrollViewReader { proxy in
         List {
             Section {
                 if let finding {
@@ -51,7 +52,7 @@ struct ObjectsPanel: View {
                 }
                 ForEach(movable) { o in
                     row(o, detail: o.sizeText)
-                    if selected == o.id { editor(o.id) }
+                    if selected == o.id { editor(o.id).id("editor-\(o.id)") }
                 }
             } header: {
                 Text("Furniture and things")
@@ -63,7 +64,7 @@ struct ObjectsPanel: View {
 
             if !lights.isEmpty {
                 Section {
-                    ForEach(lights) { o in row(o, detail: height(o)) }
+                    ForEach(lights) { o in row(o, detail: height(o)).id(o.id) }
                 } header: {
                     Text("Room lights")
                 } footer: {
@@ -72,11 +73,19 @@ struct ObjectsPanel: View {
             }
             if !power.isEmpty {
                 Section("Power") {
-                    ForEach(power) { o in row(o, detail: height(o)) }
+                    ForEach(power) { o in row(o, detail: height(o)).id(o.id) }
                 }
             }
         }
         .listStyle(.insetGrouped)
+        // The panel is short: bring the selected thing's controls (or a light's row) into view.
+        .onChange(of: selected) { _, id in
+            guard let id, let o = objects.first(where: { $0.id == id }) else { return }
+            Task { @MainActor in
+                withAnimation { proxy.scrollTo(o.kind.isMarker ? AnyHashable(id) : AnyHashable("editor-\(id)"), anchor: .bottom) }
+            }
+        }
+        }
         .sheet(isPresented: $showingKey) {
             ClaudeKeySheet(onSaved: findAfterKey ? onFind : nil)
         }
