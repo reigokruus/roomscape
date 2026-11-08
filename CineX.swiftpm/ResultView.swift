@@ -303,6 +303,9 @@ struct ResultView: View {
                     if let j = args.firstIndex(of: "-roomDimmer"), j + 1 < args.count, let v = Float(args[j + 1]) {
                         lighting?.roomDimmer = v
                     }
+                    if let j = args.firstIndex(of: "-cameraHeight"), j + 1 < args.count, let v = Float(args[j + 1]) {
+                        lighting?.cameraHeight = v
+                    }
                 }
                 if args[i + 1] == "objects" { toggleObjects() }
                 if args.contains("-storyboardView") {

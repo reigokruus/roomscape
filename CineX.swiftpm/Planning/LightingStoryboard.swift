@@ -27,7 +27,7 @@ enum LightingStoryboard {
         let c = setup.cameraPosition, face = setup.faceCenter
         let d = PlanPoint(x: Double(face.x - c.x), y: 0, z: Double(face.z - c.z))
         // The lens is a full-frame equivalent; an upright frame turns the 36 × 24 mm sensor on its side.
-        let camera = ShotCamera(position: PlanPoint(x: Double(c.x), y: floor + Double(setup.pose.faceHeight), z: Double(c.z)),
+        let camera = ShotCamera(position: PlanPoint(x: Double(c.x), y: Double(c.y), z: Double(c.z)),
                                 yaw: atan2(-d.x, -d.z), focalMM: Double(setup.focalLength),
                                 sensorWidthMM: setup.vertical ? 24 : 36, sensorHeightMM: setup.vertical ? 36 : 24)
 

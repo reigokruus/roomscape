@@ -263,12 +263,17 @@ final class LightingScene {
         l.eulerAngles.x = .pi / 2
         l.position = SCNVector3(0, 0, -0.06)
         n.addChildNode(l)
-        let stand = SCNNode(geometry: SCNCylinder(radius: 0.01, height: CGFloat(s.faceCenter.y - s.floorY)))
-        stand.geometry?.firstMaterial?.diffuse.contents = UIColor.darkGray
-        stand.position = SCNVector3(0, -(s.faceCenter.y - s.floorY) / 2, 0)
-        n.addChildNode(stand)
         n.simdPosition = s.cameraPosition
         n.simdLook(at: s.faceCenter)
+        // The stand goes straight down to the floor, however the camera tilts.
+        let height = s.cameraPosition.y - s.floorY
+        let stand = SCNNode(geometry: SCNCylinder(radius: 0.01, height: CGFloat(height)))
+        stand.geometry?.firstMaterial?.diffuse.contents = UIColor.darkGray
+        n.addChildNode(stand)
+        // World placement through the marker, which isn't in the scene yet: its parent (the preview's root) sits at
+        // the origin, so its own transform is its world transform.
+        stand.simdTransform = n.simdTransform.inverse
+            * simd_float4x4(translation: s.cameraPosition - SIMD3(0, height / 2, 0))
         n.enumerateHierarchy { node, _ in node.categoryBitMask = Self.cameraMarkerCategory }
         return n
     }
@@ -309,5 +314,12 @@ final class LightingScene {
         g.addChildNode(n)
         g.addChildNode(stand)
         return g
+    }
+}
+
+private extension simd_float4x4 {
+    init(translation t: SIMD3<Float>) {
+        self = matrix_identity_float4x4
+        columns.3 = SIMD4(t, 1)
     }
 }

@@ -53,6 +53,9 @@ struct LightingPanel: View {
                 SliderRow(title: "Camera distance", value: $setup.cameraDistance, range: 0.6...5, step: 0.1) {
                     String(format: "%.1f m", $0)
                 }
+                SliderRow(title: "Camera height", value: cameraHeight, range: LightingSetup.cameraHeights, step: 0.05) {
+                    cameraHeightText($0)
+                }
                 Picker("Lens", selection: $setup.focalLength) {
                     ForEach(LightingSetup.lenses, id: \.self) { Text("\(Int($0)) mm").tag($0) }
                 }
@@ -171,6 +174,20 @@ private extension LightingPanel {
         } footer: {
             Text("One tap: Claude picks a shot that suits the room, then places the person, your lights from My Gear and the camera. Pick a shot type first if you have one in mind. Everything stays adjustable below.")
         }
+    }
+
+    /// The camera height, at eye level unless moved off it; within 2.5 cm of eye level it snaps back (and follows
+    /// the person when they stand up or sit down).
+    var cameraHeight: Binding<Float> {
+        Binding(get: { setup.cameraHeight ?? setup.pose.faceHeight },
+                set: { setup.cameraHeight = abs($0 - setup.pose.faceHeight) < 0.025 ? nil : $0 })
+    }
+
+    func cameraHeightText(_ height: Float) -> String {
+        let off = Int(((height - setup.pose.faceHeight) * 100).rounded())
+        let relative = setup.cameraHeight == nil || off == 0 ? "eye level"
+            : off > 0 ? "\(off) cm above eyes" : "\(-off) cm below eyes"
+        return String(format: "%.2f m · ", setup.cameraHeight ?? setup.pose.faceHeight) + relative
     }
 
     var roomLightsTitle: String {

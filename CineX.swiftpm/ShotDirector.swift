@@ -26,6 +26,7 @@ enum ShotDirector {
         let lookTowardZ: Double
         let pose: String
         let cameraDistance: Double
+        let cameraHeight: Double
         let lens: Double
         let vertical: Bool
         let roomLights: Double
@@ -49,7 +50,8 @@ enum ShotDirector {
             "lookTowardX": number("A point the person faces (the camera is on this side): x, metres"),
             "lookTowardZ": number("A point the person faces (the camera is on this side): z, metres"),
             "pose": ["type": "string", "enum": ["seated", "standing"]],
-            "cameraDistance": number("Camera distance from the face, metres (0.6 to 5)"),
+            "cameraDistance": number("Camera distance from the face along the floor, metres (0.6 to 5)"),
+            "cameraHeight": number("Camera height above the floor, metres (0.3 to 2.4). Eye level (1.18 seated, 1.62 standing) unless the shot wants a higher or lower angle"),
             "lens": number("Full-frame equivalent focal length, mm: 13, 26, 35, 50 or 85"),
             "vertical": ["type": "boolean", "description": "true for an upright 9:16 frame, false for wide 16:9"],
             "roomLights": number("Room's own lights: 0 = off, 1 = as scanned"),
@@ -76,7 +78,7 @@ enum ShotDirector {
             "explanation": ["type": "string", "description": "Two or three plain sentences on why this setup works, for a creator, not a film crew"],
             "tips": ["type": "array", "items": ["type": "string"], "description": "Two to five short, practical things to do on the day"],
         ] as [String: Any],
-        "required": ["shot", "subjectX", "subjectZ", "lookTowardX", "lookTowardZ", "pose", "cameraDistance", "lens", "vertical",
+        "required": ["shot", "subjectX", "subjectZ", "lookTowardX", "lookTowardZ", "pose", "cameraDistance", "cameraHeight", "lens", "vertical",
                      "roomLights", "daylight", "lights", "explanation", "tips"],
         "additionalProperties": false,
     ]
@@ -178,8 +180,9 @@ enum ShotDirector {
 
         How the answer is used
         - The person is placed at subjectX, subjectZ and faces lookToward; the camera stands cameraDistance metres \
-        from their face in that direction, at face height (seated 1.18 m, standing 1.62 m). They may sit on a chair \
-        or sofa from the list.
+        from their face in that direction, cameraHeight above the floor, and always aims at their face. Their face is \
+        at 1.18 m seated and 1.62 m standing: a camera at that height is eye level; higher looks down on them, lower \
+        looks up. They may sit on a chair or sofa from the list.
         - Each light stands at its angle and distance around the person and always aims at their face. Use only the \
         user's lights, each at most once, by number.
         - Keep the person, the camera and every light stand inside the floor outline and clear of furniture.
@@ -216,6 +219,8 @@ enum ShotDirector {
         s.exposureEV = 0
 
         s.cameraDistance = clamp(r.cameraDistance, 0.6, 5)
+        let height = clamp(r.cameraHeight, LightingSetup.cameraHeights.lowerBound, LightingSetup.cameraHeights.upperBound)
+        s.cameraHeight = abs(height - s.pose.faceHeight) < 0.025 ? nil : height
         while s.cameraDistance > 0.6, !inside(s.cameraPosition) { s.cameraDistance -= 0.1 }
 
         let owned = gear.filter { $0.category == .light }

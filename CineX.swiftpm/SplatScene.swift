@@ -266,6 +266,13 @@ enum SplatScene {
             group.addChildNode(floor(shell.floorOutline, color: tint ?? UIColor(white: 0.45, alpha: 1), meshLook: true,
                                      scanned: tint != nil))
         }
+        // A plain ceiling behind the ceiling splats, which scans rarely capture: without it the shot camera sees a
+        // black band above the walls, wide at low angles. It faces down, so like the near walls it's culled while
+        // the 3D view looks in from above.
+        if shell.floorOutline.count >= 3, let top = shell.ceilingY {
+            group.addChildNode(ceiling(shell.floorOutline.map { SIMD3($0.x, top, $0.z) },
+                                       color: UIColor(white: 0.85, alpha: 1)))
+        }
         return group
     }
 
@@ -291,6 +298,18 @@ enum SplatScene {
             idx += tri
         }
         return mesh(v, normal: SIMD3(0, 1, 0), indices: idx, color: color, meshLook: meshLook, scanned: scanned)
+    }
+
+    private static func ceiling(_ outline: [SIMD3<Float>], color: UIColor) -> SCNNode {
+        let centre = outline.reduce(.zero, +) / Float(outline.count)
+        let v = [centre] + outline
+        var idx: [UInt32] = []
+        for i in 0..<outline.count {
+            var tri: [UInt32] = [0, UInt32(i + 1), UInt32((i + 1) % outline.count + 1)]
+            if simd_cross(v[Int(tri[1])] - v[0], v[Int(tri[2])] - v[0]).y > 0 { tri.swapAt(1, 2) } // face down
+            idx += tri
+        }
+        return mesh(v, normal: SIMD3(0, -1, 0), indices: idx, color: color, meshLook: true)
     }
 
     private static func mesh(_ v: [SIMD3<Float>], normal: SIMD3<Float>, indices: [UInt32], color: UIColor,

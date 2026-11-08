@@ -149,6 +149,9 @@ struct LightingSetup: Equatable {
     /// The shoot camera: how far in front of the face (metres), its lens (full-frame equivalent focal length, mm)
     /// and whether the frame is upright (9:16, for phones and reels) or wide (16:9).
     var cameraDistance: Float = 2
+    /// The camera's height above the floor (metres), or nil for the person's eye level, which follows seated /
+    /// standing. The camera always aims at the face, so higher looks down on them and lower looks up.
+    var cameraHeight: Float?
     var focalLength: Float = 26
     var vertical = false
     /// Claude's kind of shot ("Interview"…), reasoning and practical tips for the setup it proposed
@@ -171,8 +174,15 @@ struct LightingSetup: Equatable {
         return SIMD3(sin(a), 0, cos(a))
     }
 
-    /// The shoot camera: `cameraDistance` in front of the face, at face height.
-    var cameraPosition: SIMD3<Float> { faceCenter + facingDirection * cameraDistance }
+    /// The shoot camera: `cameraDistance` in front of the face (along the floor), at `cameraHeight` or eye level.
+    var cameraPosition: SIMD3<Float> {
+        var p = faceCenter + facingDirection * cameraDistance
+        if let cameraHeight { p.y = floorY + cameraHeight }
+        return p
+    }
+
+    /// Range offered for `cameraHeight`, metres above the floor: a low table shot to a raised tripod.
+    static let cameraHeights: ClosedRange<Float> = 0.3...2.4
 
     /// The frame's full field of view along its long side, degrees (36 mm full-frame long side).
     var fieldOfView: Float { 2 * atan(18 / focalLength) * 180 / .pi }
