@@ -57,6 +57,8 @@ struct ResultView: View {
     /// shoot planner was pushed on top); loading again built a second scene the 3D view never showed, so the
     /// Mesh / Photo / Model switch seemed to do nothing.
     @State private var loadStarted = false
+    /// The model under the room's name, for Share (else the scan's file, "Scan_<date>.usdz").
+    @State private var shareURL: URL?
     /// Debug builds only: -openPlanner opens the shoot planner once the room is loaded.
     @State private var openingPlanner = false
 
@@ -150,7 +152,7 @@ struct ResultView: View {
                     Label("Plan a Shoot", systemImage: "sparkles")
                 }
             }
-            ShareLink(item: scan.modelURL)
+            ShareLink(item: shareURL ?? scan.modelURL)
         }
         .onDisappear { training?.pause() }
         .onChange(of: scenePhase) { _, phase in
@@ -194,6 +196,7 @@ struct ResultView: View {
             let scan = scan
             capture = await Task.detached(priority: .utility) { CaptureStore.loadMeta(scan.captureURL) }.value
             improved = await Task.detached(priority: .utility) { ImproveHistory.dates(scan) }.value
+            shareURL = await Task.detached(priority: .utility) { ScanStore.namedModelCopy(scan) }.value
             let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<(SCNScene, SCNNode), Error>) in
                 let room = ScanStore.loadRoom(scan)
                 let result = Result { () throws -> (SCNScene, SCNNode) in

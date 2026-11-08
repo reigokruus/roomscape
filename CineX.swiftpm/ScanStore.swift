@@ -86,6 +86,23 @@ enum ScanStore {
         return renamed
     }
 
+    /// The scan's model as "<room name>.usdz" in the temporary folder (a clone of the file, instant on APFS), so a
+    /// shared model carries the room's name. Nil for unnamed scans or if the copy fails.
+    static func namedModelCopy(_ scan: SavedScan) -> URL? {
+        guard let title = scan.title else { return nil }
+        let safe = title.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: "-")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("share-\(scan.name)", isDirectory: true)
+        let url = folder.appendingPathComponent(safe + ".usdz")
+        try? FileManager.default.removeItem(at: folder)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: scan.modelURL, to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
     private static func cleanTitle(_ raw: String) -> String? {
         let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : String(t.prefix(60))
