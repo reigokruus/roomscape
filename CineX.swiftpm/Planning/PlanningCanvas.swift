@@ -27,15 +27,20 @@ private struct PlanMapping {
         let mid = Self.rotate((minX+maxX)/2,(minY+maxY)/2,by:-turn)
         center = PlanPoint(x:pivot.x+mid.x,y:room.floor,z:pivot.z+mid.y)
         extent = (maxX-minX,maxY-minY)
-        scale = max(0.01,min((Double(size.width)-40)/max(0.1,maxX-minX),(Double(size.height)-40)/max(0.1,maxY-minY)))
+        scale = max(0.01,min((Double(size.width)-40)/max(0.1,maxX-minX),
+                             (Double(size.height)-Self.top-Self.bottom)/max(0.1,maxY-minY)))
     }
+
+    /// Margins: the top one leaves room for the hint and size captions above the walls.
+    private static let top = 32.0, bottom = 20.0
+    private var middle:CGPoint { CGPoint(x:Double(size.width)/2,y:Self.top+(Double(size.height)-Self.top-Self.bottom)/2) }
 
     func screen(_ p:PlanPoint) -> CGPoint {
         let r = Self.rotate(p.x-center.x,p.z-center.z,by:angle)
-        return CGPoint(x:Double(size.width)/2+r.x*scale,y:Double(size.height)/2+r.y*scale)
+        return CGPoint(x:middle.x+r.x*scale,y:middle.y+r.y*scale)
     }
     func world(_ p:CGPoint) -> PlanPoint {
-        let d = delta(CGSize(width:Double(p.x)-Double(size.width)/2,height:Double(p.y)-Double(size.height)/2))
+        let d = delta(CGSize(width:Double(p.x)-middle.x,height:Double(p.y)-middle.y))
         return .init(x:center.x+d.x,y:room.floor,z:center.z+d.z)
     }
     /// A drag on the screen as a move on the floor.

@@ -94,6 +94,8 @@ struct PlanningEditorView: View {
             // UI checks in the Simulator: open on the Frame tab.
             let args = ProcessInfo.processInfo.arguments
             if args.contains("-framePanel") { panel = 1 }
+            if let i = args.firstIndex(of:"-storyboardTab"), i+1 < args.count,
+               let tab = ["room","frame","budget","views"].firstIndex(of:args[i+1]) { panel = tab }
             if let i = args.firstIndex(of:"-storyboardView"), i+1 < args.count,
                let shot = store.project.shots.first(where:{ $0.name == args[i+1] }) { store.selectedShotID = shot.id }
             #endif
@@ -211,7 +213,13 @@ struct PlanningEditorView: View {
     private var budgetPanel:some View {
         VStack(alignment:.leading,spacing:12) {
             Stepper("Allocated shoot days: \(store.shot.days)",value:Binding(get:{ store.shot.days },set:{ days in store.updateShot { $0.days = days } }),in:1...365)
-            ForEach(store.shot.items) { item in
+            // The room's own furniture isn't hired: it's listed only once someone gives it a rate.
+            let hired = store.shot.items.filter { $0.source != .scanned || $0.dailyRate > 0 }
+            if hired.isEmpty {
+                Text("Nothing to hire in this view yet. Add lights, stands and other kit in the Room tab.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            ForEach(hired) { item in
                 Button { editItem = item } label:{
                     HStack { Text(item.name); Spacer(); Text(item.dailyRate,format:.currency(code:"EUR")); Text("/day").font(.caption) }
                 }
