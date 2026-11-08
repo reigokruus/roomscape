@@ -10,9 +10,13 @@ struct ResultView: View {
     enum Style: Hashable { case mesh, photo, model }
 
     let scan: SavedScan
+    /// Starts a second pass over this scan (Improve scan); only offered when the scan saved its world map.
+    var onImprove: (() -> Void)?
     @State private var scene: SCNScene?
     @State private var room: CapturedRoom?
     @State private var capture: CaptureMeta?
+    /// When this scan was improved with a second pass (see `ImproveHistory`).
+    @State private var improved: [Date] = []
     /// Windows found from the photos and LiDAR (see `WindowFinder`), including ones RoomPlan also found.
     @State private var foundWindows: [WindowFinder.Found] = []
     @State private var topView = false
@@ -115,11 +119,13 @@ struct ResultView: View {
                               })
                     .frame(maxHeight: 340)
             } else if let room {
-                RoomSummary(room: room, capture: capture, foundWindows: foundWindows, objects: objects)
+                RoomSummary(room: room, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
+                            onImprove: WorldMapStore.exists(scan) ? onImprove : nil)
                     .frame(maxHeight: 260)
             }
         }
         .navigationTitle(scan.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
+        .modifier(ImprovedSubtitle(date: improved.last))
         .navigationBarTitleDisplayMode(.inline)
         // Black bar above the black 3D view, with light title, buttons and status bar in light mode too.
         .toolbarBackground(Color.black, for: .navigationBar)
@@ -173,6 +179,7 @@ struct ResultView: View {
             // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
             let scan = scan
             capture = await Task.detached(priority: .utility) { CaptureStore.loadMeta(scan.captureURL) }.value
+            improved = await Task.detached(priority: .utility) { ImproveHistory.dates(scan) }.value
             let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<(SCNScene, SCNNode), Error>) in
                 let room = ScanStore.loadRoom(scan)
                 let result = Result { () throws -> (SCNScene, SCNNode) in
@@ -725,6 +732,8 @@ struct RoomSummary: View {
     var foundWindows: [WindowFinder.Found] = []
     /// The Objects panel's list, with the user's edits. Empty for scans without points: then RoomPlan's own objects.
     var objects: [RoomObject] = []
+    var improved: [Date] = []
+    var onImprove: (() -> Void)?
 
     private var missedWindows: [WindowFinder.Found] { foundWindows.filter { !$0.matchesRoomPlan } }
 
@@ -751,9 +760,26 @@ struct RoomSummary: View {
                 }
             }
             if let capture {
-                Section("Capture") {
+                Section {
                     LabeledContent("Points", value: capture.pointCount.formatted())
                     LabeledContent("Photos", value: capture.keyframeCount.formatted())
+                    if let last = improved.last {
+                        let when = last.formatted(.dateTime.day().month(.abbreviated).hour().minute())
+                        LabeledContent("Improved", value: improved.count == 1 ? when : "\(improved.count) times, last \(when)")
+                    }
+                    if let onImprove {
+                        Button {
+                            onImprove()
+                        } label: {
+                            Label("Improve this scan", systemImage: "plus.viewfinder")
+                        }
+                    }
+                } header: {
+                    Text("Capture")
+                } footer: {
+                    if onImprove != nil {
+                        Text("Scan again over parts that came out thin or blurry. The phone recognises the room by itself and adds the new points and photos to this scan.")
+                    }
                 }
             }
             if !objectCounts.isEmpty || removedCount > 0 {
@@ -852,5 +878,18 @@ private struct TrainingStatus: View {
         .font(.caption.weight(.medium))
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(.regularMaterial, in: Capsule())
+    }
+}
+
+/// "Improved 7 Nov at 17:05" under the title (iOS 26 and later; the Capture section says it on every version).
+private struct ImprovedSubtitle: ViewModifier {
+    let date: Date?
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *), let date {
+            content.navigationSubtitle("Improved \(date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))")
+        } else {
+            content
+        }
     }
 }

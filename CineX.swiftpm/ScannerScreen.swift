@@ -1,3 +1,4 @@
+import ARKit
 import SwiftUI
 import RoomPlan
 import os
@@ -12,6 +13,8 @@ private let log = Logger(subsystem: "SetScan", category: "scan")
 @MainActor
 final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate {
     enum Phase: Equatable {
+        /// Improve scan: waiting for ARKit to recognise the saved room before RoomPlan starts.
+        case relocalizing
         case scanning
         case processing
         case failed(String)
@@ -33,8 +36,23 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     let live: LiveCapture
     private var running = false
     private var processingTask: Task<Void, Never>?
+    /// The saved scan this pass improves (see `ImproveScan.swift`), and its world map.
+    let improving: SavedScan?
+    private let worldMap: ARWorldMap?
+    /// Improve scan recognises the saved room in a session of its own (shown in `relocalizeView`): RoomPlan, run on a
+    /// session holding the saved map, stopped within seconds with "the space is too big for one scan".
+    let relocalizeView: ARSCNView?
+    private var relocalizeTask: Task<Void, Never>?
+    /// Maps the improving pass's coordinates onto the saved scan's (identity unless RoomPlan restarted tracking when it
+    /// started; see `measureHandoff`).
+    private var alignment = matrix_identity_float4x4
+    /// This pass's world map, saved with the scan so it can be improved (again) later.
+    private var worldMapTask: Task<Data?, Never>?
 
-    override init() {
+    init(improving: SavedScan? = nil) {
+        self.improving = improving
+        worldMap = improving.flatMap(WorldMapStore.load)
+        relocalizeView = worldMap == nil ? nil : ARSCNView(frame: .zero)
         captureView = RoomCaptureView(frame: .zero)
         live = LiveCapture(session: captureView.captureSession.arSession)
         super.init()
@@ -58,6 +76,78 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         running = true
         saved = nil
         endedEarlyReason = nil
+        worldMapTask = nil
+        if let worldMap {
+            relocalize(with: worldMap)
+        } else {
+            beginCapture()
+        }
+    }
+
+    /// Runs a separate AR session from the saved map until ARKit recognises the room (tracking goes from relocalising
+    /// back to normal), notes where the phone is in the saved scan's coordinates, closes that session, and starts
+    /// RoomPlan in a fresh one, like a normal scan.
+    private func relocalize(with map: ARWorldMap) {
+        guard let session = relocalizeView?.session else { return beginCapture() }
+        setPhase(.relocalizing)
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.initialWorldMap = map
+        session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        relocalizeTask?.cancel()
+        ImproveLog.write("finding the saved room of \(improving?.name ?? "?") (map: \(map.anchors.count) anchors, \(map.rawFeaturePoints.points.count) feature points)")
+        relocalizeTask = Task { [weak self] in
+            var sawRelocalizing = false
+            let started = Date()
+            var lastNote = Date()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let self, self.phase == .relocalizing else { return }
+                guard let frame = session.currentFrame else { continue }
+                let camera = frame.camera
+                if Date().timeIntervalSince(lastNote) > 5 {
+                    lastNote = Date()
+                    ImproveLog.write(String(format: "  %.0f s: tracking %@, mapping %d, %d feature points in view",
+                                            Date().timeIntervalSince(started), String(describing: camera.trackingState),
+                                            frame.worldMappingStatus.rawValue, frame.rawFeaturePoints?.points.count ?? 0))
+                }
+                switch camera.trackingState {
+                case .limited(.relocalizing):
+                    sawRelocalizing = true
+                case .normal where sawRelocalizing || Date().timeIntervalSince(started) > 2:
+                    ImproveLog.write("recognised the room after \(String(format: "%.1f", Date().timeIntervalSince(started))) s (saw relocalising: \(sawRelocalizing))")
+                    let before = camera.transform
+                    ImproveLog.write("  pose at recognition: \(ImproveLog.pose(before))")
+                    session.pause()
+                    self.beginCapture()
+                    self.measureHandoff(before: before, recognisedAt: Date())
+                    return
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    /// The pose where the saved room was recognised (saved scan's coordinates) against RoomPlan's first tracked pose
+    /// (its fresh session's coordinates), while the phone is held still between the two: a first guess for mapping the
+    /// pass onto the saved scan, which `PassRegistration` then fits on the LiDAR points.
+    private func measureHandoff(before: simd_float4x4, recognisedAt: Date) {
+        let session = captureView.captureSession.arSession
+        Task { [weak self] in
+            while Date().timeIntervalSince(recognisedAt) < 8 {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                guard let self, self.phase == .scanning else { return }
+                guard let camera = session.currentFrame?.camera, case .normal = camera.trackingState else { continue }
+                self.alignment = ImproveAlignment.yawAndShift(from: camera.transform, to: before)
+                ImproveLog.write(String(format: "RoomPlan tracking after %.1f s: ", Date().timeIntervalSince(recognisedAt))
+                                 + "\(ImproveLog.pose(camera.transform)) <- saved room \(ImproveLog.pose(before))")
+                return
+            }
+            ImproveLog.write("RoomPlan didn't track within 8 s; fitting the pass from scratch")
+        }
+    }
+
+    private func beginCapture() {
         setPhase(.scanning)
         // No coaching overlay (the animated phone over a grid, "Move device to start" and the other prompts): the
         // live mesh already shows where the scan has been.
@@ -74,22 +164,36 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     }
 
     /// User tapped Done. RoomPlan answers through `shouldPresent`, where processing starts.
+    /// The AR session keeps running for a moment so its world map can be saved with the scan (for Improve scan).
     func finish() {
         guard phase == .scanning, running else { return }
         setPhase(.processing)
         running = false
         live.stop()
-        captureView.captureSession.stop()
+        let session = captureView.captureSession.arSession
+        captureView.captureSession.stop(pauseARSession: false)
+        worldMapTask = Task {
+            let map = await WorldMapStore.capture(from: session)
+            session.pause()
+            return map
+        }
     }
 
     func cancel() {
         log.info("cancel")
+        if improving != nil { ImproveLog.write("cancelled while \(phase)") }
         processingTask?.cancel()
         processingTask = nil
+        relocalizeTask?.cancel()
+        relocalizeTask = nil
         live.stop()
         if running {
             running = false
-            captureView.captureSession.stop()
+            if phase == .relocalizing {
+                relocalizeView?.session.pause()
+            } else {
+                captureView.captureSession.stop()
+            }
         }
     }
 
@@ -168,10 +272,20 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         log.info("session ended, error: \(String(describing: sessionError), privacy: .public)")
         running = false
         live.stop()
-        // The session ended with an error and the user didn't ask to finish. Let them decide.
         if let sessionError, phase == .scanning {
-            setPhase(.failed(Self.message(for: sessionError)))
-            return
+            // RoomPlan stopped by itself because the space got too big for it or the phone too hot: keep what was
+            // scanned so far, like the app's own early finish. (Big open spaces with glass walls hit the size limit.)
+            if let captureError = sessionError as? RoomCaptureSession.CaptureError,
+               captureError == .exceedSceneSizeLimit || captureError == .deviceTooHot {
+                endedEarlyReason = captureError == .exceedSceneSizeLimit
+                    ? "The space got too big for one scan, so the scan stopped here and what you scanned so far was kept."
+                    : "The phone got too hot, so the scan stopped here and what you scanned so far was kept."
+                if improving != nil { ImproveLog.write("RoomPlan stopped: \(captureError); keeping the pass") }
+            } else {
+                // Any other error the user didn't ask for (lost tracking): let them decide.
+                setPhase(.failed(Self.message(for: sessionError)))
+                return
+            }
         }
         guard phase == .processing || phase == .scanning else { return }
         if phase != .processing { setPhase(.processing) }
@@ -180,22 +294,40 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         processingTask = Task {
             do {
                 let builder = RoomBuilder(options: [.beautifyObjects])
-                let room = try await builder.capturedRoom(from: data)
+                // Improving keeps the saved room model, so a pass RoomPlan can't make a room from still adds its points.
+                let room: CapturedRoom?
+                if self.improving != nil {
+                    room = try? await builder.capturedRoom(from: data)
+                } else {
+                    room = try await builder.capturedRoom(from: data)
+                }
                 try Task.checkCancellation()
-                log.info("built room: \(room.walls.count) walls, \(room.objects.count) objects")
-                guard !room.walls.isEmpty else {
+                log.info("built room: \(room?.walls.count ?? -1) walls, \(room?.objects.count ?? -1) objects")
+                if self.improving == nil, room?.walls.isEmpty ?? true {
                     self.setPhase(.failed("No walls were found in this scan. Stand inside the room, point the camera at a wall from 1–3 m away, and turn slowly until white outlines appear on every wall."))
                     return
                 }
                 let capture = await self.live.snapshot()
+                let worldMap = await self.worldMapTask?.value
+                log.info("world map: \(worldMap?.count ?? 0, privacy: .public) bytes")
+                let improving = self.improving, alignment = self.alignment
                 let saved = try await Task.detached(priority: .userInitiated) {
-                    try ScanStore.save(room, capture: capture)
+                    if let improving {
+                        return try ScanStore.improve(improving, with: capture, room: room, worldMap: worldMap,
+                                                     alignment: alignment)
+                    }
+                    guard let room else { throw CancellationError() } // not reached: checked above
+                    let saved = try ScanStore.save(room, capture: capture)
+                    if let worldMap { WorldMapStore.save(worldMap, for: saved) }
+                    return saved
                 }.value
                 try Task.checkCancellation()
                 log.info("saved \(saved.name, privacy: .public)")
                 self.saved = saved
             } catch is CancellationError {
                 // User closed the scanner.
+            } catch let error as ScanStore.ImproveError {
+                self.setPhase(.failed(error.localizedDescription))
             } catch {
                 log.error("processing failed: \(String(describing: error), privacy: .public)")
                 self.setPhase(.failed("Could not build the room model. \(Self.message(for: error))"))
@@ -220,6 +352,13 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     }
 }
 
+/// The camera while Improve scan looks for the saved room (its own AR session).
+private struct RelocalizeCamera: UIViewRepresentable {
+    let view: ARSCNView
+    func makeUIView(context: Context) -> ARSCNView { view }
+    func updateUIView(_ uiView: ARSCNView, context: Context) {}
+}
+
 private struct RoomCaptureRepresentable: UIViewRepresentable {
     let controller: ScanController
 
@@ -233,18 +372,57 @@ private struct RoomCaptureRepresentable: UIViewRepresentable {
 struct ScannerScreen: View {
     let onFinished: (SavedScan) -> Void
     let onCancel: () -> Void
-    @StateObject private var controller = ScanController()
+    @StateObject private var controller: ScanController
     @Environment(\.scenePhase) private var scenePhase
+
+    /// `improving`: a saved scan to add a second pass to (Improve scan), instead of making a new one.
+    init(improving: SavedScan? = nil, onFinished: @escaping (SavedScan) -> Void, onCancel: @escaping () -> Void) {
+        self.onFinished = onFinished
+        self.onCancel = onCancel
+        _controller = StateObject(wrappedValue: ScanController(improving: improving))
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
             RoomCaptureRepresentable(controller: controller)
                 .ignoresSafeArea()
                 .onAppear { controller.start() }
+            if controller.phase == .relocalizing, let view = controller.relocalizeView {
+                RelocalizeCamera(view: view).ignoresSafeArea()
+            }
 
             VStack(spacing: 12) {
                 switch controller.phase {
+                case .relocalizing:
+                    VStack(spacing: 8) {
+                        ProgressView()
+                        Text("Finding the saved room")
+                            .font(.headline)
+                        Text("Slowly point the phone at the walls and furniture you scanned before. When it recognises them, hold the phone still for a second while scanning starts.")
+                            .font(.callout)
+                            .multilineTextAlignment(.center)
+                        TimelineView(.periodic(from: controller.phaseStarted, by: 1)) { context in
+                            if context.date.timeIntervalSince(controller.phaseStarted) > 20 {
+                                Text("Still looking. Try the spot and the direction you started from, in the same light.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
+                    }
+                    .padding()
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    Button("Cancel") { close() }
+                        .buttonStyle(.bordered)
+                        .background(.regularMaterial, in: Capsule())
                 case .scanning:
+                    if controller.improving != nil {
+                        Label("Lined up with the saved scan. Scan the parts you want sharper, then tap Done.",
+                              systemImage: "checkmark.circle")
+                            .font(.footnote)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(.regularMaterial, in: Capsule())
+                    }
                     if controller.powerSaving {
                         Label("The phone is warm, so the live mesh updates less often. Keep scanning.",
                               systemImage: "thermometer.medium")
@@ -277,7 +455,7 @@ struct ScannerScreen: View {
                                 .font(.callout)
                                 .multilineTextAlignment(.center)
                         }
-                        ProgressView("Building the room model…")
+                        ProgressView(controller.improving == nil ? "Building the room model…" : "Adding this pass to the saved scan…")
                         // A ticking counter shows the app is alive. Big rooms can take up to a minute.
                         TimelineView(.periodic(from: controller.phaseStarted, by: 1)) { context in
                             Text("\(Int(context.date.timeIntervalSince(controller.phaseStarted))) s")
@@ -311,7 +489,7 @@ struct ScannerScreen: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             // ARKit can't keep tracking in the background, so a backgrounded scan always fails. Say so plainly.
-            if newPhase == .background, controller.phase == .scanning {
+            if newPhase == .background, controller.phase == .scanning || controller.phase == .relocalizing {
                 controller.cancel()
                 controller.phase = .failed("Scanning stopped because the app went to the background. Tap Scan again to restart.")
             }
