@@ -14,6 +14,8 @@ struct LightingPanel: View {
     @State private var shot: SceneType?
     @State private var wish = ""
     @State private var showingKey = false
+    /// The key sheet was opened by the plan button: planning starts once a key is saved.
+    @State private var planAfterKey = false
 
     var body: some View {
         List {
@@ -123,7 +125,9 @@ struct LightingPanel: View {
             }
         }
         .listStyle(.insetGrouped)
-        .sheet(isPresented: $showingKey) { ClaudeKeySheet() }
+        .sheet(isPresented: $showingKey) {
+            ClaudeKeySheet(onSaved: planAfterKey ? { onPlan(shot, wish) } : nil)
+        }
     }
 }
 
@@ -149,7 +153,7 @@ private extension LightingPanel {
                 }
             } else {
                 Button {
-                    if ClaudeKeyStore.key == nil { showingKey = true } else { onPlan(shot, wish) }
+                    if ClaudeKeyStore.key == nil { planAfterKey = true; showingKey = true } else { onPlan(shot, wish) }
                 } label: {
                     Label(shot == nil ? (setup.planNote == nil ? "Set it up with Claude" : "Set it up again")
                                       : "Plan this \(shot!.rawValue.lowercased()) with Claude",

@@ -13,6 +13,8 @@ struct ObjectsPanel: View {
     let onFind: () -> Void
 
     @State private var showingKey = false
+    /// The key sheet was opened by the Find button: the search starts once a key is saved.
+    @State private var findAfterKey = false
 
     private var movable: [RoomObject] { objects.filter { !$0.kind.isMarker } }
     private var lights: [RoomObject] { objects.filter { $0.kind.isMarker && !$0.kind.isPower } }
@@ -28,7 +30,7 @@ struct ObjectsPanel: View {
                     }
                 } else {
                     Button {
-                        if ClaudeKeyStore.key == nil { showingKey = true } else { onFind() }
+                        if ClaudeKeyStore.key == nil { findAfterKey = true; showingKey = true } else { onFind() }
                     } label: {
                         Label(claudeChecked ? "Look again with Claude" : "Find objects, sockets and lights with Claude",
                               systemImage: "sparkle.magnifyingglass")
@@ -37,7 +39,7 @@ struct ObjectsPanel: View {
                 if let error {
                     Text(error).font(.caption).foregroundStyle(.red)
                 }
-                Button("Claude API key…") { showingKey = true }
+                Button("Claude API key…") { findAfterKey = false; showingKey = true }
                     .font(.caption)
             } footer: {
                 Text("Claude looks at up to 30 of the scan's photos (about 5 requests on your API key). RoomPlan's furniture is already listed without it.")
@@ -75,7 +77,9 @@ struct ObjectsPanel: View {
             }
         }
         .listStyle(.insetGrouped)
-        .sheet(isPresented: $showingKey) { ClaudeKeySheet() }
+        .sheet(isPresented: $showingKey) {
+            ClaudeKeySheet(onSaved: findAfterKey ? onFind : nil)
+        }
     }
 
     /// Turn and reset for the selected thing, right under its row.
@@ -175,6 +179,8 @@ struct ObjectsPanel: View {
 
 /// Enter, replace or remove the Claude API key (kept in the Keychain on this phone only).
 struct ClaudeKeySheet: View {
+    /// Run after a key is saved (the action that asked for it), if any.
+    var onSaved: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var key = ""
     @State private var hasKey = ClaudeKeyStore.key != nil
@@ -204,6 +210,7 @@ struct ClaudeKeySheet: View {
                     Button("Save") {
                         ClaudeKeyStore.save(key)
                         dismiss()
+                        if ClaudeKeyStore.key != nil { onSaved?() }
                     }
                     .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
                 }

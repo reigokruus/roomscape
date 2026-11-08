@@ -218,26 +218,48 @@ enum ObjectFinder {
         }
         progress(Progress(done: 0, total: batches.count))
         var results: [(batch: [Prepared], reply: Reply)] = []
-        try await withThrowingTaskGroup(of: ([Prepared], Reply).self) { group in
+        // One failed request (a timeout, a declined photo, an unreadable reply) costs only its own photos: the
+        // search fails only when every request does. A bad key or a cancel still stops everything.
+        var firstFailure: Error?
+        try await withThrowingTaskGroup(of: ([Prepared], Result<Reply, Error>).self) { group in
             var next = 0, done = 0
             func launch() {
                 guard next < batches.count else { return }
                 let batch = batches[next]
                 next += 1
                 group.addTask {
-                    let data = try await ClaudeAPI.askAboutPhotos(batch.map(\.jpeg), instructions: instructions(batch, known: existing),
-                                                                  schema: schema)
-                    return (batch, try JSONDecoder().decode(Reply.self, from: data))
+                    do {
+                        let data = try await ClaudeAPI.askAboutPhotos(batch.map(\.jpeg),
+                                                                      instructions: instructions(batch, known: existing),
+                                                                      schema: schema)
+                        do {
+                            return (batch, .success(try JSONDecoder().decode(Reply.self, from: data)))
+                        } catch {
+                            return (batch, .failure(ClaudeAPI.Failure.badReply(error.localizedDescription)))
+                        }
+                    } catch ClaudeAPI.Failure.noKey {
+                        throw ClaudeAPI.Failure.noKey
+                    } catch ClaudeAPI.Failure.badKey {
+                        throw ClaudeAPI.Failure.badKey
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        return (batch, .failure(error))
+                    }
                 }
             }
             for _ in 0..<3 { launch() } // three requests at a time
             while let r = try await group.next() {
-                results.append((r.0, r.1))
+                switch r.1 {
+                case .success(let reply): results.append((r.0, reply))
+                case .failure(let error): firstFailure = firstFailure ?? error
+                }
                 done += 1
                 progress(Progress(done: done, total: batches.count))
                 launch()
             }
         }
+        if results.isEmpty, let firstFailure { throw firstFailure }
 
         var objects = existing
         for (batch, reply) in results {

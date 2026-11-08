@@ -1,6 +1,16 @@
-# CineX
+# RoomScape
 
-**A set-up assistant for real rooms.** Scan your room with an iPhone, tell the app what gear you own, pick the kind of scene you want, and it tells you in plain language where to put the camera and lights. It's built for everyday creators, not film crews.
+**A set-up assistant for real rooms.** Scan your room with an iPhone, tell the app what gear you own, pick the kind of scene you want, and it shows you where to put the person, the camera and the lights. It's built for everyday creators, not film crews. (The project started as CineX; the iPhone app is now called RoomScape.)
+
+## What the iPhone app does
+- **Scan** a room with RoomPlan and LiDAR, with a live surface mesh while you walk. You get walls, doors, windows and furniture, plus the LiDAR points and photos of the room.
+- **See the room** as splats in the scanned colours (Photo), a white mesh with a grid (Mesh), or RoomPlan's model. **Sharpen** trains the splats against the scan's photos on the phone's GPU.
+- **Objects:** RoomPlan's furniture, plus lamps, ceiling lights and power sockets that Claude finds in the photos. Remove, move and turn things to plan around them.
+- **Lighting preview:** place the person and your own lights (from My Gear) in the scanned room and see the light on their face, the exposure and a camera's-eye view. The room's own lights and windows count, and cable runs to the nearest socket are shown. **Set it up with Claude** plans a whole shot (pose, lights, camera, lens) from the floor plan and your gear.
+- **Storyboard:** a measured top-down plan of the room with several views, each with its own camera, lens, kit and budget, and a frame preview rendered from the scan.
+- **Plan a Shoot:** plain-language placement tips for talking heads, interviews, vlogs, product shots and lifestyle scenes.
+
+Claude features need your own Claude API key, kept in the phone's Keychain. Everything else works offline.
 
 ## Test a native app now
 
@@ -16,19 +26,15 @@ See [Android APK install/build instructions and the iOS hardware/build gate](doc
 [Local demo notebook and phone acceptance guide](docs/pilot-interest.md): explicit paid-follow-up opt-in, named demo host, editable contacts, revoke/delete, and deliberate consent-only CSV/JSON export. Encrypted app-private storage; **no central collection or automatic team receipt**, payments or tracking. Personal data is separate from room/scan exports. This is interest, not a confirmed paying customer.
 
 ## Status
-**v0.1 (hackathon prototype):** the scan works. Apple RoomPlan captures the room, and it comes back as a 3D model with windows (natural light), doors and furniture picked out, plus a room summary and a top-down view.
-
-**Native planning integration (source, awaiting Xcode/iPhone validation):** open a saved scan → **Storyboard** for real-room floor planning, dimensioned quick-add items, sensor/lens frame checks, independent storyboard views, per-view gear budgets, reusable equipment presets and validated JSON export/import. Home → **Planning projects** reopens local plans or imports other-room exports. Existing My Gear and Plan a Shoot suggestions remain available.
-
-**Not a production-ready build:** portable Swift logic is compiled/tested; SwiftUI / SceneKit / RoomPlan integration has not been built with an iOS SDK or run on a phone here. Items are measured planning envelopes, not photorealistic assets; catalog dimensions/rates are estimates. See [native integration, limitations and exact Xcode/device test gate](docs/native-planning.md) and [verification evidence](docs/native-planning-verification.md). Run `swift test` from the repository root to verify the shared native model/geometry/import/persistence logic.
+**v0.1 (hackathon prototype).** The iPhone app builds with Xcode 26 and runs on LiDAR iPhones. The shared planning and splat-training logic is covered by `swift test` from the repository root (it needs full Xcode selected, e.g. `sudo xcode-select -s /Applications/Xcode.app`: the Command Line Tools alone have no XCTest). The storyboard's items are measured planning envelopes, not photorealistic assets, and catalog dimensions and rates are estimates. See [native planning notes](docs/native-planning.md) and [verification evidence](docs/native-planning-verification.md).
 
 ## Why not Previs Pro (or similar apps)?
-Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. CineX starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. CineX uses the scan to plan the shoot.
+Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. RoomScape starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. RoomScape uses the scan to plan the shoot.
 
 ## iPhone version (main)
 Porting the Android features to iPhone? Start with [docs/android-to-ios-handoff.md](docs/android-to-ios-handoff.md).
 
-This is the `CineX.swiftpm` folder. It requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
+This is the `CineX.swiftpm` folder (the app inside is RoomScape). It requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
 
 ### Build and install on an iPhone
 1. Download this repo (green **Code** button › **Download ZIP**) and unzip it.
