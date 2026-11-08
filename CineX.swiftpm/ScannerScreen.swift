@@ -168,10 +168,15 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         log.info("session ended, error: \(String(describing: sessionError), privacy: .public)")
         running = false
         live.stop()
-        // The session ended with an error and the user didn't ask to finish. Let them decide.
+        // The session ended with an error and the user didn't ask to finish. Some of RoomPlan's own stops (area too
+        // big, phone too hot) still hand over valid data for what was scanned so far: build that instead of throwing
+        // the whole scan away. Others (lost tracking) leave data that can't be trusted: let the user decide.
         if let sessionError, phase == .scanning {
-            setPhase(.failed(Self.message(for: sessionError)))
-            return
+            guard let reason = Self.keptScanReason(for: sessionError) else {
+                setPhase(.failed(Self.message(for: sessionError)))
+                return
+            }
+            endedEarlyReason = reason
         }
         guard phase == .processing || phase == .scanning else { return }
         if phase != .processing { setPhase(.processing) }
@@ -184,7 +189,9 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 try Task.checkCancellation()
                 log.info("built room: \(room.walls.count) walls, \(room.objects.count) objects")
                 guard !room.walls.isEmpty else {
-                    self.setPhase(.failed("No walls were found in this scan. Stand inside the room, point the camera at a wall from 1–3 m away, and turn slowly until white outlines appear on every wall."))
+                    // After a size stop, the size is the useful thing to explain, not the missing walls.
+                    self.setPhase(.failed(sessionError.map(Self.message(for:))
+                        ?? "No walls were found in this scan. Stand inside the room, point the camera at a wall from 1–3 m away, and turn slowly until white outlines appear on every wall."))
                     return
                 }
                 let capture = await self.live.snapshot()
@@ -209,7 +216,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             case .worldTrackingFailure:
                 return "The phone lost track of where it is. Scan again in good light, move slowly, and keep the camera pointed at walls and furniture, not at blank surfaces or the ceiling."
             case .exceedSceneSizeLimit:
-                return "The space is too big for one scan. Scan a single room at a time."
+                return "The scanned area got bigger than RoomPlan can handle (about 9 × 9 m). Scan one room at a time: stay inside it, and don't point the camera through open doors, large windows or at mirrors. The depth sensor sees through or into them and counts that space as part of the room."
             case .deviceTooHot:
                 return "Scanning stopped because the phone got too hot. Let it cool down for a few minutes and try again."
             default:
@@ -217,6 +224,20 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             }
         }
         return error.localizedDescription
+    }
+
+    /// For RoomPlan stops that still leave a usable scan, what to tell the user while the scan is built. nil means
+    /// the captured data can't be trusted and the scan fails.
+    private static func keptScanReason(for error: Error) -> String? {
+        guard let captureError = error as? RoomCaptureSession.CaptureError else { return nil }
+        switch captureError {
+        case .exceedSceneSizeLimit:
+            return "The scanned area reached RoomPlan's size limit (about 9 × 9 m), so the scan stopped there. What you scanned so far was kept."
+        case .deviceTooHot:
+            return "The phone got too hot, so RoomPlan stopped the scan. What you scanned so far was kept."
+        default:
+            return nil
+        }
     }
 }
 
