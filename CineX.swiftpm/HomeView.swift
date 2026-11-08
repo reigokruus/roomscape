@@ -6,6 +6,12 @@ struct HomeView: View {
     @State private var path: [SavedScan] = []
     @State private var scanning = false
     @State private var justSaved: SavedScan?
+    /// The scan being renamed, and the name being typed.
+    @State private var renaming: SavedScan?
+    @State private var newTitle = ""
+    /// Debug builds only: -openGear / -openPlanning open those screens at launch.
+    @State private var debugGear = false
+    @State private var debugPlanning = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -35,7 +41,9 @@ struct HomeView: View {
                             .foregroundStyle(.secondary)
                     }
                 } footer: {
-                    Text("Walk slowly around the room and point the phone at every wall, window, door and piece of furniture.")
+                    if RoomCaptureSession.isSupported {
+                        Text("Walk slowly around the room and point the phone at every wall, window, door and piece of furniture.")
+                    }
                 }
 
                 Section {
@@ -46,26 +54,43 @@ struct HomeView: View {
                         Label("Planning projects", systemImage: "rectangle.stack")
                     }
                 } footer: {
-                    Text("Your lights, camera and kit. The lighting preview and the shoot planner start from them.")
+                    Text("Add the lights and camera you own: the lighting preview and the shoot planner start from them. Storyboards you've made are under Planning projects.")
                 }
 
                 if !scans.isEmpty {
-                    Section("Saved scans") {
+                    Section {
                         ForEach(scans) { scan in
                             NavigationLink(value: scan) {
                                 HStack(spacing: 12) {
                                     ScanThumbnailView(scan: scan)
                                     VStack(alignment: .leading) {
-                                        Text(scan.date.formatted(date: .abbreviated, time: .shortened))
-                                        Text(scan.name).font(.caption).foregroundStyle(.secondary)
+                                        Text(scan.displayName)
+                                        if scan.title != nil {
+                                            Text(scan.defaultDisplayName).font(.caption).foregroundStyle(.secondary)
+                                        }
                                     }
                                 }
+                            }
+                            .contextMenu {
+                                Button("Rename", systemImage: "pencil") { startRenaming(scan) }
+                                Button("Delete", systemImage: "trash", role: .destructive) {
+                                    ScanStore.delete(scan)
+                                    scans = ScanStore.list()
+                                }
+                            }
+                            .swipeActions(edge: .leading) {
+                                Button("Rename", systemImage: "pencil") { startRenaming(scan) }
+                                    .tint(.accentColor)
                             }
                         }
                         .onDelete { idx in
                             idx.map { scans[$0] }.forEach(ScanStore.delete)
                             scans = ScanStore.list()
                         }
+                    } header: {
+                        Text("Saved scans")
+                    } footer: {
+                        Text("Touch and hold a scan to give the room a name.")
                     }
                 }
             }
@@ -73,21 +98,29 @@ struct HomeView: View {
             .navigationDestination(for: SavedScan.self) { scan in
                 ResultView(scan: scan)
             }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(destination: GearInventoryView()) {
-                        Label("My Gear", systemImage: "checklist")
-                            .labelStyle(.titleAndIcon)
-                    }
+            .navigationDestination(isPresented: $debugGear) { GearInventoryView() }
+            .navigationDestination(isPresented: $debugPlanning) { PlanningLibraryView() }
+            .alert("Name this room", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                TextField("e.g. Living room", text: $newTitle)
+                Button("Save") {
+                    if let scan = renaming { ScanStore.rename(scan, to: newTitle) }
+                    renaming = nil
+                    scans = ScanStore.list()
                 }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            } message: {
+                Text("Leave it empty to go back to the scan's date.")
             }
             .onAppear {
                 scans = ScanStore.list()
                 #if DEBUG
                 // UI checks in the Simulator: launch with -openLatestScan to go straight to the newest scan.
-                if ProcessInfo.processInfo.arguments.contains("-openLatestScan"), path.isEmpty, let latest = scans.first {
+                let args = ProcessInfo.processInfo.arguments
+                if args.contains("-openLatestScan"), path.isEmpty, let latest = scans.first {
                     path = [latest]
                 }
+                if args.contains("-openGear") { debugGear = true }
+                if args.contains("-openPlanning") { debugPlanning = true }
                 #endif
             }
             .fullScreenCover(isPresented: $scanning, onDismiss: {
@@ -107,6 +140,13 @@ struct HomeView: View {
                 )
             }
         }
+    }
+}
+
+extension HomeView {
+    private func startRenaming(_ scan: SavedScan) {
+        newTitle = scan.title ?? ""
+        renaming = scan
     }
 }
 

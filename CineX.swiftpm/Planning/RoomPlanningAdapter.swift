@@ -23,7 +23,7 @@ enum RoomPlanningAdapter {
                          position:.init(x:Double(t.columns.3.x),y:Double(t.columns.3.y-d.y/2),z:Double(t.columns.3.z)),
                          size:.init(x:Double(d.x),y:Double(d.y),z:Double(d.z)),yaw:atan2(Double(t.columns.2.x),Double(t.columns.2.z)))
         }
-        var project = PlanProject.make(name:scan.name,scanName:scan.name,room:geometry,items:objects)
+        var project = PlanProject.make(name:scan.displayName,scanName:scan.name,room:geometry,items:objects)
         project.presets = PlanCatalog.starterPresets
         try project.validate()
         return project

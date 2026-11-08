@@ -23,19 +23,36 @@ struct ShootPlannerView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
 
+                // The plan works with nothing but a phone and the room's light; gear makes it specific.
                 if gear.isEmpty {
-                    ContentUnavailableView(
-                        "No gear added yet",
-                        systemImage: "camera.on.rectangle",
-                        description: Text("Add your equipment in My Gear and the planner will tailor suggestions to what you own.")
-                    )
-                    .padding(.horizontal)
-                } else {
-                    TipList(tips: plan.tips)
-
-                    if !plan.notes.isEmpty {
-                        NotesList(notes: plan.notes)
+                    NavigationLink(destination: GearInventoryView()) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "camera.on.rectangle")
+                                .font(.title3)
+                                .foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Planning with just your phone")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Add the lights and camera you own for tips that use them.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(12)
+                        .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
                     }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal)
+                }
+
+                TipList(tips: plan.tips)
+
+                if !plan.notes.isEmpty {
+                    NotesList(notes: plan.notes)
                 }
             }
             .padding(.vertical)
@@ -115,6 +132,7 @@ private struct TipRow: View {
                 .foregroundStyle(.tint)
                 .frame(width: 28, height: 28)
                 .background(Color.accentColor.opacity(0.12), in: Circle())
+                .padding(.top, 10)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(tip.label)
@@ -126,6 +144,8 @@ private struct TipRow: View {
             .padding(.vertical, 12)
         }
         .padding(.horizontal, 12)
+        // Every row starts at the left edge, whatever the length of its text.
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -98,8 +98,9 @@ enum ClaudeAPI {
                 return try replyJSON(data)
             case 401, 403:
                 throw Failure.badKey
-            case 429, 500...599 where attempt < 3:
-                // Retry after the server's hint, or a short backoff.
+            case 429 where attempt < 3, 500...599 where attempt < 3:
+                // Retry after the server's hint, or a short backoff. (Each pattern needs its own `where`:
+                // a single trailing one guards only the last pattern, which made 429 retry forever.)
                 let wait = Double((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "retry-after") ?? "") ?? Double(attempt * 5)
                 try await Task.sleep(nanoseconds: UInt64(min(30, wait) * 1_000_000_000))
             case 429:

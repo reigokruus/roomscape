@@ -53,6 +53,8 @@ struct ResultView: View {
     /// shoot planner was pushed on top); loading again built a second scene the 3D view never showed, so the
     /// Mesh / Photo / Model switch seemed to do nothing.
     @State private var loadStarted = false
+    /// Debug builds only: -openPlanner opens the shoot planner once the room is loaded.
+    @State private var openingPlanner = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -77,14 +79,19 @@ struct ResultView: View {
                 }
                 // Must fit a 375-pt-wide phone: compact controls in one row, or two rows if they still don't fit
                 // (large text). A row wider than the screen would also push the panel below off both edges.
+                // The mode buttons carry a word as well as an icon whenever there's room for it.
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 8) {
-                        modeButtons
+                        modeButtons(labeled: true)
                         Spacer(minLength: 4)
                         viewPickers
                     }
                     VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) { modeButtons }
+                        HStack(spacing: 8) { modeButtons(labeled: true) }
+                        HStack(spacing: 8) { viewPickers }
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) { modeButtons(labeled: false) }
                         HStack(spacing: 8) { viewPickers }
                     }
                 }
@@ -119,7 +126,8 @@ struct ResultView: View {
                     .frame(maxHeight: 260)
             }
         }
-        .navigationTitle(scan.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
+        // A title menu here would push Plan a Shoot and Share into an overflow menu; rooms are named on Home.
+        .navigationTitle(scan.title ?? scan.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
         .navigationBarTitleDisplayMode(.inline)
         // Black bar above the black 3D view, with light title, buttons and status bar in light mode too.
         .toolbarBackground(Color.black, for: .navigationBar)
@@ -145,6 +153,12 @@ struct ResultView: View {
         .navigationDestination(isPresented: $openingStoryboard) {
             if let room {
                 PlanningLaunchView(room: room, scan: scan, objects: objects, addSetup: storyboardSetup)
+            }
+        }
+        .navigationDestination(isPresented: $openingPlanner) {
+            if let room {
+                ShootPlannerView(room: room, extraWindowAreas: foundWindows.filter { !$0.matchesRoomPlan }.map(\.area),
+                                 objects: objects)
             }
         }
         .onChange(of: lighting) { _, setup in
@@ -187,6 +201,9 @@ struct ResultView: View {
                 return (room, result)
             }.value
             room = loaded.0
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-openPlanner"), room != nil { openingPlanner = true }
+            #endif
             switch loaded.1 {
             case .success(let (s, group)):
                 scene = s
@@ -352,12 +369,12 @@ struct ResultView: View {
     #endif
 
     /// Lighting and objects toggles (only once the splats are ready), or the "building" note.
-    @ViewBuilder private var modeButtons: some View {
+    @ViewBuilder private func modeButtons(labeled: Bool) -> some View {
         if splatGroup != nil {
             Button {
                 toggleLighting()
             } label: {
-                Image(systemName: lightingOn ? "lightbulb.fill" : "lightbulb")
+                ModeLabel(title: "Lighting", icon: lightingOn ? "lightbulb.fill" : "lightbulb", labeled: labeled)
             }
             .buttonStyle(.bordered)
             .tint(lightingOn ? .yellow : nil)
@@ -365,13 +382,13 @@ struct ResultView: View {
             Button {
                 toggleObjects()
             } label: {
-                Image(systemName: objectsOn ? "cube.fill" : "cube")
+                ModeLabel(title: "Objects", icon: objectsOn ? "cube.fill" : "cube", labeled: labeled)
             }
             .buttonStyle(.bordered)
             .tint(objectsOn ? .yellow : nil)
             .accessibilityLabel(objectsOn ? "Close objects" : "Objects in the room")
             if let training {
-                TrainButton(run: training) { style = .photo } // training sharpens the colours
+                TrainButton(run: training, labeled: labeled) { style = .photo } // training sharpens the colours
             }
         } else if buildingSplats {
             Label("Building splats…", systemImage: "circle.dotted")
@@ -790,10 +807,13 @@ struct RoomSummary: View {
         return counts.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
+    /// Length and width measured along the room's longest wall, so a room scanned at an angle isn't overstated.
     private var sizeText: String {
-        guard !room.walls.isEmpty else { return "–" }
-        var minX = Float.greatestFiniteMagnitude, maxX = -Float.greatestFiniteMagnitude
-        var minZ = Float.greatestFiniteMagnitude, maxZ = -Float.greatestFiniteMagnitude
+        guard let longest = room.walls.max(by: { $0.dimensions.x < $1.dimensions.x }) else { return "–" }
+        let along = simd_normalize(simd_float3(longest.transform.columns.0.x, 0, longest.transform.columns.0.z))
+        let across = simd_float3(-along.z, 0, along.x)
+        var minA = Float.greatestFiniteMagnitude, maxA = -Float.greatestFiniteMagnitude
+        var minB = Float.greatestFiniteMagnitude, maxB = -Float.greatestFiniteMagnitude
         var height: Float = 0
         for wall in room.walls {
             let t = wall.transform
@@ -801,18 +821,20 @@ struct RoomSummary: View {
             let r = simd_float3(t.columns.0.x, t.columns.0.y, t.columns.0.z)
             let half = wall.dimensions.x / 2
             for p in [c + r * half, c - r * half] {
-                minX = min(minX, p.x); maxX = max(maxX, p.x)
-                minZ = min(minZ, p.z); maxZ = max(maxZ, p.z)
+                minA = min(minA, simd_dot(p, along)); maxA = max(maxA, simd_dot(p, along))
+                minB = min(minB, simd_dot(p, across)); maxB = max(maxB, simd_dot(p, across))
             }
             height = max(height, wall.dimensions.y)
         }
-        return String(format: "%.1f × %.1f m, %.1f m high", maxX - minX, maxZ - minZ, height)
+        let (long, short) = (max(maxA - minA, maxB - minB), min(maxA - minA, maxB - minB))
+        return String(format: "%.1f × %.1f m, %.1f m high", long, short, height)
     }
 }
 
 /// Starts splat training, or pauses it (task 6).
 private struct TrainButton: View {
     @ObservedObject var run: SplatTrainingRun
+    var labeled = false
     var onStart: () -> Void
 
     var body: some View {
@@ -820,11 +842,29 @@ private struct TrainButton: View {
             if !run.isTraining { onStart() }
             run.toggle()
         } label: {
-            Image(systemName: run.isTraining ? "pause.fill" : "wand.and.stars")
+            ModeLabel(title: run.isTraining ? "Pause" : "Sharpen",
+                      icon: run.isTraining ? "pause.fill" : "wand.and.stars", labeled: labeled)
         }
         .buttonStyle(.bordered)
         .tint(run.isTraining ? .yellow : nil)
         .accessibilityLabel(run.isTraining ? "Pause training" : "Train the splats against the photos")
+    }
+}
+
+/// A mode button's face: icon and word, or the icon alone when space is short.
+private struct ModeLabel: View {
+    let title: String
+    let icon: String
+    let labeled: Bool
+
+    var body: some View {
+        if labeled {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.medium))
+                .labelStyle(.titleAndIcon)
+        } else {
+            Image(systemName: icon)
+        }
     }
 }
 

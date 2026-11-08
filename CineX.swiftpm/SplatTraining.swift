@@ -26,8 +26,8 @@ final class SplatTrainingRun: ObservableObject {
     /// Splats are drawn as hard discs (SceneKit's blending washes them out). A trained gaussian is shown as a disc of
     /// 2 sigma, whatever its opacity: sizing discs by opacity opened gaps where training made splats see-through
     /// (their neighbours' soft edges filled those in the trainer). Splats that training made mostly transparent are hidden.
-    static let discSigmas: Float = 2
-    static let minDisplayOpacity: Float = 0.3
+    nonisolated static let discSigmas: Float = 2
+    nonisolated static let minDisplayOpacity: Float = 0.3
 
     private let shell: RoomShell
 

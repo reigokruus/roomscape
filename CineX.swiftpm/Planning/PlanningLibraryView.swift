@@ -7,6 +7,7 @@ struct PlanningLibraryView: View {
     @State private var importing = false
     @State private var error:String?
     @State private var warnings:[String] = []
+    @State private var scanNames:[String:String] = [:]
     var body:some View {
         List {
             Section {
@@ -19,7 +20,7 @@ struct PlanningLibraryView: View {
                 ForEach(projects) { project in
                     NavigationLink { PlanningEditorView(project:project) } label: {
                         VStack(alignment:.leading) {
-                            Text(project.name)
+                            Text(displayName(project))
                             Text("\(project.shots.count) views · \(project.total,format:.currency(code:"EUR")) allocated").font(.caption)
                         }
                     }
@@ -45,7 +46,13 @@ struct PlanningLibraryView: View {
             Button("OK") { error = nil }
         } message: { Text(error ?? "") }
     }
+    /// A project still called by its scan's file name shows the room's name instead (it's saved on next open).
+    private func displayName(_ project:PlanProject) -> String {
+        guard let scanName = project.scanName, project.name == scanName else { return project.name }
+        return scanNames[scanName] ?? project.name
+    }
     private func reload() {
+        scanNames = Dictionary(ScanStore.list().map { ($0.name,$0.displayName) },uniquingKeysWith:{ a,_ in a })
         do { let result = try PlanningStore.disk.list(); projects = result.projects; warnings = result.errors }
         catch { self.error = error.localizedDescription }
     }
@@ -77,6 +84,11 @@ struct PlanningLaunchView: View {
                 var next = try saved ?? RoomPlanningAdapter.makeProject(room:room,scan:scan)
                 let sync = StoryboardObjects.sync(&next,objects:objects,scan:scan)
                 var added = false
+                // A project still called by the scan's file name or date follows the room's current name.
+                if next.name != scan.displayName, [scan.name, scan.defaultDisplayName].contains(next.name) {
+                    next.name = scan.displayName
+                    added = true
+                }
                 // Cameras an older version placed outside the walls (rotated rooms) come back inside.
                 for i in next.shots.indices where !next.room.contains(next.shots[i].camera.position) {
                     next.shots[i].camera.position = next.room.pulledInside(next.shots[i].camera.position)

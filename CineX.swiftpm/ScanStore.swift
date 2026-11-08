@@ -7,10 +7,16 @@ struct SavedScan: Identifiable, Hashable {
     let modelURL: URL
     let dataURL: URL
     let date: Date
+    /// The name the user gave the room ("Living room"), or nil: then the scan goes by its date.
+    var title: String? = nil
     var id: String { name }
+    /// What the app calls the scan: its title, else when it was made.
+    var displayName: String { title ?? defaultDisplayName }
+    var defaultDisplayName: String { date.formatted(date: .abbreviated, time: .shortened) }
     /// LiDAR points and photos from the scan (see `CaptureMeta`). Missing for scans made before they were saved.
     var captureURL: URL { modelURL.deletingLastPathComponent().appendingPathComponent(name + ".capture") }
     var thumbnailURL: URL { modelURL.deletingLastPathComponent().appendingPathComponent(name + ".thumb.jpg") }
+    var titleURL: URL { modelURL.deletingLastPathComponent().appendingPathComponent(name + ".title") }
 }
 
 enum ScanStore {
@@ -20,6 +26,7 @@ enum ScanStore {
 
     private static let nameFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX") // a fixed format, whatever the phone's 12/24-hour setting
         f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         return f
     }()
@@ -55,11 +62,33 @@ enum ScanStore {
             .filter { $0.pathExtension == "usdz" }
             .map { url in
                 let name = url.deletingPathExtension().lastPathComponent
-                let date = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantPast
-                return SavedScan(name: name, modelURL: url,
-                                 dataURL: directory.appendingPathComponent(name + ".json"), date: date)
+                // The date is in the name; the file's own date changes when scans are copied between devices.
+                let date = name.hasPrefix("Scan_") ? nameFormatter.date(from: String(name.dropFirst(5))) : nil
+                var scan = SavedScan(name: name, modelURL: url, dataURL: directory.appendingPathComponent(name + ".json"),
+                                     date: date ?? (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate)
+                                         ?? Date.distantPast)
+                scan.title = (try? String(contentsOf: scan.titleURL, encoding: .utf8)).flatMap(cleanTitle)
+                return scan
             }
             .sorted { $0.date > $1.date }
+    }
+
+    /// Names the scan (an empty name goes back to the date) and returns it with the new title.
+    @discardableResult
+    static func rename(_ scan: SavedScan, to title: String) -> SavedScan {
+        var renamed = scan
+        renamed.title = cleanTitle(title)
+        if let t = renamed.title {
+            try? t.write(to: scan.titleURL, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: scan.titleURL)
+        }
+        return renamed
+    }
+
+    private static func cleanTitle(_ raw: String) -> String? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : String(t.prefix(60))
     }
 
     static func loadRoom(_ scan: SavedScan) -> CapturedRoom? {
@@ -112,5 +141,6 @@ enum ScanStore {
         try? FileManager.default.removeItem(at: scan.dataURL)
         try? FileManager.default.removeItem(at: scan.captureURL)
         try? FileManager.default.removeItem(at: scan.thumbnailURL)
+        try? FileManager.default.removeItem(at: scan.titleURL)
     }
 }
