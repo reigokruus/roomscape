@@ -59,6 +59,11 @@ struct ResultView: View {
     /// shoot planner was pushed on top); loading again built a second scene the 3D view never showed, so the
     /// Mesh / Photo / Model switch seemed to do nothing.
     @State private var loadStarted = false
+    /// The scan as renamed on this screen (the Name row), else nil; `current` is the scan with its latest name.
+    @State private var renamed: SavedScan?
+    @State private var renaming = false
+    @State private var newTitle = ""
+    private var current: SavedScan { renamed ?? scan }
     /// The model under the room's name, for Share (else the scan's file, "Scan_<date>.usdz").
     @State private var shareURL: URL?
     /// Debug builds only: -openPlanner opens the shoot planner once the room is loaded.
@@ -132,13 +137,16 @@ struct ResultView: View {
                               })
                     .frame(maxHeight: 340)
             } else if let room {
-                RoomSummary(room: room, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
+                RoomSummary(room: room, name: current.title, onRename: {
+                                newTitle = current.title ?? ""
+                                renaming = true
+                            }, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
                             onImprove: WorldMapStore.exists(scan) ? onImprove : nil)
                     .frame(maxHeight: 260)
             }
         }
         // A title menu here would push Plan a Shoot and Share into an overflow menu; rooms are named on Home.
-        .navigationTitle(scan.title ?? scan.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
+        .navigationTitle(current.title ?? scan.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
         .modifier(ImprovedSubtitle(date: improved.last))
         .navigationBarTitleDisplayMode(.inline)
         // Black bar above the black 3D view, with light title, buttons and status bar in light mode too.
@@ -147,7 +155,7 @@ struct ResultView: View {
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             if let room {
-                NavigationLink(destination: PlanningLaunchView(room: room, scan: scan, objects: objects)) {
+                NavigationLink(destination: PlanningLaunchView(room: room, scan: current, objects: objects)) {
                     Label("Storyboard", systemImage: "rectangle.stack")
                 }
                 NavigationLink(destination: ShootPlannerView(
@@ -158,13 +166,14 @@ struct ResultView: View {
             }
             ShareLink(item: shareURL ?? scan.modelURL)
         }
+        .modifier(RenameRoomAlert(isPresented: $renaming, title: $newTitle, onSave: saveName))
         .onDisappear { training?.pause() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { training?.pause() }
         }
         .navigationDestination(isPresented: $openingStoryboard) {
             if let room {
-                PlanningLaunchView(room: room, scan: scan, objects: objects, addSetup: storyboardSetup)
+                PlanningLaunchView(room: room, scan: current, objects: objects, addSetup: storyboardSetup)
             }
         }
         .navigationDestination(isPresented: $openingPlanner) {
@@ -434,6 +443,12 @@ struct ResultView: View {
         }
         .pickerStyle(.segmented)
         .fixedSize()
+    }
+
+    private func saveName() {
+        let scan = ScanStore.rename(current, to: newTitle)
+        renamed = scan
+        Task { shareURL = await Task.detached(priority: .utility) { ScanStore.namedModelCopy(scan) }.value }
     }
 
     private func floorTapped(_ p: SIMD3<Float>) {
@@ -768,6 +783,9 @@ struct RoomSceneView: UIViewRepresentable {
 /// Plain-language summary of what was found: size, light sources (windows), doors and furniture.
 struct RoomSummary: View {
     let room: CapturedRoom
+    /// The room's name, if it has one, and how to change it (nil: no Name row).
+    var name: String?
+    var onRename: (() -> Void)?
     var capture: CaptureMeta?
     var foundWindows: [WindowFinder.Found] = []
     /// The Objects panel's list, with the user's edits. Empty for scans without points: then RoomPlan's own objects.
@@ -780,6 +798,21 @@ struct RoomSummary: View {
     var body: some View {
         List {
             Section("Room") {
+                if let onRename {
+                    Button(action: onRename) {
+                        LabeledContent("Name") {
+                            HStack(spacing: 6) {
+                                if let name {
+                                    Text(name).foregroundStyle(.secondary)
+                                } else {
+                                    Text("Add a name").foregroundStyle(Color.accentColor)
+                                }
+                                Image(systemName: "pencil").font(.footnote).foregroundStyle(Color.accentColor)
+                            }
+                        }
+                    }
+                    .tint(.primary)
+                }
                 LabeledContent("Approx. size", value: sizeText)
                 LabeledContent("Walls", value: "\(room.walls.count)")
                 LabeledContent("Windows (natural light)", value: "\(room.windows.count + missedWindows.count)")

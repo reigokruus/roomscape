@@ -107,17 +107,12 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $debugGear) { GearInventoryView() }
             .navigationDestination(isPresented: $debugPlanning) { PlanningLibraryView() }
-            .alert("Name this room", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-                TextField("e.g. Living room", text: $newTitle)
-                Button("Save") {
-                    if let scan = renaming { ScanStore.rename(scan, to: newTitle) }
-                    renaming = nil
-                    scans = ScanStore.list()
-                }
-                Button("Cancel", role: .cancel) { renaming = nil }
-            } message: {
-                Text("Leave it empty to go back to the scan's date.")
-            }
+            .modifier(RenameRoomAlert(isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } }),
+                                      title: $newTitle) {
+                if let scan = renaming { ScanStore.rename(scan, to: newTitle) }
+                renaming = nil
+                scans = ScanStore.list()
+            })
             .onAppear {
                 scans = ScanStore.list()
                 #if DEBUG
@@ -182,6 +177,23 @@ private struct ScanThumbnailView: View {
                 guard let url = ScanStore.ensureThumbnail(scan) else { return nil }
                 return UIImage(contentsOfFile: url.path)
             }.value
+        }
+    }
+}
+
+/// "Name this room": the alert that names a scan, on Home and on the scan's own screen.
+struct RenameRoomAlert: ViewModifier {
+    @Binding var isPresented: Bool
+    @Binding var title: String
+    let onSave: () -> Void
+
+    func body(content: Content) -> some View {
+        content.alert("Name this room", isPresented: $isPresented) {
+            TextField("e.g. Living room", text: $title)
+            Button("Save", action: onSave)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Leave it empty to go back to the scan's date.")
         }
     }
 }
