@@ -3099,7 +3099,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthRunning = false; cleaning = false; glTasks.clear();
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
-        voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0;
+        voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
@@ -3144,6 +3144,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Tap on the scan: move the subject to the nearest scanned point under the finger. */
     void pickSubject(float tx, float ty) {
+        if (demoTool != 0 && count > 0) { demoTap(tx, ty); return; }
         if (sceneIdx == 0 || count == 0) return;
         float best = (40f * height / 1000f) * (40f * height / 1000f) + 400f, bestW = Float.MAX_VALUE;
         int bestI = -1;
@@ -3161,6 +3162,223 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (bestI < 0) return;
         subjectPick = new float[]{pos.get(bestI * 3), pos.get(bestI * 3 + 1), pos.get(bestI * 3 + 2)};
         replan();
+    }
+
+    // ---------------- demo: remove the person on stage, then a basic interview setup ----------------
+    volatile int demoTool;                    // 0 off, 1 next tap removes a person, 2 next tap places the interview
+    private float[] personSpot;               // x, local floor y, z of the last removed person
+    private volatile float[] ivPerson, ivCam, ivLights, ivRays, ivCones; // interview set, world lines / triangles
+
+    private int pickIndex(float tx, float ty) {
+        float best = (40f * height / 1000f) * (40f * height / 1000f) + 400f, bestW = Float.MAX_VALUE;
+        int bestI = -1;
+        float[] m = viewMvp;
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+            if (cw <= 0.05f) continue;
+            float sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / cw + 1f) * 0.5f * width;
+            float sy = (1f - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw) * 0.5f * height;
+            float d = (sx - tx) * (sx - tx) + (sy - ty) * (sy - ty);
+            if (d < best - 25f || (d < best + 25f && cw < bestW)) { best = Math.min(best, d); bestW = cw; bestI = i; }
+        }
+        return bestI;
+    }
+
+    /** The floor under a spot: the most common height of the points around it (the stage, not the hall floor). */
+    private float localFloor(float sx, float sy, float sz) {
+        int bins = 60; int[] h = new int[bins]; float lo = sy - 2.5f;
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            if (y > sy + 0.05f || y < lo) continue;
+            float r = (float) Math.hypot(x - sx, z - sz);
+            if (r < 0.35f || r > 1.6f) continue;
+            h[Math.min(bins - 1, (int) ((y - lo) / 0.05f))]++;
+        }
+        int bi = -1;
+        for (int b = 0; b < bins; b++) if (h[b] > 30 && (bi < 0 || h[b] > h[bi])) bi = b;
+        if (bi < 0) return roomReady ? Math.min(room.floorY, sy) : sy - 1.0f;
+        return lo + (bi + 1) * 0.05f;
+    }
+
+    private void demoTap(float tx, float ty) {
+        int tool = demoTool; demoTool = 0;
+        int i = pickIndex(tx, ty);
+        if (i < 0) { activity.toast("Nothing there. Tap right on the person."); return; }
+        float sx = pos.get(i * 3), sy = pos.get(i * 3 + 1), sz = pos.get(i * 3 + 2);
+        float fl = localFloor(sx, sy, sz);
+        if (tool == 2) { buildInterview(sx, fl, sz); activity.toast("Interview set placed: subject, camera and 3 lights."); return; }
+        removePerson(sx, sy, sz, fl);
+    }
+
+    /** Everything standing on the floor there, joined up (12 cm gaps), within 0.7 m of the tap and up to 2.3 m tall. */
+    private void removePerson(float sx, float sy, float sz, float fl) {
+        final float V = 0.06f, R = 0.7f;
+        java.util.HashMap<Long, Integer> cells = new java.util.HashMap<>();
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            if (y < fl + 0.05f || y > fl + 2.3f || Math.hypot(x - sx, z - sz) > R) continue;
+            cells.merge(ContinueAlign.key(x, y, z, V), 1, Integer::sum);
+        }
+        // start from the candidate cells next to the tap
+        java.util.ArrayDeque<long[]> q = new java.util.ArrayDeque<>();
+        java.util.HashSet<Long> in = new java.util.HashSet<>();
+        int ix0 = (int) Math.floor(sx / V), iy0 = (int) Math.floor(Math.max(sy, fl + 0.1f) / V), iz0 = (int) Math.floor(sz / V);
+        for (int dx = -3; dx <= 3; dx++) for (int dy = -3; dy <= 3; dy++) for (int dz = -3; dz <= 3; dz++) {
+            long k = ContinueAlign.key((ix0 + dx + 0.5f) * V, (iy0 + dy + 0.5f) * V, (iz0 + dz + 0.5f) * V, V);
+            if (cells.containsKey(k) && in.add(k)) q.add(new long[]{ix0 + dx, iy0 + dy, iz0 + dz});
+        }
+        if (q.isEmpty()) { activity.toast("That doesn't look like something standing there. Tap the person's body."); return; }
+        while (!q.isEmpty()) {
+            long[] c = q.poll();
+            for (int dx = -2; dx <= 2; dx++) for (int dy = -2; dy <= 2; dy++) for (int dz = -2; dz <= 2; dz++) {
+                long nx = c[0] + dx, ny = c[1] + dy, nz = c[2] + dz;
+                long k = ContinueAlign.key((nx + 0.5f) * V, (ny + 0.5f) * V, (nz + 0.5f) * V, V);
+                if (cells.containsKey(k) && in.add(k)) q.add(new long[]{nx, ny, nz});
+            }
+        }
+        takeUndo("Remove person");
+        int j = 0, removed = 0;
+        double cx = 0, cz = 0;
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            boolean gone = y >= fl + 0.05f && y <= fl + 2.3f && Math.hypot(x - sx, z - sz) <= R && in.contains(ContinueAlign.key(x, y, z, V));
+            if (gone) { removed++; cx += x; cz += z; continue; }
+            if (j != i) {
+                pos.put(j * 3, x); pos.put(j * 3 + 1, y); pos.put(j * 3 + 2, z);
+                for (int a = 0; a < 4; a++) col.put(j * 4 + a, col.get(i * 4 + a));
+                obs[j] = obs[i]; seenStamp[j] = seenStamp[i]; thru[j] = thru[i];
+            }
+            j++;
+        }
+        count = j; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
+        if (removed > 0) personSpot = new float[]{(float) (cx / removed), fl, (float) (cz / removed)};
+        surfCount = 0; surfShown = null; buildSurfels();
+        autosave();
+        log(String.format(java.util.Locale.US, "removed person: %d points, %d cells, floor %.2f", removed, in.size(), fl));
+        activity.toast(removed > 0 ? "Person removed (" + removed + " points). Undo puts them back." : "Nothing removed.");
+    }
+
+    /** Toggle the interview set: at the removed person's spot, or (none yet) where the next tap lands. Returns a message. */
+    String interviewToggle() {
+        if (ivPerson != null) { ivPerson = null; return "Interview set hidden"; }
+        float[] p = personSpot;
+        if (p != null) { buildInterview(p[0], p[1], p[2]); return "Interview set placed where the person stood"; }
+        demoTool = 2;
+        return "Tap the spot on stage where the person should stand";
+    }
+
+    private static final class Lines {
+        float[] a = new float[600]; int n;
+        void v(float x, float y, float z) { if (n + 3 > a.length) a = java.util.Arrays.copyOf(a, a.length * 2); a[n++] = x; a[n++] = y; a[n++] = z; }
+        void seg(float[] p, float[] q) { v(p[0], p[1], p[2]); v(q[0], q[1], q[2]); }
+        float[] get() { return java.util.Arrays.copyOf(a, n); }
+    }
+
+    private void buildInterview(float px, float fl, float pz) {
+        // the subject faces where the scan was taken from (the audience side)
+        double sx = 0, sz = 0; int pn = 0;
+        for (int i = 0; i < pathCount; i++) { sx += path.get(i * 3); sz += path.get(i * 3 + 2); pn++; }
+        float fx, fz;
+        if (pn > 0) { fx = (float) (sx / pn) - px; fz = (float) (sz / pn) - pz; } else { fx = (float) Math.sin(yaw); fz = (float) Math.cos(yaw); }
+        float fl2 = (float) Math.hypot(fx, fz);
+        if (fl2 < 1e-3f) { fx = 0; fz = 1; } else { fx /= fl2; fz /= fl2; }
+        final float rx = -fz, rz = fx; // the subject's left/right
+        final float ffx = fx, ffz = fz;
+        java.util.function.BiFunction<float[], Float, float[]> W = (ab, h) -> new float[]{px + ab[0] * ffx + ab[1] * rx, fl + h, pz + ab[0] * ffz + ab[1] * rz};
+        // subject: a simple standing figure
+        Lines per = new Lines();
+        float[] head = W.apply(new float[]{0, 0}, 1.62f);
+        for (int k = 0; k < 16; k++) {
+            double a0 = k * Math.PI / 8, a1 = (k + 1) * Math.PI / 8;
+            per.seg(W.apply(new float[]{0, 0.1f * (float) Math.cos(a0)}, 1.62f + 0.12f * (float) Math.sin(a0)), W.apply(new float[]{0, 0.1f * (float) Math.cos(a1)}, 1.62f + 0.12f * (float) Math.sin(a1)));
+        }
+        float[] neck = W.apply(new float[]{0, 0}, 1.5f), hip = W.apply(new float[]{0, 0}, 0.95f);
+        per.seg(neck, hip);
+        float[] shL = W.apply(new float[]{0, 0.21f}, 1.44f), shR = W.apply(new float[]{0, -0.21f}, 1.44f);
+        per.seg(shL, shR);
+        per.seg(shL, W.apply(new float[]{0.05f, 0.27f}, 0.85f)); per.seg(shR, W.apply(new float[]{0.05f, -0.27f}, 0.85f));
+        float[] hL = W.apply(new float[]{0, 0.11f}, 0.95f), hR = W.apply(new float[]{0, -0.11f}, 0.95f);
+        per.seg(hL, hR);
+        per.seg(hL, W.apply(new float[]{0, 0.13f}, 0f)); per.seg(hR, W.apply(new float[]{0, -0.13f}, 0f));
+        // camera on a tripod, 2.2 m in front at eye height, with its field of view
+        Lines cam = new Lines();
+        float[] C = W.apply(new float[]{2.2f, 0}, 1.5f);
+        box(cam, C, 0.11f, 0.08f, 0.08f, ffx, ffz);
+        for (int k = 0; k < 3; k++) {
+            double a = k * 2 * Math.PI / 3;
+            cam.seg(new float[]{C[0], C[1] - 0.08f, C[2]}, new float[]{C[0] + 0.35f * (float) Math.cos(a), fl, C[2] + 0.35f * (float) Math.sin(a)});
+        }
+        float[] lens = W.apply(new float[]{2.09f, 0}, 1.5f);
+        float[][] fr = new float[4][];
+        for (int k = 0; k < 4; k++) fr[k] = W.apply(new float[]{0.0f, (k == 0 || k == 3 ? 1 : -1) * 0.75f}, 1.5f + (k < 2 ? 0.42f : -0.42f));
+        for (int k = 0; k < 4; k++) { cam.seg(lens, fr[k]); cam.seg(fr[k], fr[(k + 1) % 4]); }
+        // lights: key, fill and back, each on a stand, pointing at the face, with its beam
+        Lines li = new Lines(), ray = new Lines(), cone = new Lines();
+        float[] face = W.apply(new float[]{0, 0}, 1.55f);
+        float[][] at = {{1.8f, 40, 2.2f}, {2.2f, -55, 1.9f}, {1.6f, 160, 2.4f}};
+        for (float[] L : at) {
+            double a = Math.toRadians(L[1]);
+            float[] H = W.apply(new float[]{L[0] * (float) Math.cos(a), L[0] * (float) Math.sin(a)}, L[2]);
+            float[] base = {H[0], fl, H[2]};
+            li.seg(base, new float[]{H[0], H[1] - 0.15f, H[2]});
+            for (int k = 0; k < 3; k++) { double b = k * 2 * Math.PI / 3 + 0.5; li.seg(new float[]{H[0], fl + 0.3f, H[2]}, new float[]{H[0] + 0.4f * (float) Math.cos(b), fl, H[2] + 0.4f * (float) Math.sin(b)}); }
+            float dx = face[0] - H[0], dy = face[1] - H[1], dz = face[2] - H[2], dl = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+            dx /= dl; dy /= dl; dz /= dl;
+            float hl = (float) Math.hypot(dx, dz);
+            box(li, H, 0.15f, 0.15f, 0.15f, dx / Math.max(hl, 1e-3f), dz / Math.max(hl, 1e-3f));
+            // beam: from the light's front to a circle around the face and a little past it
+            float ux = -dz, uz = dx; float ul = (float) Math.hypot(ux, uz); ux /= ul; uz /= ul;          // sideways
+            float wx = dy * uz, wy = dz * ux - dx * uz, wz = -dy * ux; // w = d x u
+            float wl = (float) Math.sqrt(wx * wx + wy * wy + wz * wz); wx /= wl; wy /= wl; wz /= wl;
+            float len = dl * 1.15f, rad = 0.55f * 1.15f;
+            float[] src = {H[0] + dx * 0.16f, H[1] + dy * 0.16f, H[2] + dz * 0.16f};
+            float[] end = {H[0] + dx * len, H[1] + dy * len, H[2] + dz * len};
+            int segs = 24;
+            float[] prev = null;
+            for (int k = 0; k <= segs; k++) {
+                double t = k * 2 * Math.PI / segs; float c = (float) Math.cos(t) * rad, sn = (float) Math.sin(t) * rad;
+                float[] e = {end[0] + c * ux + sn * wx, end[1] + sn * wy, end[2] + c * uz + sn * wz};
+                if (k % 3 == 0 && k < segs) ray.seg(src, e);
+                if (prev != null) { ray.seg(prev, e); cone.v(src[0], src[1], src[2]); cone.v(prev[0], prev[1], prev[2]); cone.v(e[0], e[1], e[2]); }
+                prev = e;
+            }
+        }
+        ivCam = cam.get(); ivLights = li.get(); ivRays = ray.get(); ivCones = cone.get();
+        ivPerson = per.get();
+        log(String.format(java.util.Locale.US, "interview set at %.2f %.2f %.2f facing %.2f %.2f", px, fl, pz, ffx, ffz));
+    }
+
+    /** A wireframe box centred at c, turned to face (fx, fz) horizontally; a = half length along f, b = half width, h = half height. */
+    private static void box(Lines l, float[] c, float a, float b, float h, float fx, float fz) {
+        float rx = -fz, rz = fx;
+        float[][] p = new float[8][];
+        for (int k = 0; k < 8; k++) {
+            float sa = (k & 1) == 0 ? -a : a, sb = (k & 2) == 0 ? -b : b, sh = (k & 4) == 0 ? -h : h;
+            p[k] = new float[]{c[0] + sa * fx + sb * rx, c[1] + sh, c[2] + sa * fz + sb * rz};
+        }
+        int[][] e = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+        for (int[] q : e) l.seg(p[q[0]], p[q[1]]);
+    }
+
+    private static final float[] IV_PERSON = {1f, 1f, 1f, 0.95f}, IV_CAM = {0.35f, 0.85f, 1f, 1f}, IV_LIGHT = {0.95f, 0.66f, 0.23f, 1f},
+            IV_RAY = {1f, 0.85f, 0.45f, 0.55f}, IV_CONE = {1f, 0.85f, 0.45f, 0.10f};
+
+    private void drawInterview(float[] m) {
+        float[] per = ivPerson;
+        if (per == null) return;
+        float dens = height / 1000f;
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        planDraw(m, ivCones, GLES20.GL_TRIANGLES, IV_CONE, 1);
+        GLES20.glLineWidth(2f * dens);
+        planDraw(m, ivRays, GLES20.GL_LINES, IV_RAY, 1);
+        GLES20.glLineWidth(4f * dens);
+        planDraw(m, ivLights, GLES20.GL_LINES, IV_LIGHT, 1);
+        planDraw(m, ivCam, GLES20.GL_LINES, IV_CAM, 1);
+        planDraw(m, per, GLES20.GL_LINES, IV_PERSON, 1);
     }
 
     private float boxHalfX, boxHalfZ, boxMinY, boxMaxY;
@@ -4691,6 +4909,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         if (overlays) drawPath(mvp);
         drawOutlets(mvp);
+        drawInterview(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);
         if (lighting.enabled) drawLightGizmos(mvp);
         else if (plan != null && overlays) drawPlan(mvp, plan);
