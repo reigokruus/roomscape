@@ -756,7 +756,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             loadPlanning(dir); if (done != null) done.run();
             if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
-            if (DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) // older scans: place the back wall once, no rescan
+            if (AUTO_PROCESS && DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) // older scans: place the back wall once, no rescan
                 glTasks.add(() -> { if (!hallDone) { hallDone = true; estimateHall(surfGen, false); } });
         });
     }
@@ -1555,7 +1555,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private volatile boolean cleaning;
 
     // ---- automatic processing after a scan: depth AI -> clean-up -> splats -> a round of training ----
-    static final boolean AUTO_PROCESS = true;
+    static final boolean AUTO_PROCESS = false; // demo: keep only what the live scan captured (no depth AI, clean-up, back-wall guess or refining)
     static final int AUTO_STEPS = 400;           // training steps (~4 min on the S24; 150 left the splats blotchy)
     private volatile int autoStage;             // 0 off, 1 depth AI, 2 clean-up, 3 splats, 4 training, 5 done
 
