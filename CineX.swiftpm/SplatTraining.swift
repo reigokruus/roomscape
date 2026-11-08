@@ -90,17 +90,30 @@ final class SplatTrainingRun: ObservableObject {
                     }
                 }
             }
-            let splats = Self.surfels(trainer.output())
-            Surfels.write(splats, to: ScanStore.trainedSurfelsURL(scan))
-            let text = box.progressText(iteration: trainer.iteration, ms: nil, stop: stop)
+            // Only keep training that also helps photos it didn't learn from. With few photos from about one spot it
+            // just learns those photos by heart and looks a little worse from anywhere else: keep the raw scan then.
+            let helped = box.lastGain.map { $0 >= Self.minKeptGain } ?? true
+            let splats: [SurfelRecord]
+            if helped {
+                splats = Self.surfels(trainer.output())
+                Surfels.write(splats, to: ScanStore.trainedSurfelsURL(scan))
+            } else {
+                splats = base
+                try? FileManager.default.removeItem(at: ScanStore.trainedSurfelsURL(scan))
+            }
+            let text = helped ? box.progressText(iteration: trainer.iteration, ms: nil, stop: stop)
+                              : "Training can't improve this scan: its \(trainer.viewCount) photos are from about the same spot. Kept the scan as it was"
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.progress = text
-                self.state = stop == .done ? .done : .paused
+                self.state = stop == .done || !helped ? .done : .paused
                 self.onPreview(splats)
             }
         }
     }
+
+    /// Trained splats are kept only when they match photos left out of training at least this much better.
+    static let minKeptGain: Float = 0.01
 
     /// Stops after the current step; the splats are then shown and saved.
     func pause() {
@@ -195,7 +208,7 @@ final class SplatTrainingRun: ObservableObject {
         private var heldBaseline: [Float] = []
         /// (step, gain on the held-out photos) every `checkEvery` steps of this run.
         private var history: [(iteration: Int, gain: Float)] = []
-        private var lastGain: Float?
+        private(set) var lastGain: Float?
 
         static let checkEvery = 250
         /// Done when the held-out photos gained less than `minGain` over the last `window` steps.
