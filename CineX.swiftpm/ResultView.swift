@@ -953,27 +953,57 @@ private struct ModeLabel: View {
 /// What the training is doing, over the bottom of the 3D view.
 private struct TrainingStatus: View {
     @ObservedObject var run: SplatTrainingRun
+    /// Set a moment after training stopped, so the note doesn't stay over the 3D view.
+    @State private var hidden = false
+
+    /// How long the note stays once training has stopped (paused, done, or failed).
+    static let paused: Duration = .seconds(3)
+    static let failed: Duration = .seconds(6)
 
     var body: some View {
         Group {
-            switch run.state {
-            case .idle:
+            if hidden {
                 EmptyView()
-            case .preparing:
-                Label("Getting the photos ready…", systemImage: "photo.stack")
-            case .training:
-                Label(run.progress.isEmpty ? "Training the splats…" : run.progress, systemImage: "wand.and.stars")
-            case .paused:
-                Label(run.progress + ". Saved.", systemImage: "pause.circle")
-            case .done:
-                Label(run.progress + ". Saved.", systemImage: "checkmark.circle")
-            case .failed(let message):
-                Label(message, systemImage: "exclamationmark.triangle")
+            } else {
+                switch run.state {
+                case .idle:
+                    EmptyView()
+                case .preparing:
+                    note(Label("Getting the photos ready…", systemImage: "photo.stack"))
+                case .training:
+                    note(Label(run.progress.isEmpty ? "Training the splats…" : run.progress, systemImage: "wand.and.stars"))
+                case .paused:
+                    note(Label(run.progress + ". Saved.", systemImage: "pause.circle"))
+                case .done:
+                    note(Label(run.progress + (run.progress.hasPrefix("Training can't") ? "." : ". Saved."),
+                               systemImage: "checkmark.circle"))
+                case .failed(let message):
+                    note(Label(message, systemImage: "exclamationmark.triangle"))
+                }
             }
         }
-        .font(.caption.weight(.medium))
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(.regularMaterial, in: Capsule())
+        .animation(.easeOut(duration: 0.3), value: hidden)
+        // Every new state shows again; a finished one goes away by itself after a few seconds.
+        .task(id: run.state) {
+            hidden = false
+            let wait: Duration?
+            switch run.state {
+            case .paused, .done: wait = Self.paused
+            case .failed: wait = Self.failed
+            default: wait = nil
+            }
+            guard let wait else { return }
+            try? await Task.sleep(for: wait)
+            if !Task.isCancelled { hidden = true }
+        }
+    }
+
+    private func note(_ label: some View) -> some View {
+        label
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(.regularMaterial, in: Capsule())
+            .transition(.opacity)
     }
 }
 
