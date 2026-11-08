@@ -282,10 +282,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             surfDone = s; surfBase = s; surfPending = s;
             if (autoStage == 3) glTasks.add(() -> {
                 if (autoStage != 3) return;
-                autoStage = 4; autoProgress("Step 4 of 4 · Refining detail against your photos", 0.65f);
-                String l = toggleTraining();
-                activity.trainingLabel(l);
-                if (!training) { autoStage = 5; autoProgress("Done", 1f); }
+                // demo: no refining (training made the splats worse every time), finish here
+                autoStage = 5; autoProgress("Done", 1f); autosave();
             });
             log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
                     + (System.currentTimeMillis() - t0) + " ms");
@@ -787,7 +785,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         cornerList.addAll(d.corners); wallList.addAll(d.walls);
                         markFloor = d.floor; markCeiling = d.ceiling;
                     }
-                    if (replaceMarks && d.splN > 0) {
+                    if (replaceMarks && d.splN > 0 && !DEMO_FAR) { // demo: refined splats were always worse, rebuild plain ones
                         Surfels ls = Surfels.empty(d.splN);
                         ls.pos.put(d.splPos).position(0); ls.raw.put(d.splPos).position(0); ls.nrm.put(d.splNrm).position(0); ls.col.put(d.splCol).position(0);
                         ls.trained = true; loadedSplats = ls;
@@ -1076,7 +1074,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     }
                     final int mm = m; final float camX = pm[12], camY = pm[13], camZ = pm[14];
                     glTasks.add(() -> addDepthPoints(P, C, mm, camX, camY, camZ));
-                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Step 1 of 4 · Sharpening depth from your photos (%d/%d)", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
+                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Step 1 of 3 · Sharpening depth from your photos (%d/%d)", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
                     float each = (System.currentTimeMillis() - t0) / 1000f / (ki + 1);
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Depth AI: photo %d of %d (%.1f s each). Each photo's depth is guessed by a neural net and scaled with ARCore's measurements (agrees to %.0f%%). %,d points so far.",
@@ -1566,7 +1564,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         autosave(); // right away: Android may close the app in the background, and the scan only lives in memory
         if (!AUTO_PROCESS) return;
         autoStage = 1;
-        autoProgress("Step 1 of 4 · Sharpening depth from your photos", 0.02f);
+        autoProgress("Step 1 of 3 · Sharpening depth from your photos", 0.02f);
         if (photos.keyframes.isEmpty()) { autoStage = 2; startCleanUp(); return; }
         toggleDepthAI();
         if (!depthRunning) { autoStage = 2; startCleanUp(); }
@@ -1597,7 +1595,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (autoStage == 0 || autoStage == 5) return;
         log("auto: " + what + " failed, skipping ahead");
         if (autoStage == 1) glTasks.add(() -> { autoStage = 2; startCleanUp(); });
-        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Step 3 of 4 · Building the photo-real 3D view", 0.6f); buildSurfels(); });
+        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Step 3 of 3 · Building the photo-real 3D view", 0.6f); buildSurfels(); });
         else { autoStage = 5; autoProgress("Done", 1f); }
     }
 
@@ -1617,7 +1615,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         final float[][] walls = uw;
         activity.updateStatus("Cleaning up the scan: finding floor, ceiling and walls...");
-        if (autoStage == 2) autoProgress("Step 2 of 4 · Straightening floor and walls", 0.52f);
+        if (autoStage == 2) autoProgress("Step 2 of 3 · Straightening floor and walls", 0.52f);
         new Thread(() -> { try {
             long t0 = System.currentTimeMillis();
             CleanUp c = CleanUp.run(ps, cs, n, walls);
@@ -1638,7 +1636,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = n; uploaded = 0; refineCursor = 0;
         rebuildVoxelIndex();
         analyseRoom();
-        if (autoStage == 2) { autoStage = 3; autoProgress("Step 3 of 4 · Building the photo-real 3D view", 0.6f); autosave(); }
+        if (autoStage == 2) { autoStage = 3; autoProgress("Step 3 of 3 · Building the photo-real 3D view", 0.6f); autosave(); }
         buildSurfels();
         activity.updateStatus(c.summary + "\nBuilding splats now (a few seconds), then you can Train splats.\n" + (roomReady ? room.summary : ""));
     }

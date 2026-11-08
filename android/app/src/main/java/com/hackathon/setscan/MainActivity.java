@@ -563,7 +563,7 @@ public class MainActivity extends Activity {
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
         renderer.overlays = debug;
-        Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, refineButton, undoButton};
+        Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, undoButton};
         lightButton.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // lighting is parked for now (rk: just the model)
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
