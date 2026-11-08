@@ -12,6 +12,8 @@ struct HomeView: View {
     /// Debug builds only: -openGear / -openPlanning open those screens at launch.
     @State private var debugGear = false
     @State private var debugPlanning = false
+    /// Improve scan: the saved scan the scanner adds a second pass to.
+    @State private var improving: SavedScan?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -96,7 +98,12 @@ struct HomeView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: SavedScan.self) { scan in
-                ResultView(scan: scan)
+                ResultView(scan: scan, onImprove: {
+                    // Close the result first; it opens again with the merged scan when the scanner is done.
+                    improving = scan
+                    path = []
+                    scanning = true
+                })
             }
             .navigationDestination(isPresented: $debugGear) { GearInventoryView() }
             .navigationDestination(isPresented: $debugPlanning) { PlanningLibraryView() }
@@ -126,12 +133,15 @@ struct HomeView: View {
             .fullScreenCover(isPresented: $scanning, onDismiss: {
                 // Open the result only after the scanner has fully closed, so the two transitions don't collide.
                 scans = ScanStore.list()
-                if let saved = justSaved {
-                    justSaved = nil
-                    path = [saved]
-                }
+                // Improve scan closed without merging (cancelled or failed): go back to the scan it was improving,
+                // not the home screen, where "New room scan" would start a separate scan.
+                let back = justSaved ?? improving
+                improving = nil
+                justSaved = nil
+                if let back { path = [back] }
             }) {
                 ScannerScreen(
+                    improving: improving,
                     onFinished: { saved in
                         justSaved = saved
                         scanning = false
