@@ -3,6 +3,8 @@ import SwiftUI
 struct GearInventoryView: View {
     @State private var items: [GearItem] = []
     @State private var adding = false
+    /// The item being edited (tap a row).
+    @State private var editing: GearItem?
 
     private var grouped: [(GearCategory, [GearItem])] {
         GearCategory.allCases.compactMap { cat in
@@ -23,14 +25,19 @@ struct GearInventoryView: View {
                 ForEach(grouped, id: \.0) { category, catItems in
                     Section(category.rawValue) {
                         ForEach(catItems) { item in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.name)
-                                if !item.notes.isEmpty {
-                                    Text(item.notes)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                            Button { editing = item } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.name)
+                                    if !item.notes.isEmpty {
+                                        Text(item.notes)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
                             }
+                            .tint(.primary)
                         }
                         .onDelete { idx in
                             let ids = idx.map { catItems[$0].id }
@@ -53,16 +60,32 @@ struct GearInventoryView: View {
                 GearStore.save(items)
             }
         }
+        .sheet(item: $editing) { item in
+            AddGearSheet(existing: item) { edited in
+                if let i = items.firstIndex(where: { $0.id == edited.id }) { items[i] = edited }
+                GearStore.save(items)
+            }
+        }
         .onAppear { items = GearStore.load() }
     }
 }
 
 private struct AddGearSheet: View {
+    /// The item to edit, or nil to add a new one.
+    let existing: GearItem?
     let onAdd: (GearItem) -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var category: GearCategory = .camera
-    @State private var name = ""
-    @State private var notes = ""
+    @State private var category: GearCategory
+    @State private var name: String
+    @State private var notes: String
+
+    init(existing: GearItem? = nil, onAdd: @escaping (GearItem) -> Void) {
+        self.existing = existing
+        self.onAdd = onAdd
+        _category = State(initialValue: existing?.category ?? .camera)
+        _name = State(initialValue: existing?.name ?? "")
+        _notes = State(initialValue: existing?.notes ?? "")
+    }
 
     var body: some View {
         NavigationStack {
@@ -96,15 +119,16 @@ private struct AddGearSheet: View {
                         .lineLimit(2...4)
                 }
             }
-            .navigationTitle("Add Gear")
+            .navigationTitle(existing == nil ? "Add Gear" : "Edit Gear")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        onAdd(GearItem(category: category, name: name, notes: notes))
+                    Button(existing == nil ? "Add" : "Save") {
+                        onAdd(GearItem(id: existing?.id ?? UUID(), category: category,
+                                       name: name.trimmingCharacters(in: .whitespaces), notes: notes))
                         dismiss()
                     }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)

@@ -60,7 +60,7 @@ struct ResultView: View {
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
                 if let scene {
-                    RoomSceneView(scene: scene, topView: topView,
+                    RoomSceneView(scene: scene, topView: topView, topTurn: room.map(Self.squaringTurn) ?? 0,
                                   floorY: (lightingOn || objectsOn) ? shell?.floorY : nil,
                                   onFloorTap: floorTapped)
                 } else if let loadError {
@@ -203,6 +203,7 @@ struct ResultView: View {
             room = loaded.0
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-openPlanner"), room != nil { openingPlanner = true }
+            if ProcessInfo.processInfo.arguments.contains("-topView") { topView = true }
             #endif
             switch loaded.1 {
             case .success(let (s, group)):
@@ -598,6 +599,14 @@ struct ResultView: View {
         lightingScene?.apply(lighting)
     }
 
+    /// How far to turn the top view so the room's longest wall lies square to the screen (at most 45°), as in
+    /// the storyboard's floor plan.
+    nonisolated static func squaringTurn(_ room: CapturedRoom) -> Float {
+        guard let longest = room.walls.max(by: { $0.dimensions.x < $1.dimensions.x }) else { return 0 }
+        let r = longest.transform.columns.0
+        return -remainder(atan2(r.z, r.x), .pi / 2)
+    }
+
     /// Tints RoomPlan's grey boxes by type so windows (natural light) and doors stand out.
     ///
     /// Each piece is colored by its own name ("Wall0", "Door0", "Window0"…), not its group's: RoomPlan puts a wall's
@@ -630,6 +639,8 @@ struct ResultView: View {
 struct RoomSceneView: UIViewRepresentable {
     let scene: SCNScene
     let topView: Bool
+    /// Turns the top view about the vertical (radians), so the room can sit square on the screen.
+    var topTurn: Float = 0
     /// When set, a tap on the 3D view reports where it hits the floor plane at this height.
     var floorY: Float? = nil
     var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
@@ -679,7 +690,8 @@ struct RoomSceneView: UIViewRepresentable {
         let top = context.coordinator.topCamera
         top.camera = Self.makeCamera()
         top.position = SCNVector3(center.x, center.y + framing.extent * 1.4, center.z)
-        top.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+        top.simdOrientation = simd_quatf(angle: topTurn, axis: SIMD3(0, 1, 0))
+            * simd_quatf(angle: -.pi / 2, axis: SIMD3(1, 0, 0))
         scene.rootNode.addChildNode(top)
 
         Self.addAmbientLight(to: scene)

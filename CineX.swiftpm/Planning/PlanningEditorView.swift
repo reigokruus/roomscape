@@ -28,6 +28,12 @@ struct PlanningEditorView: View {
         if let shotID, project.shots.contains(where:{ $0.id == shotID }) { store.selectedShotID = shotID }
         _store = StateObject(wrappedValue:store)
     }
+    /// "RoomScape - Living room", made safe for a file name.
+    private var exportFilename:String {
+        let name = store.project.name.components(separatedBy:CharacterSet(charactersIn:"/\\:?%*|\"<>")).joined(separator:"-")
+            .trimmingCharacters(in:.whitespacesAndNewlines)
+        return name.isEmpty ? "RoomScape-\(store.project.id.uuidString)" : "RoomScape - \(name)"
+    }
     var body:some View {
         ScrollView {
             VStack(alignment:.leading,spacing:14) {
@@ -96,7 +102,7 @@ struct PlanningEditorView: View {
         .fileImporter(isPresented:$importing,allowedContentTypes:[.json]) { result in
             do { store.importFile(try result.get()) } catch { store.error = error.localizedDescription }
         }
-        .fileExporter(isPresented:$exporting,document:exportDocument,contentType:.json,defaultFilename:"Shootlocal-\(store.project.id.uuidString)") { result in
+        .fileExporter(isPresented:$exporting,document:exportDocument,contentType:.json,defaultFilename:exportFilename) { result in
             if case .failure(let error) = result { store.error = error.localizedDescription }
         }
         .sheet(item:$editItem) { item in
