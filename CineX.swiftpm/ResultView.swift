@@ -48,6 +48,8 @@ struct ResultView: View {
     @State private var findError: String?
     /// The camera's view in the lighting preview: small in the corner, or large.
     @State private var shotLarge = false
+    /// Height of the controls over the 3D view (one or two rows, with their padding).
+    @State private var controlsHeight: CGFloat = 58
     @State private var planningShot = false
     @State private var planError: String?
     /// The lighting setup being opened as a new storyboard view.
@@ -78,7 +80,7 @@ struct ResultView: View {
                     // Under the controls row, so a large view never covers the buttons.
                     ShotPreviewInset(scene: scene, setup: lighting, large: $shotLarge)
                         .padding(.horizontal, shotLarge ? 16 : 10)
-                        .padding(.top, shotLarge ? 64 : 0)
+                        .padding(.top, shotLarge ? controlsHeight + 6 : 0)
                         .padding(.bottom, shotLarge ? 16 : 10)
                         .frame(maxWidth: .infinity, maxHeight: .infinity,
                                alignment: shotLarge ? .center : .bottomTrailing)
@@ -102,6 +104,8 @@ struct ResultView: View {
                     }
                 }
                 .padding(10)
+                // One row or two: the large camera view starts below them.
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controlsHeight = $0 }
             }
             .overlay(alignment: .bottom) {
                 if let training {
@@ -214,6 +218,7 @@ struct ResultView: View {
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-openPlanner"), room != nil { openingPlanner = true }
             if ProcessInfo.processInfo.arguments.contains("-topView") { topView = true }
+            if ProcessInfo.processInfo.arguments.contains("-shotLarge") { shotLarge = true }
             #endif
             switch loaded.1 {
             case .success(let (s, group)):
@@ -274,6 +279,9 @@ struct ResultView: View {
             self.lightingScene = lightingScene
             self.shell = shell
             style = .mesh
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
+            #endif
             let training = SplatTrainingRun(scan: scan, base: base, shell: shell)
             training.onPreview = { showSplats($0) }
             self.training = training
