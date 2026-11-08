@@ -662,6 +662,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float[] improveBase;             // its points (sub-sampled), to check which corners match
     private int improveBaseN;
     private volatile float[] improveT;       // new scan -> saved scan: {cos, sin, tx, ty, tz}
+    // "Continue scan" (demo): the saved room is found automatically from the points, no corner taps
+    private volatile boolean contAuto;
+    private volatile ContinueAlign.Base contBase;
+    private volatile boolean contBusy;
+    private long contLastMs;
+    private float[] contPrev; private int contAgree;
+    private volatile float contScore, contLockedScore;
+    private float appendSimplify;            // > 0: the saved scan is merged in simplified (one point per cell of this size)
+    private int depthOnlyFirst = -1;         // > 0: the depth AI only looks at the first photos (the new pass)
 
     interface SaveDone { void done(File dir, String error); }
 
@@ -734,7 +743,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread: open a saved scan in the viewer. Photos stream in one by one. */
     void loadScan(File dir, Runnable done) {
         reset();
-        improveDir = null; improveT = null;
+        improveDir = null; improveT = null; contAuto = false; contBase = null;
         idle = false; viewing = true; sensors.active = false;
         lastPlanes = new java.util.ArrayList<>();
         currentDir = dir;
@@ -761,6 +770,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         new Thread(() -> {
             try {
                 ScanStore.Data d = ScanStore.load(dir);
+                if (appendSimplify > 0) simplifyLoaded(d, appendSimplify);
                 if (currentName == null || replaceMarks) currentName = d.name;
                 loadedAny = true;
                 if (d.lux > 0) { loadedLux = d.lux; Lighting.ROOM_LUX = d.lux; }
@@ -812,10 +822,90 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }).start();
     }
 
+    /** Continue scan: the saved scan's points merged to one per cell (average position and colour), so it costs far less memory. */
+    private void simplifyLoaded(ScanStore.Data d, float cell) {
+        int n = d.n, cap = 1 << 21, maxCells = cap * 6 / 10;
+        LongIntMap m = new LongIntMap(cap);
+        int cn = 0;
+        float[] sp = new float[Math.min(n, maxCells) * 3]; int[] sc = new int[Math.min(n, maxCells) * 3], cnt = new int[Math.min(n, maxCells)];
+        for (int i = 0; i < n; i++) {
+            float x = d.pos[i * 3], y = d.pos[i * 3 + 1], z = d.pos[i * 3 + 2];
+            long k = ContinueAlign.key(x, y, z, cell);
+            int j = m.get(k);
+            if (j < 0) { if (cn >= cnt.length) continue; j = cn++; m.put(k, j); }
+            sp[j * 3] += x; sp[j * 3 + 1] += y; sp[j * 3 + 2] += z;
+            sc[j * 3] += d.col[i * 3] & 255; sc[j * 3 + 1] += d.col[i * 3 + 1] & 255; sc[j * 3 + 2] += d.col[i * 3 + 2] & 255;
+            cnt[j]++;
+        }
+        float[] p = new float[cn * 3]; byte[] c = new byte[cn * 3];
+        for (int j = 0; j < cn; j++) {
+            float w = cnt[j];
+            for (int a = 0; a < 3; a++) { p[j * 3 + a] = sp[j * 3 + a] / w; c[j * 3 + a] = (byte) Math.round(sc[j * 3 + a] / w); }
+        }
+        log(String.format(java.util.Locale.US, "continue: saved scan simplified %,d -> %,d points (%.0f cm cells)", n, cn, cell * 100));
+        d.pos = p; d.col = c; d.n = cn;
+    }
+
+    /** GL thread, while continuing a scan: look for the saved room every 1.5 s until found, then keep following it. */
+    private void maybeContinueAlign(long nowMs) {
+        ContinueAlign.Base b = contBase;
+        if (!contAuto || b == null || contBusy || count < 1500) return;
+        boolean locked = improveT != null;
+        if (nowMs - contLastMs < (locked ? 4000 : 1500)) return;
+        contLastMs = nowMs;
+        int n = count, step = Math.max(1, n / 20000), k = 0;
+        float[] sm = new float[(n / step + 1) * 3];
+        for (int i = 0; i < n; i += step) { if (obs[i] == 0) continue; sm[k * 3] = pos.get(i * 3); sm[k * 3 + 1] = pos.get(i * 3 + 1); sm[k * 3 + 2] = pos.get(i * 3 + 2); k++; }
+        final int sn = k; final float[] cur = improveT;
+        contBusy = true;
+        new Thread(() -> {
+            try {
+                long t0 = System.currentTimeMillis();
+                ContinueAlign.Probes pr = ContinueAlign.probes(sm, sn);
+                if (pr.coarseCells < 60) return; // too little seen yet
+                if (cur != null) {
+                    ContinueAlign.Result r = ContinueAlign.findNear(b, pr, cur);
+                    if (r != null && r.score >= 0.8f * contLockedScore && improveDir != null) { improveT = r.t; contScore = r.score; contLockedScore = Math.max(contLockedScore * 0.9f, r.score); }
+                    return;
+                }
+                ContinueAlign.Result r = ContinueAlign.findGlobal(b, pr);
+                if (r == null) return;
+                contScore = r.score;
+                boolean clear = r.score >= 0.33f && r.score >= 1.4f * r.second;
+                float[] p = contPrev;
+                boolean same = p != null && Math.abs(Math.atan2(r.t[1], r.t[0]) - Math.atan2(p[1], p[0])) < Math.toRadians(4) && Math.hypot(r.t[2] - p[2], r.t[4] - p[4]) < 0.25f && Math.abs(r.t[3] - p[3]) < 0.2f;
+                contAgree = clear ? (same ? contAgree + 1 : 1) : 0;
+                contPrev = r.t;
+                log(String.format(java.util.Locale.US, "continue: match %.0f%% (next best %.0f%%), %d cells seen, %s, %d ms",
+                        r.score * 100, r.second * 100, pr.coarseCells, clear ? (contAgree >= 2 ? "recognised" : "checking") : "not sure", System.currentTimeMillis() - t0));
+                if (contAgree >= 2 && improveDir != null && contAuto) {
+                    improveT = r.t; contLockedScore = r.score;
+                    activity.toast(String.format(java.util.Locale.US, "Recognised the saved room (%.0f%% match). Ready, keep scanning: the saved part is shown in blue.", r.score * 100));
+                }
+            } catch (Throwable e) { logError("continue align", new RuntimeException(e)); }
+            finally { contBusy = false; }
+        }).start();
+    }
+
+    private static final float[] CONT_GHOST_COL = {0.45f, 0.8f, 1f, 0.35f};
+    private final float[] contInv = new float[16], contMvp = new float[16];
+
+    /** While continuing: the saved scan (simplified) drawn where it was recognised. */
+    private void drawContinueGhost(float[] m) {
+        float[] t = improveT; ContinueAlign.Base b = contBase;
+        if (!contAuto || t == null || b == null || b.ghostN == 0) return;
+        float[] T = {t[0], 0, t[1], 0, 0, 1, 0, 0, -t[1], 0, t[0], 0, t[2], t[3], t[4], 1};
+        Matrix.invertM(contInv, 0, T, 0);
+        Matrix.multiplyMM(contMvp, 0, m, 0, contInv, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        planDraw(contMvp, b.ghost, GLES20.GL_POINTS, CONT_GHOST_COL, 5f * height / 1000f);
+    }
+
     /** GL thread: a fresh scan (not tied to a save yet). */
     void startNewScan() {
         reset();
-        improveDir = null; improveT = null; currentDir = null; currentName = null;
+        improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
         idle = false;
     }
 
@@ -836,10 +926,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         improveName = currentName;
         currentDir = dir;
         improveBase = null; improveBaseN = 0;
+        contAuto = DEMO_FAR; contBase = null; contBusy = false; contPrev = null; contAgree = 0; contScore = 0; contLockedScore = 0; contLastMs = 0;
         new Thread(() -> {
             try {
                 ScanStore.Data d = ScanStore.load(dir);
                 improveName = d.name;
+                if (contAuto) {
+                    long t0 = System.currentTimeMillis();
+                    ContinueAlign.Base b = ContinueAlign.buildBase(d.pos, d.n);
+                    contBase = b;
+                    log("continue: saved scan " + d.n + " points -> " + b.qn + " match cells, " + b.ghostN + " overlay points (" + (System.currentTimeMillis() - t0) + " ms)");
+                }
                 int step = Math.max(1, d.n / 150000), k = 0;
                 float[] b = new float[(d.n / step + 1) * 3];
                 for (int i = 0; i < d.n; i += step) { b[k * 3] = d.pos[i * 3]; b[k * 3 + 1] = d.pos[i * 3 + 1]; b[k * 3 + 2] = d.pos[i * 3 + 2]; k++; }
@@ -851,6 +948,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     String improveHint() {
         if (improveDir == null) return null;
+        if (contAuto) return "Continuing \"" + (improveName == null ? "scan" : improveName) + "\": point the phone at a part you already scanned. You'll get a message when the saved room is recognised.";
         if (improveCorners.size() < 2) return "This saved scan has no room corners marked, so the two scans can't be lined up. Scan normally; it will be kept as a new scan.";
         return "Improving \"" + (improveName == null ? "scan" : improveName) + "\": tap two of the room's corners (Room corner) to line this scan up with the saved one, then scan the parts you want sharper.";
     }
@@ -929,9 +1027,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float[] t = improveT;
         File dir = improveDir;
         improveDir = null;
+        boolean wasAuto = contAuto;
+        contAuto = false; contBase = null;
         if (t == null) {
             currentDir = null; currentName = null; // keep it as its own scan
-            activity.toast("Not lined up with the saved scan (no matching corners), so this is kept as a new scan.");
+            activity.toast(wasAuto ? "The saved room wasn't recognised, so this is kept as a new scan." : "Not lined up with the saved scan (no matching corners), so this is kept as a new scan.");
             enterViewer();
             startAuto();
             return;
@@ -963,7 +1063,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log("improve: merging " + count + " new points into " + dir);
         activity.updateStatus("Merging with the saved scan...");
         currentDir = dir;
+        depthOnlyFirst = photos.keyframes.size(); // the saved photos were processed already
+        appendSimplify = wasAuto ? 0.04f : 0;
         appendSaved(dir, true, () -> {
+            appendSimplify = 0;
             enterViewer();
             startAuto();
             activity.updateStatus(String.format(java.util.Locale.US, "Merged: %,d points from this pass + the saved scan = %,d points, %d photos. Run Depth AI and Clean up, then Save.\n%s",
@@ -982,6 +1085,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     String toggleDepthAI() {
         if (depthRunning) { depthRunning = false; return "Depth AI"; }
         final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
+        if (depthOnlyFirst > 0 && depthOnlyFirst < kfs.size()) kfs.subList(depthOnlyFirst, kfs.size()).clear();
         if (kfs.isEmpty()) { activity.updateStatus("No photos were saved during this scan, so there is nothing for the depth AI to look at."); return "Depth AI"; }
         training = false;
         // JPEG every photo now (GL thread), so the pass can keep reading photos while the app is in the background
@@ -2995,7 +3099,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthRunning = false; cleaning = false; glTasks.clear();
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
-        voxels.clear();
+        voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
@@ -3412,6 +3516,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             drawPaint(mvp);
             if (LIVE_MESH) { maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); }
             else if (LIVE_DISCS) drawLiveDiscs(mvp);
+            if (contAuto && improveDir != null) { maybeContinueAlign(nowMs); drawContinueGhost(mvp); }
             float[] tap = pendingTap;
             if (tap != null) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
             maybeStartLiveRoom(nowMs);
@@ -4489,7 +4594,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (d < 0.35f) { level = 2; hint = LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
         else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = "This spot is done. Move on to the next red area"; }
-        if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
+        if (improveDir != null && contAuto) sub = improveT != null ? "✓ Saved room recognised. Keep scanning, the saved part is shown in blue"
+                : contBase == null ? "Loading the saved scan…" : "Point at a part you scanned before so it can find its place" + (contScore > 0 ? String.format(java.util.Locale.US, " (best match %.0f%%)", contScore * 100) : "");
+        else if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
         else if (photoJustTaken()) sub = "📷 Photo " + photos.keyframes.size() + " taken, keep swaying";
         else if (guideText != null && level == 0) sub = guideText;
         // keep a hint up for 1.5 s, unless something more urgent replaces it
