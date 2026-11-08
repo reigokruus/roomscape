@@ -51,19 +51,19 @@ final class StoryboardScanScene: ObservableObject {
             state = .unavailable
             return
         }
-        let loaded = await Task.detached(priority: .userInitiated) { () -> (RoomShell, [RoomObject], ObjectsScene.Built)? in
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (RoomShell, [RoomObject], ObjectsScene.Built, SplatTidy.ShellColors)? in
             guard let room = ScanStore.loadRoom(scan) else { return nil }
             let shell = RoomShell(room: room)
             let objects = RoomObjects.load(scan)?.objects ?? RoomObjects.fromRoomPlan(room)
             guard let base = ScanStore.loadSurfels(scan, room: room), !base.isEmpty else { return nil }
-            let shown = ScanStore.loadTrainedSurfels(scan) ?? base
-            return (shell, objects, ObjectsScene.build(shown, objects: objects, floorY: shell.floorY))
+            let tidy = SplatTidy.tidy(ScanStore.loadTrainedSurfels(scan) ?? base, shell: shell)
+            return (shell, objects, ObjectsScene.build(tidy.surfels, objects: objects, floorY: shell.floorY), tidy.colors)
         }.value
-        guard let (shell, objects, built) = loaded else {
+        guard let (shell, objects, built, colors) = loaded else {
             state = .unavailable
             return
         }
-        splatRoot.addChildNode(SplatScene.shellNode(shell))
+        splatRoot.addChildNode(SplatScene.shellNode(shell, colors: colors))
         if let ceiling = Self.ceiling(shell) { splatRoot.addChildNode(ceiling) }
         splatRoot.addChildNode(built.room)
         for node in built.objects.values { splatRoot.addChildNode(node) }
@@ -138,8 +138,7 @@ final class StoryboardScanScene: ObservableObject {
     private static func ceiling(_ shell: RoomShell) -> SCNNode? {
         let outline = shell.floorOutline
         guard outline.count >= 3 else { return nil }
-        let tops = shell.walls.map { $0.center.y + $0.halfHeight }.sorted()
-        let top = tops.isEmpty ? shell.floorY + 2.5 : tops[tops.count / 2]
+        let top = shell.ceilingY ?? shell.floorY + 2.5
         let xs = outline.map(\.x), zs = outline.map(\.z)
         let plane = SCNPlane(width: CGFloat(xs.max()! - xs.min()! + 2), height: CGFloat(zs.max()! - zs.min()! + 2))
         let m = material(UIColor(white: 0.85, alpha: 1))

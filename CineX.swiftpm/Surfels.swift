@@ -307,6 +307,12 @@ struct RoomShell {
     /// Floor outline in world space (y = floorY), in order.
     let floorOutline: [SIMD3<Float>]
 
+    /// Ceiling height: the walls' typical top (the median, so one odd wall doesn't move it), or nil with no walls.
+    var ceilingY: Float? {
+        let tops = walls.map { $0.center.y + $0.halfHeight }.sorted()
+        return tops.isEmpty ? nil : tops[tops.count / 2]
+    }
+
     init(room: CapturedRoom) {
         func plane(_ s: CapturedRoom.Surface) -> (c: SIMD3<Float>, r: SIMD3<Float>, u: SIMD3<Float>, n: SIMD3<Float>) {
             let t = s.transform

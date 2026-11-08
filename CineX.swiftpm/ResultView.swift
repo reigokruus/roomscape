@@ -211,16 +211,20 @@ struct ResultView: View {
             // Objects: what was saved (with the user's edits), else RoomPlan's furniture.
             let saved = RoomObjects.load(scan)
             let objects = saved?.objects ?? RoomObjects.fromRoomPlan(room)
-            // Shown: the trained splats when the scan was trained before, else the raw ones (also the training's start).
-            let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], [SurfelRecord], ObjectsScene.Built)? in
+            // Shown: the trained splats when the scan was trained before, else the raw ones (also the training's start),
+            // tidied for viewing (see `SplatTidy`).
+            let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], SplatTidy.Result, ObjectsScene.Built)? in
                 guard let base = ScanStore.loadSurfels(scan, room: room), !base.isEmpty else { return nil }
-                let shown = ScanStore.loadTrainedSurfels(scan) ?? base
-                return (base, shown, ObjectsScene.build(shown, objects: objects, floorY: shell.floorY))
+                let tidy = SplatTidy.tidy(ScanStore.loadTrainedSurfels(scan) ?? base, shell: shell)
+                print("splats shown: \(tidy.surfels.count) (dropped \(tidy.outside) outside the room, \(tidy.floaters) "
+                      + "floaters; \(tidy.onCeiling) on the ceiling)")
+                return (base, tidy, ObjectsScene.build(tidy.surfels, objects: objects, floorY: shell.floorY))
             }.value
             buildingSplats = false
-            guard let (base, surfels, parts) = built else { return }
+            guard let (base, tidy, parts) = built else { return }
+            let surfels = tidy.surfels
             let splats = SCNNode()
-            splats.addChildNode(SplatScene.shellNode(shell))
+            splats.addChildNode(SplatScene.shellNode(shell, colors: tidy.colors))
             let objectsScene = ObjectsScene()
             objectsScene.install(parts, objects: objects)
             splats.addChildNode(objectsScene.root)
@@ -447,12 +451,13 @@ struct ResultView: View {
         rebuildingSplats = true
         let current = objects
         Task {
-            let parts = await Task.detached(priority: .userInitiated) {
-                ObjectsScene.build(splats, objects: current, floorY: shell.floorY)
+            let (tidied, parts) = await Task.detached(priority: .userInitiated) {
+                let tidied = SplatTidy.tidy(splats, shell: shell).surfels
+                return (tidied, ObjectsScene.build(tidied, objects: current, floorY: shell.floorY))
             }.value
             objectsScene?.install(parts, objects: current)
             objectsScene?.apply(objects, selected: selectedObject)
-            surfels = splats
+            surfels = tidied
             if let splatGroup {
                 // The new splat nodes start in the mesh look.
                 SplatScene.setMeshLook(style != .photo, in: splatGroup)

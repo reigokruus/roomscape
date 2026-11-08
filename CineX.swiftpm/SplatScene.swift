@@ -151,8 +151,11 @@ enum SplatScene {
     }
     // Dollhouse cutaway: a splat on or against a wall (texcoords[1].y = direction of the wall's inward normal in
     // the floor plane, -100 = none) is hidden while the camera is outside that wall, like the one-sided shell.
+    // A splat on the ceiling (50, see `SplatTidy`) is hidden while the camera is above it.
     float wallAngle = _geometry.texcoords[1].y;
-    if (wallAngle > -50.0) {
+    if (wallAngle > 40.0) {
+        if (scn_frame.inverseViewTransform[3].y > worldCenter.y) { rad = 0.0; }
+    } else if (wallAngle > -50.0) {
         float3 inward = float3(cos(wallAngle), 0.0, sin(wallAngle));
         float3 camera = scn_frame.inverseViewTransform[3].xyz;
         if (dot(camera - worldCenter, inward) < 0.0) { rad = 0.0; }
@@ -208,7 +211,7 @@ enum SplatScene {
             for m in n.geometry?.materials ?? [] {
                 if m.shaderModifiers?[.geometry]?.contains("splatScale") == true {
                     m.setValue(value, forKey: "clay")
-                } else if m.name == shellSurfaceName {
+                } else if m.name?.hasPrefix(shellSurfaceName) == true {
                     m.setValue(value, forKey: "clay")
                     updateLightingModel(m)
                 }
@@ -216,15 +219,19 @@ enum SplatScene {
         }
     }
 
-    /// Name of the shell's wall and floor materials (the ones that take the mesh look).
+    /// Name of the shell's wall and floor materials (the ones that take the mesh look); the ones painted in the
+    /// scanned colour add `scannedSuffix`.
     static let shellSurfaceName = "shellSurface"
+    private static let scannedSuffix = ".scanned"
 
-    /// The shell shades itself (`.constant`) in the mesh look and while the lighting preview is on; otherwise
-    /// SceneKit's default lights shade it.
+    /// The shell shades itself (`.constant`) in the mesh look and while the lighting preview is on, and always where
+    /// it's painted in the scanned colour (so it matches the unshaded splats in front of it); otherwise SceneKit's
+    /// default lights shade it.
     static func updateLightingModel(_ m: SCNMaterial) {
         let clay = (m.value(forKey: "clay") as? NSNumber)?.floatValue ?? 0
         let lit = (m.value(forKey: "litA") as? NSValue)?.scnVector4Value.x ?? 0
-        m.lightingModel = clay > 0.5 || lit > 0.5 ? .constant : .lambert
+        let scanned = m.name?.hasSuffix(scannedSuffix) == true
+        m.lightingModel = clay > 0.5 || lit > 0.5 || scanned ? .constant : .lambert
     }
 
     /// 4x4 plain white texture (see the surface modifiers).
@@ -237,10 +244,17 @@ enum SplatScene {
 
     // MARK: Room shell
 
-    static func shellNode(_ shell: RoomShell) -> SCNNode {
+    /// - Parameter colors: the walls' and floor's scanned colours (`SplatTidy`): those surfaces are painted in them
+    ///   outside the mesh look, so gaps between the splats in front don't show as grey speckles.
+    static func shellNode(_ shell: RoomShell, colors: SplatTidy.ShellColors? = nil) -> SCNNode {
+        func scanned(_ c: SIMD3<UInt8>?) -> UIColor? {
+            c.map { UIColor(red: CGFloat($0.x) / 255, green: CGFloat($0.y) / 255, blue: CGFloat($0.z) / 255, alpha: 1) }
+        }
         let group = SCNNode()
-        for wall in shell.walls {
-            group.addChildNode(quad(wall, inset: 0, color: UIColor(white: 0.78, alpha: 1), meshLook: true))
+        for (i, wall) in shell.walls.enumerated() {
+            let tint = scanned(colors.flatMap { i < $0.walls.count ? $0.walls[i] : nil })
+            group.addChildNode(quad(wall, inset: 0, color: tint ?? UIColor(white: 0.78, alpha: 1), meshLook: true,
+                                    scanned: tint != nil))
         }
         for opening in shell.openings {
             let color = opening.isWindow ? UIColor(red: 0.45, green: 0.75, blue: 1.0, alpha: 1)
@@ -248,21 +262,25 @@ enum SplatScene {
             group.addChildNode(quad(opening.wall, inset: 0.003, color: color))
         }
         if shell.floorOutline.count >= 3 {
-            group.addChildNode(floor(shell.floorOutline, color: UIColor(white: 0.45, alpha: 1), meshLook: true))
+            let tint = scanned(colors?.floor)
+            group.addChildNode(floor(shell.floorOutline, color: tint ?? UIColor(white: 0.45, alpha: 1), meshLook: true,
+                                     scanned: tint != nil))
         }
         return group
     }
 
-    private static func quad(_ wall: RoomShell.Wall, inset: Float, color: UIColor, meshLook: Bool = false) -> SCNNode {
+    private static func quad(_ wall: RoomShell.Wall, inset: Float, color: UIColor, meshLook: Bool = false,
+                             scanned: Bool = false) -> SCNNode {
         let c: SIMD3<Float> = wall.center + wall.inward * inset
         let r: SIMD3<Float> = wall.right * wall.halfWidth, u: SIMD3<Float> = wall.up * wall.halfHeight
         var v: [SIMD3<Float>] = [c - r - u, c + r - u, c + r + u, c - r + u]
         // Wind the triangles so the front face looks into the room; the back face is culled.
         if simd_dot(simd_cross(v[1] - v[0], v[2] - v[0]), wall.inward) < 0 { v = [v[0], v[3], v[2], v[1]] }
-        return mesh(v, normal: wall.inward, indices: [0, 1, 2, 0, 2, 3], color: color, meshLook: meshLook)
+        return mesh(v, normal: wall.inward, indices: [0, 1, 2, 0, 2, 3], color: color, meshLook: meshLook,
+                    scanned: scanned)
     }
 
-    private static func floor(_ outline: [SIMD3<Float>], color: UIColor, meshLook: Bool) -> SCNNode {
+    private static func floor(_ outline: [SIMD3<Float>], color: UIColor, meshLook: Bool, scanned: Bool) -> SCNNode {
         // Fan from the centre: fine for the convex or star-shaped outlines rooms have.
         let centre = outline.reduce(.zero, +) / Float(outline.count)
         let v = [centre] + outline
@@ -272,11 +290,11 @@ enum SplatScene {
             if simd_cross(v[Int(tri[1])] - v[0], v[Int(tri[2])] - v[0]).y < 0 { tri.swapAt(1, 2) }
             idx += tri
         }
-        return mesh(v, normal: SIMD3(0, 1, 0), indices: idx, color: color, meshLook: meshLook)
+        return mesh(v, normal: SIMD3(0, 1, 0), indices: idx, color: color, meshLook: meshLook, scanned: scanned)
     }
 
     private static func mesh(_ v: [SIMD3<Float>], normal: SIMD3<Float>, indices: [UInt32], color: UIColor,
-                             meshLook: Bool) -> SCNNode {
+                             meshLook: Bool, scanned: Bool = false) -> SCNNode {
         let verts = SCNGeometrySource(vertices: v.map { SCNVector3($0.x, $0.y, $0.z) })
         let normals = SCNGeometrySource(normals: v.map { _ in SCNVector3(normal.x, normal.y, normal.z) })
         let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
@@ -289,8 +307,9 @@ enum SplatScene {
         // must be set); only the walls and floor are switched by `setMeshLook`.
         m.shaderModifiers = [.surface: LightingShader.surfaceModifier]
         m.setValue(NSNumber(value: 0), forKey: "clay")
-        if meshLook { m.name = shellSurfaceName }
+        if meshLook { m.name = shellSurfaceName + (scanned ? scannedSuffix : "") }
         LightingShader.apply(nil, to: m)
+        updateLightingModel(m)
         g.materials = [m]
         return SCNNode(geometry: g)
     }
