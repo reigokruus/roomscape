@@ -3087,7 +3087,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     int recordedFrames() { return recs.size(); }
 
-    /** Screen rotation relative to the phone's natural (portrait) orientation; the app is locked to landscape. */
+    /** Screen rotation relative to the phone's natural (portrait) orientation; the demo turns with the phone (portrait or landscape). */
     private int displayRotation() {
         try { return activity.getWindowManager().getDefaultDisplay().getRotation(); } catch (Throwable e) { return 1; }
     }
@@ -3414,6 +3414,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private boolean displaySet;
+    private int lastRotation = -1;
 
     @Override
     public void onDrawFrame(GL10 gl) {
@@ -3421,7 +3422,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (idle) { for (Runnable r; (r = glTasks.poll()) != null; ) r.run(); return; }
         if (viewing) { drawViewer(); return; }
         if (session == null) return;
-        if (!displaySet) { session.setDisplayGeometry(displayRotation(), width, height); displaySet = true; }
+        if (frameNo % 10 == 0 && displayRotation() != lastRotation) displaySet = false; // turned upside down (same size, so no onSurfaceChanged)
+        if (!displaySet) { lastRotation = displayRotation(); session.setDisplayGeometry(lastRotation, width, height); displaySet = true; }
         if (!textureSet) { session.setCameraTextureName(bgTex); textureSet = true; }
         Frame frame;
         try {
