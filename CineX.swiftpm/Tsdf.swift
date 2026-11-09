@@ -165,8 +165,8 @@ final class Tsdf {
     @inline(__always) private func good(_ i: Int) -> Bool { i >= 0 && w[i] >= minW }
 
     /// Builds the mesh of the surface within `radius` of `centre` into `out`: positions, a 0…1 confidence per vertex
-    /// (the fewest times any of its corners was seen, over `solidWeight`), triangles, and the quads' edges (each once,
-    /// without the diagonals). Returns the triangle count.
+    /// (the fewest times any of its corners was seen, over `solidWeight`), triangles, and the triangles' edges (each
+    /// once). Returns the triangle count.
     @discardableResult
     func extractMesh(near centre: SIMD3<Float>, radius: Float, solidWeight: Float, into out: MeshScratch) -> Int {
         out.positions.removeAll(keepingCapacity: true)
@@ -260,9 +260,10 @@ final class Tsdf {
                     q[k] = UInt32(out.cellVerts[s])
                 }
                 guard found else { continue }
-                // Cells (0,0), (1,0), (0,1), (1,1) around the edge: two triangles, and the quad's outline.
+                // Cells (0,0), (1,0), (0,1), (1,1) around the edge: two triangles, and their edges including the
+                // diagonal, so the wireframe reads as triangles (as on Android) rather than a grid of squares.
                 out.triangles.append(contentsOf: [q[0], q[1], q[3], q[0], q[3], q[2]])
-                for (x, y) in [(q[0], q[1]), (q[1], q[3]), (q[3], q[2]), (q[2], q[0])] {
+                for (x, y) in [(q[0], q[1]), (q[1], q[3]), (q[3], q[2]), (q[2], q[0]), (q[0], q[3])] {
                     let lo = min(x, y), hi = max(x, y)
                     if out.edgeSet.insert(UInt64(lo) << 32 | UInt64(hi)).inserted {
                         out.edges.append(lo)
