@@ -49,6 +49,8 @@ case "debugtrack":
         }
         lastPose = tracker.pose
     }
+case "compare":
+    try Replay.compare(URL(fileURLWithPath: args[1]), out: out)
 case "replay":
     try Replay.run(URL(fileURLWithPath: args[1]), out: out)
 case "holefill":

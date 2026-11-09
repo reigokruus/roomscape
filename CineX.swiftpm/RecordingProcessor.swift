@@ -28,7 +28,7 @@ enum RecordingProcessor {
 
         // 1. Surface: fuse every depth frame into the TSDF (4 cm, as live), skipping what a later tap cleared.
         let tsdf = Tsdf(capacity: 700_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
-        var depthFrames: [(time: Double, w: Int, h: Int, mm: [UInt16])] = []
+        var depthFrames: [(time: Double, w: Int, h: Int, mm: [UInt16], conf: [UInt8])] = []
         let depthData = try Data(contentsOf: rec.appendingPathComponent("depth.bin"))
         var at = 0
         while at + 12 <= depthData.count {
@@ -44,7 +44,8 @@ enum RecordingProcessor {
             let h = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 2, as: UInt16.self) })
             guard raw.count >= 4 + w * h * 2 else { continue }
             let mm = raw.subdata(in: 4..<(4 + w * h * 2)).withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
-            depthFrames.append((time, w, h, mm))
+            let conf = raw.count >= 4 + w * h * 3 ? [UInt8](raw.subdata(in: (4 + w * h * 2)..<(4 + w * h * 3))) : []
+            depthFrames.append((time, w, h, mm, conf))
         }
         var fi = 0
         for (n, d) in depthFrames.enumerated() {
@@ -56,10 +57,16 @@ enum RecordingProcessor {
             let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
             let origin = SIMD3(f.pose.columns.3.x, f.pose.columns.3.y, f.pose.columns.3.z)
             let step = ThermalGovernor.batchScale < 0.5 ? 4 : 2 // ease back when warm
-            for y in stride(from: 0, to: d.h, by: step) {
-                for x in stride(from: 0, to: d.w, by: step) {
-                    let z = Float(d.mm[y * d.w + x]) / 1000
-                    guard z > 0.2, z < 5 else { continue }
+            // Medium or high confidence, no flying pixels at depth edges (they bridged the gaps between shelf boards
+            // and buried them), up to 4 m: on rk's 9 Nov recording this keeps all of the live surface and adds 7%
+            // (any confidence, unfiltered, added 22%, much of it bridges). Checked with `harness compare`.
+            func depth(_ x: Int, _ y: Int) -> Float { Float(d.mm[y * d.w + x]) / 1000 }
+            for y in stride(from: 1, to: d.h - 1, by: step) {
+                for x in stride(from: 1, to: d.w - 1, by: step) {
+                    let z = depth(x, y)
+                    guard z > 0.2, z < 4, d.conf.isEmpty || d.conf[y * d.w + x] >= 1 else { continue }
+                    let tol = z * 0.04 + 0.02
+                    if abs(depth(x - 1, y) - z) > tol || abs(depth(x + 1, y) - z) > tol || abs(depth(x, y - 1) - z) > tol || abs(depth(x, y + 1) - z) > tol { continue }
                     // ARKit camera: x right, y up, looking down -z (image rows go down).
                     let pc = SIMD4((Float(x) - cx) * z / fx, -(Float(y) - cy) * z / fy, -z, 1)
                     let pw4 = f.pose * pc
@@ -130,7 +137,7 @@ enum RecordingProcessor {
     }
 
     /// Photos from the video where the phone had moved 20 cm or turned 15° since the last one.
-    static func keyframes(_ url: URL, frames: [FrameRecord], depth: [(time: Double, w: Int, h: Int, mm: [UInt16])],
+    static func keyframes(_ url: URL, frames: [FrameRecord], depth: [(time: Double, w: Int, h: Int, mm: [UInt16], conf: [UInt8])],
                           progress: @escaping @Sendable (Progress) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> [Keyframe] {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else { return [] }
