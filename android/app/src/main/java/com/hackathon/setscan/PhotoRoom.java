@@ -64,7 +64,7 @@ final class PhotoRoom {
                 "precision mediump float; varying vec2 vUv; uniform samplerExternalOES uTex; uniform float uGain;" +
                 // same brightening curve as the point colours: shadows lifted, white stays white
                 "void main(){ vec3 c = texture2D(uTex, vUv).rgb; c = c * uGain / (1.0 + (uGain - 1.0) * c); gl_FragColor = vec4(c, 1.0); }");
-        meshProg = ScanRenderer.program(
+        String meshVs =
                 "uniform mat4 uMvp; attribute vec4 aPos; attribute vec2 aUv; attribute vec4 aColor;" +
                 "varying vec2 vUv; varying vec4 vColor; varying float vHide; varying vec3 vP;" +
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
@@ -72,7 +72,9 @@ final class PhotoRoom {
                 "void main(){ vHide = 0.0;" + ScanRenderer.HIDE_TEST.replace("HIDE", "vHide = 1.0;") +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
                 "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) vHide = 1.0; }" +
-                "  gl_Position = uMvp * aPos; vUv = aUv; vColor = aColor; vP = aPos.xyz; }",
+                "  gl_Position = uMvp * aPos; vUv = aUv; vColor = aColor; vP = aPos.xyz; }";
+        try {
+            meshProg = ScanRenderer.program(meshVs,
                 // Lighting preview (rk 9 Nov: the photo surface is lit instead of the splats): same maths as the
                 // splats (ScanRenderer.LIGHT_GLSL), per pixel, with the face normal from screen derivatives
                 // (two-sided: the mesh's triangles aren't reliably wound towards the room). highp: positions in metres.
@@ -86,6 +88,16 @@ final class PhotoRoom {
                 "    if (dot(lin, vec3(0.3, 0.59, 0.11)) > 0.8) E = vec3(uRoom);" + // lamps and windows glow, aren't lit
                 "    c.rgb = tone(lin * E * uExpo); }" +
                 "  gl_FragColor = c; }");
+        } catch (RuntimeException e) {
+            // A GPU without derivatives or highp in fragments: the photo room unlit rather than none (Lighting
+            // then doesn't change it).
+            android.util.Log.e("RoomScape", "lit photo shader: " + e.getMessage());
+            meshProg = ScanRenderer.program(meshVs,
+                "precision mediump float; varying vec2 vUv; varying vec4 vColor; varying float vHide; varying vec3 vP;" +
+                "uniform sampler2D uTex; uniform float uUseTex; uniform float uLit;" +
+                "void main(){ if (vHide > 0.5) discard;" +
+                "  gl_FragColor = uUseTex > 0.5 ? vec4(texture2D(uTex, vUv).rgb, 1.0) : vColor; }");
+        }
     }
 
     void clear() {
