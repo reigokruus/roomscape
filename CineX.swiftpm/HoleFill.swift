@@ -159,24 +159,62 @@ enum HoleFill {
         return SCNNode(geometry: g)
     }
 
-    /// Hides the photo room inside up to 8 boxes (the spots removed or moved objects left), from 3 cm above their
-    /// bottom, so the floor under them stays: what the Android app does with its hide boxes.
-    static let hideShader = """
-    #pragma arguments
-    float4x4 hideBox0; float4x4 hideBox1; float4x4 hideBox2; float4x4 hideBox3;
-    float4x4 hideBox4; float4x4 hideBox5; float4x4 hideBox6; float4x4 hideBox7;
-    float hideCount;
-    #pragma body
-    if (hideCount > 0.5) {
-        float4 wp = scn_frame.inverseViewTransform * float4(_surface.position, 1.0);
-        float4x4 boxes[8] = { hideBox0, hideBox1, hideBox2, hideBox3, hideBox4, hideBox5, hideBox6, hideBox7 };
-        for (int i = 0; i < 8; i++) {
-            if (float(i) >= hideCount) { break; }
-            float3 q = (boxes[i] * wp).xyz;
-            if (all(abs(q) <= float3(0.5))) { discard_fragment(); }
+    /// Leaves out the photo room's triangles whose middle is inside any of the boxes (world-to-unit-box transforms),
+    /// from 3 cm above their bottom so the floor under them stays: what the Android app does with its hide boxes.
+    /// The full geometry is kept on the node (`originalPhotoGeometry`) so putting back restores it.
+    @MainActor static func cutOut(_ node: SCNNode, boxes: [SCNMatrix4]) {
+        let target = node.geometry != nil ? node : node.childNodes(passingTest: { n, _ in n.geometry != nil }).first
+        guard let target, let current = target.geometry else { return }
+        let original = originals[ObjectIdentifier(target)] ?? current
+        originals[ObjectIdentifier(target)] = original
+        if boxes.isEmpty { if target.geometry !== original { target.geometry = original }; return }
+        guard let vertexSource = original.sources(for: .vertex).first else { return }
+        let positions = vertexPositions(vertexSource)
+        let world = target.simdWorldTransform
+        let inv = boxes.map { simd_float4x4($0) }
+        func hidden(_ i: Int, _ j: Int, _ k: Int) -> Bool {
+            guard i < positions.count, j < positions.count, k < positions.count else { return false }
+            let m = (positions[i] + positions[j] + positions[k]) / 3
+            let w = world * SIMD4(m, 1)
+            for b in inv {
+                let q = b * w
+                if abs(q.x) <= 0.5 && abs(q.y) <= 0.5 && abs(q.z) <= 0.5 { return true }
+            }
+            return false
+        }
+        var elements: [SCNGeometryElement] = []
+        for e in original.elements {
+            guard e.primitiveType == .triangles, e.bytesPerIndex == 4 || e.bytesPerIndex == 2 else { elements.append(e); continue }
+            var kept: [Int32] = []
+            e.data.withUnsafeBytes { raw in
+                func index(_ n: Int) -> Int {
+                    e.bytesPerIndex == 4 ? Int(raw.loadUnaligned(fromByteOffset: n * 4, as: UInt32.self))
+                                         : Int(raw.loadUnaligned(fromByteOffset: n * 2, as: UInt16.self))
+                }
+                for t in 0..<e.primitiveCount {
+                    let a = index(t * 3), b = index(t * 3 + 1), c = index(t * 3 + 2)
+                    if !hidden(a, b, c) { kept += [Int32(a), Int32(b), Int32(c)] }
+                }
+            }
+            elements.append(SCNGeometryElement(indices: kept, primitiveType: .triangles))
+        }
+        let cut = SCNGeometry(sources: original.sources, elements: elements)
+        cut.materials = original.materials
+        target.geometry = cut
+    }
+
+    @MainActor private static var originals: [ObjectIdentifier: SCNGeometry] = [:]
+
+    private static func vertexPositions(_ s: SCNGeometrySource) -> [SIMD3<Float>] {
+        guard s.usesFloatComponents, s.bytesPerComponent == 4, s.componentsPerVector >= 3 else { return [] }
+        return s.data.withUnsafeBytes { raw in
+            (0..<s.vectorCount).map { i in
+                let o = s.dataOffset + i * s.dataStride
+                return SIMD3(raw.loadUnaligned(fromByteOffset: o, as: Float.self), raw.loadUnaligned(fromByteOffset: o + 4, as: Float.self),
+                             raw.loadUnaligned(fromByteOffset: o + 8, as: Float.self))
+            }
         }
     }
-    """
 
     /// The world-to-unit-box transform of a hide box: the object's original box from 3 cm above its bottom, 3 cm bigger
     /// around (the margin the splats use).

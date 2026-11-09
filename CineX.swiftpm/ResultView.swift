@@ -107,6 +107,9 @@ struct ResultView: View {
                                   onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
+                    // The room is drawn below the controls, never under them.
+                    .padding(.top, walk == .off ? controlsHeight : 0)
+                    .clipped()
                 } else if let loadError {
                     Text(loadError).padding()
                 } else {
@@ -130,12 +133,9 @@ struct ResultView: View {
                         Spacer(minLength: 4)
                         viewPickers
                     }
+                    // Too wide for one row: the buttons keep their words and wrap, the switches go under them.
                     VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) { modeButtons(labeled: true) }
-                        HStack(spacing: 8) { viewPickers }
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) { modeButtons(labeled: false) }
+                        FlowRow(spacing: 8) { modeButtons(labeled: true) }
                         HStack(spacing: 8) { viewPickers }
                     }
                 }
@@ -609,15 +609,8 @@ struct ResultView: View {
                 }
             }
         }
-        // The photo room: cut out the old spots (up to 8).
-        if let photoRoom, let materials = photoRoom.geometry?.materials {
-            let boxes = away.prefix(8).map(HoleFill.hideBox)
-            for m in materials {
-                if m.shaderModifiers?[.fragment] == nil { m.shaderModifiers = [.fragment: HoleFill.hideShader] }
-                for i in 0..<8 { m.setValue(NSValue(scnMatrix4: i < boxes.count ? boxes[i] : SCNMatrix4Identity), forKey: "hideBox\(i)") }
-                m.setValue(NSNumber(value: Float(boxes.count)), forKey: "hideCount")
-            }
-        }
+        // The photo room: leave out its triangles in the old spots (no custom shader: a failed one draws magenta).
+        if let photoRoom { HoleFill.cutOut(photoRoom, boxes: away.map(HoleFill.hideBox)) }
     }
 
     /// The selected object can be moved and turned (a movable thing, not removed).
