@@ -218,21 +218,51 @@ final class Nearby {
             @Override public void onStopDiscoveryFailed(String t, int code) { }
         };
         nsd.discoverServices(TYPE, NsdManager.PROTOCOL_DNS_SD, discovery[0]);
+        // A dialog shows either a message or a list, never both: the help goes above the list in a layout of its own.
+        android.widget.LinearLayout box = new android.widget.LinearLayout(act);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.TextView help = new android.widget.TextView(act);
+        help.setText("Phones with RoomScape open on the same Wi-Fi appear below. The first time, the other phone asks to accept scans from this one.");
+        help.setTextColor(Ios.SECONDARY);
+        help.setTextSize(14);
+        int pad = Ios.dp(act, 20);
+        help.setPadding(pad, Ios.dp(act, 4), pad, Ios.dp(act, 8));
+        box.addView(help);
+        android.widget.TextView searching = new android.widget.TextView(act);
+        searching.setText("Looking for phones...");
+        searching.setTextColor(Ios.SECONDARY);
+        searching.setPadding(pad, Ios.dp(act, 8), pad, Ios.dp(act, 8));
+        box.addView(searching);
+        android.widget.ListView list = new android.widget.ListView(act);
+        list.setAdapter(names);
+        box.addView(list);
+        names.registerDataSetObserver(new android.database.DataSetObserver() {
+            @Override public void onChanged() { searching.setVisibility(names.getCount() == 0 ? android.view.View.VISIBLE : android.view.View.GONE); }
+        });
         AlertDialog dialog = new AlertDialog.Builder(act)
                 .setTitle("Send to nearby phone")
-                .setMessage("Phones with RoomScape open on the same Wi-Fi appear here. The first time, the other phone asks to accept scans from this one.")
-                .setAdapter(names, (d, which) -> send(scanDir, found.get(which)))
+                .setView(box)
                 .setNegativeButton("Close", null)
                 .create();
+        list.setOnItemClickListener((parent, view, which, id) -> { dialog.dismiss(); send(scanDir, found.get(which)); });
         dialog.setOnDismissListener(d -> { try { nsd.stopServiceDiscovery(discovery[0]); } catch (Exception ignored) { } });
         dialog.show();
     }
 
+    /** NsdManager resolves one service at a time on older Android: later sends wait for the earlier one. */
+    private final Object resolving = new Object();
+
     private void send(File scanDir, NsdServiceInfo peer) {
         act.toast("Packing the room for " + peer.getServiceName() + "...");
+        new Thread(() -> { synchronized (resolving) { resolve(scanDir, peer); } }, "nearby-resolve").start();
+    }
+
+    private void resolve(File scanDir, NsdServiceInfo peer) {
+        CountDownLatch done = new CountDownLatch(1);
         nsd.resolveService(peer, new NsdManager.ResolveListener() {
-            @Override public void onResolveFailed(NsdServiceInfo i, int code) { act.toast("Couldn't reach " + peer.getServiceName() + " (" + code + ")."); }
+            @Override public void onResolveFailed(NsdServiceInfo i, int code) { done.countDown(); act.toast("Couldn't reach " + peer.getServiceName() + " (" + code + ")."); }
             @Override public void onServiceResolved(NsdServiceInfo i) {
+                done.countDown();
                 new Thread(() -> {
                     try {
                         Uri uri = Rmsc.export(act, scanDir);
@@ -243,7 +273,11 @@ final class Nearby {
                             while ((r = in.read(buf)) > 0) all.write(buf, 0, r);
                             body = all.toByteArray();
                         }
+                        // Prefer an IPv4 address: link-local IPv6 needs the right interface and often fails.
                         InetAddress host = i.getHost();
+                        if (Build.VERSION.SDK_INT >= 34) {
+                            for (InetAddress a : i.getHostAddresses()) if (a instanceof java.net.Inet4Address) { host = a; break; }
+                        }
                         String addr = host.getHostAddress();
                         if (addr != null && addr.contains(":")) addr = "[" + addr.replaceAll("%.*", "") + "]";
                         HttpURLConnection c = (HttpURLConnection) new URL("http://" + addr + ":" + i.getPort() + "/rmsc").openConnection();
@@ -269,5 +303,6 @@ final class Nearby {
                 }, "nearby-send").start();
             }
         });
+        try { done.await(15, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
     }
 }
