@@ -166,6 +166,21 @@ final class Rmsc {
         if (ws.length() > 0) room.put("walls", ws);
         if (d.lux > 0) room.put("lux", d.lux);
         m.put("room", room);
+        // Flat surfaces found on this phone (Planes: "flat colour = plane"), floor at 0 like the rest.
+        try {
+            File pf = new File(dir, "planes.json");
+            if (pf.exists() && pf.lastModified() >= new File(dir, "points.bin").lastModified()) {
+                JSONArray ps = new JSONArray(text(pf)), out = new JSONArray();
+                for (int i = 0; i < ps.length(); i++) {
+                    JSONObject p = ps.getJSONObject(i);
+                    JSONArray nrm = p.getJSONArray("normal"), pmin = p.getJSONArray("min"), pmax = p.getJSONArray("max");
+                    p.put("d", p.getDouble("d") - nrm.getDouble(1) * floorY);
+                    pmin.put(1, pmin.getDouble(1) - floorY); pmax.put(1, pmax.getDouble(1) - floorY);
+                    out.put(p);
+                }
+                if (out.length() > 0) m.put("planes", out);
+            }
+        } catch (Exception ignored) { }
         JSONArray shared = sharedOutlets(d.outlets, floorY);
         if (shared.length() > 0) m.put("outlets", shared);
         put(z, "manifest.json", m.toString(1).getBytes("UTF-8"));

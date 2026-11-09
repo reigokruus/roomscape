@@ -56,6 +56,8 @@ A reader must ignore files it doesn't know. A writer may leave out every optiona
 
 `room.walls` has one entry per side of the room (when the floor outline in `corners` has more sides than walls were found, each side of the outline is written as a wall, as tall as the room). `appVersion` is the version without a build number; `appBuild` is the build. An unnamed scan is called "Room <d MMM yyyy, HH:mm>", for example "Room 9 Nov 2026, 14:20", on both platforms.
 
+`planes` (optional) lists flat surfaces the exporting phone is confident about, for example plain walls found by the Android app's "flat colour = plane" rule on phones without LiDAR: `[{"kind": "wall" | "floor" | "ceiling" | "surface", "normal": [nx, ny, nz], "d": d, "area": m², "min": [x, y, z], "max": [x, y, z], "color": [r, g, b]}]`, where points on the plane satisfy `normal · p = d`, and `min` / `max` bound the points it was fitted to. Readers may use them to flatten their surface there; nothing else depends on them.
+
 Only `format`, `version` and `name` are required; everything else is optional. `objects` is the simple shared form: a box per object, with yaw in radians around +Y. Richer per-platform object data goes in `ios/` or `android/`.
 
 ### photos.json

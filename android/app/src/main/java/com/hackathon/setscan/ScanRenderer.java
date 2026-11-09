@@ -340,11 +340,47 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Throwable e) { logError("surface save", new RuntimeException(e)); }
     }
 
+    /** Flat colour = plane on (see Planes). */
+    static boolean FLAT_WALLS = true;
+
+    /**
+     * Background: finds the plain flat surfaces in the scan's points (Planes, settings for camera depth) and returns
+     * a copy of the mesh with the vertices on them pressed flat; the planes go in planes.json in the scan folder (for
+     * the .rmsc). The scan itself is not changed.
+     */
+    private FloatBuffer flattenWalls(FloatBuffer mesh, int verts, File dir) {
+        long t0 = System.currentTimeMillis();
+        int n = count;
+        float[] xyz = new float[n * 3]; byte[] rgb = new byte[n * 4];
+        for (int i = 0; i < n * 3; i++) xyz[i] = pos.get(i);
+        for (int i = 0; i < n * 4; i++) rgb[i] = col.get(i);
+        // Camera depth is noisier than LiDAR: bigger cells and wider limits (tuned on rk's S24 scans, 9 Nov).
+        Planes.CELL = 0.1f; Planes.MAX_FLAT = 0.15f; Planes.MAX_ANGLE_DEG = 30; Planes.MAX_OFFSET = 0.08f;
+        Planes.INLIER = 0.04f; Planes.MIN_INLIERS = 0.75f; Planes.MIN_AREA = 0.4f; Planes.SNAP = 0.08f;
+        java.util.Map<Long, Integer> cells = new java.util.HashMap<>();
+        java.util.List<Planes.Plane> planes = Planes.find(xyz, rgb, 4, n, cells);
+        float[] v = new float[verts * 3];
+        for (int i = 0; i < v.length; i++) v[i] = mesh.get(i);
+        int moved = Planes.snap(v, verts, planes, cells);
+        log("flat walls: " + planes.size() + " planes, " + moved + " of " + verts + " mesh corners pressed flat (" + (System.currentTimeMillis() - t0) + " ms)");
+        if (dir != null) try {
+            float floor = roomReady ? room.floorY : boxMinY;
+            try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "planes.json"))) {
+                o.write(Planes.toJson(planes, 0, floor).toString().getBytes("UTF-8"));
+            }
+        } catch (Exception e) { logError("planes save", e); }
+        FloatBuffer out = ByteBuffer.allocateDirect(v.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        out.put(v).position(0);
+        return out;
+    }
+
     /** Photo texturing (background): the simple photo room (walls + floor) or the full scan surface. */
     private void buildPhotos() {
         final RoomModel roomNow = room; final boolean ready = roomReady;
         if (meshPosAll == null) { meshPosAll = tsdf.meshPos; meshColAll = tsdf.meshCol; meshVerts = tsdf.meshVerts; }
-        final FloatBuffer mp = meshPosAll; final ByteBuffer mc = meshColAll; final int mvAll = meshVerts;
+        final FloatBuffer mp0 = meshPosAll; final ByteBuffer mc = meshColAll; final int mvAll = meshVerts;
+        final File dirNow = currentDir;
+        final boolean ownMesh = dirNow == null || !new File(dirNow, "rmsc-extra/mesh.ply").exists();
         photos.ready = false;
         // Photo texturing takes a few seconds on the phone, so it runs in the background; the view shows points until it's done.
         final boolean simple = viewMode == 0 && ready && roomNow.hasLayout;
@@ -353,6 +389,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // The Photo style is the scanned surface only, the same as the iPhone's photo room (rk 9 Nov: the two phones
             // must match): no flat proxy walls or gap fills from the room outline, which closed the doorway and drew
             // the near walls as a box. Holes stay holes. The simple room view (viewMode 0) is still the outline walls.
+            // Flat colour = plane (rk 9 Nov): this phone's camera depth makes plain walls lumpy; press the parts that
+            // are clearly one flat, single-coloured surface onto that plane (Planes). Not an iPhone's LiDAR mesh.
+            FloatBuffer mp = mp0;
+            if (!simple && FLAT_WALLS && ownMesh && mvAll > 0) mp = flattenWalls(mp0, mvAll, dirNow);
             RoomProxies rp = simple ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
             float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
             int pv = proxy.length / 3;
