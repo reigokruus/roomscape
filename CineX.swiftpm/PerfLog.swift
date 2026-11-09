@@ -76,6 +76,13 @@ final class PerfLog: @unchecked Sendable {
 
     func stage(_ name: String) { lock.withLock { $0.stage = name } }
 
+    /// A moment worth knowing the memory at (scan start, RoomPlan running, …), with any sizes to note (MB).
+    func mark(_ name: String, sizes: [String: Double] = [:]) {
+        var o: [String: Any] = ["event": "mark", "name": name, "memMB": Self.footprintMB().rounded()]
+        if !sizes.isEmpty { o["sizesMB"] = sizes }
+        write(o)
+    }
+
     /// The file being written.
     var file: URL? { lock.withLock { $0.file } }
 
@@ -201,7 +208,7 @@ final class PerfLog: @unchecked Sendable {
         return Double(u.ru_utime.tv_sec) + Double(u.ru_utime.tv_usec) / 1e6 + Double(u.ru_stime.tv_sec) + Double(u.ru_stime.tv_usec) / 1e6
     }
 
-    private static func footprintMB() -> Double {
+    static func footprintMB() -> Double {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
         let r = withUnsafeMutablePointer(to: &info) {

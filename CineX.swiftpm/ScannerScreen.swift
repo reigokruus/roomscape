@@ -160,10 +160,16 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         setPhase(.scanning)
         // No coaching overlay (the animated phone over a grid, "Move device to start" and the other prompts): the
         // live mesh already shows where the scan has been.
+        // Hardware use while scanning (PerfLog): kept with the scan as perf-scan.jsonl (perf-continue for a pass).
+        let perf = PerfLog()
+        perf.start(FileManager.default.temporaryDirectory.appendingPathComponent("perf-scan-\(UUID().uuidString).jsonl"), stage: "scanning")
+        perf.mark("before RoomPlan")
         var configuration = RoomCaptureSession.Configuration()
         configuration.isCoachingEnabled = false
         captureView.captureSession.run(configuration: configuration)
+        perf.mark("RoomPlan running")
         live.start()
+        perf.mark("live capture started", sizes: live.memorySizes)
         // Continue scan: show what the saved scan already covers, in blue, once it's lined up.
         if let improving, let device = live.device {
             let ghost = live.ghost
@@ -176,9 +182,6 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         }
         startHud()
         if RawRecorder.enabled { live.recorder = RawRecorder() }
-        // Hardware use while scanning (PerfLog): kept with the scan as perf-scan.jsonl.
-        let perf = PerfLog()
-        perf.start(FileManager.default.temporaryDirectory.appendingPathComponent("perf-scan-\(UUID().uuidString).jsonl"), stage: "scanning")
         live.perf = perf
         live.attachDiscs(to: captureView)
         live.pinPreviewTopRight(in: captureView)

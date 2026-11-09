@@ -43,6 +43,15 @@ final class LiveCapture {
         mesh?.photos = photos
     }
 
+    /// The big buffers the live scan keeps, in MB (for the hardware log).
+    var memorySizes: [String: Double] {
+        var out: [String: Double] = [:]
+        if let cloud { out["points"] = Double(cloud.buffer.length + cloud.normalBuffer.length) / 1_048_576 }
+        if let photos = mesh?.photos { out["photo textures"] = Double(photos.texture.allocatedSize) / 1_048_576 }
+        if let mesh { out["tsdf"] = Double(mesh.tsdf.capacity * 30) / 1_048_576 }
+        return out
+    }
+
     func start() {
         guard link == nil, let cloud else { return }
         let mesh = mesh
