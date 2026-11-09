@@ -39,3 +39,14 @@ Phones disconnected at 22:45; work from the copies in recordings/ (never committ
 Bars: at > 4 cm the upper bar appears as a rod segment, the lower one still in fragments (renders:
 tools/harness/harness-out/bars-zones-dev*.png). Not ready for the phone: needs a proper simplifier (quadric) so
 flat fine areas collapse, and zone placement that follows thin things (not only the view centre).
+
+## Points vs fused surface (rk's S24 screenshot, 22:37 Points view)
+- The S24's points show the ladder bars clearly (coloured dots along each rung) where the fused surface averages
+  them away: points keep each sample, the TSDF fuses and erases thin things.
+- Next: a "points where the mesh has nothing" layer: points seen ≥ 3 times that are > 3 cm from any mesh corner
+  are thin parts the surface lost; draw them (as small photo-coloured discs) in the Photo view and/or seed fine
+  detail zones there. Test on the iPhone 22:39 and S24 22:37 scans (find the ladder frames in the 22:39 video first).
+
+## S24 room size (fixed, b7d0e68)
+- Viewer size now from the room model (5.4 × 3.8 m for 22:37, was the points' bounding box 6.8 × 5.6 m, 3.6 m);
+  height "not scanned" when fewer than 20 columns reach 1.8 m above the floor.
