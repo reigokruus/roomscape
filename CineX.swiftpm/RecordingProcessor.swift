@@ -80,7 +80,7 @@ enum RecordingProcessor {
         if job == .rebuild {
             // 1. Surface and points.
             if !done("surface") {
-                let clears = (try? JSONSerialization.jsonObject(with: Data(contentsOf: rec.appendingPathComponent("clears.json")))) as? [[String: Any]] ?? []
+                let clears = Clear.load(rec.appendingPathComponent("clears.json"))
                 // The surface (TSDF) and the points are worked out side by side, on two cores.
                 async let meshPart: (ScanMesh, [SIMD3<Float>]) = {
                     let t0 = Date()
@@ -150,7 +150,7 @@ enum RecordingProcessor {
     /// The surface fused on the GPU, or nil (no Metal, the app not in the foreground, a GPU error, or a block too big for
     /// the phone: then the CPU does it). Two passes over the depth, one frame at a time, so memory stays flat: the
     /// room's extent first, then the fusion.
-    static func gpuSurface(frames: [FrameRecord], depth depthFrames: DepthFrames, clears: [[String: Any]],
+    static func gpuSurface(frames: [FrameRecord], depth depthFrames: DepthFrames, clears: [Clear],
                            progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> ScanMesh? {
         // GPU work is only allowed while the app is in the foreground (a background continued-processing task would
         // need the background-GPU entitlement); in the background the CPU fuses.
@@ -158,7 +158,12 @@ enum RecordingProcessor {
         guard foreground else { return nil }
         func frame(_ n: Int) -> (f: FrameRecord, d: DepthFrame)? {
             let d = depthFrames[n]
-            guard d.w > 0, let f = frames.min(by: { abs($0.time - d.time) < abs($1.time - d.time) }), f.tracking == 2 else { return nil }
+            guard d.w > 0, !frames.isEmpty else { return nil }
+            var lo = 0, hi = frames.count - 1
+            while lo < hi { let mid = (lo + hi) / 2; if frames[mid].time < d.time { lo = mid + 1 } else { hi = mid } }
+            if lo > 0, abs(frames[lo - 1].time - d.time) < abs(frames[lo].time - d.time) { lo -= 1 }
+            let f = frames[lo]
+            guard f.tracking == 2 else { return nil }
             return (f, d)
         }
         // Each depth frame filtered as for the CPU fusion (medium+ confidence, no flying pixels, 0.2-4 m, not cleared).
@@ -177,7 +182,7 @@ enum RecordingProcessor {
                     if bounds || !clears.isEmpty {
                         let p4 = f.pose * SIMD4((Float(x) - cx) * z / fx, -(Float(y) - cy) * z / fy, -z, 1)
                         let pw = SIMD3(p4.x, p4.y, p4.z)
-                        if !clears.isEmpty, clears.contains(where: { Self.cleared(pw, at: d.time, by: $0) }) { continue }
+                        if !clears.isEmpty, clears.contains(where: { $0.covers(pw, at: d.time) }) { continue }
                         if bounds { lo = simd_min(lo, pw); hi = simd_max(hi, pw); continue }
                     }
                     m[y * d.w + x] = z
@@ -221,7 +226,7 @@ enum RecordingProcessor {
 
     /// Fuses every depth frame into the TSDF (4 cm, as live), skipping what a later tap cleared; points are the depth
     /// samples in 2 cm cells (averaged) seen at least twice, like the live scan.
-    static func surface(frames: [FrameRecord], depth depthFrames: DepthFrames, clears: [[String: Any]],
+    static func surface(frames: [FrameRecord], depth depthFrames: DepthFrames, clears: [Clear],
                         mesh wantMesh: Bool = true, points wantPoints: Bool = true,
                         progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> (ScanMesh, [SIMD3<Float>]) {
         let tsdf = Tsdf(capacity: wantMesh ? 700_000 : 16, voxel: 0.04, truncation: 0.08, carve: 1.5)
@@ -252,7 +257,7 @@ enum RecordingProcessor {
                     let pc = SIMD4((Float(x) - cx) * z / fx, -(Float(y) - cy) * z / fy, -z, 1)
                     let pw4 = f.pose * pc
                     let pw = SIMD3(pw4.x, pw4.y, pw4.z)
-                    if clears.contains(where: { Self.cleared(pw, at: d.time, by: $0) }) { continue }
+                    if !clears.isEmpty, clears.contains(where: { $0.covers(pw, at: d.time) }) { continue }
                     if wantMesh { tsdf.integrate(origin: origin, point: pw) }
                     if wantPoints, cells.count < 1_200_000 {
                         let k = SIMD3(Int32((pw.x / 0.02).rounded(.down)), Int32((pw.y / 0.02).rounded(.down)), Int32((pw.z / 0.02).rounded(.down)))
@@ -287,6 +292,12 @@ enum RecordingProcessor {
         var endIndex: Int { times.count }
 
         subscript(i: Int) -> DepthFrame {
+            // In an autorelease pool: NSData's decompression result is autoreleased, and in a long loop with no pool
+            // every frame's would stay until the loop ends (the Simulator run on rk's 8.7-minute scan reached 3.8 GB).
+            autoreleasepool { decode(i) }
+        }
+
+        private func decode(_ i: Int) -> DepthFrame {
             let packed = data.subdata(in: ranges[i])
             let raw = (try? (packed as NSData).decompressed(using: .lzfse) as Data) ?? packed
             guard raw.count >= 4 else { return (times[i], 0, 0, [], []) }
@@ -377,6 +388,35 @@ enum RecordingProcessor {
         return simd_distance(SIMD2(sx, sy), SIMD2(center[0].floatValue, center[1].floatValue)) < r
     }
 
+    /// A tap to clear from the recording (clears.json), read once: checking the JSON dictionaries for every depth
+    /// sample was slow and, with Foundation's bridged numbers piling up, took gigabytes on rk's 8.7-minute scan.
+    struct Clear {
+        var time: Double, m: simd_float4x4, center: SIMD2<Float>, size: SIMD2<Float>, radius: Float, limit: Float
+
+        static func load(_ url: URL) -> [Clear] {
+            guard let data = try? Data(contentsOf: url),
+                  let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return [] }
+            return list.compactMap { c in
+                guard let t = c["time"] as? Double, let vp = c["viewProjection"] as? [NSNumber], vp.count == 16,
+                      let center = c["center"] as? [NSNumber], center.count >= 2, let size = c["viewSize"] as? [NSNumber], size.count >= 2,
+                      let r = (c["radius"] as? NSNumber)?.floatValue, let limit = (c["limit"] as? NSNumber)?.floatValue else { return nil }
+                let v = vp.map(\.floatValue)
+                let m = simd_float4x4(SIMD4(v[0], v[1], v[2], v[3]), SIMD4(v[4], v[5], v[6], v[7]), SIMD4(v[8], v[9], v[10], v[11]), SIMD4(v[12], v[13], v[14], v[15]))
+                return Clear(time: t, m: m, center: SIMD2(center[0].floatValue, center[1].floatValue),
+                             size: SIMD2(size[0].floatValue, size[1].floatValue), radius: r, limit: limit)
+            }
+        }
+
+        /// Whether this tap cleared `p` from frames before it (the tap's cone, as it was on screen).
+        func covers(_ p: SIMD3<Float>, at frameTime: Double) -> Bool {
+            guard frameTime < time else { return false }
+            let q = m * SIMD4(p, 1)
+            guard q.w > 0.05, q.w <= limit else { return false }
+            let s = SIMD2((q.x / q.w + 1) / 2 * size.x, (1 - q.y / q.w) / 2 * size.y)
+            return simd_distance(s, center) < radius
+        }
+    }
+
     /// Photos from the video where the phone had moved 20 cm or turned 15° since the last one.
     static func keyframes(_ url: URL, frames: [FrameRecord], depth: DepthFrames,
                           progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> [Keyframe] {
@@ -405,9 +445,12 @@ enum RecordingProcessor {
             last = f.pose
             let w = CVPixelBufferGetWidth(buffer)
             let scale = 1024 / Float(w)
-            let image = CIImage(cvPixelBuffer: buffer).transformed(by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
-            guard let jpeg = ctx.jpegRepresentation(of: image, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                                    options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.8]) else { continue }
+            let jpegData: Data? = autoreleasepool {
+                let image = CIImage(cvPixelBuffer: buffer).transformed(by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
+                return ctx.jpegRepresentation(of: image, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                              options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.8])
+            }
+            guard let jpeg = jpegData else { continue }
             var kf = Keyframe(timestamp: t, cameraToWorld: f.pose, fx: f.k[0][0] * scale, fy: f.k[1][1] * scale,
                               cx: f.k[2][0] * scale, cy: f.k[2][1] * scale, width: 1024, height: Int(Float(f.height) * scale), jpeg: jpeg, exposure: nil)
             // Its depth at half size (128 × 96), as live photos keep it.

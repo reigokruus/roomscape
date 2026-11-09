@@ -65,8 +65,12 @@ final class TsdfGPU {
     func integrate(depth: [Float], width: Int, height: Int, pose: simd_float4x4, fx: Float, fy: Float, cx: Float, cy: Float, step: Int) {
         guard let buffer = device.makeBuffer(bytes: depth, length: depth.count * 4, options: .storageModeShared) else { return }
         if encoder == nil {
-            commands = queue.makeCommandBuffer()
-            encoder = commands?.makeComputeCommandEncoder()
+            // Made inside an autorelease pool and held only by us: otherwise the command buffer (and the 32 depth
+            // buffers it keeps) stays alive until the caller's loop ends; a long recording reached 1.1 GB.
+            autoreleasepool {
+                commands = queue.makeCommandBuffer()
+                encoder = commands?.makeComputeCommandEncoder()
+            }
         }
         guard let encoder else { return }
         var p = Params(worldToCam: pose.inverse, fx: fx, fy: fy, cx: cx, cy: cy, width: UInt32(width), height: UInt32(height),

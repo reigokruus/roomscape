@@ -97,39 +97,44 @@ enum DecalFinder {
             lastLook = t
             try Task.checkCancellation()
             progress(Float(fi) / Float(frames.count))
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = false
-            let visionStart = Date()
-            try? VNImageRequestHandler(cvPixelBuffer: buffer, options: [:]).perform([request])
-            PerfLog.processing?.note("vision text", ms: Date().timeIntervalSince(visionStart) * 1000)
-            // Real text only: what it read has at least two letters or digits, read with some confidence (patterned
-            // fabric and radiators passed as "text" with the fast detector).
-            let boxes = (request.results ?? []).filter { obs in
-                guard let top = obs.topCandidates(1).first, top.confidence >= 0.5 else { return false }
-                return top.string.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count >= 2
+            // In an autorelease pool, as everything per frame below: Vision and Core Image autorelease, and in this long
+            // loop nothing would be freed until it ends.
+            let boxes: [VNRecognizedTextObservation] = autoreleasepool {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = false
+                let visionStart = Date()
+                try? VNImageRequestHandler(cvPixelBuffer: buffer, options: [:]).perform([request])
+                PerfLog.processing?.note("vision text", ms: Date().timeIntervalSince(visionStart) * 1000)
+                // Real text only: what it read has at least two letters or digits, read with some confidence
+                // (patterned fabric and radiators passed as "text" with the fast detector).
+                return (request.results ?? []).filter { obs in
+                    guard let top = obs.topCandidates(1).first, top.confidence >= 0.5 else { return false }
+                    return top.string.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count >= 2
+                }
             }
             guard !boxes.isEmpty, let d = depthAt(t) else { await pace(); continue }
-            let f = frames[fi]
-            let image = CIImage(cvPixelBuffer: buffer)
-            var any = false
-            var firstNew = sightings.count
-            for box in boxes {
-                if let s = place(box.boundingBox, frame: f, frameIndex: fi, depth: d, image: image) { sightings.append(s); any = true }
-            }
-            // Only the straightened patch of a group's best sighting so far is kept (rk 9 Nov: keeping whole frames
-            // with text took over a GB on an 8-minute scan and iOS stopped the rebuild).
-            if any {
-                for s in sightings[firstNew...] {
-                    let g = groups.firstIndex(where: { simd_distance($0.centre, s.centre) < 0.1 }) ?? {
-                        groups.append(Group(centre: s.centre, best: s, jpeg: nil, ppm: 0)); return groups.count - 1 }()
-                    if groups[g].jpeg == nil || s.score > groups[g].best.score,
-                       let r = rectify(s, image: image, ctx: ctx) {
-                        groups[g].best = s; groups[g].jpeg = r.jpeg; groups[g].ppm = r.ppm
+            autoreleasepool {
+                let f = frames[fi]
+                let image = CIImage(cvPixelBuffer: buffer)
+                var any = false
+                var firstNew = sightings.count
+                for box in boxes {
+                    if let s = place(box.boundingBox, frame: f, frameIndex: fi, depth: d, image: image) { sightings.append(s); any = true }
+                }
+                // Only the straightened patch of a group's best sighting so far is kept (rk 9 Nov: keeping whole frames
+                // with text took over a GB on an 8-minute scan and iOS stopped the rebuild).
+                if any {
+                    for s in sightings[firstNew...] {
+                        let g = groups.firstIndex(where: { simd_distance($0.centre, s.centre) < 0.1 }) ?? {
+                            groups.append(Group(centre: s.centre, best: s, jpeg: nil, ppm: 0)); return groups.count - 1 }()
+                        if groups[g].jpeg == nil || s.score > groups[g].best.score,
+                           let r = rectify(s, image: image, ctx: ctx) {
+                            groups[g].best = s; groups[g].jpeg = r.jpeg; groups[g].ppm = r.ppm
+                        }
                     }
                 }
             }
-            firstNew = sightings.count
             await pace()
         }
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
