@@ -27,6 +27,10 @@ struct ResultView: View {
     /// The scan's photos painted onto its fused mesh (`PhotoRoom`): what Photo shows when the scan has both; else the
     /// splats in their scanned colours.
     @State private var photoRoom: SCNNode?
+    /// The photo room as a .glb (`PhotoRoomExport`), being written or ready to share (AirDrop, Save to Files).
+    @State private var exportingGLB = false
+    @State private var glbFile: SharedFile?
+    @State private var glbError: String?
     @State private var buildingSplats = false
     /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
     @State private var lightingOn = false
@@ -167,7 +171,26 @@ struct ResultView: View {
                     Label("Plan a Shoot", systemImage: "sparkles")
                 }
             }
-            ShareLink(item: shareURL ?? scan.modelURL)
+            if exportingGLB {
+                ProgressView()
+            } else if photoRoom != nil {
+                Menu {
+                    ShareLink(item: shareURL ?? scan.modelURL) { Label("Room model (.usdz)", systemImage: "cube") }
+                    Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
+                } label: {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+            } else {
+                ShareLink(item: shareURL ?? scan.modelURL)
+            }
+        }
+        .sheet(item: $glbFile) { file in
+            ActivitySheet(items: [file.url]).ignoresSafeArea()
+        }
+        .alert("Couldn't export the photo room", isPresented: Binding(get: { glbError != nil }, set: { if !$0 { glbError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(glbError ?? "")
         }
         .modifier(RenameRoomAlert(isPresented: $renaming, title: $newTitle, onSave: saveName))
         .onDisappear { training?.pause() }
@@ -474,6 +497,25 @@ struct ResultView: View {
         } else if lightingOn {
             lighting?.subjectX = p.x
             lighting?.subjectZ = p.z
+        }
+    }
+
+    /// Writes the photo room as RoomScape-<scan date>.glb in the temporary folder and opens the share sheet for it.
+    private func exportGLB() {
+        exportingGLB = true
+        let scan = scan
+        Task {
+            let url = await Task.detached(priority: .userInitiated) { () -> URL? in
+                guard let result = PhotoRoomExport.glb(folder: scan.captureURL) else { return nil }
+                let stamp = scan.captureURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "Scan_", with: "")
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("RoomScape-\(stamp).glb")
+                do { try result.data.write(to: url, options: .atomic) } catch { return nil }
+                print("photo room .glb: \(result.data.count) bytes, \(result.photos) photos at \(result.textureWidth) px, "
+                      + "\(result.triangles) triangles (\(result.uncovered) uncovered)")
+                return url
+            }.value
+            exportingGLB = false
+            if let url { glbFile = SharedFile(url: url) } else { glbError = "This scan has no saved mesh or photos to export." }
         }
     }
 
@@ -1042,4 +1084,20 @@ private struct ImprovedSubtitle: ViewModifier {
             content
         }
     }
+}
+
+
+/// A file to hand to the share sheet.
+struct SharedFile: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// UIKit's share sheet (AirDrop, Save to Files, …) for files SwiftUI's ShareLink can't wait for.
+struct ActivitySheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
