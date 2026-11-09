@@ -650,7 +650,8 @@ public class MainActivity extends Activity {
                 if (e.getActionMasked() == MotionEvent.ACTION_UP && !multiTouch && e.getEventTime() - downTime < 300
                         && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
                     float tx = e.getX(), ty = e.getY();
-                    glView.queueEvent(() -> renderer.requestRescan(tx, ty));
+                    // A tap clears the scan there so it can be redone (rk 9 Nov); only a quick single-finger tap.
+                    glView.queueEvent(() -> renderer.requestClear(tx, ty));
                 }
                 return true;
             }
@@ -2027,6 +2028,22 @@ public class MainActivity extends Activity {
             outletButton.setStateListAnimator(null);
         } else Ios.pill(outletButton);
         outletButton.setContentDescription(renderer.showOutlets ? "Hide the power outlets" : "Show the power outlets");
+    }
+
+    /** A translucent circle where a tap cleared the scan, fading out. */
+    void flashCleared(float x, float y, float r) {
+        runOnUiThread(() -> {
+            View c = new View(this);
+            android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+            g.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            g.setColor(0x40FFFFFF); g.setStroke(dp(2), 0xCCFFFFFF);
+            c.setBackground(g);
+            int d = Math.round(2 * r);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(d, d);
+            lp.leftMargin = Math.round(x - r); lp.topMargin = Math.round(y - r);
+            ((FrameLayout) scanChrome).addView(c, lp);
+            c.animate().alpha(0f).setDuration(700).withEndAction(() -> ((FrameLayout) scanChrome).removeView(c)).start();
+        });
     }
 
     void updateStatus(String s) {

@@ -64,6 +64,39 @@ final class LiveCapture {
     }
 
     /// iOS warned about memory: let the cloud give some back.
+    /// Tap to clear while scanning: what's inside the circle of `radius` points around `point` on the live overlay (as
+    /// drawn now: the overview's camera when it's on), from the camera to the surface there plus 15 cm, is removed from
+    /// the points and the live mesh's surface. Calls back on the main queue with how much went.
+    func clear(at point: CGPoint, radius: CGFloat, done: @escaping (Int) -> Void) {
+        guard let cloud, let view = discView, let vp = view.lastViewProjection, view.bounds.width > 0 else { done(0); return }
+        let size = view.bounds.size, mesh = mesh
+        worker.async {
+            func screen(_ p: SIMD3<Float>) -> (SIMD2<Float>, Float)? {
+                let c = vp * SIMD4(p, 1)
+                guard c.w > 0.05 else { return nil }
+                return (SIMD2((c.x / c.w + 1) / 2 * Float(size.width), (1 - c.y / c.w) / 2 * Float(size.height)), c.w)
+            }
+            let tap = SIMD2(Float(point.x), Float(point.y)), r = Float(radius)
+            // How far the surface under the tap is: the nearest fifth of the points near the middle of the circle.
+            var near: [Float] = []
+            let n = cloud.count, stride = max(1, n / 200_000)
+            let all = cloud.buffer.contents().bindMemory(to: LivePoint.self, capacity: n)
+            for i in Swift.stride(from: 0, to: n, by: stride) {
+                if let (s, w) = screen(SIMD3(all[i].x, all[i].y, all[i].z)), simd_distance(s, tap) < r * 0.35 { near.append(w) }
+            }
+            guard near.count >= 5 else { DispatchQueue.main.async { done(0) }; return }
+            near.sort()
+            let limit = near[near.count / 5] + 0.15
+            let inCone: (SIMD3<Float>) -> Bool = { p in
+                guard let (s, w) = screen(p), w <= limit else { return false }
+                return simd_distance(s, tap) < r
+            }
+            let removed = cloud.removeWhere(inCone)
+            _ = mesh?.tsdf.clearWhere(inCone)
+            DispatchQueue.main.async { done(removed) }
+        }
+    }
+
     func shedMemory() {
         if let cloud { worker.async { cloud.shedMemory() } }
     }
@@ -231,6 +264,8 @@ final class LiveCapture {
 /// Holds its renderer, since an MTKView only keeps a weak reference to its delegate.
 final class LiveDiscsMTKView: MTKView {
     private let renderer: LiveDiscRenderer
+    /// The view-projection the overlay was last drawn with (the overview's when it's on).
+    var lastViewProjection: simd_float4x4? { renderer.lastViewProjection }
 
     init?(live: LiveCapture) {
         guard let device = live.device, let cloud = live.cloud,
@@ -275,6 +310,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let depthEqual: MTLDepthStencilState
     /// The wide overview (ScanOverview): the pulled-back camera and the camera-image window.
     private let overview = OverviewCamera()
+    private(set) var lastViewProjection: simd_float4x4?
     private let liveMesh: LiveMesh?
     private func meshTriangles() -> Int { (liveMesh?.buffers?.triangleIndexCount ?? 0) / 3 }
     private let window: OverviewWindowRenderer?
@@ -376,6 +412,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
             let viewMatrix = overviewView?.view ?? realView
             let projection = overviewView?.projection ?? realProjection
+            lastViewProjection = projection * viewMatrix
             // The live LiDAR mesh once ARKit has one; until then (or without it) the discs.
             // Continue scan never shows the discs: they'd cover the saved (blue) areas again.
             if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix) != true, count > 0, !ghost.isActive {

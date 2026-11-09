@@ -32,6 +32,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     @Published var powerSaving = false
     /// The scan card: hint and the This spot / Room bars (see `updateHud`), the same as the Android app's.
     @Published var hud = ScanHud()
+    /// When a tap last cleared part of the scan (the card says so for a moment).
+    private var clearedAt = Date.distantPast
     private var hudTask: Task<Void, Never>?
     private var lastMemoryWarning: Date?
     let captureView: RoomCaptureView
@@ -260,6 +262,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 let spot = cloud?.detailHere ?? -1
                 let points = cloud?.count ?? 0
                 var (hint, level) = ScanHud.hint(tracking: frame.camera.trackingState, spot: spot, points: points, tooFast: tooFast)
+                if Date().timeIntervalSince(self.clearedAt) < 3 { (hint, level) = ("Cleared, scan that spot again", 1) }
                 // Keep a hint up for 1.5 s, unless a warning replaces it.
                 if let s = shown, s.hint != hint, Date().timeIntervalSince(s.at) < 1.5, !(level == 2 && s.level < 2) {
                     (hint, level) = (s.hint, s.level)
@@ -267,8 +270,22 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                     shown = (hint, level, Date())
                 }
                 let room = await Task.detached(priority: .utility) { cloud?.solidShare() ?? 0 }.value
-                self.hud = ScanHud(hint: hint, level: level, spot: max(0, spot), room: max(self.hud.room, room))
+                let justCleared = Date().timeIntervalSince(self.clearedAt) < 3
+                self.hud = ScanHud(hint: hint, level: level, spot: justCleared ? min(max(0, spot), self.hud.spot) : max(0, spot),
+                                   room: justCleared ? room : max(self.hud.room, room))
             }
+        }
+    }
+
+    /// Tap to clear (rk 9 Nov): wipes our own points and live mesh in the tapped circle so the spot can be scanned
+    /// again. RoomPlan's own outlines can't be edited; they redo themselves as you scan.
+    func clearTapped(at point: CGPoint, radius: CGFloat) {
+        guard phase == .scanning else { return }
+        live.clear(at: point, radius: radius) { [weak self] removed in
+            guard let self, removed > 0 else { return }
+            self.clearedAt = Date()
+            self.hud = ScanHud(hint: "Cleared, scan that spot again", level: 1, spot: 0,
+                               room: self.live.cloud?.solidShare() ?? self.hud.room)
         }
     }
 
@@ -449,6 +466,7 @@ struct ScannerScreen: View {
     @StateObject private var controller: ScanController
     @Environment(\.scenePhase) private var scenePhase
     @State private var confirmCancel = false
+    @State private var flash: ClearFlash?
 
     /// `improving`: a saved scan to add a second pass to (Improve scan), instead of making a new one.
     init(improving: SavedScan? = nil, onFinished: @escaping (SavedScan) -> Void, onCancel: @escaping () -> Void) {
@@ -464,6 +482,30 @@ struct ScannerScreen: View {
                 .onAppear { controller.start() }
             if controller.phase == .relocalizing, let view = controller.relocalizeView {
                 RelocalizeCamera(view: view).ignoresSafeArea()
+            }
+            // Tap to clear: a quick single-finger tap on the camera view wipes the scan in a circle around it
+            // (22% of the screen's short side) so it can be scanned again. The card and buttons above take their own taps.
+            if controller.phase == .scanning {
+                GeometryReader { g in
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(SpatialTapGesture(count: 1).onEnded { e in
+                            let r = min(g.size.width, g.size.height) * 0.22
+                            controller.clearTapped(at: e.location, radius: r)
+                            flash = ClearFlash(center: e.location, radius: r)
+                            withAnimation(.easeOut(duration: 0.7)) { flash?.visible = false }
+                        })
+                    if let flash {
+                        Circle()
+                            .fill(Color.white.opacity(0.25))
+                            .overlay(Circle().stroke(Color.white.opacity(0.8), lineWidth: 2))
+                            .frame(width: flash.radius * 2, height: flash.radius * 2)
+                            .position(flash.center)
+                            .opacity(flash.visible ? 1 : 0)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .ignoresSafeArea()
             }
 
             VStack(spacing: 12) {
@@ -679,4 +721,11 @@ struct ScanHudCard: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(label) \(Int(value * 100)) percent")
     }
+}
+
+/// The circle a tap-to-clear flashes where it cleared.
+struct ClearFlash {
+    var center: CGPoint
+    var radius: CGFloat
+    var visible = true
 }

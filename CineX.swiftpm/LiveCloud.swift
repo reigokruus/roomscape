@@ -521,6 +521,27 @@ final class LiveCloud: @unchecked Sendable {
 
     /// iOS says memory is low: give back what we can without losing coverage — merge the points into coarser cells
     /// (roughly halves them) and keep every other photo.
+    /// Removes the points that pass the test (tap to clear while scanning); returns how many. Worker queue.
+    func removeWhere(_ test: (SIMD3<Float>) -> Bool) -> Int {
+        let n = count
+        var k = 0
+        for i in 0..<n {
+            let p = points[i]
+            if test(SIMD3(p.x, p.y, p.z)) { continue }
+            if k != i {
+                points[k] = points[i]; normals[k] = normals[i]
+                observations[k] = observations[i]; seenStamp[k] = seenStamp[i]
+            }
+            k += 1
+        }
+        guard k != n else { return 0 }
+        index.removeAll(keepingCapacity: true)
+        for i in 0..<k { index[Self.key(points[i].x, points[i].y, points[i].z, voxel)] = Int32(i) }
+        countLock.withLock { $0 = k }
+        detailHere = -1
+        return n - k
+    }
+
     func shedMemory() {
         if count > 50_000, voxel < 0.06 { coarsen() }
         if keyframesTaken > 20 { thinPhotos() }

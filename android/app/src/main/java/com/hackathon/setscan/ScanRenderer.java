@@ -2537,6 +2537,76 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Room marks by tapping (corner, wall, floor, ceiling, object) were too far off (rk, 7 Nov): off, except corners when improving a saved scan. */
     static final boolean ROOM_TAPS = false;
 
+    // ---- Tap to clear while scanning (rk 9 Nov): a mistake can be wiped and scanned again ----
+    /** Share of the screen's short side the cleared circle reaches from the tap. */
+    static final float CLEAR_RADIUS = 0.22f;
+    /** How far behind the tapped surface the clearing reaches, metres. */
+    static final float CLEAR_BEHIND = 0.15f;
+    volatile long clearedAtMs;
+
+    void requestClear(float x, float y) { glTasks.add(() -> clearAt(x, y)); }
+
+    /**
+     * GL thread: everything in the cone through a circle around the tap (as seen on screen now: the overview's camera
+     * when it's on), from the camera to the surface there plus CLEAR_BEHIND: points, surface voxels and so the live
+     * mesh and the coverage. Scanning the spot again fills it back in.
+     */
+    private void clearAt(float sx, float sy) {
+        if (viewing || count == 0) return;
+        final float[] m = mvp.clone();
+        final float r = CLEAR_RADIUS * Math.min(width, height), r2 = r * r;
+        final float tx = sx, ty = sy, w2 = width / 2f, h2 = height / 2f;
+        // Where on screen a point is, and how far from the camera (clip w); null when behind it.
+        // Pass 1: how far the surface under the tap is (near the middle of the circle).
+        float[] near = new float[2048]; int nn = 0;
+        for (int i = 0; i < count; i += Math.max(1, count / 200000)) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+            if (cw <= 0.05f) continue;
+            float px = (m[0] * x + m[4] * y + m[8] * z + m[12]) / cw * w2 + w2, py = h2 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw * h2;
+            float dx = px - tx, dy = py - ty;
+            if (dx * dx + dy * dy < r2 * 0.12f && nn < near.length) near[nn++] = cw;
+        }
+        if (nn < 5) { activity.toast("Nothing scanned there yet"); return; }
+        java.util.Arrays.sort(near, 0, nn);
+        final float limit = near[nn / 5] + CLEAR_BEHIND;
+        Tsdf.Where inCone = (x, y, z) -> {
+            float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+            if (cw <= 0.05f || cw > limit) return false;
+            float px = (m[0] * x + m[4] * y + m[8] * z + m[12]) / cw * w2 + w2, py = h2 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw * h2;
+            float dx = px - tx, dy = py - ty;
+            return dx * dx + dy * dy < r2;
+        };
+        int removed = removePointsWhere(inCone);
+        int vox = tsdf.clearWhere(inCone) + detail.clearWhere(inCone);
+        liveMeshAt = 0; // the live mesh follows at once
+        int sc = 0; for (int i = 0; i < count; i++) if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++;
+        solidCount = sc;
+        roomShown = count > 0 ? Math.min(roomShown, (float) sc / count) : 0; // the Room bar drops too
+        detailHere = 0;
+        clearedAtMs = System.currentTimeMillis();
+        activity.flashCleared(sx, sy, r);
+        log(String.format(java.util.Locale.US, "cleared by tap: %d points, %d voxels, to %.2f m", removed, vox, limit));
+    }
+
+    /** Removes the points that pass the test. */
+    private int removePointsWhere(Tsdf.Where drop) {
+        int k = 0;
+        for (int i = 0; i < count; i++) {
+            if (drop.test(pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2))) continue;
+            if (k != i) {
+                pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
+                for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
+            }
+            k++;
+        }
+        int removed = count - k;
+        count = k; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
+        return removed;
+    }
+
     void requestRescan(float x, float y) {
         if (!ROOM_TAPS && improveDir == null) return;
         pendingTap = new float[]{x, y};
@@ -5388,6 +5458,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (d < 0.35f) { level = 2; hint = LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
         else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = LIVE_MESH ? "This spot is done. Move on to the next orange area" : "This spot is done. Move on to the next red area"; }
+        if (System.currentTimeMillis() - clearedAtMs < 3000) { hint = "Cleared, scan that spot again"; level = 1; }
         if (improveDir != null && contAuto) sub = improveT != null ? "✓ Saved room recognised. Keep scanning, the saved part is shown in blue"
                 : contBase == null ? "Loading the saved scan…" : "Point at a part you scanned before so it can find its place" + (contScore > 0 ? String.format(java.util.Locale.US, " (best match %.0f%%)", contScore * 100) : "");
         else if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";

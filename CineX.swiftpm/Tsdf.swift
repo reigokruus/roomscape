@@ -49,6 +49,17 @@ final class Tsdf {
         w.deallocate()
     }
 
+    /// Resets every voxel whose centre passes the test (tap to clear while scanning); returns how many.
+    func clearWhere(_ test: (SIMD3<Float>) -> Bool) -> Int {
+        var cleared = 0
+        for i in 0..<count {
+            let c = Self.coords(voxelKeys[i])
+            let p = (SIMD3<Float>(Float(c.x), Float(c.y), Float(c.z)) + 0.5) * vs
+            if test(p) { w[i] = 0; sdf[i] = 0; cleared += 1 }
+        }
+        return cleared
+    }
+
     func clear() {
         tableKeys.update(repeating: Self.empty, count: mask + 1)
         count = 0

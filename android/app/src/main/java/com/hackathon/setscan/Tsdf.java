@@ -76,6 +76,26 @@ final class Tsdf {
     }
 
     /** Forget everything inside a sphere so it gets rebuilt from fresh looks. Returns voxels reset. */
+    /** A test on a point in the world. */
+    interface Where { boolean test(float x, float y, float z); }
+
+    /** Resets every voxel whose centre passes the test (tap to clear while scanning). */
+    int clearWhere(Where where) {
+        int cleared = 0;
+        for (int t = 0; t < keys.length; t++) {
+            long k = keys[t];
+            if (k == Long.MIN_VALUE) continue;
+            float vx = (((int) (k & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs;
+            float vy = (((int) ((k >>> 21) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs;
+            float vz = (((int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs;
+            if (!where.test(vx, vy, vz)) continue;
+            int i = slots[t];
+            w[i] = 0; sdf[i] = 0;
+            cleared++;
+        }
+        return cleared;
+    }
+
     int clearSphere(float x, float y, float z, float r) {
         int cleared = 0;
         for (int t = 0; t < keys.length; t++) {
