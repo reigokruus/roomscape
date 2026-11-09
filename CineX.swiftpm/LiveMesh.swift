@@ -73,6 +73,17 @@ final class LiveMesh: @unchecked Sendable {
 
     var buffers: Buffers? { published.withLock { $0 } }
 
+    /// Worker queue: what the mesh holds, in MB (the hardware log's size marks).
+    func sizesMB() -> [String: Double] {
+        let mb = 1.0 / 1_048_576
+        let meshBytes = sets.reduce(0) { $0 + ($1.vertices?.length ?? 0) + ($1.triangles?.length ?? 0) + ($1.edges?.length ?? 0) + ($1.slots?.length ?? 0) }
+        var out: [String: Double] = ["mesh buffers": Double(meshBytes) * mb,
+                                     "tsdf": Double(tsdf.capacity * 30) * mb,
+                                     "tsdf used voxels (k)": Double(tsdf.count) / 1000]
+        if let gpu { out["gpu tsdf"] = Double(gpu.voxelCount * 6) * mb }
+        return out
+    }
+
     /// Worker queue.
     func reset() {
         tsdf.clear()

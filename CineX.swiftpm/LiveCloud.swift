@@ -109,6 +109,15 @@ final class LiveCloud: @unchecked Sendable {
     private let keyframes = OSAllocatedUnfairLock(initialState: [Keyframe]())
     /// Photos started (worker only), counted against `maxKeyframes` before they finish encoding.
     private var keyframesTaken = 0
+
+    /// Photos kept so far and their bytes (JPEG + depth), for the hardware log.
+    var keyframeSizes: (count: Int, mb: Double) {
+        keyframes.withLock { k -> (count: Int, mb: Double) in
+            var bytes = 0
+            for f in k { bytes += f.jpeg.count + (f.depth?.count ?? 0) * 2 }
+            return (k.count, Double(bytes) / 1_048_576)
+        }
+    }
     private var lastKeyframePose: simd_float4x4?
     private var nextPhotoID = 1
     /// The live preview's photo textures (LivePreview): every finished photo goes there too.

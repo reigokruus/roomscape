@@ -277,7 +277,20 @@ final class LiveCapture {
         }
         // A separate block, so the frame is already let go while the mesh is built.
         if let mesh { worker.async { mesh.rebuildIfDue(camera: camera, time: time) } }
+        // Every 30 s: what each part holds (iPhone memory grew 720 MB → 1.55 GB in a 3-minute scan; rk 9 Nov).
+        if let perf, time - lastSizesTime >= 30 {
+            lastSizesTime = time
+            worker.async {
+                var sizes = mesh?.sizesMB() ?? [:]
+                let k = cloud.keyframeSizes
+                sizes["photos"] = k.mb
+                sizes["photo count"] = Double(k.count)
+                sizes["points"] = Double(cloud.buffer.length + cloud.normalBuffer.length) / 1_048_576
+                perf.mark("sizes", sizes: sizes)
+            }
+        }
     }
+    private var lastSizesTime: TimeInterval = 0
 
     /// CADisplayLink keeps a strong reference to its target; this keeps it from holding on to LiveCapture.
     private final class WeakTarget: NSObject {
