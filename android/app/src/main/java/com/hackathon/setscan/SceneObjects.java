@@ -41,6 +41,8 @@ final class SceneObjects {
         byte[] cols;          // rgb per point
         int n;
         FloatBuffer gpu; ByteBuffer gpuCol; // drawing copies, made on first draw
+        /** The hole it leaves (HoleFill), made once it's first removed or moved; generated, never saved. */
+        FloatBuffer fillPos; ByteBuffer fillCol; int fillVerts; volatile boolean fillPending;
 
         float w() { return 2 * hu; }
         float d() { return 2 * hv; }
@@ -197,7 +199,39 @@ final class SceneObjects {
 
     // ---------------- drawing ----------------
 
-    private int ptProg, lineProg;
+    private int ptProg, lineProg, fillProg;
+    private FloatBuffer roomPos; private ByteBuffer roomCol; private int roomCount; private float roomFloor;
+
+    /** GL thread, each frame: the room's points, for filling the holes moved objects leave. */
+    void room(FloatBuffer pos, ByteBuffer col, int count, float floorY) { roomPos = pos; roomCol = col; roomCount = count; roomFloor = floorY; }
+
+    /** Background: the hole fill for an object that's away from its spot. */
+    private void makeFill(Obj o) {
+        final FloatBuffer pos = roomPos; final ByteBuffer col = roomCol; final int n = roomCount; final float fy = roomFloor;
+        if (pos == null || n == 0 || o.fromCatalog) return;
+        o.fillPending = true;
+        new Thread(() -> {
+            try {
+                // Only the points near the object (cheap): within 40 cm of its box.
+                float r = (float) Math.hypot(o.hu, o.hv) + 0.4f;
+                float[] xyz = new float[Math.min(n, 300000) * 3]; byte[] rgb = new byte[xyz.length]; int k = 0;
+                for (int i = 0; i < n && k * 3 < xyz.length; i++) {
+                    float x = pos.get(i * 3), z = pos.get(i * 3 + 2);
+                    if (Math.abs(x - o.cx) > r || Math.abs(z - o.cz) > r) continue;
+                    if ((col.get(i * 4 + 3) & 0xFF) == 0) continue;
+                    xyz[k * 3] = x; xyz[k * 3 + 1] = pos.get(i * 3 + 1); xyz[k * 3 + 2] = z;
+                    rgb[k * 3] = col.get(i * 4); rgb[k * 3 + 1] = col.get(i * 4 + 1); rgb[k * 3 + 2] = col.get(i * 4 + 2);
+                    k++;
+                }
+                HoleFill.Mesh m = HoleFill.build(xyz, rgb, 3, k, o.cx, o.cz, o.cosA, o.sinA, o.hu, o.hv, o.y0, o.y1, fy);
+                FloatBuffer fp = ByteBuffer.allocateDirect(Math.max(1, m.verts) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+                fp.put(m.pos, 0, m.verts * 3).position(0);
+                ByteBuffer fc = ByteBuffer.allocateDirect(Math.max(1, m.verts) * 3).order(ByteOrder.nativeOrder());
+                fc.put(m.col, 0, m.verts * 3).position(0);
+                o.fillPos = fp; o.fillCol = fc; o.fillVerts = m.verts;
+            } catch (Throwable ignored) { }
+        }, "hole-fill").start();
+    }
     private FloatBuffer scratch = ByteBuffer.allocateDirect(64 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
 
     void draw(float[] mvp, int height, float pxPerMeter) {
@@ -214,6 +248,12 @@ final class SceneObjects {
                     "precision mediump float; uniform vec4 uColor; void main(){ gl_FragColor = uColor; }");
         }
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        // The holes left by objects that are removed or moved away: filled with a best guess (HoleFill).
+        for (Obj o : list) {
+            if (!o.hidesOriginal()) continue;
+            if (o.fillPos == null && !o.fillPending) makeFill(o);
+            if (o.fillVerts > 0) drawFill(mvp, o);
+        }
         for (Obj o : list) if (o.drawnSeparately() && o.n > 0) drawPoints(mvp, o, pxPerMeter);
         float dens = height / 1000f;
         // gear placed from the catalogue has no scanned points: always show it as a see-through box of its real size
@@ -241,6 +281,21 @@ final class SceneObjects {
             lines(mvp, edges(corners(o)), s ? SEL : (active ? BOX : FAINT));
         }
         GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    private void drawFill(float[] mvp, Obj o) {
+        if (fillProg == 0) fillProg = ScanRenderer.program(
+                "uniform mat4 uMvp; attribute vec3 aPos; attribute vec3 aCol; varying vec3 vCol; void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vCol = aCol; }",
+                "precision mediump float; varying vec3 vCol; void main(){ gl_FragColor = vec4(vCol, 1.0); }");
+        GLES20.glUseProgram(fillProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(fillProg, "uMvp"), 1, false, mvp, 0);
+        int aPos = GLES20.glGetAttribLocation(fillProg, "aPos"), aCol = GLES20.glGetAttribLocation(fillProg, "aCol");
+        o.fillPos.position(0); o.fillCol.position(0);
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, o.fillPos);
+        GLES20.glVertexAttribPointer(aCol, 3, GLES20.GL_UNSIGNED_BYTE, true, 0, o.fillCol);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aCol);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, o.fillVerts);
+        GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aCol);
     }
 
     private static final float[] GEAR_FILL = {0.25f, 0.75f, 0.9f, 0.18f}, GEAR_EDGE = {0.35f, 0.85f, 1f, 0.95f};

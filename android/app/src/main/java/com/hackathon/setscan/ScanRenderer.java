@@ -5346,7 +5346,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         // A thumbnail frame shows just the room: no labels, markers or props.
         boolean clean = photoThumbWanted && photos.ready && style == 0 && !walking && meshTris > 0 && currentDir != null;
-        if (!clean) objects.draw(mvp, height, proj[5] * height / 2f);
+        if (!clean) {
+            objects.room(pos, col, count, roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY);
+            objects.draw(mvp, height, proj[5] * height / 2f);
+        }
         if (clean) { }
         else if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
         else { drawProps(mvp); if (roomReady && overlays && !planningPreview) drawRoom(mvp, simple); }
