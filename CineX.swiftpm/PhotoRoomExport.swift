@@ -28,11 +28,13 @@ enum PhotoRoomExport {
 
     /// Builds the .glb for a scan's capture folder, or nil without a mesh or photos. Slow (a second or two): call off
     /// the main thread.
-    static func glb(folder: URL) -> Result? {
+    /// `floorY`: the floor height to move to y = 0 (RoomPlan's floor in a .rmsc export); by default the mesh's own
+    /// lowest surfaces.
+    static func glb(folder: URL, floorY knownFloor: Float? = nil) -> Result? {
         guard let layout = PhotoLayout.make(folder: folder, maxPhotos: maxPhotos, leaveOutCeiling: false) else { return nil }
         let mesh = layout.mesh
         let ys = mesh.positions.map(\.y).sorted()
-        let floorY = ys[min(ys.count - 1, ys.count * 5 / 1000)]
+        let floorY = knownFloor ?? ys[min(ys.count - 1, ys.count * 5 / 1000)]
         let shift = SIMD3<Float>(0, -floorY, 0)
 
         // Photos: the saved JPEGs, smaller when everything wouldn't fit in `maxBytes`.
@@ -190,7 +192,7 @@ enum PhotoRoomExport {
     }
 
     /// The scan's point colours (`points.bin`), averaged per 5 cm cell, in linear RGB for glTF's COLOR_0.
-    private struct PointColors {
+    struct PointColors {
         static let cell: Float = 0.05
         var cells: [SIMD3<Int32>: SIMD4<Float>] = [:]
 
@@ -225,6 +227,11 @@ enum PhotoRoomExport {
             guard sum.w > 0 else { return nil }
             let srgb = SIMD3(sum.x, sum.y, sum.z) / sum.w
             return SIMD3(pow(srgb.x, 2.2), pow(srgb.y, 2.2), pow(srgb.z, 2.2))
+        }
+
+        /// The same colour as stored (sRGB, 0…1), for files that keep colours as bytes.
+        func srgb(near p: SIMD3<Float>) -> SIMD3<Float>? {
+            color(near: p).map { SIMD3(pow($0.x, 1 / 2.2), pow($0.y, 1 / 2.2), pow($0.z, 1 / 2.2)) }
         }
     }
 }

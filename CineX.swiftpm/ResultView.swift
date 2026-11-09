@@ -184,10 +184,13 @@ struct ResultView: View {
             }
             if exportingGLB {
                 ProgressView()
-            } else if photoRoom != nil {
+            } else if photoRoom != nil || capture != nil {
                 Menu {
+                    Button(action: exportRmsc) { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }
+                    if photoRoom != nil {
+                        Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
+                    }
                     ShareLink(item: shareURL ?? scan.modelURL) { Label("Room model (.usdz)", systemImage: "cube") }
-                    Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
                 } label: {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
@@ -198,7 +201,7 @@ struct ResultView: View {
         .sheet(item: $glbFile) { file in
             ActivitySheet(items: [file.url]).ignoresSafeArea()
         }
-        .alert("Couldn't export the photo room", isPresented: Binding(get: { glbError != nil }, set: { if !$0 { glbError = nil } })) {
+        .alert("Couldn't export the scan", isPresented: Binding(get: { glbError != nil }, set: { if !$0 { glbError = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(glbError ?? "")
@@ -282,7 +285,10 @@ struct ResultView: View {
 
             // Photo room, when the scan has a mesh and photos: built in the background, shown by Photo.
             if let scene {
-                let photo = await Task.detached(priority: .userInitiated) { PhotoRoom.build(scan) }.value
+                // Painted from the mesh and photos; for a scan imported without a mesh, the package's own room.glb.
+                let photo = await Task.detached(priority: .userInitiated) {
+                    PhotoRoom.build(scan) ?? GLBScene.node(forScan: scan.captureURL)
+                }.value
                 if let photo {
                     scene.rootNode.addChildNode(photo)
                     photoRoom = photo
@@ -516,6 +522,22 @@ struct ResultView: View {
     }
 
     /// Writes the photo room as RoomScape-<scan date>.glb in the temporary folder and opens the share sheet for it.
+    /// Writes the whole scan as a .rmsc package (see `Rmsc`) and opens the share sheet for it.
+    private func exportRmsc() {
+        exportingGLB = true
+        let scan = current
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<URL, Error> in
+                Result { try Rmsc.export(scan) }
+            }.value
+            exportingGLB = false
+            switch result {
+            case .success(let url): glbFile = SharedFile(url: url)
+            case .failure(let error): glbError = error.localizedDescription
+            }
+        }
+    }
+
     private func exportGLB() {
         exportingGLB = true
         let scan = scan
@@ -535,7 +557,10 @@ struct ResultView: View {
     }
 
     /// The floor height for standing in the room: RoomPlan's floor plane.
-    private var walkFloorY: Float? { shell?.floorY ?? room.map { RoomShell(room: $0).floorY } }
+    private var walkFloorY: Float? {
+        // Imported scans without RoomPlan's room: the bottom of the photo room.
+        shell?.floorY ?? room.map { RoomShell(room: $0).floorY } ?? photoRoom.map { Float($0.boundingBox.min.y) + $0.simdPosition.y }
+    }
 
     /// Highest eye height: 2.2 m, and 10 cm under RoomPlan's ceiling.
     private var maxEyeHeight: Double {

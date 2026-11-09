@@ -31,6 +31,15 @@ enum ScanStore {
         return f
     }()
 
+    /// A free scan name for a scan made (or imported) now: "Scan_<date>".
+    static func newScanName(_ date: Date = Date()) -> String {
+        var date = date
+        while FileManager.default.fileExists(atPath: directory.appendingPathComponent("Scan_" + nameFormatter.string(from: date) + ".usdz").path) {
+            date += 1
+        }
+        return "Scan_" + nameFormatter.string(from: date)
+    }
+
     static func save(_ room: CapturedRoom, capture: CaptureSnapshot?) throws -> SavedScan {
         let date = Date()
         let name = "Scan_" + nameFormatter.string(from: date)

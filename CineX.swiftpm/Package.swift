@@ -29,7 +29,9 @@ let package = Package(
             ],
             capabilities: [
                 .camera(purposeString: "RoomScape uses the camera and LiDAR scanner to capture your room.")
-            ]
+            ],
+            appCategory: nil,
+            additionalInfoPlistContentFilePath: "DocumentTypes.plist"
         )
     ],
     targets: [

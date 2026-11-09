@@ -1,5 +1,6 @@
 import SwiftUI
 import RoomPlan
+import UniformTypeIdentifiers
 
 struct HomeView: View {
     @State private var scans: [SavedScan] = []
@@ -17,6 +18,10 @@ struct HomeView: View {
     @State private var debugPlanning = false
     /// Improve scan: the saved scan the scanner adds a second pass to.
     @State private var improving: SavedScan?
+    /// Importing a .rmsc scan (from Files, AirDrop or another app).
+    @State private var pickingImport = false
+    @State private var importing = false
+    @State private var importError: String?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -49,6 +54,21 @@ struct HomeView: View {
                     if RoomCaptureSession.isSupported {
                         Text("Walk slowly around the room and point the phone at every wall, window, door and piece of furniture.")
                     }
+                }
+
+                Section {
+                    Button {
+                        pickingImport = true
+                    } label: {
+                        if importing {
+                            Label("Importing scan…", systemImage: "hourglass")
+                        } else {
+                            Label("Import a scan (.rmsc)", systemImage: "square.and.arrow.down")
+                        }
+                    }
+                    .disabled(importing)
+                } footer: {
+                    Text("Open a room scanned with RoomScape on another iPhone or Android phone. You can also AirDrop a .rmsc file to this phone, or open it from Files.")
                 }
 
                 Section {
@@ -100,6 +120,18 @@ struct HomeView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
+            .fileImporter(isPresented: $pickingImport, allowedContentTypes: [Rmsc.type, .zip]) { result in
+                if case .success(let url) = result { importRmsc(url) }
+            }
+            // AirDrop, Files and "Open in RoomScape" hand the file to the app here.
+            .onOpenURL { url in
+                if url.isFileURL { importRmsc(url) }
+            }
+            .alert("Couldn't import the scan", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(importError ?? "")
+            }
             .navigationDestination(for: SavedScan.self) { scan in
                 ResultView(scan: scan, onImprove: {
                     // Close the result first; it opens again with the merged scan when the scanner is done.
@@ -152,6 +184,26 @@ struct HomeView: View {
 }
 
 extension HomeView {
+    /// Imports a .rmsc package as a new scan and opens it.
+    private func importRmsc(_ url: URL) {
+        importing = true
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<SavedScan, Error> in
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                return Result { try Rmsc.importScan(from: url) }
+            }.value
+            importing = false
+            switch result {
+            case .success(let scan):
+                scans = ScanStore.list()
+                path = [scan]
+            case .failure(let error):
+                importError = error.localizedDescription
+            }
+        }
+    }
+
     private func startRenaming(_ scan: SavedScan) {
         newTitle = scan.title ?? ""
         renaming = scan
