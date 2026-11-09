@@ -157,6 +157,78 @@ public class MainActivity extends Activity {
         })));
     }
 
+    static final int IMPORT_RMSC = 7301;
+
+    /** Share: the saved scan as a .rmsc package (opens on the iPhone app, the web viewer, or another Android). */
+    private void shareRmsc() {
+        File dir = renderer.currentDir;
+        if (dir == null) { toast("The scan saves itself a moment after Done. Try Share again in a few seconds."); return; }
+        exportButton.setEnabled(false);
+        Toast.makeText(this, "Packing the room...", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                android.net.Uri uri = Rmsc.export(this, dir);
+                runOnUiThread(() -> {
+                    exportButton.setEnabled(true);
+                    android.content.Intent send = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                    send.setType(Rmsc.MIME);
+                    send.putExtra(android.content.Intent.EXTRA_STREAM, uri);
+                    send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    toast("Saved to Downloads/RoomScape. Pick where to send it.");
+                    try { startActivity(android.content.Intent.createChooser(send, "Share room (.rmsc)")); }
+                    catch (Exception e) { toast("Saved, but sharing failed: " + e.getMessage()); }
+                });
+            } catch (Throwable e) {
+                runOnUiThread(() -> { exportButton.setEnabled(true); toast("Share failed: " + e.getMessage()); });
+            }
+        }).start();
+    }
+
+    /** Pick a .rmsc file to import. */
+    private void pickRmsc() {
+        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try { startActivityForResult(i, IMPORT_RMSC); } catch (Exception e) { toast("No file picker: " + e.getMessage()); }
+    }
+
+    /** Import a .rmsc as a new saved scan and open it. */
+    private void importRmsc(android.net.Uri uri) {
+        if (uri == null) return;
+        toast("Importing the room...");
+        new Thread(() -> {
+            try {
+                File dir = Rmsc.importFrom(this, uri);
+                runOnUiThread(() -> {
+                    toast("Room imported.");
+                    refreshHome();
+                    for (ScanStore.Entry e : ScanStore.list(this)) if (e.dir.equals(dir)) { openScan(e); break; }
+                });
+            } catch (Throwable e) {
+                runOnUiThread(() -> new android.app.AlertDialog.Builder(this).setTitle("Couldn't import the room")
+                        .setMessage(String.valueOf(e.getMessage())).setPositiveButton("OK", null).show());
+            }
+        }).start();
+    }
+
+    /** A .rmsc opened from another app (Files, a chat, the browser). */
+    private void handleIncoming(android.content.Intent intent) {
+        if (intent == null) return;
+        android.net.Uri uri = null;
+        if (android.content.Intent.ACTION_VIEW.equals(intent.getAction())) uri = intent.getData();
+        else if (android.content.Intent.ACTION_SEND.equals(intent.getAction())) uri = intent.getParcelableExtra(android.content.Intent.EXTRA_STREAM);
+        if (uri == null) return;
+        intent.setAction(null); // don't import twice on rotation
+        final android.net.Uri u = uri;
+        importRmsc(u);
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        handleIncoming(intent);
+    }
+
     private void exportScan() {
         exportButton.setEnabled(false);
         Toast.makeText(this, "Packing the scan...", Toast.LENGTH_SHORT).show();
@@ -326,7 +398,8 @@ public class MainActivity extends Activity {
         exportButton = new Button(this);
         exportButton.setText("Share");
         exportButton.setVisibility(View.GONE);
-        exportButton.setOnClickListener(v -> exportScan());
+        exportButton.setOnClickListener(v -> shareRmsc());
+        exportButton.setOnLongClickListener(v -> { exportScan(); return true; }); // the raw debug zip (depth frames, sensors)
         bar.addView(mainButton);
 
         bar.addView(topButton);
@@ -513,6 +586,7 @@ public class MainActivity extends Activity {
         });
         updateStatus("Starting...");
         refreshHome();
+        handleIncoming(getIntent());
     }
 
     @Override
@@ -774,7 +848,7 @@ public class MainActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(dp(16), dp(40), dp(16), dp(24));
         TextView title = new TextView(this);
-        title.setText("CineX");
+        title.setText("RoomScape");
         title.setTextColor(Color.WHITE);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
@@ -791,6 +865,7 @@ public class MainActivity extends Activity {
         newScan.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         newScan.setOnClickListener(v -> startNewScan());
         col.addView(newScan, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)));
+        Button openRmsc = new Button(this); openRmsc.setText("Open a room file (.rmsc)"); openRmsc.setAllCaps(false); openRmsc.setOnClickListener(v -> pickRmsc()); col.addView(openRmsc);
         Button browseCatalog = new Button(this); browseCatalog.setText("Browse item catalog (offline)"); browseCatalog.setOnClickListener(v -> nativePlanning.showCatalog()); col.addView(browseCatalog);
         Button pilot = new Button(this); pilot.setText("Interested in a paid pilot? (optional)"); pilot.setAllCaps(false); pilot.setOnClickListener(v -> pilotIntake.open()); col.addView(pilot);
         TextView saved = new TextView(this);
@@ -1348,6 +1423,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if(requestCode == IMPORT_RMSC && resultCode == RESULT_OK && data != null) importRmsc(data.getData());
         if(requestCode == NativePlanningUi.IMPORT_CATALOG && resultCode == RESULT_OK && data != null && data.getData() != null) nativePlanning.importUri(data.getData());
         if(requestCode == PilotIntakeUi.EXPORT_PILOT) pilotIntake.exportResult(resultCode == RESULT_OK, data == null ? null : data.getData());
     }
