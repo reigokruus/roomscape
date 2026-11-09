@@ -344,9 +344,7 @@ struct ResultView: View {
             .buttonStyle(.bordered)
             .tint(objectsOn ? .yellow : nil)
             .accessibilityLabel(objectsOn ? "Close objects" : "Objects in the room")
-            if let training {
-                TrainButton(run: training, labeled: labeled) { style = .photo } // training sharpens the colours
-            }
+            // Splat training is gone with the Splats view (rk 9 Nov).
         } else if buildingSplats {
             Label("Building splats…", systemImage: "circle.dotted")
                 .font(.caption.weight(.medium))
@@ -374,7 +372,6 @@ struct ResultView: View {
         if splatGroup != nil {
             Picker("Style", selection: $style) {
                 Text("Photo").tag(Style.photo)
-                Text("Splats").tag(Style.splats)
                 Text("Points").tag(Style.points)
                 Text("Mesh").tag(Style.mesh)
                 if room != nil { Text("Model").tag(Style.model) } // RoomPlan's model: iPhone scans only
@@ -746,9 +743,7 @@ struct ResultView: View {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
         #endif
-        let training = SplatTrainingRun(scan: scan, base: base, shell: shell)
-        training.onPreview = { showSplats($0) }
-        self.training = training
+        // No splat training any more (rk 9 Nov: the Splats view is gone; the splat data only feeds Lighting).
         #if DEBUG
         // UI checks in the Simulator: -openPanel lighting | objects
         let args = ProcessInfo.processInfo.arguments
@@ -799,7 +794,7 @@ struct ResultView: View {
         }
         // Training on the phone without taps: -train <seconds> [-snapshotPhoto <n>] trains, pauses, and with a photo
         // number saves Documents/debug-before.png and debug-after.png, the splats seen from that photo's camera.
-        if let i = args.firstIndex(of: "-train"), i + 1 < args.count, let seconds = Double(args[i + 1]) {
+        if let i = args.firstIndex(of: "-train"), i + 1 < args.count, let seconds = Double(args[i + 1]), let training = self.training {
             let photo = args.firstIndex(of: "-snapshotPhoto").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil }
             if let photo {
                 try? await Task.sleep(nanoseconds: 3_000_000_000) // SceneKit's first frames skip the splat shaders
@@ -846,7 +841,7 @@ struct ResultView: View {
         if let i = args.firstIndex(of: "-style"), i + 1 < args.count {
             try? await Task.sleep(nanoseconds: 500_000_000)
             switch args[i + 1] {
-            case "splats": style = .splats
+            case "splats": style = .points
             case "points": style = .points
             case "mesh": style = .mesh
             default: style = .photo
@@ -994,7 +989,7 @@ struct ResultView: View {
         objectsScene?.boxes.isHidden = !objectsOn
         if objectsOn {
             // The outlines show in every style but RoomPlan's own model (moving and removing moves the splats).
-            if style == .model { style = .splats }
+            if style == .model { style = .points }
             if lightingOn { toggleLighting() }
         } else {
             selectedObject = nil
@@ -1145,7 +1140,7 @@ struct ResultView: View {
             lightingScene?.apply(nil)
             return
         }
-        if style == .model || style == .mesh || (style == .photo && photoRoom != nil) { style = .splats }
+        if style == .model || style == .mesh || (style == .photo && photoRoom != nil) { style = .points }
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.

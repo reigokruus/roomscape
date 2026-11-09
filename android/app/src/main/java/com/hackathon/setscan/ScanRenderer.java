@@ -5183,10 +5183,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private volatile boolean splats = true;
-    private volatile int style = 1; // 0 = photo surface, 1 = splats (surfels), 2 = dots
+    private volatile int style = 0; // 0 = photo surface, 2 = dots, 3 = mesh (1 = splats: no longer offered)
 
     String cycleStyle() {
-        style = (style + 1) % 4;
+        style = (style + 1) % 4; if (style == 1) style = 2; // no splats view
         splats = style != 2;
         return styleLabel();
     }
@@ -5304,7 +5304,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return String.format(java.util.Locale.US, "%.1f × %.1f m, %.1f m high", Math.max(w, d), Math.min(w, d), h);
     }
 
-    void setStyle(int s) { style = Math.max(0, Math.min(3, s)); }
+    void setStyle(int s) { style = Math.max(0, Math.min(3, s)); if (style == 1) style = 2; } // no Splats view: points
     int style() { return style; }
 
     String styleLabel() { return style == 0 ? "Style: photo" : style == 1 ? "Style: splats" : style == 2 ? "Style: dots" : "Style: mesh"; }

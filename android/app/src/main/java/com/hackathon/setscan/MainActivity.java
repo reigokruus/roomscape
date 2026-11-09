@@ -901,7 +901,9 @@ public class MainActivity extends Activity {
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
         // Every scan records itself now, so the Record session button is gone (toggleRecording stays for tests).
         recordButton.setVisibility(View.GONE);
-        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
+        // Splat training and the splat style cycle are gone with the Splats view (rk 9 Nov).
+        trainButton.setVisibility(View.GONE); splatButton.setVisibility(View.GONE);
+        Button[] tools = {depthButton, cleanButton, viewButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
         improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE); // demo: Continue scan finds the saved room by itself
         for (Button b : tools) {
@@ -971,7 +973,10 @@ public class MainActivity extends Activity {
     private TextView viewerTitle;
     private android.widget.ImageView viewerShared;
     private final java.util.List<Button> menuActions = new java.util.ArrayList<>();
-    private final TextView[] styleTabs = new TextView[4];
+    private final TextView[] styleTabs = new TextView[3];
+    /** The renderer style behind each tab: Photo, Points, Mesh (rk 9 Nov: the Splats view is gone; style 1 is no
+     *  longer offered, its data only feeds the Lighting preview). */
+    private static final int[] TAB_STYLE = {0, 2, 3};
 
     private void buildViewerChrome(FrameLayout chrome) {
         // Top bar: ‹ Back, the scan's name, ✦ (more actions), Share.
@@ -1015,9 +1020,9 @@ public class MainActivity extends Activity {
         android.graphics.drawable.GradientDrawable sbg = new android.graphics.drawable.GradientDrawable();
         sbg.setColor(0xE61C1C1E); sbg.setCornerRadius(dp(9));
         styleSwitch.setBackground(sbg);
-        String[] names = {"Photo", "Splats", "Points", "Mesh"};
+        String[] names = {"Photo", "Points", "Mesh"};
         for (int i = 0; i < names.length; i++) {
-            final int s = i;
+            final int s = TAB_STYLE[i];
             TextView t = new TextView(this);
             t.setText(names[i]);
             t.setTextColor(Color.WHITE);
@@ -1314,8 +1319,8 @@ public class MainActivity extends Activity {
         for (int i = 0; i < styleTabs.length; i++) {
             android.graphics.drawable.GradientDrawable on = new android.graphics.drawable.GradientDrawable();
             on.setColor(0xFF636366); on.setCornerRadius(dp(7));
-            styleTabs[i].setBackground(i == s ? on : null);
-            styleTabs[i].setTypeface(i == s ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
+            styleTabs[i].setBackground(TAB_STYLE[i] == s ? on : null);
+            styleTabs[i].setTypeface(TAB_STYLE[i] == s ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
         }
     }
 
