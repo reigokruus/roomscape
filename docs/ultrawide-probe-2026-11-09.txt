@@ -1,0 +1,33 @@
+device: iPhone iOS 27.2
+ARWorldTracking supported: true, sceneDepth: true, mesh: true
+video formats (15):
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1440 @60 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1440 @30 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1080 @60 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1080 @30 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1280x720 @60 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1280x720 @30 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1440 @60 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1440 @30 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1080 @60 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1920x1080 @30 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1280x720 @60 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 1280x720 @30 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 3840x2160 @30 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 3840x2160 @25 fps
+  AVCaptureDeviceTypeBuiltInWideAngleCamera pos 1 3840x2160 @24 fps
+recommended hi-res: AVCaptureDeviceTypeBuiltInWideAngleCamera (1920.0, 1440.0)
+RoomCaptureSession supported: true; RoomCaptureSession(arSession:) is available on iOS 17+ (custom ARSession)
+no ultrawide ARKit video format
+default format (1920.0, 1440.0): fov h 71.4° v 56.6°, sceneDepth yes
+AVCaptureMultiCamSession supported: true
+back devices: AVCaptureDeviceTypeBuiltInLiDARDepthCamera, AVCaptureDeviceTypeBuiltInUltraWideCamera, AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeBuiltInTelephotoCamera
+  multicam set: AVCaptureDeviceTypeBuiltInLiDARDepthCamera + AVCaptureDeviceTypeBuiltInUltraWideCamera
+  multicam set: AVCaptureDeviceTypeBuiltInLiDARDepthCamera + AVCaptureDeviceTypeBuiltInTelephotoCamera
+  multicam set: AVCaptureDeviceTypeBuiltInUltraWideCamera + AVCaptureDeviceTypeBuiltInWideAngleCamera
+  multicam set: AVCaptureDeviceTypeBuiltInTelephotoCamera + AVCaptureDeviceTypeBuiltInUltraWideCamera
+  multicam set: AVCaptureDeviceTypeBuiltInTelephotoCamera + AVCaptureDeviceTypeBuiltInWideAngleCamera
+  multicam set: AVCaptureDeviceTypeBuiltInLiDARDepthCamera + AVCaptureDeviceTypeBuiltInTelephotoCamera + AVCaptureDeviceTypeBuiltInUltraWideCamera
+  multicam set: AVCaptureDeviceTypeBuiltInTelephotoCamera + AVCaptureDeviceTypeBuiltInUltraWideCamera + AVCaptureDeviceTypeBuiltInWideAngleCamera
+LiDAR depth camera: 45 formats, 39 with depth; constituent devices: AVCaptureDeviceTypeBuiltInWideAngleCamera
+written to /var/mobile/Containers/Data/Application/BB9BE984-AD42-42E9-BD8B-CF2BEE182BD2/Documents/ultrawide-probe.txt
