@@ -71,3 +71,8 @@ Live per frame: per-point normals (LiveCloud.normalBuffer, 4.8 MB) only for the 
 | points.bin | 6 | Points view, room analysis | keep |
 | surface.ply | 2.7 | Photo/Mesh views | keep |
 Splat building after Done (3–7 s) → goes with the Lighting port.
+
+## Backlog (rk 9 Nov, 23:00)
+- S24 recordings are kept (rk). Add an S24 "rebuild from recording" (ARCore playback of recording.mp4 through the
+  scan pipeline, as the iPhone's RecordingProcessor), after the iPhone overnight items, so old S24 scans can be
+  reprocessed.
