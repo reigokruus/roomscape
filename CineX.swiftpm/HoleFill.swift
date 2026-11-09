@@ -18,17 +18,19 @@ enum HoleFill {
                       y0: Float, y1: Float, floorY: Float) -> (positions: [SIMD3<Float>], colors: [SIMD3<Float>]) {
         var pos: [SIMD3<Float>] = [], col: [SIMD3<Float>] = []
         let v = SIMD2(-u.y, u.x)
-        if y0 - floorY < 0.12 {
-            floorPatch(points, center, u, v, hu + margin, hv + margin, floorY, &pos, &col)
+        // Walls first: the floor's colour band must not reach up a wall right behind the object.
+        var walled = [Bool](repeating: false, count: 4) // +u, -u, +v, -v
+        for (i, (n, h, w, l)) in [(u, hu, hv, v), (-u, hu, hv, v), (v, hv, hu, u), (-v, hv, hu, u)].enumerated() {
+            walled[i] = wallPatch(points, center, n, h, w, l, y1, floorY, &pos, &col)
         }
-        for (n, h, w, l) in [(u, hu, hv, v), (-u, hu, hv, v), (v, hv, hu, u), (-v, hv, hu, u)] {
-            wallPatch(points, center, n, h, w, l, y1, floorY, &pos, &col)
+        if y0 - floorY < 0.12 {
+            floorPatch(points, center, u, v, hu + margin, hv + margin, floorY, walled, &pos, &col)
         }
         return (pos, col)
     }
 
     private static func floorPatch(_ pts: [Point], _ c: SIMD2<Float>, _ u: SIMD2<Float>, _ v: SIMD2<Float>, _ a: Float, _ b: Float,
-                                   _ floorY: Float, _ pos: inout [SIMD3<Float>], _ col: inout [SIMD3<Float>]) {
+                                   _ floorY: Float, _ walled: [Bool], _ pos: inout [SIMD3<Float>], _ col: inout [SIMD3<Float>]) {
         let nu = max(2, Int((2 * a / step).rounded(.up)) + 1), nv = max(2, Int((2 * b / step).rounded(.up)) + 1)
         var negV = Profile(nu), posV = Profile(nu), negU = Profile(nv), posU = Profile(nv)
         for q in pts where abs(q.p.y - floorY) <= 0.04 {
@@ -40,6 +42,9 @@ enum HoleFill {
             if abs(pu) <= a { if pv < 0 { negV.add(iu, q.c) } else { posV.add(iu, q.c) } }
             if abs(pv) <= b { if pu < 0 { negU.add(iv, q.c) } else { posU.add(iv, q.c) } }
         }
+        // A side with a wall right behind it: its band is mostly wall, so the other side stands in for it.
+        if walled[0] { posU = negU } else if walled[1] { negU = posU }
+        if walled[2] { posV = negV } else if walled[3] { negV = posV }
         guard let avg = average([negV, posV, negU, posU]) else { return }
         negV.fill(avg); posV.fill(avg); negU.fill(avg); posU.fill(avg)
         var corner: [SIMD3<Float>] = [], colour: [SIMD3<Float>] = []
@@ -55,7 +60,7 @@ enum HoleFill {
     }
 
     private static func wallPatch(_ pts: [Point], _ c: SIMD2<Float>, _ n: SIMD2<Float>, _ h: Float, _ w: Float, _ l: SIMD2<Float>,
-                                  _ y1: Float, _ floorY: Float, _ pos: inout [SIMD3<Float>], _ col: inout [SIMD3<Float>]) {
+                                  _ y1: Float, _ floorY: Float, _ pos: inout [SIMD3<Float>], _ col: inout [SIMD3<Float>]) -> Bool {
         let top = y1 + margin, half = w + margin
         var gaps: [Float] = []
         for q in pts {
@@ -64,10 +69,10 @@ enum HoleFill {
             if t < 0 || t > wallGap || abs(s) > half || q.p.y < floorY + 0.05 || q.p.y > top { continue }
             gaps.append(t)
         }
-        guard gaps.count >= 120 else { return }
+        guard gaps.count >= 120 else { return false }
         gaps.sort()
         let t0 = gaps[gaps.count / 2]
-        guard Float(gaps.filter { abs($0 - t0) < 0.04 }.count) >= 0.7 * Float(gaps.count) else { return }
+        guard Float(gaps.filter { abs($0 - t0) < 0.04 }.count) >= 0.7 * Float(gaps.count) else { return false }
         let nl = max(2, Int((2 * half / step).rounded(.up)) + 1), ny = max(2, Int(((top - floorY) / step).rounded(.up)) + 1)
         var left = Profile(ny), right = Profile(ny), above = Profile(nl)
         for q in pts where q.p.y >= floorY {
@@ -83,7 +88,7 @@ enum HoleFill {
                 above.add(bin(s, -half, half, nl), q.c)
             }
         }
-        guard let avg = average([left, right, above]) else { return }
+        guard let avg = average([left, right, above]) else { return true }
         left.fill(avg); right.fill(avg); above.fill(avg)
         let dist = h + t0 - 0.006
         var corner: [SIMD3<Float>] = [], colour: [SIMD3<Float>] = []
@@ -97,6 +102,7 @@ enum HoleFill {
             }
         }
         grid(corner, colour, nl, ny, &pos, &col)
+        return true
     }
 
     private static func grid(_ corner: [SIMD3<Float>], _ colour: [SIMD3<Float>], _ nu: Int, _ nv: Int,

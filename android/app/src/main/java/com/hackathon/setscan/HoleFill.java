@@ -26,13 +26,14 @@ final class HoleFill {
                       float hu, float hv, float y0, float y1, float floorY) {
         List<float[]> tris = new ArrayList<>(); List<float[]> cols = new ArrayList<>();
         float vx = -uz, vz = ux;
+        // Walls first (each side of the box with a wall just behind it): the floor's colour band must not reach up one.
+        float[][] sides = {{ux, uz, hu, hv, vx, vz}, {-ux, -uz, hu, hv, vx, vz}, {vx, vz, hv, hu, ux, uz}, {-vx, -vz, hv, hu, ux, uz}};
+        boolean[] walled = new boolean[4]; // +u, -u, +v, -v
+        for (int i = 0; i < 4; i++) { float[] s = sides[i]; walled[i] = wallPatch(xyz, rgb, colStride, n, cx, cz, s[0], s[1], s[2], s[3], s[4], s[5], y0, y1, floorY, tris, cols); }
         // Floor: when the object stood on it.
         if (y0 - floorY < 0.12f) {
-            floorPatch(xyz, rgb, colStride, n, cx, cz, ux, uz, vx, vz, hu + MARGIN, hv + MARGIN, floorY, tris, cols);
+            floorPatch(xyz, rgb, colStride, n, cx, cz, ux, uz, vx, vz, hu + MARGIN, hv + MARGIN, floorY, walled, tris, cols);
         }
-        // Walls: each side of the box with a wall just behind it.
-        float[][] sides = {{ux, uz, hu, hv, vx, vz}, {-ux, -uz, hu, hv, vx, vz}, {vx, vz, hv, hu, ux, uz}, {-vx, -vz, hv, hu, ux, uz}};
-        for (float[] s : sides) wallPatch(xyz, rgb, colStride, n, cx, cz, s[0], s[1], s[2], s[3], s[4], s[5], y0, y1, floorY, tris, cols);
         Mesh m = new Mesh();
         m.verts = tris.size();
         m.pos = new float[m.verts * 3]; m.col = new byte[m.verts * 3];
@@ -46,7 +47,7 @@ final class HoleFill {
 
     /** The floor under the box (a, b: half sizes with margin), coloured from the floor around it. */
     private static void floorPatch(float[] xyz, byte[] rgb, int cs, int n, float cx, float cz, float ux, float uz, float vx, float vz,
-                                   float a, float b, float floorY, List<float[]> tris, List<float[]> cols) {
+                                   float a, float b, float floorY, boolean[] walled, List<float[]> tris, List<float[]> cols) {
         // Colour profiles along each edge: for each step along u, the floor colour just beyond -v and +v; and the same
         // along v beyond -u and +u. A spot inside blends the two opposite edges by where it is.
         int nu = Math.max(2, (int) Math.ceil(2 * a / STEP) + 1), nv = Math.max(2, (int) Math.ceil(2 * b / STEP) + 1);
@@ -62,6 +63,9 @@ final class HoleFill {
             if (Math.abs(u) <= a) { if (v < 0) negV.add(iu, rgb, i * cs); else posV.add(iu, rgb, i * cs); }
             if (Math.abs(v) <= b) { if (u < 0) negU.add(iv, rgb, i * cs); else posU.add(iv, rgb, i * cs); }
         }
+        // A side with a wall right behind it: its band is mostly wall, so the other side stands in for it.
+        if (walled[0]) posU = negU; else if (walled[1]) negU = posU;
+        if (walled[2]) posV = negV; else if (walled[3]) negV = posV;
         float[] avg = average(negV, posV, negU, posU);
         if (avg == null) return; // nothing around it to copy from: leave the hole
         negV.fill(avg); posV.fill(avg); negU.fill(avg); posU.fill(avg);
@@ -81,7 +85,7 @@ final class HoleFill {
      * distance (a flat surface), spread along the side. Filled from the floor to the object's top, coloured from the
      * wall to its left and right.
      */
-    private static void wallPatch(float[] xyz, byte[] rgb, int cs, int n, float cx, float cz, float nx, float nz, float h, float w,
+    private static boolean wallPatch(float[] xyz, byte[] rgb, int cs, int n, float cx, float cz, float nx, float nz, float h, float w,
                                   float lx, float lz, float y0, float y1, float floorY, List<float[]> tris, List<float[]> cols) {
         float top = y1 + MARGIN, half = w + MARGIN;
         // Where the wall is: the distances of points just beyond the side, within its width and height.
@@ -93,11 +97,11 @@ final class HoleFill {
             seen++;
             if (ng < gaps.length) gaps[ng++] = t; else { int k = (int) (Math.random() * seen); if (k < ng) gaps[k] = t; }
         }
-        if (ng < 120) return;
+        if (ng < 120) return false;
         java.util.Arrays.sort(gaps, 0, ng);
         float t0 = gaps[ng / 2];
         int near = 0; for (int i = 0; i < ng; i++) if (Math.abs(gaps[i] - t0) < 0.04f) near++;
-        if (near < 0.7f * ng) return; // not one flat surface: leave it
+        if (near < 0.7f * ng) return false; // not one flat surface: leave it
         // Colour: the wall to the left and right of the hole, row by row.
         int nl = Math.max(2, (int) Math.ceil(2 * half / STEP) + 1), ny = Math.max(2, (int) Math.ceil((top - floorY) / STEP) + 1);
         Profile left = new Profile(ny), right = new Profile(ny), above = new Profile(nl);
@@ -111,7 +115,7 @@ final class HoleFill {
             else if (Math.abs(l) <= half) above.add(bin(l, -half, half, nl), rgb, i * cs);
         }
         float[] avg = average(left, right, above, null);
-        if (avg == null) return;
+        if (avg == null) return true;
         left.fill(avg); right.fill(avg); above.fill(avg);
         float[][] corner = new float[nl * ny][], colour = new float[nl * ny][];
         float d = h + t0 - 0.006f; // just in front of the wall
@@ -124,6 +128,7 @@ final class HoleFill {
             colour[j * nl + i] = above.count > 0 ? lerp(row, above.c[i], sy * sy * 0.5f) : row;
         }
         grid(corner, colour, nl, ny, tris, cols);
+        return true;
     }
 
     /** Two triangles per grid cell. */

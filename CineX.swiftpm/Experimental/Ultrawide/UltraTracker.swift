@@ -7,6 +7,7 @@ import simd
 ///
 /// Camera coordinates: x right, y down, z forward. `pose` maps the depth camera's coordinates to the world's (y up).
 final class UltraTracker {
+    static var debug = false
     private(set) var pose = matrix_identity_float4x4
     private(set) var started = false
     private var velocity = SIMD3<Float>(repeating: 0)
@@ -50,7 +51,8 @@ final class UltraTracker {
             let r = simd_float3x3(t.columns.0.ux3, t.columns.1.ux3, t.columns.2.ux3) * gyro
             t.columns.0 = SIMD4(r.columns.0, 0); t.columns.1 = SIMD4(r.columns.1, 0); t.columns.2 = SIMD4(r.columns.2, 0)
         }
-        t.columns.3 += SIMD4(velocity, 0)
+        // No constant-velocity guess: when the view constrains a direction poorly (one wall in view), the guess would
+        // coast on along it unchecked; starting from the last position, an unconstrained direction just stays put.
         let predicted = t
         var last = Result(ok: false, inliers: 0, rms: 1)
         for (step, iterations, gate) in [(4, 6, Float(0.12)), (2, 5, Float(0.06)), (1, 3, Float(0.04))] {
@@ -159,8 +161,12 @@ final class UltraTracker {
                 used += 1
             }
         }
+        if UltraTracker.debug { print("  solve step \(step): tried \(tried) used \(used)") }
         guard used > 60 else { return nil }
         for i in 0..<6 { for k in 0..<i { a[i * 6 + k] = a[k * 6 + i] } }
+        // A little damping (Levenberg-Marquardt), so directions the view barely constrains move little.
+        let damp = (a[0] + a[7] + a[14] + a[21] + a[28] + a[35]) / 6 * 1e-3
+        for i in 0..<6 { a[i * 6 + i] += damp }
         guard let x = Self.solve6(a, b) else { return nil }
         let w3 = SIMD3(Float(x[0]), Float(x[1]), Float(x[2]))
         let angle = simd_length(w3)
