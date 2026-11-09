@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Added to the app's Info.plist (Package.swift: additionalInfoPlistContentFilePath): the .rmsc scan package, see
-     docs/rmsc-format.md. -->
+<!-- Added to the app's Info.plist (Package.swift: additionalInfoPlistContentFilePath): the .rmsc scan package and
+     sending it to nearby phones, see docs/rmsc-format.md. -->
 <plist version="1.0">
 <dict>
     <key>UTExportedTypeDeclarations</key>
@@ -43,6 +43,12 @@
                 <string>com.roomscape.rmsc</string>
             </array>
         </dict>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>RoomScape sends and receives room scans with other phones running RoomScape on the same Wi-Fi.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_roomscape._tcp</string>
     </array>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <false/>

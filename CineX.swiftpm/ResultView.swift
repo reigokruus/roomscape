@@ -37,6 +37,7 @@ struct ResultView: View {
     @State private var exportingGLB = false
     @State private var glbFile: SharedFile?
     @State private var glbError: String?
+    @State private var sendingNearby = false
     @State private var buildingSplats = false
     /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
     @State private var lightingOn = false
@@ -186,6 +187,7 @@ struct ResultView: View {
                 ProgressView()
             } else if photoRoom != nil || capture != nil {
                 Menu {
+                    Button { sendingNearby = true } label: { Label("Send to nearby phone", systemImage: "iphone.radiowaves.left.and.right") }
                     Button(action: exportRmsc) { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }
                     if photoRoom != nil {
                         Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
@@ -198,6 +200,7 @@ struct ResultView: View {
                 ShareLink(item: shareURL ?? scan.modelURL)
             }
         }
+        .sheet(isPresented: $sendingNearby) { SendNearbySheet(scan: current) }
         .sheet(item: $glbFile) { file in
             ActivitySheet(items: [file.url]).ignoresSafeArea()
         }

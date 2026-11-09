@@ -22,6 +22,9 @@ struct HomeView: View {
     @State private var pickingImport = false
     @State private var importing = false
     @State private var importError: String?
+    /// Scans from nearby phones (see `Nearby`).
+    @ObservedObject private var nearby = Nearby.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -127,6 +130,10 @@ struct HomeView: View {
             .onOpenURL { url in
                 if url.isFileURL { importRmsc(url) }
             }
+            .onAppear { nearby.start() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { nearby.start() }
+            }
             .alert("Couldn't import the scan", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -178,6 +185,36 @@ struct HomeView: View {
                     },
                     onCancel: { scanRequest = nil }
                 )
+            }
+        }
+        // A nearby phone wants to send a scan: asked once per phone (Always allow), then they just arrive.
+        .alert(nearby.request.map { "Accept scans from \($0.deviceName)?" } ?? "",
+               isPresented: Binding(get: { nearby.request != nil }, set: { if !$0, let r = nearby.request { nearby.answer(r, .decline) } })) {
+            if let r = nearby.request {
+                Button("Always allow") { nearby.answer(r, .always) }
+                Button("Just this once") { nearby.answer(r, .once) }
+                Button("Decline", role: .cancel) { nearby.answer(r, .decline) }
+            }
+        } message: {
+            Text("It's sending a room scan (\(nearby.request?.fileName ?? "")). With Always allow, scans from this phone arrive without asking.")
+        }
+        .onChange(of: nearby.received?.scan.id) { _, id in
+            guard id != nil else { return }
+            scans = ScanStore.list()
+            Task {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                nearby.received = nil
+            }
+        }
+        .overlay(alignment: .top) {
+            if let r = nearby.received {
+                Label("Scan received from \(r.from)", systemImage: "tray.and.arrow.down.fill")
+                    .font(.callout)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 8)
+                    .onTapGesture { path = [r.scan]; nearby.received = nil }
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
     }

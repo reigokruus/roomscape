@@ -83,6 +83,29 @@ Only `format`, `version` and `name` are required; everything else is optional. `
   - otherwise it builds its own view from `points.ply`, `photos` and `depth`.
 - **Continue scan works across platforms** by geometric alignment against `points.ply` (Android's ContinueAlign; iOS needs the same fallback). The iOS world map only helps on iOS.
 
+## Sending to a nearby phone
+
+Inside the RoomScape apps only (not the system share sheet): a scan's own menu has **Send to nearby phone**, and the
+scan lands in the other phone's scan library. Both phones need to be on the same Wi-Fi (or one phone's hotspot).
+
+- **Discovery:** while RoomScape is open, it listens on a TCP port and advertises it as the DNS-SD / Bonjour service
+  `_roomscape._tcp`. Bonjour is used on iOS, and NsdManager with a MulticastLock on Android. The instance name is the
+  phone's display name. TXT attributes are `id` (a random id kept per install), `name` and `platform` (`ios` or
+  `android`). An app never lists its own `id`.
+- **Transfer:** plain HTTP/1.1 on that port: `POST /rmsc`, with `Content-Length` set and the raw .rmsc zip as the
+  body. The request carries these headers (URL-encode the values if needed):
+  - `X-Device-Id`: the sender's `id`;
+  - `X-Device-Name`: shown to the receiver;
+  - `X-File-Name`: the package's file name.
+- **Trust:** the first scan from an unknown `X-Device-Id` asks the receiver "Accept scans from <name>?", with three
+  answers: Always allow, Just this once, and Decline. Always allow remembers the id; later scans from that phone import
+  without asking and show a short "Scan received from <name>".
+- **Reply:** sent after the import finishes (or after the user declines). `200` means it was imported as a new scan,
+  `403` means it was declined, and `400` / `422` mean a bad request or a package that couldn't be imported. Senders
+  should allow a few minutes for the reply, since the receiver may be waiting on the question.
+- **Platform needs:** iOS declares `NSLocalNetworkUsageDescription` and `NSBonjourServices` (`_roomscape._tcp`).
+  Android needs `CHANGE_WIFI_MULTICAST_STATE`, `ACCESS_WIFI_STATE` and cleartext HTTP for the local address.
+
 ## Versioning
 
 `version` goes up only for a change that breaks old readers. Adding new optional files or fields keeps version 1.

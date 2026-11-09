@@ -159,6 +159,27 @@ public class MainActivity extends Activity {
 
     static final int IMPORT_RMSC = 7301;
 
+    /** Sends scans to, and receives them from, RoomScape phones on the same Wi-Fi (see Nearby). */
+    Nearby nearby;
+
+    /** A scan arrived from a nearby phone and was imported. Any thread. */
+    void nearbyReceived(File dir, String from) {
+        runOnUiThread(() -> {
+            Toast.makeText(this, "Scan received from " + from + ".", Toast.LENGTH_LONG).show();
+            refreshHome();
+        });
+    }
+
+    /** Share: send to a nearby phone, or share the .rmsc file through another app. */
+    private void shareMenu() {
+        File dir = renderer.currentDir;
+        if (dir == null) { toast("The scan saves itself a moment after Done. Try Share again in a few seconds."); return; }
+        new android.app.AlertDialog.Builder(this).setTitle("Share room")
+                .setItems(new String[]{"Send to nearby phone", "Share file (.rmsc)"}, (d, which) -> {
+                    if (which == 0) nearby.showSendDialog(dir); else shareRmsc();
+                }).show();
+    }
+
     /** Share: the saved scan as a .rmsc package (opens on the iPhone app, the web viewer, or another Android). */
     private void shareRmsc() {
         File dir = renderer.currentDir;
@@ -281,6 +302,7 @@ public class MainActivity extends Activity {
         glView.setEGLContextClientVersion(2);
         glView.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
         renderer = new ScanRenderer(this);
+        nearby = new Nearby(this);
         glView.setRenderer(renderer);
         nativePlanning = new NativePlanningUi(this, glView, renderer);
         pilotIntake = new PilotIntakeUi(this);
@@ -398,7 +420,7 @@ public class MainActivity extends Activity {
         exportButton = new Button(this);
         exportButton.setText("Share");
         exportButton.setVisibility(View.GONE);
-        exportButton.setOnClickListener(v -> shareRmsc());
+        exportButton.setOnClickListener(v -> shareMenu());
         exportButton.setOnLongClickListener(v -> { exportScan(); return true; }); // the raw debug zip (depth frames, sensors)
         bar.addView(mainButton);
 
@@ -1357,6 +1379,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        nearby.start();
         renderer.paused = false;
         if (session == null) {
             try {
@@ -1406,6 +1429,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        nearby.stop();
         renderer.paused = true;
         glView.onPause();
         if (session != null) session.pause();
