@@ -38,6 +38,9 @@ struct ResultView: View {
     @State private var objectHistory: [[RoomObject]] = []
     /// Size of the scan's raw recording (RawRecorder), shown in the room panel; nil without one.
     @State private var recordingBytes: Int64?
+    /// Rebuilding from the recording: stage, progress (0…1) and a note (cooling down), or nil.
+    @State private var rebuild: RecordingProcessor.Progress?
+    @State private var rebuildDone: String?
     /// Fills for the holes removed or moved objects leave (HoleFill), by object; generated, never saved.
     @State private var holeFills: [UUID: SCNNode] = [:]
     @State private var holeFillsPending: Set<UUID> = []
@@ -233,6 +236,10 @@ struct ResultView: View {
                         Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
                     }
                     ShareLink(item: shareURL ?? scan.modelURL) { Label("Room model (.usdz)", systemImage: "cube") }
+                    if recordingBytes != nil {
+                        // Test: build the scan again from its raw recording (record now, process later).
+                        Button { rebuildFromRecording() } label: { Label("Rebuild from recording (test)", systemImage: "arrow.triangle.2.circlepath") }
+                    }
                 } label: {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
@@ -241,6 +248,21 @@ struct ResultView: View {
             }
         }
         .sheet(isPresented: $sendingNearby) { SendNearbySheet(scan: current) }
+        .overlay(alignment: .center) {
+            if let rebuild {
+                VStack(spacing: 8) {
+                    Text(rebuild.stage.isEmpty ? "Rebuilding…" : rebuild.stage).font(.headline)
+                    ProgressView(value: max(0, min(1, rebuild.fraction)))
+                    if let note = rebuild.note { Text(note).font(.footnote).foregroundStyle(.secondary) }
+                }
+                .padding()
+                .frame(maxWidth: 300)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            }
+        }
+        .alert("Rebuilt from the recording", isPresented: Binding(get: { rebuildDone != nil }, set: { if !$0 { rebuildDone = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(rebuildDone ?? "") }
         .sheet(item: $glbFile) { file in
             ActivitySheet(items: [file.url]).ignoresSafeArea()
         }
@@ -770,6 +792,31 @@ struct ResultView: View {
 
     /// Writes the photo room as RoomScape-<scan date>.glb in the temporary folder and opens the share sheet for it.
     /// Writes the whole scan as a .rmsc package (see `Rmsc`) and opens the share sheet for it.
+    /// Builds this scan's surface, points and photos again from its raw recording, in the background, paced by heat.
+    /// The files it replaces are kept in before-rebuild/.
+    private func rebuildFromRecording() {
+        guard rebuild == nil else { return }
+        let scan = current
+        rebuild = RecordingProcessor.Progress(stage: "Starting", fraction: 0, note: nil)
+        Task {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try await RecordingProcessor.rebuild(scan) { p in
+                        Task { @MainActor in
+                            if p.fraction < 0 { rebuild?.note = p.note } else { rebuild = RecordingProcessor.Progress(stage: p.stage, fraction: p.fraction, note: rebuild?.note) }
+                        }
+                    }
+                }.value
+                ScanStore.invalidateThumbnail(scan)
+                rebuild = nil
+                rebuildDone = "Go back and open the room again to see it. The previous version is kept in the scan's before-rebuild folder."
+            } catch {
+                rebuild = nil
+                rebuildDone = "Couldn't rebuild: \(error.localizedDescription)"
+            }
+        }
+    }
+
     private func exportRmsc(save: Bool) {
         exportingGLB = true
         let scan = current
