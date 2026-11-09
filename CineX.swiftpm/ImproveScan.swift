@@ -49,7 +49,7 @@ extension ScanStore {
     }
 
     /// Files in the capture folder that the result screen saved and that stay valid after a merge.
-    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json"]
+    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json", ScanMesh.fileName]
     /// Caches built from the points and photos: rebuilt from the merged ones the next time the scan opens.
     private static let rebuiltFiles = ["surfels.bin", "trained.bin", "windows.json"]
 

@@ -24,6 +24,10 @@ struct Keyframe: Sendable {
     /// How the camera exposed this photo, so pixel values can be turned back into how bright the scene really was
     /// (a daylit window is many times brighter than an LED-lit white wall, which auto-exposure hides).
     var exposure: PhotoExposure?
+    /// LiDAR depth when the photo was taken, millimetres (0 = unknown), `depthWidth` × `depthHeight`, row 0 at the top,
+    /// covering the same view as the photo. Lets the photo room tell whether a surface was hidden in this photo.
+    var depth: [UInt16]? = nil
+    var depthWidth = 0, depthHeight = 0
 }
 
 /// ARKit's exposure and light estimate for one photo.
@@ -46,6 +50,8 @@ struct CaptureSnapshot: Sendable {
     var keyframes: [Keyframe]
     /// Cell size the points ended up at (2 cm, or coarser after a large room filled the budget).
     var voxelSize: Float
+    /// The surface mesh fused from LiDAR depth while scanning (see `LiveMesh`), for the photo room.
+    var mesh: ScanMesh? = nil
 }
 
 /// The live point cloud built from LiDAR depth while RoomPlan scans (handoff section 2: live capture + seen counter).
@@ -338,6 +344,7 @@ final class LiveCloud: @unchecked Sendable {
             guard moved >= photoMove * photoSpacing || turnedDegrees >= photoTurn * photoSpacing else { return }
         }
         guard let pixels = Self.copy(frame.capturedImage) else { return }
+        let depth = frame.sceneDepth.flatMap(Self.smallDepth)
         pendingPhotos.withLock { $0 += 1 }
         keyframesTaken += 1
         lastKeyframePose = pose
@@ -361,12 +368,43 @@ final class LiveCloud: @unchecked Sendable {
             let keyframe = Keyframe(timestamp: timestamp, cameraToWorld: pose,
                                     fx: k[0][0] * scale, fy: k[1][1] * scale, cx: k[2][0] * scale, cy: k[2][1] * scale,
                                     width: Int((Float(iw) * scale).rounded()), height: Int((Float(ih) * scale).rounded()),
-                                    jpeg: jpeg, exposure: exposure)
+                                    jpeg: jpeg, exposure: exposure,
+                                    depth: depth?.values, depthWidth: depth?.width ?? 0, depthHeight: depth?.height ?? 0)
             keyframes.withLock { $0.append(keyframe) }
         }
     }
 
     /// A copy of a camera image in a buffer we own, so ARKit gets its own buffer back straight away.
+    /// The depth map at half size (128 × 96 from ARKit's 256 × 192), in millimetres; pixels ARKit isn't at least
+    /// medium-confident about are 0.
+    private static func smallDepth(_ sceneDepth: ARDepthData) -> (values: [UInt16], width: Int, height: Int)? {
+        let depth = sceneDepth.depthMap
+        guard let confidence = sceneDepth.confidenceMap else { return nil }
+        CVPixelBufferLockBaseAddress(depth, .readOnly)
+        CVPixelBufferLockBaseAddress(confidence, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(confidence, .readOnly)
+            CVPixelBufferUnlockBaseAddress(depth, .readOnly)
+        }
+        guard let dBase = CVPixelBufferGetBaseAddress(depth), let cBase = CVPixelBufferGetBaseAddress(confidence) else { return nil }
+        let dw = CVPixelBufferGetWidth(depth), dh = CVPixelBufferGetHeight(depth)
+        let dRow = CVPixelBufferGetBytesPerRow(depth) / MemoryLayout<Float32>.stride
+        let cRow = CVPixelBufferGetBytesPerRow(confidence)
+        let d = dBase.assumingMemoryBound(to: Float32.self), c = cBase.assumingMemoryBound(to: UInt8.self)
+        let w = dw / 2, h = dh / 2
+        let medium = UInt8(ARConfidenceLevel.medium.rawValue)
+        var values = [UInt16](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let u = x * 2, v = y * 2
+                guard c[v * cRow + u] >= medium else { continue }
+                let m = d[v * dRow + u] * 1000
+                if m > 0, m < 65000 { values[y * w + x] = UInt16(m) }
+            }
+        }
+        return (values, w, h)
+    }
+
     private static func copy(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         var copy: CVPixelBuffer?
         let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [String: Any]()] as CFDictionary

@@ -24,6 +24,9 @@ struct ResultView: View {
     @State private var style: Style = .model
     @State private var modelGroup: SCNNode?
     @State private var splatGroup: SCNNode?
+    /// The scan's photos painted onto its fused mesh (`PhotoRoom`): what Photo shows when the scan has both; else the
+    /// splats in their scanned colours.
+    @State private var photoRoom: SCNNode?
     @State private var buildingSplats = false
     /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
     @State private var lightingOn = false
@@ -198,9 +201,7 @@ struct ResultView: View {
             // The preview lights the splats and objects move splats; RoomPlan's model has neither.
             if newStyle == .model, lightingOn { toggleLighting() }
             if newStyle == .model, objectsOn { toggleObjects() }
-            modelGroup?.isHidden = newStyle != .model
-            splatGroup?.isHidden = newStyle == .model
-            if let splatGroup { SplatScene.setMeshLook(newStyle != .photo, in: splatGroup) }
+            showStyle(newStyle)
         }
         .task {
             guard !loadStarted else { return }
@@ -243,6 +244,16 @@ struct ResultView: View {
                 let windows = await Task.detached(priority: .userInitiated) { WindowDetection.load(scan, room: room) }.value
                 foundWindows = windows
                 scene.rootNode.addChildNode(WindowDetection.node(windows, room: room))
+            }
+
+            // Photo room, when the scan has a mesh and photos: built in the background, shown by Photo.
+            if let scene {
+                let photo = await Task.detached(priority: .userInitiated) { PhotoRoom.build(scan) }.value
+                if let photo {
+                    scene.rootNode.addChildNode(photo)
+                    photoRoom = photo
+                    showStyle(style)
+                }
             }
 
             // Splats, when the scan has points: built in the background (cached after the first time), then shown
@@ -466,10 +477,20 @@ struct ResultView: View {
         }
     }
 
+    /// Shows the part of the scene for a style: RoomPlan's model, the photo room, or the splats (mesh look or colours).
+    private func showStyle(_ style: Style) {
+        let photos = style == .photo && photoRoom != nil
+        modelGroup?.isHidden = style != .model
+        photoRoom?.isHidden = !photos
+        splatGroup?.isHidden = style == .model || photos
+        if let splatGroup { SplatScene.setMeshLook(style != .photo, in: splatGroup) }
+    }
+
     private func toggleObjects() {
         objectsOn.toggle()
         if objectsOn {
-            if style == .model { style = .mesh }
+            // Objects move splats: not in RoomPlan's model or the photo room.
+            if style == .model || (style == .photo && photoRoom != nil) { style = .mesh }
             if lightingOn { toggleLighting() }
         } else {
             selectedObject = nil
@@ -620,7 +641,7 @@ struct ResultView: View {
             lightingScene?.apply(nil)
             return
         }
-        if style == .model { style = .mesh }
+        if style == .model || (style == .photo && photoRoom != nil) { style = .mesh }
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.

@@ -78,6 +78,13 @@ final class LiveMesh: @unchecked Sendable {
         publish()
     }
 
+    /// Worker queue: the whole room's surface, for saving with the scan (the photo room is painted onto it).
+    func wholeMesh() -> ScanMesh? {
+        let all = Tsdf.MeshScratch()
+        guard tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: Self.solidWeight, into: all) > 0 else { return nil }
+        return ScanMesh(positions: all.positions, triangles: all.triangles)
+    }
+
     private func buffer(_ existing: MTLBuffer?, bytes: Int) -> MTLBuffer? {
         if let existing, existing.length >= bytes { return existing }
         return device.makeBuffer(length: max(bytes + bytes / 2, 1024), options: .storageModeShared)

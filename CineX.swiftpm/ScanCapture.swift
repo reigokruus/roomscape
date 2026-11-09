@@ -10,6 +10,8 @@ import UIKit
 ///   then uint8 r, g, b and how solid the spot was (1…255, 255 = solid).
 /// - `keyframes.json`: one `KeyframeRecord` per photo.
 /// - `photos/NNN.jpg`: the photos, in the camera sensor's landscape orientation.
+/// - `photos/NNN.depth`: LiDAR depth for that photo (uint16 millimetres, see `KeyframeRecord.depthWidth`), if any.
+/// - `mesh.bin`: the surface mesh fused from LiDAR depth while scanning (`ScanMesh`), if any.
 struct CaptureMeta: Codable {
     var version = 1
     var pointCount: Int
@@ -28,6 +30,9 @@ struct KeyframeRecord: Codable {
     var cameraToWorld: [Float]
     /// Missing in scans saved before 7 Nov 2026 13:30.
     var exposure: PhotoExposure?
+    /// The photo's depth file and its size (same view as the photo); missing in scans saved before 9 Nov 2026.
+    var depthFile: String? = nil
+    var depthWidth: Int? = nil, depthHeight: Int? = nil
 }
 
 enum CaptureStore {
@@ -43,16 +48,24 @@ enum CaptureStore {
         for (i, keyframe) in capture.keyframes.enumerated() {
             let file = String(format: "photos/%03d.jpg", i)
             try keyframe.jpeg.write(to: temp.appendingPathComponent(file))
+            var depthFile: String?
+            if let depth = keyframe.depth, depth.count == keyframe.depthWidth * keyframe.depthHeight, !depth.isEmpty {
+                depthFile = String(format: "photos/%03d.depth", i)
+                try depth.withUnsafeBytes { Data($0) }.write(to: temp.appendingPathComponent(depthFile!))
+            }
             let m = keyframe.cameraToWorld
             records.append(KeyframeRecord(
                 file: file, timestamp: keyframe.timestamp, width: keyframe.width, height: keyframe.height,
                 fx: keyframe.fx, fy: keyframe.fy, cx: keyframe.cx, cy: keyframe.cy,
                 cameraToWorld: [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] },
-                exposure: keyframe.exposure))
+                exposure: keyframe.exposure, depthFile: depthFile,
+                depthWidth: depthFile == nil ? nil : keyframe.depthWidth,
+                depthHeight: depthFile == nil ? nil : keyframe.depthHeight))
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(records).write(to: temp.appendingPathComponent("keyframes.json"))
+        if let mesh = capture.mesh { try mesh.write(to: temp.appendingPathComponent(ScanMesh.fileName)) }
         let meta = CaptureMeta(pointCount: capture.pointCount, keyframeCount: records.count, voxelSize: capture.voxelSize)
         try encoder.encode(meta).write(to: temp.appendingPathComponent("meta.json"))
 

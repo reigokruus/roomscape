@@ -185,8 +185,13 @@ final class LiveCapture {
     /// The points and photos captured so far, read after any frame still being processed.
     func snapshot() async -> CaptureSnapshot? {
         guard let cloud else { return nil }
+        let mesh = mesh
         return await withCheckedContinuation { continuation in
-            worker.async { continuation.resume(returning: cloud.snapshot()) }
+            worker.async {
+                var snapshot = cloud.snapshot()
+                snapshot.mesh = mesh?.wholeMesh()
+                continuation.resume(returning: snapshot)
+            }
         }
     }
 
