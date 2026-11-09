@@ -295,28 +295,56 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final boolean simple = viewMode == 0 && ready && roomNow.hasLayout;
         new Thread(() -> { try {
             long t1 = System.currentTimeMillis();
-            RoomProxies rp = ready && roomNow.hasLayout ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
+            // The Photo style is the scanned surface only, the same as the iPhone's photo room (rk 9 Nov: the two phones
+            // must match): no flat proxy walls or gap fills from the room outline, which closed the doorway and drew
+            // the near walls as a box. Holes stay holes. The simple room view (viewMode 0) is still the outline walls.
+            RoomProxies rp = simple ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
             float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
-            if (ready && !simple) {
-                ScenePriors.Fill f = ScenePriors.apply(mp, mvAll, roomNow, pos, col, count);
-                proxy = ScenePriors.concat(proxy, f.triArray()); proxyCol = ScenePriors.concat(proxyCol, f.colArray());
-                log(f.toString());
-            }
-            int mv = simple ? 0 : mvAll, pv = proxy.length / 3; // the photo room is walls and floor only
+            int pv = proxy.length / 3;
+            boolean[] ceil = simple ? new boolean[0] : ceilingTriangles(mp, mvAll / 3);
+            int keepTris = 0;
+            for (boolean c : ceil) if (!c) keepTris++;
+            int mv = simple ? 0 : keepTris * 3;
             FloatBuffer all = ByteBuffer.allocateDirect(Math.max(1, mv + pv) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
-            mp.position(0); mp.limit(mv * 3);
-            all.put(mp).put(proxy).position(0);
-            mp.limit(mp.capacity()); mp.position(0);
             ByteBuffer allCol = ByteBuffer.allocateDirect(Math.max(4, (mv + pv) * 4)).order(ByteOrder.nativeOrder());
-            mc.position(0); mc.limit(mv * 4);
-            allCol.put(mc).put(proxyCol).position(0);
-            mc.limit(mc.capacity()); mc.position(0);
+            for (int t = 0; t < ceil.length; t++) {
+                if (ceil[t]) continue;
+                for (int i = t * 9; i < t * 9 + 9; i++) all.put(mp.get(i));
+                for (int i = t * 12; i < t * 12 + 12; i++) allCol.put(mc.get(i));
+            }
+            all.put(proxy).position(0);
+            allCol.put(proxyCol).position(0);
+            if (!simple) log("photo room: " + ceil.length + " triangles, " + (ceil.length - keepTris) + " ceiling left out");
             photos.build(all, allCol, mv + pv, mv, simple);
             log((simple ? "photo room: " : "photos: ") + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
                     + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
         } catch (Throwable e) { logError("photos", new RuntimeException(e)); } }).start();
     }
 
+
+    /**
+     * The ceiling triangles of a triangle soup, left out of the photo room exactly as the iPhone does
+     * (PhotoLayout.ceilingTriangles): flat (|normal.y| > 0.7) and within 30 cm of the top (99.5th percentile vertex).
+     */
+    static boolean[] ceilingTriangles(FloatBuffer p, int tris) {
+        boolean[] out = new boolean[tris];
+        if (tris == 0) return out;
+        float[] ys = new float[tris * 3];
+        for (int i = 0; i < ys.length; i++) ys[i] = p.get(i * 3 + 1);
+        java.util.Arrays.sort(ys);
+        float top = ys[Math.min(ys.length - 1, (int) ((long) ys.length * 995 / 1000))];
+        for (int t = 0; t < tris; t++) {
+            int b = t * 9;
+            float ax = p.get(b), ay = p.get(b + 1), az = p.get(b + 2);
+            float ux = p.get(b + 3) - ax, uy = p.get(b + 4) - ay, uz = p.get(b + 5) - az;
+            float vx = p.get(b + 6) - ax, vy = p.get(b + 7) - ay, vz = p.get(b + 8) - az;
+            float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+            float cy = (ay + p.get(b + 4) + p.get(b + 7)) / 3;
+            out[t] = len > 1e-12f && cy > top - 0.3f && Math.abs(ny / len) > 0.7f;
+        }
+        return out;
+    }
 
     /** Turn the current points into surfel splats in the background (a few seconds on the phone). */
     private void buildSurfels() {
@@ -5136,7 +5164,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } else if (simple) {
             if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         } else if (style == 0 && photos.ready && meshTris > 0)
-            photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
+            // The photo room already has its ceiling left out (see buildPhotos), like the iPhone's: no height cut, so
+            // the tops of the walls stay. The Cut walls tool still cuts.
+            photos.draw(mvp, cutaway && cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         // A thumbnail frame shows just the room: no labels, markers or props.
