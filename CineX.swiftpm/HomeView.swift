@@ -287,14 +287,41 @@ struct RenameRoomAlert: ViewModifier {
     @Binding var title: String
     let onSave: () -> Void
 
+    /// A small sheet, not an alert: an alert's text field keeps its height and clips large text sizes.
     func body(content: Content) -> some View {
-        content.alert("Name this room", isPresented: $isPresented) {
-            TextField("e.g. Living room", text: $title)
-            Button("Save", action: onSave)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Leave it empty to go back to the scan's date.")
+        content.sheet(isPresented: $isPresented) {
+            RenameSheet(title: $title, onSave: { isPresented = false; onSave() }, onCancel: { isPresented = false })
+                .presentationDetents([.medium])
         }
+    }
+}
+
+private struct RenameSheet: View {
+    @Binding var title: String
+    let onSave: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("e.g. Living room", text: $title)
+                        .focused($focused)
+                        .submitLabel(.done)
+                        .onSubmit(onSave)
+                } footer: {
+                    Text("Leave it empty to go back to the scan's date.")
+                }
+            }
+            .navigationTitle("Name this room")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: onCancel) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save", action: onSave).bold() }
+            }
+        }
+        .onAppear { focused = true }
     }
 }
 
