@@ -313,6 +313,15 @@ struct RoomShell {
         return tops.isEmpty ? nil : tops[tops.count / 2]
     }
 
+    /// A room without RoomPlan's model (a scan from the Android app): its floor height, and no walls or outline
+    /// unless known, so nothing is cut away from what was scanned.
+    init(floorY: Float, walls: [Wall] = [], outline: [SIMD3<Float>] = []) {
+        self.walls = walls
+        openings = []
+        self.floorY = floorY
+        floorOutline = outline
+    }
+
     init(room: CapturedRoom) {
         func plane(_ s: CapturedRoom.Surface) -> (c: SIMD3<Float>, r: SIMD3<Float>, u: SIMD3<Float>, n: SIMD3<Float>) {
             let t = s.transform

@@ -346,12 +346,15 @@ struct ResultView: View {
 
             // Splats, when the scan has points: built in the background (cached after the first time), then shown
             // instead of RoomPlan's boxes. The Splats / Model switch flips between the two.
-            guard let room = loaded.0, let scene, (capture?.pointCount ?? 0) > 0 else { return }
+            // Scans from the Android app have no RoomPlan model: they get splats, objects and lighting too, in a room
+            // with its floor at 0 (where imports put it) and no walls guessed.
+            let room = loaded.0
+            guard let scene, (capture?.pointCount ?? 0) > 0 else { return }
             buildingSplats = true
-            let shell = RoomShell(room: room)
+            let shell = room.map(RoomShell.init(room:)) ?? RoomShell(floorY: 0)
             // Objects: what was saved (with the user's edits), else RoomPlan's furniture.
             let saved = RoomObjects.load(scan)
-            let objects = saved?.objects ?? RoomObjects.fromRoomPlan(room)
+            let objects = saved?.objects ?? room.map(RoomObjects.fromRoomPlan) ?? []
             // Shown: the trained splats when the scan was trained before, else the raw ones (also the training's start),
             // tidied for viewing (see `SplatTidy`).
             let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], SplatTidy.Result, ObjectsScene.Built)? in
@@ -421,7 +424,7 @@ struct ResultView: View {
                     openingStoryboard = true
                 }
             }
-            if args.contains("-replayFind"), let saved {
+            if args.contains("-replayFind"), let saved, let room {
                 // Replays the end of a Claude search with the saved result, starting from RoomPlan's objects only.
                 let found = saved.objects
                 let roomPlanOnly = RoomObjects.fromRoomPlan(room)
@@ -553,7 +556,7 @@ struct ResultView: View {
             Picker("Style", selection: $style) {
                 Text("Mesh").tag(Style.mesh)
                 Text("Photo").tag(Style.photo)
-                Text("Model").tag(Style.model)
+                if room != nil { Text("Model").tag(Style.model) } // RoomPlan's model: iPhone scans only
             }
             .pickerStyle(.segmented)
             .fixedSize()
@@ -998,7 +1001,10 @@ struct ResultView: View {
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.
-            let center = shell.walls.reduce(SIMD3<Float>(), { $0 + $1.center }) / Float(max(1, shell.walls.count))
+            // No walls (a scan from the Android app): the middle of the splats.
+            let center = shell.walls.isEmpty
+                ? surfels.reduce(SIMD3<Float>(), { $0 + SIMD3($1.x, $1.y, $1.z) }) / Float(max(1, surfels.count))
+                : shell.walls.reduce(SIMD3<Float>(), { $0 + $1.center }) / Float(max(1, shell.walls.count))
             let facing: Float = shell.walls.max(by: { $0.halfWidth < $1.halfWidth }).map {
                 atan2($0.inward.x, $0.inward.z) * 180 / .pi
             } ?? 0

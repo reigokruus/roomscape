@@ -159,7 +159,7 @@ enum ScanStore {
 
     /// The scan's splats: from `surfels.bin` in the capture folder, or built from the points, snapped to RoomPlan's
     /// walls and floor, and cached there. Slow the first time (about a second): call off the main thread.
-    static func loadSurfels(_ scan: SavedScan, room: CapturedRoom) -> [SurfelRecord]? {
+    static func loadSurfels(_ scan: SavedScan, room: CapturedRoom?) -> [SurfelRecord]? {
         let cache = scan.captureURL.appendingPathComponent("surfels.bin")
         if let cached = Surfels.read(from: cache) { return cached }
         let points = loadPoints(scan)
@@ -167,7 +167,7 @@ enum ScanStore {
         let start = Date()
         let voxel = CaptureStore.loadMeta(scan.captureURL)?.voxelSize ?? LiveCloud.voxel
         var (surfels, stats) = Surfels.build(points, voxel: voxel)
-        let snapped = Surfels.snap(&surfels, to: RoomShell(room: room))
+        let snapped = room.map { Surfels.snap(&surfels, to: RoomShell(room: $0)) } ?? 0
         print("splats: \(surfels.count) from \(points.count) points (\(stats.flat) flat, \(stats.curved) curved, "
               + "\(stats.lonely) lonely, \(snapped) on walls/floor) in \(Int(Date().timeIntervalSince(start) * 1000)) ms")
         Surfels.write(surfels, to: cache)
