@@ -93,6 +93,8 @@ final class RoomModel {
     /** Share of the room's floor (inside the fitted layout) that the scan has seen, 0..1. */
     float floorCoverage;
     String summary = "";
+    /** The scan barely covered the ceiling, so the room's height isn't known (columnTop). */
+    boolean ceilingUnknown;
 
     /**
      * The top of the room from the points: for each 20 cm column with its own floor (its lowest points within 30 cm of
@@ -123,6 +125,11 @@ final class RoomModel {
         }
         if (m < 20) return Float.NaN;
         java.util.Arrays.sort(hs, 0, m);
+        // Low ceiling coverage (a quick scan that barely looked up): too few columns reach 1.8 m to know the height
+        // (rk 9 Nov: a rough scan came out 2.21 m for a 2.9 m room). Unknown then, not a guess.
+        int high = 0;
+        for (int i = 0; i < m; i++) if (hs[i] >= 1.8f) high++;
+        if (high < 20) return Float.NEGATIVE_INFINITY;
         return floorY + hs[(int) (m * 0.9f)];
     }
 
@@ -131,6 +138,7 @@ final class RoomModel {
 
     void build(List<PlaneData> planes, ShotPlanner grid, FloatBuffer pos, ByteBuffer col, int count) {
         this.grid = grid;
+        ceilingUnknown = false;
         surfaces.clear(); boxes.clear(); lights.clear();
         floorY = grid.floorY;
 
@@ -173,7 +181,8 @@ final class RoomModel {
             // the 90th percentile of those (rk 9 Nov: a room 2.9 m at its highest came out 3.16 m, from one sloped
             // band the S24's depth-from-motion put 0.3-0.45 m too high; this gives 2.84 m on that scan).
             float top = columnTop(pos, count, floorY);
-            if (!Float.isNaN(top)) maxY = top;
+            if (top == Float.NEGATIVE_INFINITY) { maxY = floorY; ceilingUnknown = true; } // too little ceiling scanned
+            else if (!Float.isNaN(top)) maxY = top;
         }
         hasCeiling = false;
         ceilingY = maxY;

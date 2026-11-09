@@ -5292,6 +5292,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float h = sm.has("ceilingY") ? (float) (sm.optDouble("ceilingY") - sm.optDouble("floorY", 0)) : hh;
             if (x1 > x0) return String.format(java.util.Locale.US, "%.1f × %.1f m, %.1f m high", Math.max(x1 - x0, z1 - z0), Math.min(x1 - x0, z1 - z0), h);
         }
+        // This phone's own scan: the room model's size and height (the same robust numbers the log prints), not the
+        // points' bounding box, which stray points stretch (rk 9 Nov: 6.8 × 5.6 m, 3.6 m for a 5.4 × 3.8 m, ~2.9 m room).
+        if (roomReady && room.sizeX > 0 && room.sizeZ > 0) {
+            String size = String.format(java.util.Locale.US, "%.1f × %.1f m", Math.max(room.sizeX, room.sizeZ), Math.min(room.sizeX, room.sizeZ));
+            if (room.hasCeiling) return size + String.format(java.util.Locale.US, ", %.1f m high", room.ceilingY - room.floorY);
+            return size + (room.ceilingUnknown ? ", height not scanned" : "");
+        }
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
         if (w <= 0 || d <= 0) return null;
         return String.format(java.util.Locale.US, "%.1f × %.1f m, %.1f m high", Math.max(w, d), Math.min(w, d), h);
