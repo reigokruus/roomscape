@@ -118,6 +118,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final java.util.Set<String> loggedErrors = new java.util.HashSet<>();
 
     synchronized void log(String msg) {
+        android.util.Log.i("RoomScape", msg); // also in logcat, for checking from the Mac
         if (log.length() > 20000) return;
         log.append(String.format(java.util.Locale.US, "%6.1fs  %s%n", (System.currentTimeMillis() - t0) / 1000f, msg));
     }
@@ -166,6 +167,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 b.append(" [id ").append(c.getCameraId()).append(' ').append(c.getImageSize()).append(' ').append(c.getFpsRange()).append(']');
             log("supported camera configs:" + b);
         } catch (Throwable e) { logError("cameraConfigs", new RuntimeException(e)); }
+        try { // what Camera2 offers besides ARCore's camera: lenses, their focal lengths, and which can run together
+            android.hardware.camera2.CameraManager cm = (android.hardware.camera2.CameraManager) activity.getSystemService(android.content.Context.CAMERA_SERVICE);
+            StringBuilder b = new StringBuilder();
+            for (String id : cm.getCameraIdList()) {
+                android.hardware.camera2.CameraCharacteristics ch = cm.getCameraCharacteristics(id);
+                Integer facing = ch.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING);
+                float[] fl = ch.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+                android.util.SizeF sensor = ch.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
+                double hfov = fl != null && fl.length > 0 && sensor != null ? Math.toDegrees(2 * Math.atan(sensor.getWidth() / (2 * fl[0]))) : 0;
+                b.append(String.format(java.util.Locale.US, " [id %s facing %s focal %s hfov %.0f° physical %s]", id, facing,
+                        java.util.Arrays.toString(fl), hfov, ch.getPhysicalCameraIds()));
+            }
+            log("camera2 cameras:" + b);
+            if (android.os.Build.VERSION.SDK_INT >= 30) log("camera2 concurrent sets: " + cm.getConcurrentCameraIds());
+        } catch (Throwable e) { logError("camera2 list", new RuntimeException(e)); }
         modeIndex = 0;
         applyMode();
     }
