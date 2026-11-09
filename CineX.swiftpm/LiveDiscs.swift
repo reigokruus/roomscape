@@ -35,6 +35,10 @@ final class LiveCapture {
         device = MTLCreateSystemDefaultDevice()
         cloud = device.flatMap { LiveCloud(device: $0) }
         mesh = device.map { LiveMesh(device: $0) }
+        // The live preview: the scan's photos as textures, filling the mesh as the Photo view will (LivePreview).
+        let photos = device.flatMap { LivePhotoStore(device: $0) }
+        cloud?.photoStore = photos
+        mesh?.photos = photos
     }
 
     func start() {
@@ -97,6 +101,13 @@ final class LiveCapture {
             let removed = cloud.removeWhere(inCone)
             if let t = clearTime { recorder?.cleared(time: t, viewProjection: vp, center: point, radius: radius, viewSize: size, limit: limit) }
             _ = mesh?.tsdf.clearWhere(inCone)
+            // The photo choices there are worked out again for what gets scanned next.
+            var centre = SIMD3<Float>.zero, hits: Float = 0
+            for i in Swift.stride(from: 0, to: n, by: stride) {
+                let q = SIMD3(all[i].x, all[i].y, all[i].z)
+                if let (s, w) = screen(q), w <= limit, simd_distance(s, tap) < r * 0.35 { centre += q; hits += 1 }
+            }
+            if hits > 0 { mesh?.forgetPhotos(near: [centre / hits], radius: 0.5) }
             DispatchQueue.main.async { done(removed) }
         }
     }
@@ -245,7 +256,8 @@ final class LiveCapture {
         let mesh = mesh
         let covered = ghost.coveredTest()
         let p = frame.camera.transform.columns.3
-        let camera = SIMD3<Float>(p.x, p.y, p.z), time = frame.timestamp
+        _ = p
+        let camera = frame.camera.transform, time = frame.timestamp
         worker.async { [weak self] in
             cloud.integrate(frame, tsdf: mesh?.tsdf, covered: covered)
             DispatchQueue.main.async { self?.busy = false }
@@ -415,6 +427,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             let realView = camera.viewMatrix(for: .portrait)
             let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
             if overviewView != nil { window?.encodeZebra(encoder, alpha: overview.blend) }
+            // The live preview: the camera picture dimmed, so only what's been scanned (and photographed) is bright.
+            meshRenderer?.encodeDim(encoder, alpha: (1 - LivePreview.dim) * (overviewView != nil ? 1 - overview.blend : 1))
             let viewMatrix = overviewView?.view ?? realView
             let projection = overviewView?.projection ?? realProjection
             lastViewProjection = projection * viewMatrix

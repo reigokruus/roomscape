@@ -24,7 +24,17 @@ final class LiveMesh: @unchecked Sendable {
         let triangleIndexCount: Int
         let edges: MTLBuffer
         let edgeIndexCount: Int
+        /// Per triangle: the photo slot that fills it (LivePreview), or -1.
+        let photoSlots: MTLBuffer
     }
+
+    /// The live preview's photos (LivePreview), set by LiveCapture.
+    var photos: LivePhotoStore?
+    private let assigner = LivePhotoAssigner()
+    private let filled = OSAllocatedUnfairLock(initialState: (inView: Float(0), room: Float(0)))
+    /// Share of confirmed surface already filled with its photo: ahead of the phone, and in the whole room.
+    var filledShare: (inView: Float, room: Float) { filled.withLock { $0 } }
+    private var cameraPose = matrix_identity_float4x4
 
     /// 4 cm voxels, a ±8 cm band, free space erased up to 1.5 m in front of a surface. 700k voxels (~25 MB) hold about
     /// 170 m² of surface, a large room; past that new areas stop being added.
@@ -39,7 +49,7 @@ final class LiveMesh: @unchecked Sendable {
 
     // Worker-queue state.
     private let scratch = Tsdf.MeshScratch()
-    private var sets: [(vertices: MTLBuffer?, triangles: MTLBuffer?, edges: MTLBuffer?)] = Array(repeating: (nil, nil, nil), count: 3)
+    private var sets: [(vertices: MTLBuffer?, triangles: MTLBuffer?, edges: MTLBuffer?, slots: MTLBuffer?)] = Array(repeating: (nil, nil, nil, nil), count: 3)
     private var nextSet = 0
     private var lastBuild: TimeInterval = 0
     /// Seconds between mesh builds: twice a second, once a second when the phone is hot.
@@ -57,10 +67,15 @@ final class LiveMesh: @unchecked Sendable {
     /// Worker queue.
     func reset() {
         tsdf.clear()
+        assigner.reset()
+        filled.withLock { $0 = (0, 0) }
         lastBuild = 0
         lastDuration = 0
         published.withLock { $0 = nil }
     }
+
+    /// Worker queue: tap to clear, the photo choices there are worked out again.
+    func forgetPhotos(near points: [SIMD3<Float>], radius: Float) { assigner.forget(near: points, radius: radius) }
 
     /// Worker queue.
     func setPowerSaving(_ on: Bool) {
@@ -68,8 +83,10 @@ final class LiveMesh: @unchecked Sendable {
     }
 
     /// Worker queue, after a frame was fused: rebuilds the mesh around the camera if it's time.
-    func rebuildIfDue(camera: SIMD3<Float>, time: TimeInterval) {
+    func rebuildIfDue(camera pose: simd_float4x4, time: TimeInterval) {
         guard time - lastBuild >= max(interval, lastDuration * 5), tsdf.count > 50 else { return }
+        cameraPose = pose
+        let camera = SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
         lastBuild = time
         let started = CACurrentMediaTime()
         defer { lastDuration = CACurrentMediaTime() - started }
@@ -96,8 +113,9 @@ final class LiveMesh: @unchecked Sendable {
         var set = sets[nextSet]
         guard let vertices = buffer(set.vertices, bytes: vertexCount * MemoryLayout<Vertex>.stride),
               let triangles = buffer(set.triangles, bytes: scratch.triangles.count * 4),
-              let edges = buffer(set.edges, bytes: max(scratch.edges.count, 1) * 4) else { return }
-        set = (vertices, triangles, edges)
+              let edges = buffer(set.edges, bytes: max(scratch.edges.count, 1) * 4),
+              let slots = buffer(set.slots, bytes: max(scratch.triangles.count / 3, 1) * 4) else { return }
+        set = (vertices, triangles, edges, slots)
         sets[nextSet] = set
         nextSet = (nextSet + 1) % sets.count
         let v = vertices.contents().bindMemory(to: Vertex.self, capacity: vertexCount)
@@ -109,8 +127,16 @@ final class LiveMesh: @unchecked Sendable {
         if !scratch.edges.isEmpty {
             scratch.edges.withUnsafeBytes { edges.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
         }
+        let slotPointer = slots.contents().bindMemory(to: Int32.self, capacity: max(scratch.triangles.count / 3, 1))
+        if let photos {
+            assigner.assign(positions: scratch.positions, confidence: scratch.confidence, triangles: scratch.triangles,
+                            store: photos, camera: cameraPose, into: slotPointer)
+            filled.withLock { $0 = (assigner.filledInView, assigner.filledRoom) }
+        } else {
+            for t in 0..<(scratch.triangles.count / 3) { slotPointer[t] = -1 }
+        }
         let result = Buffers(vertices: vertices, triangles: triangles, triangleIndexCount: scratch.triangles.count,
-                             edges: edges, edgeIndexCount: scratch.edges.count)
+                             edges: edges, edgeIndexCount: scratch.edges.count, photoSlots: slots)
         published.withLock { $0 = result }
     }
 }
@@ -124,9 +150,18 @@ final class LiveMeshRenderer {
     private let edgePipeline: MTLRenderPipelineState
     private let depthWrite: MTLDepthStencilState
     private let depthEqual: MTLDepthStencilState
+    private let dimPipeline: MTLRenderPipelineState
+    private let noDepth: MTLDepthStencilState
 
     private struct Uniforms {
         var viewProjection: simd_float4x4
+    }
+
+    /// LivePreview's colours and thresholds, for the shaders.
+    private struct Colours {
+        var tentative = LivePreview.tentative, tentativeEdge = LivePreview.tentativeEdge
+        var solid = LivePreview.solid, solidEdge = LivePreview.solidEdge
+        var confirmed = LivePreview.confirmed
     }
 
     init?(device: MTLDevice, mesh: LiveMesh) {
@@ -135,10 +170,12 @@ final class LiveMeshRenderer {
         guard let library = try? device.makeLibrary(source: Self.shaderSource, options: options),
               let vertex = library.makeFunction(name: "meshVertex"),
               let face = library.makeFunction(name: "meshFace"),
-              let edge = library.makeFunction(name: "meshEdge") else { return nil }
-        func pipeline(_ fragment: MTLFunction?) -> MTLRenderPipelineState? {
+              let edge = library.makeFunction(name: "meshEdge"),
+              let dimVertex = library.makeFunction(name: "dimVertex"),
+              let dimFragment = library.makeFunction(name: "dimFragment") else { return nil }
+        func pipeline(_ fragment: MTLFunction?, vertexFunction: MTLFunction? = nil) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = vertex
+            descriptor.vertexFunction = vertexFunction ?? vertex
             descriptor.fragmentFunction = fragment
             descriptor.depthAttachmentPixelFormat = .depth32Float
             let color = descriptor.colorAttachments[0]!
@@ -159,13 +196,27 @@ final class LiveMeshRenderer {
         }
         guard let depthPipeline = pipeline(nil), let facePipeline = pipeline(face), let edgePipeline = pipeline(edge),
               let depthWrite = depthState(.less, write: true),
-              let depthEqual = depthState(.lessEqual, write: false) else { return nil }
+              let depthEqual = depthState(.lessEqual, write: false),
+              let dimPipeline = pipeline(dimFragment, vertexFunction: dimVertex),
+              let noDepth = depthState(.always, write: false) else { return nil }
+        self.dimPipeline = dimPipeline
+        self.noDepth = noDepth
         self.mesh = mesh
         self.depthPipeline = depthPipeline
         self.facePipeline = facePipeline
         self.edgePipeline = edgePipeline
         self.depthWrite = depthWrite
         self.depthEqual = depthEqual
+    }
+
+    /// Darkens the camera picture under the preview (LivePreview.dim): what isn't scanned yet stays dark.
+    func encodeDim(_ encoder: MTLRenderCommandEncoder, alpha: Float) {
+        guard alpha > 0.01 else { return }
+        var a = alpha
+        encoder.setDepthStencilState(noDepth)
+        encoder.setRenderPipelineState(dimPipeline)
+        encoder.setFragmentBytes(&a, length: 4, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
     /// Draws the mesh if there is one yet; false if there's nothing to draw.
@@ -176,6 +227,15 @@ final class LiveMeshRenderer {
         encoder.setVertexBuffer(buffers.vertices, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setFragmentBuffer(buffers.photoSlots, offset: 0, index: 1)
+        var colours = Colours()
+        encoder.setFragmentBytes(&colours, length: MemoryLayout<Colours>.stride, index: 3)
+        if let photos = mesh.photos {
+            encoder.setFragmentBuffer(photos.projections, offset: 0, index: 2)
+            encoder.setFragmentTexture(photos.texture, index: 0)
+        } else {
+            encoder.setFragmentBuffer(buffers.photoSlots, offset: 0, index: 2) // never read: every slot is -1
+        }
         // Faces sit a little behind their edges, so the edges pass the depth test along them.
         encoder.setDepthBias(4, slopeScale: 2, clamp: 0.01)
         encoder.setRenderPipelineState(depthPipeline)
@@ -201,9 +261,11 @@ final class LiveMeshRenderer {
 
     struct MeshVertex { packed_float3 position; float confidence; };
     struct Uniforms { float4x4 viewProjection; };
+    struct Colours { float4 tentative; float4 tentativeEdge; float4 solid; float4 solidEdge; float confirmed; };
     struct MeshOut {
         float4 position [[position, invariant]];
-        float solid;
+        float3 world;
+        float confidence;
     };
 
     vertex MeshOut meshVertex(uint vid [[vertex_id]],
@@ -212,17 +274,45 @@ final class LiveMeshRenderer {
         MeshVertex v = vertices[vid];
         MeshOut out;
         out.position = u.viewProjection * float4(float3(v.position), 1.0);
-        // Orange while the surface has only been seen a few times, white once it's solid (as on Android).
-        out.solid = smoothstep(0.15, 0.6, v.confidence);
+        out.world = float3(v.position);
+        out.confidence = v.confidence;
         return out;
     }
 
-    fragment float4 meshFace(MeshOut in [[stage_in]]) {
-        return mix(float4(1.0, 0.55, 0.15, 0.40), float4(0.92, 0.94, 1.0, 0.42), saturate(in.solid));
+    // Orange while the surface has only been seen a few times, white once it's solid (as on Android), and the photo
+    // the Photo view will use once it's confirmed and has one (LivePreview), at full brightness.
+    fragment float4 meshFace(MeshOut in [[stage_in]], uint prim [[primitive_id]],
+                             const device int *slots [[buffer(1)]],
+                             const device float4x4 *projections [[buffer(2)]],
+                             constant Colours &c [[buffer(3)]],
+                             texture2d_array<float> photos [[texture(0)]]) {
+        int slot = slots[prim];
+        if (slot >= 0) {
+            float4 q = projections[slot] * float4(in.world, 1.0);
+            if (q.z > 0.05) {
+                constexpr sampler s(filter::linear, address::clamp_to_edge);
+                return float4(photos.sample(s, q.xy / q.z, uint(slot)).rgb, 1.0);
+            }
+        }
+        float solid = smoothstep(0.15, c.confirmed, in.confidence);
+        return mix(c.tentative, c.solid, saturate(solid));
     }
 
-    fragment float4 meshEdge(MeshOut in [[stage_in]]) {
-        return mix(float4(1.0, 0.45, 0.1, 0.85), float4(1.0, 1.0, 1.0, 0.75), saturate(in.solid));
+    vertex MeshOut dimVertex(uint vid [[vertex_id]]) {
+        MeshOut out;
+        out.position = float4(vid & 1 ? 1.0 : -1.0, vid & 2 ? 1.0 : -1.0, 0.0, 1.0);
+        out.world = float3(0.0);
+        out.confidence = 0.0;
+        return out;
+    }
+
+    fragment float4 dimFragment(MeshOut in [[stage_in]], constant float &alpha [[buffer(0)]]) {
+        return float4(0.0, 0.0, 0.0, alpha);
+    }
+
+    fragment float4 meshEdge(MeshOut in [[stage_in]], constant Colours &c [[buffer(3)]]) {
+        float solid = smoothstep(0.15, c.confirmed, in.confidence);
+        return mix(c.tentativeEdge, c.solidEdge, saturate(solid));
     }
     """
 }

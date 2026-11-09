@@ -166,34 +166,41 @@ enum PhotoLayout {
     static func choose(_ mesh: ScanMesh, _ photos: [Photo], allowed: Set<Int>?) -> [Int] {
         let triangleCount = mesh.triangles.count / 3
         var pick = [Int](repeating: -1, count: triangleCount)
+        let candidates = allowed.map { Array($0).sorted() } ?? Array(photos.indices)
         for t in 0..<triangleCount {
             let a = mesh.positions[Int(mesh.triangles[t * 3])]
             let b = mesh.positions[Int(mesh.triangles[t * 3 + 1])]
             let c = mesh.positions[Int(mesh.triangles[t * 3 + 2])]
-            let centre = (a + b + c) / 3
-            let cross = simd_cross(b - a, c - a)
-            let length = simd_length(cross)
-            guard length > 1e-9 else { continue }
-            let normal = cross / length
-            var best = -1
-            var bestScore: Float = 0
-            for k in photos.indices {
-                if let allowed, !allowed.contains(k) { continue }
-                let photo = photos[k]
-                let toCamera = photo.position - centre
-                let distance = simd_length(toCamera)
-                if distance < 0.15 || distance > 4.5 { continue }
-                let cosA = abs(simd_dot(normal, toCamera)) / distance
-                if cosA < 0.25 { continue }
-                let score = cosA * cosA / distance
-                if score <= bestScore { continue }
-                guard inside(photo, a), inside(photo, b), inside(photo, c), !occluded(photo, centre) else { continue }
-                best = k
-                bestScore = score
-            }
-            pick[t] = best
+            pick[t] = best(a, b, c, photos, among: candidates).photo
         }
         return pick
+    }
+
+    /// The best of `among` (photo indices) for one triangle, and its score; (-1, `beat`) when none beats `beat`.
+    /// Shared by the photo room and the live scan preview (LivePreview), so both pick the same photo.
+    static func best(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ c: SIMD3<Float>, _ photos: [Photo], among: [Int],
+                     beat: Float = 0) -> (photo: Int, score: Float) {
+        let centre = (a + b + c) / 3
+        let cross = simd_cross(b - a, c - a)
+        let length = simd_length(cross)
+        guard length > 1e-9 else { return (-1, beat) }
+        let normal = cross / length
+        var best = -1
+        var bestScore = beat
+        for k in among {
+            let photo = photos[k]
+            let toCamera = photo.position - centre
+            let distance = simd_length(toCamera)
+            if distance < 0.15 || distance > 4.5 { continue }
+            let cosA = abs(simd_dot(normal, toCamera)) / distance
+            if cosA < 0.25 { continue }
+            let score = cosA * cosA / distance
+            if score <= bestScore { continue }
+            guard inside(photo, a), inside(photo, b), inside(photo, c), !occluded(photo, centre) else { continue }
+            best = k
+            bestScore = score
+        }
+        return (best, bestScore)
     }
 
     /// Pixel position of `p` in the photo (row 0 at the top), or nil when it's behind the camera.

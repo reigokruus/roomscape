@@ -28,6 +28,8 @@ struct Keyframe: Sendable {
     /// covering the same view as the photo. Lets the photo room tell whether a surface was hidden in this photo.
     var depth: [UInt16]? = nil
     var depthWidth = 0, depthHeight = 0
+    /// Live scan only: a number that stays with this photo (the live preview's texture slot follows it).
+    var id = 0
 }
 
 /// ARKit's exposure and light estimate for one photo.
@@ -108,6 +110,9 @@ final class LiveCloud: @unchecked Sendable {
     /// Photos started (worker only), counted against `maxKeyframes` before they finish encoding.
     private var keyframesTaken = 0
     private var lastKeyframePose: simd_float4x4?
+    private var nextPhotoID = 1
+    /// The live preview's photo textures (LivePreview): every finished photo goes there too.
+    var photoStore: LivePhotoStore?
     /// Since when tracking has been normal without a break (worker only).
     private var trackingNormalSince: TimeInterval?
     /// Scaling and JPEG encoding happen here, at low priority, so they never compete with ARKit's tracking.
@@ -166,6 +171,7 @@ final class LiveCloud: @unchecked Sendable {
         detailHere = -1
         photoQueue.sync {}
         keyframes.withLock { $0.removeAll() }
+        photoStore?.keep([])
         keyframesTaken = 0
         lastKeyframePose = nil
         trackingNormalSince = nil
@@ -372,6 +378,9 @@ final class LiveCloud: @unchecked Sendable {
         pendingPhotos.withLock { $0 += 1 }
         keyframesTaken += 1
         lastKeyframePose = pose
+        let photoID = nextPhotoID
+        nextPhotoID += 1
+        let store = photoStore
         let timestamp = frame.timestamp
         let k = frame.camera.intrinsics
         let exposure = PhotoExposure(duration: frame.camera.exposureDuration, offset: frame.camera.exposureOffset,
@@ -393,8 +402,10 @@ final class LiveCloud: @unchecked Sendable {
                                     fx: k[0][0] * scale, fy: k[1][1] * scale, cx: k[2][0] * scale, cy: k[2][1] * scale,
                                     width: Int((Float(iw) * scale).rounded()), height: Int((Float(ih) * scale).rounded()),
                                     jpeg: jpeg, exposure: exposure,
-                                    depth: depth?.values, depthWidth: depth?.width ?? 0, depthHeight: depth?.height ?? 0)
+                                    depth: depth?.values, depthWidth: depth?.width ?? 0, depthHeight: depth?.height ?? 0,
+                                    id: photoID)
             keyframes.withLock { $0.append(keyframe) }
+            store?.add(keyframe)
         }
     }
 
@@ -555,6 +566,7 @@ final class LiveCloud: @unchecked Sendable {
             frames = frames.enumerated().filter { $0.offset % 2 == 0 }.map(\.element)
             return frames.count
         }
+        photoStore?.keep(Set(keyframes.withLock { $0.map(\.id) }))
         keyframesTaken = kept
         photoMove *= 2
         photoTurn *= 2

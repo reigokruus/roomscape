@@ -36,6 +36,18 @@ ios)
   shot 5-viewer-mesh 25 -openLatestScan -style mesh
   shot 6-objects-selected 25 -openLatestScan -selectObject chest
   shot 7-lighting 25 -openLatestScan -openPanel lighting
+  # The scan screen from a raw recording (VirtualScan.swift): REC=<recording folder> (default: the newest in
+  # recordings/ios; those show someone's home, so the shots stay in tools/ui-shots/, never committed).
+  REC=${REC:-$(ls -d $REPO/recordings/ios/*/frames.bin(N) 2>/dev/null | tail -1 | xargs -I{} dirname {})}
+  if [[ -n $REC && -d $REC ]]; then
+    shot 8-scan-start 12 -virtualScan $REC -virtualScanAt 2
+    shot 9-scan-middle 12 -virtualScan $REC -virtualScanAt 35
+    # A screen video of the scan screen playing the recording.
+    xcrun simctl launch --terminate-running-process $SIM $BUNDLE -virtualScan $REC >/dev/null
+    sleep 6
+    xcrun simctl io $SIM recordVideo --codec h264 $OUT/scan-run.mp4 >/dev/null 2>&1 & VID=$!
+    sleep 20; kill -INT $VID; wait $VID 2>/dev/null; echo "  scan-run.mp4"
+  fi
   xcrun simctl shutdown $SIM  # the 8 GB Mac: one simulator, shut down right after
   ;;
 esac

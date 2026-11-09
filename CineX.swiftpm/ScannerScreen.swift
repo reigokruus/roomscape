@@ -267,7 +267,11 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 lastTime = frame.timestamp
                 tooFast = speed > (tooFast ? 0.45 : 0.6) // a slow walk (~0.4 m/s) is fine
                 let cloud = self.live.cloud
-                let spot = cloud?.detailHere ?? -1
+                var spot = cloud?.detailHere ?? -1
+                // What you get is what you see (LivePreview): "This spot" and "Room" count surface that has its
+                // photo, not only its shape.
+                let filled = self.live.mesh?.filledShare
+                if let filled, filled.room > 0 || filled.inView > 0, spot >= 0 { spot = min(spot, filled.inView) }
                 let points = cloud?.count ?? 0
                 var (hint, level) = ScanHud.hint(tracking: frame.camera.trackingState, spot: spot, points: points, tooFast: tooFast)
                 if Date().timeIntervalSince(self.clearedAt) < 3 { (hint, level) = ("Cleared, scan that spot again", 1) }
@@ -277,7 +281,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 } else if shown?.hint != hint {
                     shown = (hint, level, Date())
                 }
-                let room = await Task.detached(priority: .utility) { cloud?.solidShare() ?? 0 }.value
+                var room = await Task.detached(priority: .utility) { cloud?.solidShare() ?? 0 }.value
+                // What you get is what you see (LivePreview): the bars count surface that has its photo, not only
+                // its shape.
+                if let filled, filled.room > 0 || filled.inView > 0 { room *= filled.room }
                 self.areaNote = Self.areaNote(frame: frame, cloud: cloud)
                 let justCleared = Date().timeIntervalSince(self.clearedAt) < 3
                 self.hud = ScanHud(hint: hint, level: level, spot: justCleared ? min(max(0, spot), self.hud.spot) : max(0, spot),

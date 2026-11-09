@@ -118,7 +118,7 @@ final class UltraScanner: ObservableObject {
                               SIMD3(pose.columns.2.x, pose.columns.2.y, pose.columns.2.z))
         let pts = UltraTracker.points(f, step: 2)
         let (spot, room) = fuse(pts.map { r * $0 + origin }, origin: origin)
-        mesh?.rebuildIfDue(camera: origin, time: f.time)
+        mesh?.rebuildIfDue(camera: pose, time: f.time)
         state.withLock { s in
             s.pose = pose; s.tracking = true; s.lostFrames = 0; s.frames += 1
             s.spot = s.spot * 0.7 + spot * 0.3
