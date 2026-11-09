@@ -413,6 +413,10 @@ function frame() {
 }
 
 setModel(sampleRoom(), 'Sample room', true);
+// Hosted with a scan: a room.glb next to this page opens by itself (else the built-in sample stays).
+fetch('room.glb').then(r => r.ok ? r.arrayBuffer() : Promise.reject()).then(buf =>
+  new THREE.GLTFLoader().parse(buf, '', g => { setModel(g.scene, 'Room', false); toast('Double-click a spot to fly in, or switch to Walk.'); }, () => {})
+).catch(() => {});
 toast('Showing a sample room. Open a .glb exported from RoomScape to see your scan.', 6000);
 frame();
 })();
