@@ -184,6 +184,12 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         live.stop()
         let session = captureView.captureSession.arSession
         captureView.captureSession.stop(pauseARSession: false)
+        // Continue scan: move this pass's map onto the saved scan's coordinates (by the hand-off guess), so it can
+        // replace the saved map and the next Continue scan recognises the new areas too. The points and photos
+        // were already copied out, in the pass's own coordinates.
+        if improving != nil, alignment != matrix_identity_float4x4 {
+            session.setWorldOrigin(relativeTransform: alignment.inverse)
+        }
         worldMapTask = Task {
             let map = await WorldMapStore.capture(from: session)
             session.pause()

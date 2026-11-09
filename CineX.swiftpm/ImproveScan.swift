@@ -49,7 +49,9 @@ extension ScanStore {
     }
 
     /// Files in the capture folder that the result screen saved and that stay valid after a merge.
-    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json"]
+    /// The world map is kept too: it's in the saved scan's coordinates, so the scan can be continued again (replaced
+    /// below by the pass's own map when that is in the same coordinates).
+    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json", "worldmap.arexperience"]
     /// Caches built from the points and photos: rebuilt from the merged ones the next time the scan opens.
     private static let rebuiltFiles = ["surfels.bin", "trained.bin", "windows.json"]
 
@@ -66,6 +68,7 @@ extension ScanStore {
         }
         #endif
         // Fit the pass onto the saved scan's points, starting from the hand-off guess.
+        let handoff = alignment
         var alignment = alignment
         if let capture, capture.pointCount > 0 {
             let start = Date()
@@ -152,7 +155,15 @@ extension ScanStore {
         for name in rebuiltFiles { try? fm.removeItem(at: folder.appendingPathComponent(name)) }
         ImproveHistory.record(Date(), for: scan)
         // The pass's own map is only in the saved scan's coordinates when nothing had to be mapped back.
-        if let worldMap, alignment == matrix_identity_float4x4 { WorldMapStore.save(worldMap, for: scan) }
+        // The pass's map was moved onto the saved scan by the hand-off guess (see `ScanController.finish`): it replaces
+        // the saved map (and so covers the new areas too) when the fit agrees with that guess within 10 cm and 3°.
+        // Otherwise the saved map stays (kept above), so the scan can always be continued again.
+        if let worldMap, ImproveAlignment.close(alignment, handoff) {
+            WorldMapStore.save(worldMap, for: scan)
+            ImproveLog.write("saved the pass's world map")
+        } else if worldMap != nil {
+            ImproveLog.write("kept the saved world map (the fit moved the pass more than the hand-off guess)")
+        }
         ImproveLog.write("merged: \(added) points added, \(replaced) made more solid (\(points.count) now); "
                          + "\(keyframes.count - oldPhotos) photos added (\(keyframes.count) now)")
         return scan
@@ -234,6 +245,14 @@ enum ImproveAlignment {
     }
 
     /// The pass's points and photo poses in the saved scan's coordinates.
+    /// Within 10 cm and 3° of each other.
+    static func close(_ a: simd_float4x4, _ b: simd_float4x4) -> Bool {
+        let d = a.inverse * b
+        let shift = simd_length(SIMD3(d.columns.3.x, d.columns.3.y, d.columns.3.z))
+        let cosAngle = (d.columns.0.x + d.columns.1.y + d.columns.2.z - 1) / 2
+        return shift < 0.1 && cosAngle > cos(3 * Float.pi / 180)
+    }
+
     static func apply(_ m: simd_float4x4, to capture: CaptureSnapshot) -> CaptureSnapshot {
         guard m != matrix_identity_float4x4 else { return capture }
         var out = capture
