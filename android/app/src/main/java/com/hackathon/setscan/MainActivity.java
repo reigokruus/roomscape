@@ -40,6 +40,17 @@ public class MainActivity extends Activity {
     private Button outletButton;
     private Button recordButton;
 
+    /** Ends a recording if one is running (Done, Cancel, leaving the scan or the app). */
+    private void stopRecordingIfAny() {
+        try {
+            if (session != null && session.getRecordingStatus() == com.google.ar.core.RecordingStatus.OK) {
+                session.stopRecording();
+                android.util.Log.i("RoomScape", "recording stopped");
+            }
+        } catch (Exception e) { android.util.Log.e("RoomScape", "stop recording: " + e); }
+        if (recordButton != null) recordButton.setText("Record session");
+    }
+
     private void toggleRecording() {
         if (session == null) return;
         try {
@@ -53,7 +64,7 @@ public class MainActivity extends Activity {
             dir.mkdirs();
             File out = new File(dir, "session-" + android.text.format.DateFormat.format("yyyyMMdd-HHmmss", System.currentTimeMillis()) + ".mp4");
             session.startRecording(new com.google.ar.core.RecordingConfig(session)
-                    .setMp4DatasetUri(android.net.Uri.fromFile(out)).setAutoStopOnPause(true));
+                    .setMp4DatasetUri(android.net.Uri.fromFile(out)).setAutoStopOnPause(false)); // survives tracking restarts
             recordButton.setText("Stop recording");
             android.util.Log.i("RoomScape", "recording to " + out);
             toast("Recording… tap again to stop");
@@ -741,6 +752,7 @@ public class MainActivity extends Activity {
     }
 
     private void onMainButton() {
+        if (!renderer.isViewing()) stopRecordingIfAny(); // Done ends the recording
         if (renderer.isViewing()) {
             // Rescan: a new scan from scratch
             glView.queueEvent(() -> renderer.startNewScan());
@@ -1335,6 +1347,12 @@ public class MainActivity extends Activity {
     void updateHud(String hint, String sub, int level, float detail, float room, int points) {
         runOnUiThread(() -> {
             if (hud == null) return;
+            // The record button shows whether ARCore is really recording (it can stop on its own).
+            if (recordButton != null && session != null) {
+                boolean on = session.getRecordingStatus() == com.google.ar.core.RecordingStatus.OK;
+                String want = on ? "Stop recording" : "Record session";
+                if (!want.contentEquals(recordButton.getText())) recordButton.setText(want);
+            }
             hudHint.setText(hint);
             hudHint.setTextColor(HINT_COLORS[Math.max(0, Math.min(2, level))]);
             hudSub.setText(sub == null ? "" : sub);
@@ -1476,6 +1494,7 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
+        stopRecordingIfAny();
         if (walkState != 0) setWalk(0);
         if (session != null) session.pause();
         glView.queueEvent(() -> renderer.goHome());
@@ -2143,6 +2162,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        stopRecordingIfAny();
         super.onPause();
         nearby.stop();
         renderer.paused = true;
