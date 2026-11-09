@@ -28,6 +28,11 @@ final class Tsdf {
     private final short[] w;
     private final byte[] rgb;
     private final int[] at; // voxel -> its slot in the hash table (to walk the voxels without scanning the whole table)
+    private final int[] carvedIn; // the depth frame that last carved each voxel (solid ones: at most once a frame)
+    private int frame;
+    /** Surface seen this often counts as solid: free space in front only nudges it, once per depth frame (rk 9 Nov:
+     *  stepping back, finished surface seen at a shallow angle got carved away). */
+    static final int SOLID_W = 20;
     private int n;
 
     Tsdf(int maxVoxels, float voxel, float truncation, float carveDist) {
@@ -41,6 +46,7 @@ final class Tsdf {
         w = new short[cap];
         rgb = new byte[cap * 3];
         at = new int[cap];
+        carvedIn = new int[cap];
         clear();
     }
 
@@ -49,6 +55,9 @@ final class Tsdf {
     void clear() { Arrays.fill(keys, Long.MIN_VALUE); n = 0; meshVerts = 0; }
 
     int size() { return n; }
+
+    /** Call before each depth frame's samples. */
+    void beginFrame() { frame++; }
 
     private static long key(int x, int y, int z) {
         return ((long) (x + (1 << 20)) & 0x1FFFFF) | (((long) (y + (1 << 20)) & 0x1FFFFF) << 21) | (((long) (z + (1 << 20)) & 0x1FFFFF) << 42);
@@ -73,7 +82,7 @@ final class Tsdf {
         if (keys[i] == k) return slots[i];
         if (n >= cap) return -1;
         keys[i] = k; slots[i] = n; at[n] = i;
-        sdf[n] = 0; w[n] = 0;
+        sdf[n] = 0; w[n] = 0; carvedIn[n] = -1;
         return n++;
     }
 
@@ -124,12 +133,19 @@ final class Tsdf {
         // Free space in front of the surface erases stale surfaces and mid-air noise (existing voxels only).
         // carve is how far back along the ray this goes (>= 10 means all the way to 25 cm from the camera).
         // A margin that grows with distance keeps depth noise from eating the real surface.
-        float farS = Math.min(carve, len - 0.25f), nearS = trunc + 0.02f * len;
+        // The margin is wider further away: rays to far surfaces pass close over nearer ones at a shallow angle.
+        float farS = Math.min(carve, len - 0.25f), nearS = trunc + 0.05f * len;
         for (float s = farS; s > nearS; s -= vs) {
             int vx = (int) Math.floor((px - dx * s) / vs), vy = (int) Math.floor((py - dy * s) / vs), vz = (int) Math.floor((pz - dz * s) / vs);
             int i = get(vx, vy, vz);
             if (i < 0) continue;
             int wi = w[i];
+            if (wi >= SOLID_W) { // solid: a small nudge toward free space, at most once per depth frame
+                if (carvedIn[i] == frame) continue;
+                carvedIn[i] = frame;
+                sdf[i] += (1f - sdf[i]) * 0.04f * carveWeight;
+                continue;
+            }
             sdf[i] = (sdf[i] * wi + carveWeight) / (wi + carveWeight); // seeing through counts extra
             if (wi < MAX_W) w[i] = (short) (wi + 1);
         }

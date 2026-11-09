@@ -276,6 +276,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (gen != surfGen || !viewing) return;
                 if (k.depth == null || k.dfx <= 0) continue;
                 activity.updateProcess("Building the photo room", done / (float) total);
+                synchronized (tsdf) { tsdf.beginFrame(); }
                 float ox = k.pose[12], oy = k.pose[13], oz = k.pose[14];
                 int step = Math.max(1, k.dw / 128);
                 for (int v = 0; v < k.dh; v += step) for (int u = 0; u < k.dw; u += step) {
@@ -4179,6 +4180,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (!LIVE_MESH) uploadNew(); // the points aren't drawn while scanning with the mesh: upload them for the viewer only
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
+            if (OVERVIEW && overviewBlend > 0.5f) { // where the screen's corners are in the camera texture (overview projection)
+                frame.transformCoordinates2d(com.google.ar.core.Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                        new float[]{-1, -1, 1, -1, -1, 1}, com.google.ar.core.Coordinates2d.TEXTURE_NORMALIZED, ovCamUv);
+            }
             if (LIVE_MESH) { maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); }
             else if (LIVE_DISCS) drawLiveDiscs(mvp);
             if (contAuto && improveDir != null) { maybeContinueAlign(nowMs); drawContinueGhost(mvp); }
@@ -4426,6 +4431,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private void integrate(Frame frame, Camera camera) {
+        tsdf.beginFrame(); detail.beginFrame();
         if (count >= MAX_POINTS) return;
         if (!depthSupported) {
             integrateFeaturePoints(frame, camera);
@@ -5064,7 +5070,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glVertexAttribPointer(aPos, 4, GLES20.GL_FLOAT, false, 0, cb);
         GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 0, quadUv);
         GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        // The flat picture only while the overview eases in; after that the picture is on the mesh
+        // (drawOverviewProjection) and only the frame stays.
+        if (!(LIVE_MESH && overviewBlend > 0.5f)) GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
         GLES20.glDisableVertexAttribArray(aUv);
         // The frame: corners 0 1 3 2 (the strip's order), drawn over everything.
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
@@ -5436,6 +5444,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- live surface mesh (rk, 7 Nov: like the iPhone's LiDAR mesh, polygons on what's detected, not splats) ----
     static final boolean LIVE_MESH = true;
     static final long LIVE_MESH_MS = 1200;
+    static final float LIVE_MESH_RADIUS = 8f;
     private volatile boolean liveMeshBusy;
     private Tsdf liveScratch;                // reused between live mesh builds (only the builder thread touches it)
     private java.nio.FloatBuffer liveLines; private ByteBuffer liveLineConf;
@@ -5463,7 +5472,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
         new Thread(() -> {
             try {
-                Tsdf near = tsdf.copyNear(px, py, pz, 3.5f, liveScratch); // read while the GL thread keeps fusing: fine for a preview
+                // Up to 8 m (was 3.5: stepping back made the far parts vanish, rk 9 Nov).
+                Tsdf near = tsdf.copyNear(px, py, pz, LIVE_MESH_RADIUS, liveScratch); // read while the GL thread keeps fusing: fine for a preview
                 liveScratch = near; near.reuseBuffers = true;
                 int nt = near.extractMesh();
                 LivePreview.Result r = livePreview.build(near.meshPos, near.meshConf, nt, kfs, px, py, pz, fx, fy, fz);
@@ -5523,7 +5533,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
-        if (liveMeshTriVerts == 0) return;
+        if (liveMeshTriVerts == 0) { if (OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m); return; }
         if (liveMeshProg == 0) liveMeshProg = program(
                 "uniform mat4 uMvp; attribute vec3 aPos; attribute float aConf; varying float vConf;" +
                 "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vConf = aConf; }",
@@ -5557,6 +5567,60 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aConf);
         GLES20.glDisable(GLES20.GL_BLEND);
+        if (OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m);
+    }
+
+    /** Screen corners (-1,-1), (1,-1), (-1,1) of the real camera's view in the camera texture, for the overview. */
+    private final float[] ovCamUv = new float[6];
+    private int ovProjProg;
+
+    /**
+     * The wide overview: the camera picture right now projected onto the live mesh from the phone's real view, so each
+     * camera pixel lands on its own surface from the pulled-back viewpoint (rk 9 Nov: the flat picture at OV_WINDOW
+     * showed things twice). Surfaces seen at a grazing angle are left out; hidden surfaces aren't tested yet.
+     */
+    private void drawOverviewProjection(float[] m) {
+        if (ovProjProg == 0) ovProjProg = program(
+                "uniform mat4 uMvp; attribute vec3 aPos; varying vec3 vWorld; void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vWorld = aPos; }",
+                "#extension GL_OES_EGL_image_external : require\n" +
+                "precision highp float; uniform samplerExternalOES uTex; uniform mat4 uReal; uniform vec2 uA0; uniform vec2 uAx; uniform vec2 uAy;" +
+                "uniform float uAlpha; varying vec3 vWorld;" +
+                "void main(){ vec4 c = uReal * vec4(vWorld, 1.0); if (c.w < 0.05) discard; vec2 n = c.xy / c.w;" +
+                "  if (abs(n.x) > 1.0 || abs(n.y) > 1.0) discard;" +
+                "  vec2 uv = uA0 + (n.x * 0.5 + 0.5) * uAx + (n.y * 0.5 + 0.5) * uAy;" +
+                "  gl_FragColor = vec4(texture2D(uTex, uv).rgb, uAlpha); }");
+        GLES20.glUseProgram(ovProjProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ovProjProg, "uMvp"), 1, false, m, 0);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ovProjProg, "uReal"), 1, false, realMvp, 0);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(ovProjProg, "uA0"), ovCamUv[0], ovCamUv[1]);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(ovProjProg, "uAx"), ovCamUv[2] - ovCamUv[0], ovCamUv[3] - ovCamUv[1]);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(ovProjProg, "uAy"), ovCamUv[4] - ovCamUv[0], ovCamUv[5] - ovCamUv[1]);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ovProjProg, "uAlpha"), Math.min(1f, overviewBlend));
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, bgTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(ovProjProg, "uTex"), 0);
+        int aPos = GLES20.glGetAttribLocation(ovProjProg, "aPos");
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthFunc(GLES20.GL_LEQUAL);
+        GLES20.glEnable(GLES20.GL_POLYGON_OFFSET_FILL);
+        GLES20.glPolygonOffset(-1f, -1f);
+        GLES20.glEnableVertexAttribArray(aPos);
+        for (int g = 0; g < liveGroupPos.size(); g++) {
+            GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, liveGroupPos.get(g));
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, liveGroupVerts.get(g));
+        }
+        if (liveMeshTriVerts > 0) {
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]);
+            GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, liveMeshTriVerts);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+        }
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisable(GLES20.GL_POLYGON_OFFSET_FILL);
+        GLES20.glDepthFunc(GLES20.GL_LESS);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
     }
 
     /** A black veil over the whole view (the live preview's dimmed camera). */
