@@ -42,6 +42,16 @@ Phones disconnected at 22:45; work from the copies in recordings/ (never committ
 | > 1.2 cm | 842k | 902k | 12 s |
 | > 2.5 cm | 591k | 675k | 27 s |
 | > 4 cm | 167k | 272k | 27 s |
+
+Measured to the coarse *surface* (nearest corner's normal) instead of the nearest corner (23:30):
+| kept where the fine surface is off the coarse plane by | fine triangles | total |
+|---|---|---|
+| > 0.6 cm | 663k | 738k |
+| > 1.0 cm | 566k | 648k |
+| > 1.5 cm | 435k | 527k |
+So it isn't the test: at 1.5 cm voxels the fine surface is rough with LiDAR noise (renders: fragments, not rods), and
+most of it really is > 1.5 cm off. Fine re-fusion isn't the way to the 3 cm bars on its own. Next idea: thin-structure
+placement from points seen ≥ 3 times that sit > 3 cm off the mesh (rods fitted to them), not finer voxels everywhere.
 Bars: at > 4 cm the upper bar appears as a rod segment, the lower one still in fragments (renders:
 tools/harness/harness-out/bars-zones-dev*.png). Not ready for the phone: needs a proper simplifier (quadric) so
 flat fine areas collapse, and zone placement that follows thin things (not only the view centre).

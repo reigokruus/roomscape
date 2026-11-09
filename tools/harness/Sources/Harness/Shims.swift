@@ -1,3 +1,4 @@
+import SceneKit
 import AppKit
 import simd
 
@@ -27,3 +28,6 @@ final class PerfLog: @unchecked Sendable {
     nonisolated(unsafe) static var processing: PerfLog?
     func note(_ name: String, ms: Double) {}
 }
+
+/// The app's Lighting preview shader (LightingScene.swift): no lighting in the harness.
+enum LightingShader { static func makeLit(_ m: SCNMaterial) {} }

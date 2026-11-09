@@ -274,12 +274,26 @@ enum GPUBench {
             // coarse ones when they stray more than 1.2 cm from the coarse surface (or there is none); elsewhere the
             // coarse stays (flat walls don't need 1.5 cm triangles: they'd multiply the triangle count for nothing).
             let coarse = gpuMesh
-            var coarseGrid: [SIMD3<Int32>: [SIMD3<Float>]] = [:]
-            for p in coarse.positions { coarseGrid[SIMD3<Int32>((p / 0.02).rounded(.down)), default: []].append(p) }
+            // Distance to the coarse *surface*: along the normal of the nearest coarse corner (the distance to the
+            // corner itself is up to half a coarse voxel even on a flat wall, which kept most fine triangles).
+            var normals = [SIMD3<Float>](repeating: .zero, count: coarse.positions.count)
+            for t in stride(from: 0, to: coarse.triangles.count, by: 3) {
+                let a = Int(coarse.triangles[t]), b = Int(coarse.triangles[t + 1]), c = Int(coarse.triangles[t + 2])
+                let n = simd_cross(coarse.positions[b] - coarse.positions[a], coarse.positions[c] - coarse.positions[a])
+                normals[a] += n; normals[b] += n; normals[c] += n
+            }
+            var coarseGrid: [SIMD3<Int32>: [Int]] = [:]
+            for (i, p) in coarse.positions.enumerated() { coarseGrid[SIMD3<Int32>((p / 0.02).rounded(.down)), default: []].append(i) }
+            let pointDist = ProcessInfo.processInfo.environment["FINE_POINT"] == "1"
             func distToCoarse(_ p: SIMD3<Float>) -> Float {
-                let k = SIMD3<Int32>((p / 0.02).rounded(.down)); var best = Float.infinity
-                for dx: Int32 in -2...2 { for dy: Int32 in -2...2 { for dz: Int32 in -2...2 { for q in coarseGrid[k &+ SIMD3(dx, dy, dz)] ?? [] { best = min(best, simd_distance(p, q)) } } } }
-                return best
+                let k = SIMD3<Int32>((p / 0.02).rounded(.down)); var best = Float.infinity, bestI = -1
+                for dx: Int32 in -2...2 { for dy: Int32 in -2...2 { for dz: Int32 in -2...2 { for i in coarseGrid[k &+ SIMD3(dx, dy, dz)] ?? [] {
+                    let d = simd_distance_squared(p, coarse.positions[i]); if d < best { best = d; bestI = i }
+                } } } }
+                guard bestI >= 0 else { return .infinity }
+                if pointDist { return best.squareRoot() }
+                let n = normals[bestI], l = simd_length(n)
+                return l > 1e-12 ? abs(simd_dot(p - coarse.positions[bestI], n / l)) : best.squareRoot()
             }
             func cell(_ p: SIMD3<Float>) -> SIMD3<Int32> { SIMD3<Int32>((p / 0.04).rounded(.down)) }
             var fineCells = Set<SIMD3<Int32>>()
