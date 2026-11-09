@@ -28,3 +28,14 @@ Phones disconnected at 22:45; work from the copies in recordings/ (never committ
   not an iPhone hole); one spot (1.1 m up, near the chair) had matching high-confidence iPhone depth and iPhone
   surface 6–12 cm away: an alignment residual, not a hole. rk's chair-back / cupboard / bars spots still need
   locating by hand in renders.
+
+## Detail zones, triangle budget (20:33 recording, 24 zones)
+| fine kept where it strays from the coarse surface by | fine triangles | total | time (Mac) |
+|---|---|---|---|
+| all (no check) | 929k | 980k | 13 s |
+| > 1.2 cm | 842k | 902k | 12 s |
+| > 2.5 cm | 591k | 675k | 27 s |
+| > 4 cm | 167k | 272k | 27 s |
+Bars: at > 4 cm the upper bar appears as a rod segment, the lower one still in fragments (renders:
+tools/harness/harness-out/bars-zones-dev*.png). Not ready for the phone: needs a proper simplifier (quadric) so
+flat fine areas collapse, and zone placement that follows thin things (not only the view centre).

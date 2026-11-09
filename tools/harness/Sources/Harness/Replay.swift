@@ -270,12 +270,20 @@ enum GPUBench {
                 if let p = DetailZones.focus(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy) { DetailZones.add(p, to: &zones) }
             }
             let settled = DetailZones.settled(zones)
-            var positions = gpuMesh.positions, triangles: [UInt32] = []
-            for t in stride(from: 0, to: gpuMesh.triangles.count, by: 3) {
-                let c = (positions[Int(gpuMesh.triangles[t])] + positions[Int(gpuMesh.triangles[t + 1])] + positions[Int(gpuMesh.triangles[t + 2])]) / 3
-                if !settled.contains(where: { DetailZones.contains($0, c) }) { triangles += gpuMesh.triangles[t..<(t + 3)] }
+            // Fine surface only where it adds detail: per 4 cm cell inside a zone, the fine triangles replace the
+            // coarse ones when they stray more than 1.2 cm from the coarse surface (or there is none); elsewhere the
+            // coarse stays (flat walls don't need 1.5 cm triangles: they'd multiply the triangle count for nothing).
+            let coarse = gpuMesh
+            var coarseGrid: [SIMD3<Int32>: [SIMD3<Float>]] = [:]
+            for p in coarse.positions { coarseGrid[SIMD3<Int32>((p / 0.02).rounded(.down)), default: []].append(p) }
+            func distToCoarse(_ p: SIMD3<Float>) -> Float {
+                let k = SIMD3<Int32>((p / 0.02).rounded(.down)); var best = Float.infinity
+                for dx: Int32 in -2...2 { for dy: Int32 in -2...2 { for dz: Int32 in -2...2 { for q in coarseGrid[k &+ SIMD3(dx, dy, dz)] ?? [] { best = min(best, simd_distance(p, q)) } } } }
+                return best
             }
-            var fineTris = 0
+            func cell(_ p: SIMD3<Float>) -> SIMD3<Int32> { SIMD3<Int32>((p / 0.04).rounded(.down)) }
+            var fineCells = Set<SIMD3<Int32>>()
+            var fineMeshes: [(Tsdf.MeshScratch, DetailZones.Zone)] = []
             for z in settled {
                 let h = SIMD3<Float>(repeating: DetailZones.size / 2)
                 guard let fine = TsdfGPU(min: z.centre - h, max: z.centre + h, voxel: DetailZones.voxel, truncation: DetailZones.voxel * 2, carve: 1.5) else { continue }
@@ -287,11 +295,24 @@ enum GPUBench {
                 let ft = Tsdf(capacity: 2_000_000, voxel: DetailZones.voxel, truncation: DetailZones.voxel * 2, carve: 1.5)
                 fine.copy(into: ft)
                 let fm = Fusion.mesh(ft)
+                for t in stride(from: 0, to: fm.triangles.count, by: 3) {
+                    let c = (fm.positions[Int(fm.triangles[t])] + fm.positions[Int(fm.triangles[t + 1])] + fm.positions[Int(fm.triangles[t + 2])]) / 3
+                    if DetailZones.contains(z, c, margin: 0.03), distToCoarse(c) > (Float(ProcessInfo.processInfo.environment["FINE_DEV"] ?? "") ?? 0.025) { fineCells.insert(cell(c)) }
+                }
+                fineMeshes.append((fm, z))
+            }
+            var positions = coarse.positions, triangles: [UInt32] = []
+            for t in stride(from: 0, to: coarse.triangles.count, by: 3) {
+                let c = (positions[Int(coarse.triangles[t])] + positions[Int(coarse.triangles[t + 1])] + positions[Int(coarse.triangles[t + 2])]) / 3
+                if !fineCells.contains(cell(c)) { triangles += coarse.triangles[t..<(t + 3)] }
+            }
+            var fineTris = 0
+            for (fm, z) in fineMeshes {
                 let base = UInt32(positions.count)
                 positions += fm.positions
                 for t in stride(from: 0, to: fm.triangles.count, by: 3) {
                     let c = (fm.positions[Int(fm.triangles[t])] + fm.positions[Int(fm.triangles[t + 1])] + fm.positions[Int(fm.triangles[t + 2])]) / 3
-                    if DetailZones.contains(z, c) { triangles += [fm.triangles[t] + base, fm.triangles[t + 1] + base, fm.triangles[t + 2] + base]; fineTris += 1 }
+                    if DetailZones.contains(z, c, margin: 0.03), fineCells.contains(cell(c)) { triangles += [fm.triangles[t] + base, fm.triangles[t + 1] + base, fm.triangles[t + 2] + base]; fineTris += 1 }
                 }
             }
             gpuMesh.positions = positions; gpuMesh.triangles = triangles
