@@ -16,7 +16,9 @@ import java.util.List;
  * (closest, most head-on, not hidden behind something else). All GL calls run on the GL thread.
  */
 final class PhotoRoom {
-    static final int MAX_KEYFRAMES = 60;
+    /** Photos kept (90 × 2.7 MB of texture); the last 15 places are for close-ups of detail zones. Raised from 60 on
+     *  9 Nov: rk's longer scans stopped getting photos after 45, so the areas scanned last had none. */
+    static final int MAX_KEYFRAMES = 90, MAX_WIDE = MAX_KEYFRAMES - 15;
     static final int TEX_W = 1024, TEX_H = 512; // power of two so we can mipmap; uv is normalized so the squash doesn't matter
 
     static final class Keyframe {
@@ -85,8 +87,8 @@ final class PhotoRoom {
 
     /** Is this a view we have no photo of yet? Far enough (25 cm or 12°) from every keyframe so far. Blur is checked by the caller. */
     boolean novel(float[] pose, boolean nearDetail) {
-        if (keyframes.size() >= MAX_KEYFRAMES && !nearDetail) return false; // full: only close-ups may replace a wide shot
-        if (!nearDetail && keyframes.size() >= MAX_KEYFRAMES - 15) return false; // keep room for close-ups of detail zones
+        // Full: a new view still counts; it replaces the most redundant wide shot (capture), so the areas scanned
+        // last get photos too.
         float minMove = nearDetail ? 0.1f : 0.25f, maxDot = nearDetail ? 0.985f : 0.978f;
         float fx = -pose[8], fy = -pose[9], fz = -pose[10];
         for (Keyframe k : keyframes) {
@@ -195,7 +197,9 @@ final class PhotoRoom {
     void capture(int cameraTex, float[] pose, float[] texIntr, short[] depth, int dw, int dh, float[] depIntr, float gain, int screenW, int screenH, boolean closeUp) {
         int[] t = new int[1];
         int replace = -1;
-        if (keyframes.size() >= MAX_KEYFRAMES) {
+        int wide = 0;
+        for (Keyframe k : keyframes) if (!k.closeUp) wide++;
+        if (keyframes.size() >= MAX_KEYFRAMES || (!closeUp && wide >= MAX_WIDE)) {
             replace = mostRedundant();
             if (replace < 0) return;
             t[0] = keyframes.get(replace).tex; // reuse its texture

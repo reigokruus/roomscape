@@ -57,6 +57,43 @@ public class MainActivity extends Activity {
         } catch (Exception e) { android.util.Log.e("RoomScape", "auto recording failed: " + e); }
     }
 
+    /**
+     * At launch: an auto recording left in recordings/ (the app closed or failed before moving it) goes into the scan
+     * it belongs to: the first scan without a recording saved within 15 minutes after the recording started. Copied,
+     * checked, then removed from recordings/ (never lost).
+     */
+    private void adoptStrayRecordings() {
+        new Thread(() -> {
+            try {
+                File dir = new File(getExternalFilesDir(null), "recordings");
+                File[] recs = dir.listFiles((d, n) -> n.startsWith("scan-") && n.endsWith(".mp4"));
+                File[] scans = ScanStore.root(this).listFiles(File::isDirectory);
+                if (recs == null || scans == null) return;
+                java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US);
+                for (File rec : recs) {
+                    long start;
+                    try { start = f.parse(rec.getName().substring(5, 20)).getTime(); } catch (Exception e) { continue; }
+                    if (System.currentTimeMillis() - rec.lastModified() < 60_000) continue; // still being written
+                    File best = null; long bestCreated = Long.MAX_VALUE;
+                    for (File sd : scans) {
+                        if (new File(sd, "recording.mp4").exists()) continue;
+                        long created;
+                        try { created = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(new File(sd, "meta.json").toPath()))).optLong("created", 0); }
+                        catch (Exception e) { continue; }
+                        if (created >= start && created - start < 15 * 60_000 && created < bestCreated) { best = sd; bestCreated = created; }
+                    }
+                    if (best == null) continue;
+                    File to = new File(best, "recording.mp4"), part = new File(best, "recording.mp4.part");
+                    java.nio.file.Files.copy(rec.toPath(), part.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    if (part.length() == rec.length() && part.renameTo(to)) {
+                        rec.delete();
+                        android.util.Log.i("RoomScape", "adopted stray recording " + rec.getName() + " into " + best.getName());
+                    } else part.delete();
+                }
+            } catch (Exception e) { android.util.Log.e("RoomScape", "adopting stray recordings failed: " + e); }
+        }).start();
+    }
+
     /** After a save: the finished recording moves into the scan's folder as recording.mp4. */
     private void attachRecording() {
         File rec = finishedRecording, dir = renderer.currentDir;
@@ -421,6 +458,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        adoptStrayRecordings();
 
         FrameLayout root = new FrameLayout(this);
         glView = new GLSurfaceView(this);
@@ -449,6 +487,7 @@ public class MainActivity extends Activity {
         FrameLayout chrome = new FrameLayout(this);
         scanChrome = chrome;
         chrome.addView(status, slp);
+        statusLp = slp;
 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
@@ -628,14 +667,30 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
-        chrome.addView(bars, blp);
-        toolBars = bars; toolBarsLp = blp;
+        // Debug tools: their own scrolling panel (at most 30% of the screen) with the debug text above the buttons, so
+        // they never cover the normal controls (rk 9 Nov: they spilled over the pills and the style switch).
+        android.widget.ScrollView dbg = new android.widget.ScrollView(this) {
+            @Override protected void onMeasure(int w, int h) {
+                int max = (int) (getResources().getDisplayMetrics().heightPixels * 0.3f);
+                super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST));
+            }
+        };
+        LinearLayout dbgBox = new LinearLayout(this);
+        dbgBox.setOrientation(LinearLayout.VERTICAL);
+        dbgBox.addView(bars, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        dbg.addView(dbgBox);
+        dbg.setBackgroundColor(0xCC000000);
+        dbg.setVisibility(View.GONE);
+        chrome.addView(dbg, blp);
+        toolBars = dbg; toolBarsLp = blp; debugBox = dbgBox;
         sizeBtn = sizeButton; logBtn = logButton;
-        try { debug = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("debug", false); } catch (Exception ignored) { }
+        // Debug tools are off at every start and never stored (rk 9 Nov: they stayed on after a long-press); this also
+        // clears the setting older versions kept.
+        debug = false;
+        try { getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("debug").apply(); } catch (Exception ignored) { }
         mainButton.setOnLongClickListener(v -> {
             debug = !debug;
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("debug", debug).apply();
-            toast(debug ? "Debug tools on" : "Debug tools off");
+            toast(debug ? "Debug tools on (until the app closes)" : "Debug tools off");
             applyUi();
             return true;
         });
@@ -828,6 +883,9 @@ public class MainActivity extends Activity {
 
     // ---------------- minimal UI: the scan shows only guidance and progress; tools are behind debug ----------------
     private boolean scanning = true, debug;
+    /** The debug panel's content (the debug text goes in here while the tools are on). */
+    private LinearLayout debugBox;
+    private FrameLayout.LayoutParams statusLp;
     private Button sizeBtn, logBtn;
     private LinearLayout hud, procBox;
     private FrameLayout.LayoutParams procLp;
@@ -841,11 +899,13 @@ public class MainActivity extends Activity {
         Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, undoButton, removePersonButton, interviewButton};
         lightButton.setVisibility(!scanning ? View.VISIBLE : View.GONE); // in the pill row, like the iPhone's Lighting
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
-        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton, recordButton};
+        // Every scan records itself now, so the Record session button is gone (toggleRecording stays for tests).
+        recordButton.setVisibility(View.GONE);
+        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
         improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE); // demo: Continue scan finds the saved room by itself
         for (Button b : tools) {
-            boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn || b == recordButton;
+            boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn;
             b.setVisibility(debug && (!scanning || scanTool) ? View.VISIBLE : View.GONE);
         }
         // While scanning, Cancel and Done are their own row at the bottom (as on the iPhone).
@@ -853,6 +913,14 @@ public class MainActivity extends Activity {
         if (scanRow != null) scanRow.setVisibility(scanning ? View.VISIBLE : View.GONE);
         // the text panel is for debugging; testers see it only for the lighting readout
         status.setVisibility(debug || (!scanning && (renderer.lighting.enabled || renderer.planningPreview)) ? View.VISIBLE : View.GONE);
+        // With the debug tools on, the debug text sits in their panel; otherwise (lighting readout) at the top as before.
+        ViewGroup statusHome = debug ? debugBox : (ViewGroup) scanChrome;
+        if (statusHome != null && status.getParent() != statusHome) {
+            if (status.getParent() != null) ((ViewGroup) status.getParent()).removeView(status);
+            if (debug) statusHome.addView(status, 0, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            else statusHome.addView(status, 0, statusLp);
+        }
+        if (toolBars != null) toolBars.setVisibility(debug && walkState == 0 ? View.VISIBLE : View.GONE);
         if (hud != null) hud.setVisibility(scanning ? View.VISIBLE : View.GONE);
         if (procBox != null && scanning) procBox.setVisibility(View.GONE);
         // Viewer, laid out like the iPhone: Back / title / ✦ / Share on top, Photo | Splats | Points under it,
@@ -1193,7 +1261,7 @@ public class MainActivity extends Activity {
         if (objPanel.getVisibility() == View.VISIBLE) setObjectMode(false);
         boolean viewerChrome = state == 0;
         viewerPanel.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
-        toolBars.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
+        toolBars.setVisibility(viewerChrome && debug ? View.VISIBLE : View.GONE);
         // The top rows (Lighting, Objects, the view switch) stay while standing in the room, as on the iPhone.
         styleSwitch.setVisibility(View.VISIBLE);
         pillRow.setVisibility(View.VISIBLE);

@@ -99,6 +99,48 @@ final class ScanExport {
     }
 
     /** Reads keyframe textures back as JPEG bytes. Must run on the GL thread. */
+    /**
+     * GL thread: like readKeyframes, but photos not encoded yet come back as bitmaps (just read back from their
+     * texture), to be turned into JPEGs off the GL thread with encodeKeyframe. Already encoded ones come back as byte[].
+     */
+    static List<Object> readKeyframesRaw(PhotoRoom photos, int screenW, int screenH) {
+        List<Object> out = new ArrayList<>();
+        int[] fb = new int[1];
+        boolean bound = false;
+        ByteBuffer px = null;
+        for (PhotoRoom.Keyframe k : photos.keyframes) {
+            if (k.jpg != null) { out.add(k.jpg); continue; }
+            if (!bound) {
+                GLES20.glGenFramebuffers(1, fb, 0);
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fb[0]);
+                px = ByteBuffer.allocateDirect(PhotoRoom.TEX_W * PhotoRoom.TEX_H * 4).order(ByteOrder.nativeOrder());
+                bound = true;
+            }
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, k.tex, 0);
+            px.position(0);
+            GLES20.glReadPixels(0, 0, PhotoRoom.TEX_W, PhotoRoom.TEX_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+            px.position(0);
+            Bitmap b = Bitmap.createBitmap(PhotoRoom.TEX_W, PhotoRoom.TEX_H, Bitmap.Config.ARGB_8888);
+            b.copyPixelsFromBuffer(px);
+            out.add(b);
+        }
+        if (bound) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            GLES20.glDeleteFramebuffers(1, fb, 0);
+            GLES20.glViewport(0, 0, screenW, screenH);
+        }
+        return out;
+    }
+
+    /** Any thread: a photo read back by readKeyframesRaw as the JPEG saved with the scan (recycles the bitmap). */
+    static byte[] encodeKeyframe(Bitmap b) {
+        Bitmap s = Bitmap.createScaledBitmap(b, 1024, 576, true); // back to the camera's 16:9
+        ByteArrayOutputStream jpg = new ByteArrayOutputStream();
+        s.compress(Bitmap.CompressFormat.JPEG, 80, jpg);
+        b.recycle(); s.recycle();
+        return jpg.toByteArray();
+    }
+
     static List<byte[]> readKeyframes(PhotoRoom photos, int screenW, int screenH) {
         List<byte[]> out = new ArrayList<>();
         int[] fb = new int[1];

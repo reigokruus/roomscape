@@ -33,6 +33,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private static final int MAX_POINTS = 2_000_000;
     private static final float VOXEL = 0.02f;
     private static final int MAX_PATH = 20_000;
+    /** The camera timestamp of the previous tracked frame (ns), for telling a map jump from a pause between frames. */
+    private long prevFrameNs;
 
     private final MainActivity activity;
     private Session session;
@@ -881,31 +883,27 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
                 d.hall = hallDone;
                 try { d.outletsChecked = outlets.checked; if (!outlets.list.isEmpty()) d.outlets = outlets.toJson(); if (!roomItems.list.isEmpty()) d.items = roomItems.toJson(); } catch (Exception e) { logError("outlets save", e); }
+                // The GL thread only copies (in bulk) what it must; the slow parts (picking the points, the thumbnail,
+                // new photos' JPEGs) run on the save thread. rk 9 Nov: the old per-point copy stalled the camera frames
+                // for long enough that the scan took them for map jumps and paused itself, more often as it grew.
                 // thumbnail: the frame just drawn
-                java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
+                final int tw = width, th = height;
+                final java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
-                px.position(0);
-                android.graphics.Bitmap full = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888);
-                full.copyPixelsFromBuffer(px);
-                android.graphics.Matrix flip = new android.graphics.Matrix();
-                float sc = 360f / width;
-                flip.postScale(sc, -sc);
-                d.thumb = android.graphics.Bitmap.createBitmap(full, 0, 0, width, height, flip, true);
-                full.recycle();
-                int live = 0;
-                for (int i = 0; i < count; i++) if (obs[i] != 0) live++;
-                d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
-                for (int i = 0, j = 0; i < count; i++) {
-                    if (obs[i] == 0) continue; // cleared by see-through
-                    d.pos[j * 3] = pos.get(i * 3); d.pos[j * 3 + 1] = pos.get(i * 3 + 1); d.pos[j * 3 + 2] = pos.get(i * 3 + 2);
-                    d.col[j * 3] = col.get(i * 4); d.col[j * 3 + 1] = col.get(i * 4 + 1); d.col[j * 3 + 2] = col.get(i * 4 + 2);
-                    j++;
-                }
-                java.util.List<byte[]> jpgs = ScanExport.readKeyframes(photos, width, height);
+                final int cn = count;
+                final float[] pa = new float[cn * 3];
+                FloatBuffer pd = pos.duplicate(); pd.position(0); pd.get(pa, 0, cn * 3);
+                final byte[] ca = new byte[cn * 4];
+                ByteBuffer cd = col.duplicate(); cd.position(0); cd.get(ca, 0, cn * 4);
+                final byte[] oa = java.util.Arrays.copyOf(obs, cn);
+                final java.util.List<Object> jpgs = ScanExport.readKeyframesRaw(photos, width, height);
+                final java.util.List<Runnable> encode = new java.util.ArrayList<>();
                 for (int i = 0; i < photos.keyframes.size() && i < jpgs.size(); i++) {
                     PhotoRoom.Keyframe k = photos.keyframes.get(i);
                     ScanStore.Kf o = new ScanStore.Kf();
-                    o.jpg = jpgs.get(i);
+                    Object raw = jpgs.get(i);
+                    if (raw instanceof byte[]) o.jpg = (byte[]) raw;
+                    else encode.add(() -> { o.jpg = ScanExport.encodeKeyframe((android.graphics.Bitmap) raw); k.jpg = o.jpg; });
                     System.arraycopy(k.view, 0, o.view, 0, 16); System.arraycopy(k.pose, 0, o.pose, 0, 16);
                     o.fx = k.fx; o.fy = k.fy; o.cx = k.cx; o.cy = k.cy; o.w = k.w; o.h = k.h; o.closeUp = k.closeUp;
                     o.depth = k.depth; o.dw = k.dw; o.dh = k.dh; o.dfx = k.dfx; o.dfy = k.dfy; o.dcx = k.dcx; o.dcy = k.dcy;
@@ -921,6 +919,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
                 new Thread(() -> {
                     try {
+                        px.position(0);
+                        android.graphics.Bitmap full = android.graphics.Bitmap.createBitmap(tw, th, android.graphics.Bitmap.Config.ARGB_8888);
+                        full.copyPixelsFromBuffer(px);
+                        android.graphics.Matrix flip = new android.graphics.Matrix();
+                        float sc = 360f / tw;
+                        flip.postScale(sc, -sc);
+                        d.thumb = android.graphics.Bitmap.createBitmap(full, 0, 0, tw, th, flip, true);
+                        full.recycle();
+                        int live = 0;
+                        for (int i = 0; i < cn; i++) if (oa[i] != 0) live++;
+                        d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
+                        for (int i = 0, j = 0; i < cn; i++) {
+                            if (oa[i] == 0) continue; // cleared by see-through
+                            d.pos[j * 3] = pa[i * 3]; d.pos[j * 3 + 1] = pa[i * 3 + 1]; d.pos[j * 3 + 2] = pa[i * 3 + 2];
+                            d.col[j * 3] = ca[i * 4]; d.col[j * 3 + 1] = ca[i * 4 + 1]; d.col[j * 3 + 2] = ca[i * 4 + 2];
+                            j++;
+                        }
+                        for (Runnable r : encode) r.run();
                         File out = ScanStore.save(activity, dir, d);
                         currentDir = out; currentName = name;
                         log("saved '" + name + "': " + d.n + " points, " + d.kfs.size() + " photos -> " + out);
@@ -996,7 +1012,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (replaceMarks) { outlets.fromJson(d.outlets, d.outletsChecked); roomItems.fromJson(d.items); hallDone = d.hall; }
                     if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
-                int room = Math.max(0, 80 - photos.keyframes.size());
+                int room = Math.max(0, PhotoRoom.MAX_KEYFRAMES + 30 - photos.keyframes.size()); // a Continue scan adds to them
                 for (int i = 0; i < d.kfs.size() && i < room; i++) {
                     ScanStore.Kf k = d.kfs.get(i);
                     android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeByteArray(k.jpg, 0, k.jpg.length);
@@ -1898,7 +1914,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Save without asking (a dated name the first time, then over the same folder). */
     private volatile boolean saving;
     private long lastAutosaveMs; private int lastAutosaveCount;
-    static final long AUTOSAVE_MS = 8000;
+    static final long AUTOSAVE_MS = 20_000; // was 8 s: each save briefly holds up the frames (rk 9 Nov)
 
     /** While scanning: save every few seconds when there is new data (not during an improve pass, which isn't lined up yet). */
     private void maybeAutosaveWhileScanning(long nowMs) {
@@ -4126,6 +4142,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         lastTrackState = ts;
         if (ts == TrackingState.TRACKING) {
             camera.getPose().toMatrix(curPose, 0);
+            long frameNs = frame.getTimestamp();
+            float frameDt = havePrevPose && prevFrameNs > 0 ? Math.max(0f, (frameNs - prevFrameNs) / 1e9f) : 0f;
+            prevFrameNs = frameNs;
             if (havePrevPose) {
                 float dx = curPose[12] - prevPose[12], dy = curPose[13] - prevPose[13], dz = curPose[14] - prevPose[14];
                 frameMove = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -4134,7 +4153,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             moveSpeed = moveSpeed * 0.9f + Math.min(frameMove, 0.15f) * 30f * 0.1f;
             // A sudden jump means ARCore just corrected its map: the next moment's poses can't be trusted yet.
-            if (havePrevPose && frameMove > 0.15f) { settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); }
+            // Measured against the time since the last frame we saw: after a pause (a save, a slow frame) the phone
+            // has simply walked further. Up to 2 m/s counts as walking, not as ARCore moving its map.
+            if (havePrevPose && frameMove > Math.max(0.15f, 2f * frameDt)) { settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); }
             System.arraycopy(curPose, 0, prevPose, 0, 16);
             havePrevPose = true;
             if (nowMs >= settleUntil) {
