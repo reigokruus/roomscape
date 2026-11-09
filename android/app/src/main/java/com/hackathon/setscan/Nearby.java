@@ -113,6 +113,7 @@ final class Nearby {
                 @Override public void onUnregistrationFailed(NsdServiceInfo i, int code) { }
             };
             nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, registration);
+            discover();
         } catch (Exception e) {
             stop();
         }
@@ -120,6 +121,7 @@ final class Nearby {
 
     /** Stops listening (onPause). */
     synchronized void stop() {
+        stopDiscovering();
         try { if (registration != null) nsd.unregisterService(registration); } catch (Exception ignored) { }
         registration = null;
         try { if (server != null) server.close(); } catch (Exception ignored) { }
@@ -129,6 +131,157 @@ final class Nearby {
     }
 
     private Set<String> trusted() { return new HashSet<>(prefs.getStringSet("trusted", new HashSet<>())); }
+
+    /** A phone this one shares a scan with, or was told to always accept: may read and update shared scans. */
+    private boolean knows(String id) {
+        if (trusted().contains(id)) return true;
+        for (Object[] o : SyncInfo.shared(act)) if (((SyncInfo) o[1]).peers.containsKey(id)) return true;
+        return false;
+    }
+
+    /** Tells the user what a received package did. */
+    private void note(Rmsc.Result r, String from) {
+        if (r.outcome == Rmsc.NEW) act.nearbyReceived(r.dir, "Scan received from " + from + ".");
+        else if (r.outcome == Rmsc.UPDATED) act.nearbyReceived(r.dir, "Updated from " + from + ".");
+        else if (r.outcome == Rmsc.CONFLICT) act.nearbyReceived(r.dir, "Updated from " + from + "; your changes kept as a copy.");
+    }
+
+    // ---------------------------------------------------------------- syncing shared scans
+
+    /** Phones seen while the app is open, resolved: device id -> {host, port, name}. */
+    private final Map<String, Object[]> known = new java.util.concurrent.ConcurrentHashMap<>();
+    private NsdManager.DiscoveryListener background;
+    private volatile boolean syncing;
+    private final java.util.concurrent.ExecutorService resolver = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private android.os.Handler timer;
+    private final Runnable tick = new Runnable() { @Override public void run() { syncSoon(); if (timer != null) timer.postDelayed(this, 30_000); } };
+
+    /** Looks for RoomScape phones the whole time the app is open, so shared scans sync by themselves. */
+    private void discover() {
+        if (background != null) return;
+        background = new NsdManager.DiscoveryListener() {
+            @Override public void onServiceFound(NsdServiceInfo i) {
+                if (i.getServiceName().equals(registeredName)) return;
+                resolver.execute(() -> resolveKnown(i)); // one resolve at a time
+            }
+            @Override public void onServiceLost(NsdServiceInfo i) { }
+            @Override public void onDiscoveryStarted(String t) { }
+            @Override public void onDiscoveryStopped(String t) { }
+            @Override public void onStartDiscoveryFailed(String t, int code) { }
+            @Override public void onStopDiscoveryFailed(String t, int code) { }
+        };
+        try { nsd.discoverServices(TYPE, NsdManager.PROTOCOL_DNS_SD, background); } catch (Exception e) { background = null; }
+        timer = new android.os.Handler(android.os.Looper.getMainLooper());
+        timer.postDelayed(tick, 5_000);
+    }
+
+    private void stopDiscovering() {
+        if (timer != null) { timer.removeCallbacks(tick); timer = null; }
+        try { if (background != null) nsd.stopServiceDiscovery(background); } catch (Exception ignored) { }
+        background = null;
+    }
+
+    private void resolveKnown(NsdServiceInfo i) {
+        CountDownLatch done = new CountDownLatch(1);
+        try {
+            nsd.resolveService(i, new NsdManager.ResolveListener() {
+                @Override public void onResolveFailed(NsdServiceInfo x, int code) { done.countDown(); }
+                @Override public void onServiceResolved(NsdServiceInfo x) {
+                    byte[] idb = x.getAttributes().get("id");
+                    if (idb != null) {
+                        String id = new String(idb, StandardCharsets.UTF_8);
+                        if (!id.equals(deviceId)) {
+                            boolean fresh = !known.containsKey(id);
+                            known.put(id, new Object[]{host(x), x.getPort(), x.getServiceName()});
+                            if (fresh) syncSoon();
+                        }
+                    }
+                    done.countDown();
+                }
+            });
+            done.await(15, TimeUnit.SECONDS);
+        } catch (Exception ignored) { }
+    }
+
+    private static String host(NsdServiceInfo i) {
+        InetAddress host = i.getHost();
+        if (Build.VERSION.SDK_INT >= 34) for (InetAddress a : i.getHostAddresses()) if (a instanceof java.net.Inet4Address) { host = a; break; }
+        String addr = host.getHostAddress();
+        if (addr != null && addr.contains(":")) addr = "[" + addr.replaceAll("%.*", "") + "]";
+        return addr;
+    }
+
+    /** Syncs shared scans with the known phones around, in the background. */
+    void syncSoon() {
+        if (syncing) return;
+        syncing = true;
+        new Thread(() -> { try { syncAll(); } catch (Throwable ignored) { } finally { syncing = false; } }, "nearby-sync").start();
+    }
+
+    private void syncAll() throws Exception {
+        List<Object[]> mine = SyncInfo.shared(act);
+        if (mine.isEmpty()) return;
+        for (Map.Entry<String, Object[]> peer : known.entrySet()) {
+            String pid = peer.getKey();
+            if (!knows(pid)) continue;
+            String base = "http://" + peer.getValue()[0] + ":" + peer.getValue()[1];
+            String pname = (String) peer.getValue()[2];
+            String body;
+            try { body = new String(get(base + "/scans"), StandardCharsets.UTF_8); } catch (Exception e) { continue; }
+            org.json.JSONArray list = new org.json.JSONArray(body);
+            for (int k = 0; k < list.length(); k++) {
+                String id = list.getJSONObject(k).optString("id");
+                int theirs = list.getJSONObject(k).optInt("revision", 0);
+                File dir = null;
+                for (Object[] o : mine) if (((SyncInfo) o[1]).id.equals(id)) dir = (File) o[0];
+                if (dir == null) continue;
+                int ours = SyncInfo.load(act, dir).revision;
+                if (theirs > ours) {
+                    File f = new File(act.getCacheDir(), "pull_" + System.currentTimeMillis() + ".rmsc");
+                    try (OutputStream o = new FileOutputStream(f)) { o.write(get(base + "/rmsc/" + id)); }
+                    try { note(Rmsc.importFrom(act, Uri.fromFile(f), pid, pname), pname); } finally { //noinspection ResultOfMethodCallIgnored
+                        f.delete(); }
+                } else if (ours > theirs) {
+                    File pkg = Rmsc.exportToFile(act, dir);
+                    try { if (post(base + "/rmsc", pkg) == 200) SyncInfo.markShared(act, dir, pid, pname, ours); }
+                    finally { //noinspection ResultOfMethodCallIgnored
+                        pkg.delete(); }
+                }
+            }
+        }
+    }
+
+    private byte[] get(String url) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(8_000); c.setReadTimeout(120_000);
+        c.setRequestProperty("X-Device-Id", deviceId);
+        c.setRequestProperty("X-Device-Name", URLEncoder.encode(deviceName, "UTF-8"));
+        try (InputStream in = c.getInputStream()) {
+            if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
+            ByteArrayOutputStream b = new ByteArrayOutputStream();
+            byte[] buf = new byte[1 << 16]; int r;
+            while ((r = in.read(buf)) > 0) b.write(buf, 0, r);
+            return b.toByteArray();
+        } finally { c.disconnect(); }
+    }
+
+    private int post(String url, File pkg) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setRequestMethod("POST"); c.setDoOutput(true);
+        c.setFixedLengthStreamingMode(pkg.length());
+        c.setConnectTimeout(8_000); c.setReadTimeout(180_000);
+        c.setRequestProperty("Content-Type", "application/vnd.roomscape.rmsc+zip");
+        c.setRequestProperty("X-Device-Id", deviceId);
+        c.setRequestProperty("X-Device-Name", URLEncoder.encode(deviceName, "UTF-8"));
+        c.setRequestProperty("X-File-Name", pkg.getName());
+        try (OutputStream o = c.getOutputStream(); InputStream f = new java.io.FileInputStream(pkg)) {
+            byte[] buf = new byte[1 << 16]; int r; while ((r = f.read(buf)) > 0) o.write(buf, 0, r);
+        }
+        int code = c.getResponseCode();
+        c.disconnect();
+        return code;
+    }
+
 
     private void serve(Socket c) {
         File file = new File(act.getCacheDir(), "nearby_" + System.currentTimeMillis() + ".rmsc");
@@ -153,6 +306,33 @@ final class Nearby {
             }
             long length = -1;
             try { length = Long.parseLong(h.getOrDefault("content-length", "-1")); } catch (Exception ignored) { }
+            String reqId = h.getOrDefault("x-device-id", "unknown");
+            // Sync: the shared scans and their revisions, and a shared scan's package, for phones it's shared with.
+            if (first.length >= 2 && "GET".equals(first[0])) {
+                if (!knows(reqId)) { reply(out, 403, "Unknown phone"); return; }
+                if ("/scans".equals(first[1])) {
+                    org.json.JSONArray list = new org.json.JSONArray();
+                    for (Object[] o : SyncInfo.shared(act)) {
+                        SyncInfo si = (SyncInfo) o[1];
+                        list.put(new org.json.JSONObject().put("id", si.id).put("revision", si.revision));
+                    }
+                    reply(out, 200, list.toString(), "application/json");
+                } else if (first[1].startsWith("/rmsc/")) {
+                    File dir = SyncInfo.find(act, first[1].substring(6));
+                    if (dir == null || !SyncInfo.load(act, dir).shared) { reply(out, 404, "Not found"); return; }
+                    File pkg = Rmsc.exportToFile(act, dir);
+                    try {
+                        String hdr = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.roomscape.rmsc+zip\r\nContent-Length: " + pkg.length() + "\r\nConnection: close\r\n\r\n";
+                        out.write(hdr.getBytes(StandardCharsets.US_ASCII));
+                        try (InputStream f = new java.io.FileInputStream(pkg)) { byte[] buf = new byte[1 << 16]; int r; while ((r = f.read(buf)) > 0) out.write(buf, 0, r); }
+                        out.flush();
+                    } finally { //noinspection ResultOfMethodCallIgnored
+                        pkg.delete(); }
+                } else {
+                    reply(out, 404, "Not found");
+                }
+                return;
+            }
             if (first.length < 2 || !"POST".equals(first[0]) || !"/rmsc".equals(first[1]) || length <= 0) { reply(out, 400, "Bad request"); return; }
             // Body to a file.
             try (OutputStream f = new FileOutputStream(file)) {
@@ -167,11 +347,11 @@ final class Nearby {
             }
             String id = h.getOrDefault("x-device-id", "unknown"), name = h.getOrDefault("x-device-name", "A phone");
             String fileName = h.getOrDefault("x-file-name", "scan.rmsc");
-            if (!trusted().contains(id) && !ask(id, name, fileName)) { reply(out, 403, "Declined"); return; }
+            if (!knows(id) && !ask(id, name, fileName)) { reply(out, 403, "Declined"); return; }
             sock.setSoTimeout(0);
-            File dir = Rmsc.importFrom(act, Uri.fromFile(file));
+            Rmsc.Result r = Rmsc.importFrom(act, Uri.fromFile(file), id, name);
             reply(out, 200, "OK");
-            act.nearbyReceived(dir, name);
+            note(r, name);
         } catch (Throwable e) {
             try { reply(c.getOutputStream(), 422, String.valueOf(e.getMessage())); } catch (Exception ignored) { }
         } finally {
@@ -199,9 +379,11 @@ final class Nearby {
         return accept[0];
     }
 
-    private static void reply(OutputStream out, int status, String text) throws Exception {
+    private static void reply(OutputStream out, int status, String text) throws Exception { reply(out, status, text, "text/plain"); }
+
+    private static void reply(OutputStream out, int status, String text, String type) throws Exception {
         byte[] body = text.getBytes(StandardCharsets.UTF_8);
-        String head = "HTTP/1.1 " + status + (status == 200 ? " OK" : " Error") + "\r\nContent-Type: text/plain\r\nContent-Length: "
+        String head = "HTTP/1.1 " + status + (status == 200 ? " OK" : " Error") + "\r\nContent-Type: " + type + "\r\nContent-Length: "
                 + body.length + "\r\nConnection: close\r\n\r\n";
         out.write(head.getBytes(StandardCharsets.US_ASCII));
         out.write(body);
@@ -328,7 +510,14 @@ final class Nearby {
                         try (OutputStream o = c.getOutputStream()) { o.write(body); }
                         int code = c.getResponseCode();
                         c.disconnect();
-                        act.toast(code == 200 ? "Sent. It's open as a new scan on " + peer.getServiceName() + "."
+                        byte[] pidb = i.getAttributes().get("id");
+                        if (code == 200 && pidb != null) {
+                            String pid = new String(pidb, StandardCharsets.UTF_8);
+                            SyncInfo.markShared(act, scanDir, pid, peer.getServiceName(), SyncInfo.load(act, scanDir).revision);
+                            known.put(pid, new Object[]{host(i), i.getPort(), peer.getServiceName()});
+                            act.runOnUiThread(act::refreshHomeIfShown);
+                        }
+                        act.toast(code == 200 ? "Sent. It's in " + peer.getServiceName() + "'s scans; changes on either phone now sync."
                                 : code == 403 ? peer.getServiceName() + " declined the scan."
                                 : "Couldn't send: the other phone answered " + code + ".");
                     } catch (Throwable e) {

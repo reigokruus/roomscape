@@ -124,6 +124,10 @@ final class Rmsc {
         JSONObject m = new JSONObject();
         m.put("format", "rmsc"); m.put("version", 1);
         m.put("name", d.name);
+        if (SyncInfo.app != null) { // shared scans: which room this is, and which version
+            SyncInfo si = SyncInfo.load(SyncInfo.app, dir);
+            m.put("id", si.id); m.put("revision", si.revision); m.put("revisionBy", si.revisionBy);
+        }
         SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US);
         m.put("created", iso.format(new Date(d.created > 0 ? d.created : System.currentTimeMillis())));
         m.put("modified", iso.format(new Date(new File(dir, "meta.json").lastModified())));
@@ -145,6 +149,103 @@ final class Rmsc {
         copyIf(z, new File(dir, "meta.json"), "android/meta.json");
         copyIf(z, new File(dir, "splats.bin"), "android/splats.bin");
         copyIf(z, new File(dir, "path.bin"), "android/path.bin");
+        // Parts of the package this app doesn't use (an iPhone's ios/ folder) go back out unchanged.
+        putTree(z, new File(dir, "rmsc-extra"), "");
+    }
+
+    private static void putTree(ZipOutputStream z, File f, String path) throws Exception {
+        if (!f.exists()) return;
+        if (f.isDirectory()) {
+            File[] kids = f.listFiles();
+            if (kids != null) for (File k : kids) putTree(z, k, path.isEmpty() ? k.getName() : path + "/" + k.getName());
+        } else {
+            put(z, path, bytes(f));
+        }
+    }
+
+    /** The scan as a .rmsc file (for syncing to a nearby phone). Background thread. */
+    static File exportToFile(Context ctx, File dir) throws Exception {
+        ScanStore.Data d = ScanStore.load(dir);
+        File out = new File(ctx.getCacheDir(), "sync_" + System.currentTimeMillis() + ".rmsc");
+        try (ZipOutputStream z = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(out), 1 << 16))) {
+            String ver = "?";
+            try { ver = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0).versionName; } catch (Exception ignored) { }
+            write(z, d, dir, ver);
+        }
+        return out;
+    }
+
+    static final int NEW = 0, UPDATED = 1, UNCHANGED = 2, CONFLICT = 3;
+
+    /** What an import did: the scan folder, and NEW / UPDATED / UNCHANGED / CONFLICT. */
+    static final class Result {
+        final File dir; final int outcome;
+        Result(File dir, int outcome) { this.dir = dir; this.outcome = outcome; }
+    }
+
+    /**
+     * Imports a .rmsc. A package whose id matches a scan here updates that scan in place when it's a newer revision
+     * (if both sides changed it, this phone's version is kept as a copy first: data is never lost); anything else
+     * becomes a new scan. peerId / peerName: the phone it came from (the scan is then shared with it), or null.
+     */
+    static Result importFrom(Context ctx, Uri uri, String peerId, String peerName) throws Exception {
+        JSONObject m = peekManifest(ctx, uri);
+        String id = m.optString("id", "");
+        int rev = m.optInt("revision", 1);
+        String by = m.optString("revisionBy", peerId == null ? "" : peerId);
+        File existing = id.isEmpty() ? null : SyncInfo.find(ctx, id);
+        int outcome = NEW;
+        SyncInfo prev = null;
+        if (existing != null) {
+            prev = SyncInfo.load(ctx, existing);
+            if (rev <= prev.revision) {
+                if (peerId != null) SyncInfo.markShared(ctx, existing, peerId, peerName, rev);
+                return new Result(existing, UNCHANGED);
+            }
+            if (prev.revision > prev.syncedRevision && prev.syncedRevision > 0) {
+                outcome = CONFLICT;
+                File copy = new File(existing.getParentFile(), "scan_" + System.currentTimeMillis());
+                ScanStore.copyTree(existing, copy);
+                //noinspection ResultOfMethodCallIgnored
+                SyncInfo.file(copy).delete(); // a new identity
+                String nm = ScanStore.load(existing).name;
+                ScanStore.rename(copy, nm + " (copy from " + android.os.Build.MODEL + ")");
+            } else {
+                outcome = UPDATED;
+            }
+        }
+        File out = importFrom(ctx, uri);
+        if (existing != null) {
+            // Swap the new version into the old folder; the old one stays until the swap worked.
+            File old = new File(existing.getParentFile(), existing.getName() + ".replaced");
+            deleteRec(old);
+            if (!existing.renameTo(old)) throw new Exception("could not update the scan");
+            if (!out.renameTo(existing)) { old.renameTo(existing); throw new Exception("could not update the scan"); }
+            deleteRec(old);
+            out = existing;
+        }
+        SyncInfo si = SyncInfo.load(ctx, out);
+        if (!id.isEmpty()) si.id = id;
+        si.revision = rev; si.revisionBy = by; si.syncedRevision = rev; si.modified = System.currentTimeMillis();
+        if (prev != null) { for (java.util.Map.Entry<String, String> e : prev.peers.entrySet()) si.peers.putIfAbsent(e.getKey(), e.getValue()); si.shared |= prev.shared; }
+        if (peerId != null) { si.shared = true; si.peers.put(peerId, peerName); }
+        SyncInfo.save(out, si);
+        return new Result(out, outcome);
+    }
+
+    private static JSONObject peekManifest(Context ctx, Uri uri) throws Exception {
+        try (InputStream in = ctx.getContentResolver().openInputStream(uri);
+             java.util.zip.ZipInputStream z = new java.util.zip.ZipInputStream(new BufferedInputStream(in, 1 << 16))) {
+            ZipEntry e;
+            while ((e = z.getNextEntry()) != null) {
+                if (!"manifest.json".equals(e.getName())) continue;
+                java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[8192]; int r;
+                while ((r = z.read(buf)) > 0) b.write(buf, 0, r);
+                return new JSONObject(b.toString("UTF-8"));
+            }
+        }
+        throw new Exception("this isn't a RoomScape .rmsc file (no manifest.json)");
     }
 
     /** The floor height: the tapped/estimated floor mark if there is one, else the 2nd percentile of the points. */
@@ -250,6 +351,8 @@ final class Rmsc {
             } catch (Exception ignored) { d.path = new float[0]; }
 
             File out = ScanStore.save(ctx, null, d);
+            File ios = new File(tmp, "ios");
+            if (ios.exists()) ScanStore.copyTree(ios, new File(out, "rmsc-extra/ios")); // kept for the iPhone
             File sp = new File(tmp, "android/splats.bin");
             if (sp.exists()) copy(sp, new File(out, "splats.bin"));
             if (d.thumb != null) d.thumb.recycle();

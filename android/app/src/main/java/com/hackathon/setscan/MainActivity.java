@@ -163,12 +163,15 @@ public class MainActivity extends Activity {
     Nearby nearby;
 
     /** A scan arrived from a nearby phone and was imported. Any thread. */
-    void nearbyReceived(File dir, String from) {
+    void nearbyReceived(File dir, String message) {
         runOnUiThread(() -> {
-            Toast.makeText(this, "Scan received from " + from + ".", Toast.LENGTH_LONG).show();
-            refreshHome();
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            refreshHomeIfShown();
         });
     }
+
+    /** Home's scan list again (a scan arrived, synced or became shared). */
+    void refreshHomeIfShown() { if (homeShown()) refreshHome(); }
 
     /** Share: send to a nearby phone, or share the .rmsc file through another app. */
     private void shareMenu() {
@@ -303,6 +306,8 @@ public class MainActivity extends Activity {
         glView.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
         renderer = new ScanRenderer(this);
         nearby = new Nearby(this);
+        SyncInfo.app = getApplicationContext();
+        SyncInfo.onSharedChange = () -> nearby.syncSoon(); // a change to a shared scan goes to the other phones
         glView.setRenderer(renderer);
         nativePlanning = new NativePlanningUi(this, glView, renderer);
         pilotIntake = new PilotIntakeUi(this);
@@ -699,6 +704,8 @@ public class MainActivity extends Activity {
             viewerPanel.setVisibility(viewer ? View.VISIBLE : View.GONE);
             viewerTitle.setText(renderer.currentName != null ? renderer.currentName : "Scan");
             nameValue.setText(renderer.currentName != null ? renderer.currentName : "Add a name");
+            File cd = renderer.currentDir;
+            viewerShared.setVisibility(cd != null && SyncInfo.file(cd).exists() && SyncInfo.load(this, cd).shared ? View.VISIBLE : View.GONE);
             String size = renderer.roomSizeText();
             sizeValue.setText(size != null ? size : "—");
             updateStyleSwitch();
@@ -725,6 +732,7 @@ public class MainActivity extends Activity {
     private android.widget.ScrollView viewerPanel;
     private FrameLayout.LayoutParams toolBarsLp;
     private TextView viewerTitle;
+    private android.widget.ImageView viewerShared;
     private final java.util.List<Button> menuActions = new java.util.ArrayList<>();
     private final TextView[] styleTabs = new TextView[3];
 
@@ -746,6 +754,12 @@ public class MainActivity extends Activity {
         viewerTitle.setSingleLine(true);
         viewerTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
         viewerTop.addView(viewerTitle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        viewerShared = new android.widget.ImageView(this);
+        viewerShared.setImageResource(R.drawable.ic_shared);
+        viewerShared.setImageTintList(android.content.res.ColorStateList.valueOf(Ios.ACCENT));
+        viewerShared.setContentDescription("Shared: syncs with other phones");
+        viewerShared.setVisibility(View.GONE);
+        viewerTop.addView(viewerShared, new LinearLayout.LayoutParams(dp(22), dp(22)));
         Button more = new Button(this);
         more.setText("✦");
         Ios.textButton(more);
@@ -1242,6 +1256,18 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** The "shared" mark: this room syncs with other phones (amber circle, dark people icon). */
+    private View sharedBadge() {
+        android.widget.ImageView b = new android.widget.ImageView(this);
+        b.setImageResource(R.drawable.ic_shared);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setShape(android.graphics.drawable.GradientDrawable.OVAL); bg.setColor(Ios.ACCENT);
+        b.setBackground(bg);
+        b.setPadding(dp(3), dp(3), dp(3), dp(3));
+        b.setContentDescription("Shared");
+        return b;
+    }
+
     /** A saved scan as an iPhone-style list row: thumbnail, name (and date when it has a name), chevron. */
     private View scanRow(ScanStore.Entry e, android.graphics.Bitmap thumb) {
         LinearLayout r = new LinearLayout(this);
@@ -1256,7 +1282,10 @@ public class MainActivity extends Activity {
         iv.setBackground(tb);
         iv.setClipToOutline(true);
         if (thumb != null) iv.setImageBitmap(thumb);
-        r.addView(iv, new LinearLayout.LayoutParams(dp(88), dp(66)));
+        FrameLayout tf = new FrameLayout(this);
+        tf.addView(iv, new FrameLayout.LayoutParams(dp(88), dp(66)));
+        if (SyncInfo.file(e.dir).exists() && SyncInfo.load(this, e.dir).shared) tf.addView(sharedBadge(), new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.BOTTOM | Gravity.END));
+        r.addView(tf, new LinearLayout.LayoutParams(dp(88), dp(66)));
         LinearLayout text = new LinearLayout(this);
         text.setOrientation(LinearLayout.VERTICAL);
         text.setPadding(dp(12), 0, dp(8), 0);

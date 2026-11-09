@@ -106,6 +106,33 @@ scan lands in the other phone's scan library. Both phones need to be on the same
 - **Platform needs:** iOS declares `NSLocalNetworkUsageDescription` and `NSBonjourServices` (`_roomscape._tcp`).
   Android needs `CHANGE_WIFI_MULTICAST_STATE`, `ACCESS_WIFI_STATE` and cleartext HTTP for the local address.
 
+## Shared scans (sync)
+
+A room scan has an identity, so phones that have the same room keep it in sync instead of piling up copies.
+
+- **Manifest fields** (optional; version stays 1):
+  - `id`: a permanent UUID for the room;
+  - `revision`: an integer, +1 for every saved change (rename, Continue scan, object edits);
+  - `revisionBy`: the device id that made that revision.
+  Each app keeps them with the scan (iOS: `<scan>.capture/sync.json`; Android: the scan folder's `sync.json`), along
+  with `shared`, the `peers` it's shared with (device id → name), and `syncedRevision`, the last revision both
+  sides agreed on.
+- **Becoming shared:** sending a scan to a nearby phone marks it shared on both phones with each other as a peer. Shared
+  scans show a small "shared" badge (people icon, accent colour) on the Home thumbnail and in the scan's top bar.
+- **Importing a package with a known `id`** updates that scan in place when its `revision` is higher, and is ignored
+  otherwise. If the local scan also changed since `syncedRevision`, the local version is first kept as a copy with a
+  new id and the name "<name> (copy from <device>)": data is never lost. A package without an `id` is always a new scan.
+- **Sync over the local network** (the nearby service above), between phones that share a scan or are "Always
+  allow"ed (others get `403`):
+  - `GET /scans` lists the shared scans as `[{"id": "...", "revision": 7}]`.
+  - `GET /rmsc/<id>` returns that shared scan's .rmsc package.
+  - `POST /rmsc` sends one, as before.
+  While RoomScape is open, each app looks for known phones the whole time. When one appears, every 30 s, and after a
+  local change to a shared scan, it compares revisions: it pulls newer packages and pushes its own where they're newer.
+- **Round trips:** package folders an app doesn't use (an iPhone's `ios/`) are kept with the scan and written back out
+  on export, so a scan that passes through another platform loses nothing.
+- **Later:** a cloud backend can use the same `id` / `revision` and the same packages.
+
 ## Versioning
 
 `version` goes up only for a change that breaks old readers. Adding new optional files or fields keeps version 1.

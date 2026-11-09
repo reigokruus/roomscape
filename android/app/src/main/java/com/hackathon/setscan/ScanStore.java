@@ -82,6 +82,10 @@ final class ScanStore {
     /** Writes the scan into dir (a new folder when null) and returns the folder. Background thread. */
     static File save(Context c, File dir, Data d) throws Exception {
         if (dir == null) dir = new File(root(c), "scan_" + System.currentTimeMillis());
+        // What this save changes, for syncing shared scans: a rename, or new points or photos (Continue scan).
+        String before = null;
+        try { JSONObject om = new JSONObject(readText(new File(dir, "meta.json"))); before = om.optString("name") + "|" + om.optInt("points") + "|" + om.optInt("photos"); }
+        catch (Exception ignored) { }
         File tmp = new File(dir.getParentFile(), dir.getName() + ".saving");
         deleteRec(tmp);
         new File(tmp, "kf").mkdirs();
@@ -132,13 +136,30 @@ final class ScanStore {
         if (d.floor != null) m.put("floor", vec(d.floor));
         if (d.ceiling != null) m.put("ceiling", vec(d.ceiling));
         try (FileOutputStream f = new FileOutputStream(new File(tmp, "meta.json"))) { f.write(m.toString(1).getBytes("UTF-8")); }
+        // Kept across saves: the sync identity, and package parts this app doesn't use (an iPhone's ios/ folder).
+        for (String keep : new String[]{"sync.json", "rmsc-extra", "splats.bin"}) {
+            File from = new File(dir, keep), to = new File(tmp, keep);
+            if (from.exists() && !to.exists()) copyTree(from, to);
+        }
         // swap in the new version
         File old = new File(dir.getParentFile(), dir.getName() + ".old");
         deleteRec(old);
         if (dir.exists() && !dir.renameTo(old)) throw new Exception("could not replace the old save");
         if (!tmp.renameTo(dir)) throw new Exception("could not write the save");
         deleteRec(old);
+        String after = d.name + "|" + d.n + "|" + d.kfs.size();
+        if (before != null && !before.equals(after) && SyncInfo.file(dir).exists()) SyncInfo.touch(c, dir);
         return dir;
+    }
+
+    static void copyTree(File from, File to) throws Exception {
+        if (from.isDirectory()) {
+            to.mkdirs();
+            File[] kids = from.listFiles();
+            if (kids != null) for (File k : kids) copyTree(k, new File(to, k.getName()));
+        } else {
+            java.nio.file.Files.copy(from.toPath(), to.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     /** Everything but the photos' pixels decoded (photos stay JPEG bytes). Background thread. */
@@ -201,8 +222,10 @@ final class ScanStore {
     static void rename(File dir, String name) throws Exception {
         File f = new File(dir, "meta.json");
         JSONObject m = new JSONObject(readText(f));
+        boolean changed = !name.equals(m.optString("name"));
         m.put("name", name);
         try (FileOutputStream o = new FileOutputStream(f)) { o.write(m.toString(1).getBytes("UTF-8")); }
+        if (changed && SyncInfo.file(dir).exists()) SyncInfo.touch(dir); // syncs to the phones it's shared with
     }
 
     static void delete(File dir) { deleteRec(dir); }
