@@ -182,6 +182,14 @@ struct ResultView: View {
                             }, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
                             onImprove: WorldMapStore.exists(scan) ? onImprove : nil, outletCount: outlets.count)
                     .frame(maxHeight: .infinity)
+            } else if walk == .off, let capture {
+                // A room from the Android app (no RoomPlan model): the same panel from its own data.
+                ImportedRoomSummary(name: current.title, onRename: {
+                                        newTitle = current.title ?? ""
+                                        renaming = true
+                                    }, capture: capture, manifest: SourceManifest.load(scan), surfels: surfels,
+                                    objects: objects, outletCount: outlets.count)
+                    .frame(maxHeight: .infinity)
             }
         }
         // A title menu here would push Plan a Shoot and Share into an overflow menu; rooms are named on Home.
@@ -759,7 +767,7 @@ struct ResultView: View {
     }
 
     /// The room summary list shows under the 3D view (no objects or lighting panel, not standing in the room).
-    private var summaryShown: Bool { !objectsOn && !lightingOn && room != nil && walk == .off }
+    private var summaryShown: Bool { !objectsOn && !lightingOn && (room != nil || capture != nil) && walk == .off }
 
     /// The floor height for standing in the room: RoomPlan's floor plane.
     private var walkFloorY: Float? {
@@ -1516,6 +1524,101 @@ struct RoomSceneView: UIViewRepresentable {
 }
 
 /// Plain-language summary of what was found: size, light sources (windows), doors and furniture.
+/// What the sending phone wrote about a room (its .rmsc manifest), kept on import.
+struct SourceManifest {
+    var json: [String: Any]
+    static func load(_ scan: SavedScan) -> SourceManifest? {
+        guard let data = try? Data(contentsOf: scan.captureURL.appendingPathComponent("source-manifest.json")),
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return SourceManifest(json: j)
+    }
+    var room: [String: Any]? { json["room"] as? [String: Any] }
+    var walls: [[Double]] { (room?["walls"] as? [[NSNumber]])?.map { $0.map(\.doubleValue) } ?? [] }
+    var corners: [[Double]] { (room?["corners"] as? [[NSNumber]])?.map { $0.map(\.doubleValue) } ?? [] }
+    var ceilingY: Double? { (json["ceilingY"] as? NSNumber)?.doubleValue }
+    var device: String? { (json["source"] as? [String: Any])?["device"] as? String }
+    var platform: String? { (json["source"] as? [String: Any])?["platform"] as? String }
+    var created: Date? { (json["created"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } }
+}
+
+/// The room panel for a scan without RoomPlan's model (a room from the Android app): name, size, walls, outlets,
+/// objects, and how it was captured, like `RoomSummary`.
+struct ImportedRoomSummary: View {
+    var name: String?
+    var onRename: () -> Void
+    var capture: CaptureMeta
+    var manifest: SourceManifest?
+    var surfels: [SurfelRecord]
+    var objects: [RoomObject]
+    var outletCount: Int
+
+    var body: some View {
+        List {
+            Section("Room") {
+                Button(action: onRename) {
+                    LabeledContent("Name") {
+                        HStack(spacing: 6) {
+                            if let name { Text(name).foregroundStyle(.secondary) } else { Text("Add a name").foregroundStyle(Color.accentColor) }
+                            Image(systemName: "pencil").font(.footnote).foregroundStyle(Color.accentColor)
+                        }
+                    }
+                }
+                .tint(.primary)
+                LabeledContent("Approx. size", value: sizeText)
+                if let walls = manifest?.walls, !walls.isEmpty { LabeledContent("Walls", value: "\(walls.count)") }
+                if outletCount > 0 { LabeledContent("Power outlets", value: "\(outletCount)") }
+            }
+            Section("Capture") {
+                LabeledContent("Points", value: capture.pointCount.formatted())
+                LabeledContent("Photos", value: capture.keyframeCount.formatted())
+                if let device = manifest?.device {
+                    LabeledContent("Scanned with", value: (manifest?.platform == "android" ? "Android · " : "") + device)
+                }
+                if let created = manifest?.created {
+                    LabeledContent("Scanned", value: created.formatted(.dateTime.day().month(.abbreviated).year().hour().minute()))
+                }
+            }
+            let counts = objectCounts
+            if !counts.isEmpty {
+                Section {
+                    ForEach(counts, id: \.0) { item in LabeledContent(item.0, value: "\(item.1)") }
+                } header: {
+                    Text("Furniture & objects")
+                } footer: {
+                    let removed = objects.filter { $0.removed && !$0.kind.isMarker }.count
+                    if removed > 0 { Text("\(removed) removed in Objects, not counted.") }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+    }
+
+    /// By name (the Android app names things itself; its kinds are all "object").
+    private var objectCounts: [(String, Int)] {
+        var counts: [String: Int] = [:]
+        for o in objects where !o.removed && !o.kind.isMarker { counts[o.kind == .other ? o.label : o.kind.label, default: 0] += 1 }
+        return counts.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+
+    /// From the room's corners when the sending phone found them, else the scan's extent; height from the ceiling.
+    private var sizeText: String {
+        var xs: [Double] = [], zs: [Double] = []
+        if let corners = manifest?.corners, corners.count >= 3 {
+            xs = corners.map { $0[0] }; zs = corners.map { $0[2] }
+        } else if !surfels.isEmpty {
+            // The middle 98% of the splats, so a few stray ones don't stretch it.
+            let x = surfels.map { Double($0.x) }.sorted(), z = surfels.map { Double($0.z) }.sorted()
+            let lo = x.count / 100, hi = x.count - 1 - x.count / 100
+            xs = [x[lo], x[hi]]; zs = [z[lo], z[hi]]
+        }
+        guard let x0 = xs.min(), let x1 = xs.max(), let z0 = zs.min(), let z1 = zs.max() else { return "–" }
+        let a = max(x1 - x0, z1 - z0), b = min(x1 - x0, z1 - z0)
+        var text = String(format: "%.1f × %.1f m", a, b)
+        if let h = manifest?.ceilingY, h > 1.5 { text += String(format: ", %.1f m high", h) }
+        return text
+    }
+}
+
 struct RoomSummary: View {
     let room: CapturedRoom
     /// The room's name, if it has one, and how to change it (nil: no Name row).

@@ -384,6 +384,10 @@ enum Rmsc {
             }
             if let thumb = try zip.read("thumb.jpg") { try thumb.write(to: scan.thumbnailURL) }
 
+            // The sending phone's manifest, for the room panel of scans without RoomPlan's model (size, device, date).
+            if let data = try? JSONSerialization.data(withJSONObject: manifest) {
+                try? data.write(to: folder.appendingPathComponent("source-manifest.json"))
+            }
             let meta = CaptureMeta(pointCount: points.count, keyframeCount: records.count, voxelSize: LiveCloud.voxel)
             try encoder.encode(meta).write(to: folder.appendingPathComponent("meta.json"))
             if let title = manifest["name"] as? String, !title.isEmpty { scan = ScanStore.rename(scan, to: title, touch: false) }
