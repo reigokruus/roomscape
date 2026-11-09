@@ -173,8 +173,9 @@ enum Rmsc {
         if let v = manifest["version"] as? Int, v > 1 { throw Failure.newerVersion(v) }
         let fm = FileManager.default
 
-        // An iPhone's own package goes back to its own coordinates, so its world map still fits.
-        var lift: Float = 0
+        // An iPhone's own package goes back to its own coordinates, so its world map still fits. Any other package is
+        // moved so its floor (`floorY`, which Android writes as the real floor height) is at y = 0.
+        var lift: Float = -((manifest["floorY"] as? NSNumber)?.floatValue ?? 0)
         if let s = try zip.read("ios/shift.json"), let j = try? JSONSerialization.jsonObject(with: s) as? [String: Any],
            let f = (j["floorY"] as? NSNumber)?.floatValue, zip.contains("ios/worldmap.arexperience") {
             lift = f
@@ -202,6 +203,8 @@ enum Rmsc {
 
             // Photos.
             var records: [KeyframeRecord] = []
+            /// Depth images with their own intrinsics, to build a mesh when the package has none.
+            var depthViews: [(pose: simd_float4x4, depth: Data, w: Int, h: Int, fx: Float, fy: Float, cx: Float, cy: Float)] = []
             if let data = try zip.read("photos.json"),
                let list = (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["photos"] as? [[String: Any]] {
                 for p in list {
@@ -211,6 +214,14 @@ enum Rmsc {
                           let fx = f("fx"), let fy = f("fy"), let cx = f("cx"), let cy = f("cy"),
                           var pose = (p["pose"] as? [NSNumber])?.map(\.floatValue), pose.count == 16 else { continue }
                     pose[13] += lift
+                    if let d = p["depth"] as? [String: Any], let df = d["file"] as? String,
+                       let dw = d["width"] as? Int, let dh = d["height"] as? Int,
+                       let dfx = f("fx", d), let dfy = f("fy", d), let dcx = f("cx", d), let dcy = f("cy", d),
+                       let depth = try zip.read(df), depth.count == dw * dh * 2 {
+                        let m = simd_float4x4(SIMD4(pose[0], pose[1], pose[2], pose[3]), SIMD4(pose[4], pose[5], pose[6], pose[7]),
+                                              SIMD4(pose[8], pose[9], pose[10], pose[11]), SIMD4(pose[12], pose[13], pose[14], pose[15]))
+                        depthViews.append((m, depth, dw, dh, dfx, dfy, dcx, dcy))
+                    }
                     let i = records.count
                     let out = String(format: "photos/%03d.jpg", i)
                     try jpeg.write(to: folder.appendingPathComponent(out))
@@ -234,14 +245,15 @@ enum Rmsc {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(records).write(to: folder.appendingPathComponent("keyframes.json"))
 
-            // Mesh, and the photo room as made by the other app (used when there's no mesh to paint).
+            // Mesh: the package's, else fused from its depth images (Android packages have only points, photos and
+            // depth), so the photo room can be painted. The package's room.glb is kept for when neither works.
+            var mesh: ScanMesh?
             if let data = try zip.read("mesh.ply") {
                 let ply = try Ply(data)
-                if !ply.faces.isEmpty {
-                    try ScanMesh(positions: ply.vertices.map { $0.position + up }, triangles: ply.faces)
-                        .write(to: folder.appendingPathComponent(ScanMesh.fileName))
-                }
+                if !ply.faces.isEmpty { mesh = ScanMesh(positions: ply.vertices.map { $0.position + up }, triangles: ply.faces) }
             }
+            if mesh == nil, !depthViews.isEmpty { mesh = fuse(depthViews) }
+            try mesh?.write(to: folder.appendingPathComponent(ScanMesh.fileName))
             if let glb = try zip.read("room.glb") { try glb.write(to: folder.appendingPathComponent(GLBScene.fileName)) }
             try JSONSerialization.data(withJSONObject: ["y": lift]).write(to: folder.appendingPathComponent(GLBScene.liftFileName))
 
@@ -265,6 +277,35 @@ enum Rmsc {
             ScanStore.delete(scan)
             throw error
         }
+    }
+}
+
+extension Rmsc {
+    /// A mesh from depth images and their camera poses: each depth pixel is fused into a 4 cm TSDF, like the live
+    /// scan, and the surface is extracted. Depth is millimetres (0 = none), the camera looks along -Z with +Y up.
+    static func fuse(_ views: [(pose: simd_float4x4, depth: Data, w: Int, h: Int, fx: Float, fy: Float, cx: Float, cy: Float)]) -> ScanMesh? {
+        let tsdf = Tsdf(capacity: 1_200_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
+        tsdf.minW = 1
+        for v in views {
+            let origin = SIMD3(v.pose.columns.3.x, v.pose.columns.3.y, v.pose.columns.3.z)
+            // About one ray per 4 cm at room distance: every pixel of small depth images, every second of larger ones.
+            let step = max(1, v.w / 128)
+            v.depth.withUnsafeBytes { raw in
+                for y in stride(from: 0, to: v.h, by: step) {
+                    for x in stride(from: 0, to: v.w, by: step) {
+                        let mm = UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: (y * v.w + x) * 2, as: UInt16.self))
+                        guard mm > 200, mm < 5000 else { continue }
+                        let d = Float(mm) / 1000
+                        let cam = SIMD4<Float>((Float(x) + 0.5 - v.cx) * d / v.fx, (v.cy - (Float(y) + 0.5)) * d / v.fy, -d, 1)
+                        let w = v.pose * cam
+                        tsdf.integrate(origin: origin, point: SIMD3(w.x, w.y, w.z))
+                    }
+                }
+            }
+        }
+        let out = Tsdf.MeshScratch()
+        guard tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: 20, into: out) > 0 else { return nil }
+        return ScanMesh(positions: out.positions, triangles: out.triangles)
     }
 }
 
