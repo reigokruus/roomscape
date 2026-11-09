@@ -47,6 +47,9 @@ enum RecordingProcessor {
             let conf = raw.count >= 4 + w * h * 3 ? [UInt8](raw.subdata(in: (4 + w * h * 2)..<(4 + w * h * 3))) : []
             depthFrames.append((time, w, h, mm, conf))
         }
+        // Points: the depth samples in 2 cm cells (averaged), like the live scan, for the splats and points views.
+        var cells: [SIMD3<Int32>: (sum: SIMD3<Float>, n: Int32)] = [:]
+        cells.reserveCapacity(400_000)
         var fi = 0
         for (n, d) in depthFrames.enumerated() {
             while fi + 1 < frames.count, abs(frames[fi + 1].time - d.time) <= abs(frames[fi].time - d.time) { fi += 1 }
@@ -73,6 +76,11 @@ enum RecordingProcessor {
                     let pw = SIMD3(pw4.x, pw4.y, pw4.z)
                     if clears.contains(where: { Self.cleared(pw, at: d.time, by: $0) }) { continue }
                     tsdf.integrate(origin: origin, point: pw)
+                    if cells.count < 1_200_000 {
+                        let k = SIMD3(Int32((pw.x / 0.02).rounded(.down)), Int32((pw.y / 0.02).rounded(.down)), Int32((pw.z / 0.02).rounded(.down)))
+                        let c = cells[k] ?? (.zero, 0)
+                        cells[k] = (c.sum + pw, c.n + 1)
+                    }
                 }
             }
             if n % 10 == 0 {
@@ -90,7 +98,9 @@ enum RecordingProcessor {
 
         // 3. Write, keeping the old files.
         progress(Progress(stage: "Saving", fraction: 0.95, note: nil))
-        try write(scan, mesh: mesh, photos: photos)
+        // Cells seen at least twice (a single sighting is often a stray sample).
+        let points = cells.values.filter { $0.n >= 2 }.map { $0.sum / Float($0.n) }
+        try write(scan, mesh: mesh, points: points.isEmpty ? mesh.positions : points, photos: photos)
         progress(Progress(stage: "Done", fraction: 1, note: nil))
     }
 
@@ -187,7 +197,7 @@ enum RecordingProcessor {
 
     // MARK: Writing
 
-    static func write(_ scan: SavedScan, mesh: ScanMesh, photos: [Keyframe]) throws {
+    static func write(_ scan: SavedScan, mesh: ScanMesh, points pointPositions: [SIMD3<Float>], photos: [Keyframe]) throws {
         let fm = FileManager.default
         let folder = scan.captureURL
         // The current files move aside first (a rebuild never loses the scan it replaces).
@@ -219,13 +229,13 @@ enum RecordingProcessor {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(records).write(to: folder.appendingPathComponent("keyframes.json"))
         try mesh.write(to: folder.appendingPathComponent(ScanMesh.fileName))
-        // Points: the surface's corners, coloured from the first photo that sees each (grey where none does).
-        let colours = colour(mesh.positions, photos)
-        let points = mesh.positions.enumerated().map { i, p in
+        // Points coloured from the first photo that sees each (grey where none does).
+        let colours = colour(pointPositions, photos)
+        let points = pointPositions.enumerated().map { i, p in
             LivePoint(x: p.x, y: p.y, z: p.z, rgba: UInt32(colours[i].x) | (UInt32(colours[i].y) << 8) | (UInt32(colours[i].z) << 16) | (255 << 24))
         }
         try points.withUnsafeBytes { Data($0) }.write(to: folder.appendingPathComponent("points.bin"))
-        try encoder.encode(CaptureMeta(pointCount: points.count, keyframeCount: records.count, voxelSize: 0.04))
+        try encoder.encode(CaptureMeta(pointCount: points.count, keyframeCount: records.count, voxelSize: 0.02))
             .write(to: folder.appendingPathComponent("meta.json"))
     }
 
