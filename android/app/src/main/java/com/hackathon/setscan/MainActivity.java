@@ -568,21 +568,31 @@ public class MainActivity extends Activity {
         });
         buildHud(chrome);
         buildViewerChrome(chrome);
+        // Lighting and Objects bars are part of the panel under the 3D view (its first card), not floating over it.
         lightPanel = buildLightPanel();
         lightPanel.setVisibility(View.GONE);
-        FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-        llp.bottomMargin = dp(150);
-        chrome.addView(lightPanel, llp);
         objPanel = buildObjPanel();
         objPanel.setVisibility(View.GONE);
-        FrameLayout.LayoutParams olp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-        olp.bottomMargin = dp(150);
-        chrome.addView(objPanel, olp);
-        // keep the panel just above the button rows, however many rows they wrap into
+        for (LinearLayout panel : new LinearLayout[]{objPanel, lightPanel}) {
+            android.graphics.drawable.GradientDrawable cb = new android.graphics.drawable.GradientDrawable();
+            cb.setColor(Ios.CARD); cb.setCornerRadius(dp(Ios.RADIUS_DP));
+            panel.setBackground(cb);
+            panel.setPadding(dp(12), dp(10), dp(12), dp(10));
+            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            cp.bottomMargin = dp(12);
+            viewerBottom.addView(panel, 0, cp);
+        }
+        // The 3D view ends where the panel starts, also when a bar appears in it or goes.
+        viewerPanel.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (b - t == ob - ot) return;
+            v.post(() -> {
+                FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
+                int want = !scanning && walkState == 0 ? viewerPanel.getHeight() : 0;
+                if (gp.bottomMargin != want) { gp.bottomMargin = want; glView.setLayoutParams(gp); }
+            });
+        });
         bars.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             int want = dp(56) + (b - t);
-            if (llp.bottomMargin != want) { llp.bottomMargin = want; lightPanel.post(() -> lightPanel.setLayoutParams(llp)); }
-            if (olp.bottomMargin != want) { olp.bottomMargin = want; objPanel.post(() -> objPanel.setLayoutParams(olp)); }
             if (procLp != null && procLp.bottomMargin != want + dp(8)) { procLp.bottomMargin = want + dp(8); procBox.post(() -> procBox.setLayoutParams(procLp)); }
         });
         root.addView(chrome, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -1623,6 +1633,7 @@ public class MainActivity extends Activity {
     private void setObjectMode(boolean on) {
         objPanel.setVisibility(on ? View.VISIBLE : View.GONE);
         if (on && lightPanel != null) lightPanel.setVisibility(View.GONE);
+        if (on) viewerPanel.post(() -> viewerPanel.smoothScrollTo(0, 0)); // the bar is the panel's first card
         glView.queueEvent(() -> { String t = renderer.objectsOn(on); runOnUiThread(() -> objPanelText(t)); });
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import simd
 
 /// Objects in the scan: find more with Claude, select, remove / put back, move (tap the floor) and turn movable
 /// things, and see where the room's lights and power sockets are. Swipe a row left to remove it (or put it back),
@@ -224,6 +225,139 @@ struct ClaudeKeySheet: View {
                     .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
+        }
+    }
+}
+
+/// Objects mode's bar under the 3D view, the same as the Android app's: what's found or selected, ✕ Done, and
+/// Remove / Turn 15° / Removed… as pills. Tap an object's box to select it; tap the floor to move it there.
+struct ObjectsBar: View {
+    @Binding var objects: [RoomObject]
+    @Binding var selected: UUID?
+    let claudeChecked: Bool
+    let finding: String?
+    let error: String?
+    let onFind: () -> Void
+    let onDone: () -> Void
+
+    @State private var showingKey = false
+    @State private var findAfterKey = false
+    @State private var choosingRemoved = false
+
+    private var movable: [RoomObject] { objects.filter { !$0.kind.isMarker } }
+    private var selectedIndex: Int? { selected.flatMap { id in objects.firstIndex { $0.id == id } } }
+
+    private var info: String {
+        if let i = selectedIndex {
+            let o = objects[i]
+            let state = o.removed ? " · removed" : (simd_length(o.offset) > 0.001 || abs(o.turn) > 0.001) ? " · moved" : ""
+            return "\(o.label) · \(o.sizeText)\(state)" + (o.removed || o.kind.isMarker ? "" : "\nTap the floor to move it there.")
+        }
+        if movable.isEmpty { return "No separate objects found in this scan yet." }
+        let removed = movable.filter(\.removed).count
+        return "\(movable.count) objects found" + (removed > 0 ? " (\(removed) removed)" : "") + ". Tap one to select it."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                Text(info)
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                pill("✕ Done", action: onDone)
+            }
+            if let finding {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text(finding).font(.footnote).foregroundStyle(.white.opacity(0.8))
+                }
+            }
+            if let error { Text(error).font(.footnote).foregroundStyle(.red) }
+            FlowRow(spacing: 6) {
+                if let i = selectedIndex, objects[i].removed {
+                    pill("Put back") { objects[i].removed = false }
+                } else {
+                    pill("Remove", disabled: selectedIndex == nil) {
+                        if let i = selectedIndex { objects[i].removed = true }
+                    }
+                }
+                pill("Turn 15°", disabled: selectedIndex == nil || objects[selectedIndex!].kind.isMarker) {
+                    if let i = selectedIndex {
+                        var t = objects[i].turn + .pi / 12
+                        if t > .pi { t -= 2 * .pi }
+                        objects[i].turn = t
+                    }
+                }
+                pill("Removed…") { choosingRemoved = true }
+                if finding == nil {
+                    pill(claudeChecked ? "Look again with Claude" : "Find with Claude") {
+                        if ClaudeKeyStore.key == nil { findAfterKey = true; showingKey = true } else { onFind() }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(red: 0.06, green: 0.07, blue: 0.09).opacity(0.9))
+        .environment(\.colorScheme, .dark)
+        .confirmationDialog("Put back", isPresented: $choosingRemoved, titleVisibility: .visible) {
+            ForEach(objects.filter(\.removed)) { o in
+                Button("\(o.label) · \(o.sizeText)") {
+                    if let i = objects.firstIndex(where: { $0.id == o.id }) { objects[i].removed = false; selected = o.id }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(objects.contains(where: \.removed) ? "Tap one to put it back." : "Nothing removed yet.")
+        }
+        .sheet(isPresented: $showingKey) {
+            ClaudeKeySheet(onSaved: findAfterKey ? onFind : nil)
+        }
+    }
+
+    /// A dark capsule with white text, like the Android app's small buttons.
+    private func pill(_ title: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white.opacity(disabled ? 0.35 : 1))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color(white: 0.17), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+    }
+}
+
+/// Lays its views out left to right, wrapping onto new rows.
+struct FlowRow: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, row: CGFloat = 0, widest: CGFloat = 0
+        for s in subviews {
+            let size = s.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width { y += row + spacing; x = 0; row = 0 }
+            x += size.width + spacing
+            row = max(row, size.height)
+            widest = max(widest, x - spacing)
+        }
+        return CGSize(width: min(widest, width), height: y + row)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, row: CGFloat = 0
+        for s in subviews {
+            let size = s.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX { y += row + spacing; x = bounds.minX; row = 0 }
+            s.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            row = max(row, size.height)
         }
     }
 }

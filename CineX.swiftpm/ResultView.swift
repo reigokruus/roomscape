@@ -96,6 +96,7 @@ struct ResultView: View {
                     RoomSceneView(scene: scene, topView: topView, topTurn: room.map(Self.squaringTurn) ?? 0,
                                   floorY: (lightingOn || objectsOn || walk == .choosing) ? walkFloorY : nil,
                                   onFloorTap: floorTapped,
+                                  onTapRay: objectsOn ? objectTapped : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
                 } else if let loadError {
@@ -154,10 +155,10 @@ struct ResultView: View {
             // The 3D area is always black, so its controls use dark styling even when the phone is in light mode.
             .environment(\.colorScheme, .dark)
 
-            if objectsOn, let shell {
-                ObjectsPanel(objects: $objects, selected: $selectedObject, floorY: shell.floorY,
-                             claudeChecked: claudeChecked, finding: finding, error: findError, onFind: findObjects)
-                    .frame(maxHeight: 340)
+            if objectsOn, shell != nil {
+                // The same bar as the Android app's: what's selected, and Remove / Turn 15° / Removed… under it.
+                ObjectsBar(objects: $objects, selected: $selectedObject, claudeChecked: claudeChecked,
+                           finding: finding, error: findError, onFind: findObjects, onDone: toggleObjects)
             } else if lightingOn, lighting != nil {
                 LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }),
                               planning: planningShot, planError: planError, onPlan: planShot,
@@ -358,6 +359,8 @@ struct ResultView: View {
             let objectsScene = ObjectsScene()
             objectsScene.install(parts, objects: objects)
             splats.addChildNode(objectsScene.root)
+            objectsScene.boxes.isHidden = !objectsOn
+            scene.rootNode.addChildNode(objectsScene.boxes)
             splats.isHidden = true
             scene.rootNode.addChildNode(splats)
             splatGroup = splats
@@ -558,6 +561,34 @@ struct ResultView: View {
         Task { shareURL = await Task.detached(priority: .utility) { ScanStore.namedModelCopy(scan) }.value }
     }
 
+    /// Objects mode: a tap on an object's box selects it (the nearest one along the ray); true when one was hit.
+    private func objectTapped(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> Bool {
+        var best: (UUID, Float)?
+        for o in objects where !o.kind.isMarker && !o.removed {
+            // The ray in the box's own frame (turned by yaw + turn, moved by the offset), slab test with a 3 cm margin.
+            let c = o.center + o.offset
+            let q = simd_quatf(angle: -(o.yaw + o.turn), axis: SIMD3(0, 1, 0))
+            let ro = q.act(origin - c), rd = q.act(dir)
+            let h = o.halfExtents + 0.03
+            var t0: Float = 0, t1: Float = .greatestFiniteMagnitude
+            var hit = true
+            for k in 0..<3 {
+                if abs(rd[k]) < 1e-6 {
+                    if abs(ro[k]) > h[k] { hit = false; break }
+                } else {
+                    var a = (-h[k] - ro[k]) / rd[k], b = (h[k] - ro[k]) / rd[k]
+                    if a > b { swap(&a, &b) }
+                    t0 = max(t0, a); t1 = min(t1, b)
+                    if t0 > t1 { hit = false; break }
+                }
+            }
+            if hit, best == nil || t0 < best!.1 { best = (o.id, t0) }
+        }
+        guard let best else { return false }
+        selectedObject = best.0
+        return true
+    }
+
     private func floorTapped(_ p: SIMD3<Float>) {
         if walk == .choosing {
             walk = .inside(p)
@@ -693,9 +724,10 @@ struct ResultView: View {
 
     private func toggleObjects() {
         objectsOn.toggle()
+        objectsScene?.boxes.isHidden = !objectsOn
         if objectsOn {
-            // Objects move splats: not in RoomPlan's model or the photo room.
-            if style == .model || (style == .photo && photoRoom != nil) { style = .mesh }
+            // The outlines show in every style but RoomPlan's own model (moving and removing moves the splats).
+            if style == .model { style = .mesh }
             if lightingOn { toggleLighting() }
         } else {
             selectedObject = nil
@@ -906,6 +938,8 @@ struct RoomSceneView: UIViewRepresentable {
     /// When set, a tap on the 3D view reports where it hits the floor plane at this height.
     var floorY: Float? = nil
     var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
+    /// Gets every tap first, as a ray (origin, unit direction); returns true when it used it (an object was hit).
+    var onTapRay: ((SIMD3<Float>, SIMD3<Float>) -> Bool)? = nil
     /// Standing in the room (first person) at this floor point; nil = the orbit or top view.
     var standAt: SIMD3<Float>? = nil
     /// The floor, for walking to a double-tapped spot.
@@ -1020,6 +1054,7 @@ struct RoomSceneView: UIViewRepresentable {
         var lastTop: Bool?
         var floorY: Float?
         var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
+        var onTapRay: ((SIMD3<Float>, SIMD3<Float>) -> Bool)?
 
         // First person ("Enter the room").
         weak var view: SCNView?
@@ -1160,6 +1195,13 @@ struct RoomSceneView: UIViewRepresentable {
         /// Intersects the tapped ray with the floor plane. (SceneKit's hit test can't see the splats: their discs
         /// are opened up in the shader, so on the CPU they have no area.)
         @objc func tapped(_ gesture: UITapGestureRecognizer) {
+            if standing == nil, let onTapRay, let view = gesture.view as? SCNView {
+                let p = gesture.location(in: view)
+                let near = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 0))
+                let far = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 1))
+                let a = SIMD3<Float>(near.x, near.y, near.z), b = SIMD3<Float>(far.x, far.y, far.z)
+                if simd_length(b - a) > 1e-6, onTapRay(a, simd_normalize(b - a)) { return }
+            }
             guard standing == nil, let floorY, let view = gesture.view as? SCNView,
                   let p = floorPoint(gesture.location(in: view), floorY: floorY, in: view) else { return }
             onFloorTap(p)
@@ -1258,6 +1300,7 @@ struct RoomSceneView: UIViewRepresentable {
     func updateUIView(_ view: SCNView, context: Context) {
         context.coordinator.floorY = floorY
         context.coordinator.onFloorTap = onFloorTap
+        context.coordinator.onTapRay = onTapRay
         context.coordinator.walkFloorY = walkFloorY
         context.coordinator.viewHeight = view.bounds.height
         context.coordinator.walkMove = walkMove
