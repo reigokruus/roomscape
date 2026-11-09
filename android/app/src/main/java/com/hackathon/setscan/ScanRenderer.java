@@ -225,6 +225,46 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return out;
     }
 
+    /**
+     * A reopened (or imported) scan has photos with depth but no surface mesh, so Photo would show points. Fuse each
+     * photo's depth image into the TSDF in the background (like the live scan does), extract the surface and paint it
+     * with the photos, so Photo looks like the iPhone's photo room. Progress shows in the processing card.
+     */
+    private void fuseSavedDepth() {
+        final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
+        int withDepth = 0;
+        for (PhotoRoom.Keyframe k : kfs) if (k.depth != null && k.dfx > 0) withDepth++;
+        if (withDepth == 0) return;
+        final int total = withDepth, gen = surfGen;
+        new Thread(() -> { try {
+            long t0 = System.currentTimeMillis();
+            int done = 0;
+            int[] grey = {170, 170, 170};
+            float[] cam = new float[4], w = new float[4];
+            for (PhotoRoom.Keyframe k : kfs) {
+                if (gen != surfGen || !viewing) return;
+                if (k.depth == null || k.dfx <= 0) continue;
+                activity.updateProcess("Building the photo room", done / (float) total);
+                float ox = k.pose[12], oy = k.pose[13], oz = k.pose[14];
+                int step = Math.max(1, k.dw / 128);
+                for (int v = 0; v < k.dh; v += step) for (int u = 0; u < k.dw; u += step) {
+                    int mm = k.depth[v * k.dw + u] & 0xFFFF;
+                    if (mm < 200 || mm > 5000) continue;
+                    float d = mm * 0.001f;
+                    cam[0] = (u + 0.5f - k.dcx) * d / k.dfx; cam[1] = (k.dcy - (v + 0.5f)) * d / k.dfy; cam[2] = -d; cam[3] = 1;
+                    Matrix.multiplyMV(w, 0, k.pose, 0, cam, 0);
+                    synchronized (tsdf) { tsdf.integrate(ox, oy, oz, w[0], w[1], w[2], grey); }
+                }
+                done++;
+            }
+            int tris;
+            synchronized (tsdf) { tris = tsdf.extractMesh(); }
+            log("photo room surface from " + total + " depth photos: " + tris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
+            activity.updateProcess(null, -1);
+            if (tris > 0) glTasks.add(() -> { if (gen == surfGen) { meshTris = tris; meshPosAll = null; buildPhotos(); } });
+        } catch (Throwable e) { activity.updateProcess(null, -1); logError("photo room surface", new RuntimeException(e)); } }, "fuse-depth").start();
+    }
+
     /** 0 = photo room (walls and floor with the photos on them, plus cut-outs), 1 = the raw scan. Rebuilds the photos. */
     String cycleViewMode() {
         viewMode = (viewMode + 1) % 2;
@@ -755,6 +795,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 log("opened with " + surfDone.n + " trained splats");
             }
             loadPlanning(dir); if (done != null) done.run();
+            if (meshTris == 0) fuseSavedDepth(); // saved and imported scans keep no surface: rebuild it for Photo
             if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
             if (AUTO_PROCESS && DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) // older scans: place the back wall once, no rescan
                 glTasks.add(() -> { if (!hallDone) { hallDone = true; estimateHall(surfGen, false); } });

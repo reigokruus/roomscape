@@ -674,6 +674,7 @@ public class MainActivity extends Activity {
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
         renderer.overlays = debug;
+        updateSpend();
         Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, undoButton, removePersonButton, interviewButton};
         lightButton.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // lighting is parked for now (rk: just the model)
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
@@ -1084,7 +1085,7 @@ public class MainActivity extends Activity {
         android.content.SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         double now = ClaudeHelper.sessionUsd, total = p.getFloat("claude_usd_total", 0f);
         if (now > spendSaved) { total += now - spendSaved; spendSaved = now; p.edit().putFloat("claude_usd_total", (float) total).apply(); }
-        boolean on = claudeKey() != null;
+        boolean on = debug && claudeKey() != null; // the cost counter is a debug tool now (rk: no counter on top)
         spendView.setVisibility(on ? View.VISIBLE : View.GONE);
         spendView.setText(String.format(java.util.Locale.US, "Claude $%.2f · total $%.2f", now, total));
         if (hud != null && hud.getLayoutParams() instanceof FrameLayout.LayoutParams) {
