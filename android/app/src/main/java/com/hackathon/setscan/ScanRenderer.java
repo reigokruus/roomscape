@@ -5073,7 +5073,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
         // The flat picture only while the overview eases in; after that the picture is on the mesh
         // (drawOverviewProjection) and only the frame stays.
-        if (!(LIVE_MESH && overviewBlend > 0.5f)) GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        if (LivePreview.SHOW_CAMERA && !(LIVE_MESH && overviewBlend > 0.5f)) GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
         GLES20.glDisableVertexAttribArray(aUv);
         // The frame: corners 0 1 3 2 (the strip's order), drawn over everything.
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
@@ -5509,7 +5509,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             liveGroupUv.clear(); liveGroupUv.addAll(r.groupUv);
             liveGroupVerts.clear(); liveGroupVerts.addAll(r.groupVerts);
         }
-        drawLiveDim(1f - LivePreview.DIM);
+        if (LivePreview.SHOW_CAMERA) drawLiveDim(1f - LivePreview.DIM);
+        else drawZebra(1f); // no camera picture: only what was captured, on the zebra background
         if (liveMeshTriVerts == 0 && liveGroupTex.isEmpty()) return;
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         // Photo-filled triangles, opaque, with the photo the Photo view will use.
@@ -5534,7 +5535,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
-        if (liveMeshTriVerts == 0) { if (OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m); return; }
+        if (liveMeshTriVerts == 0) { if (LivePreview.SHOW_CAMERA && OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m); return; }
         if (liveMeshProg == 0) liveMeshProg = program(
                 "uniform mat4 uMvp; attribute vec3 aPos; attribute float aConf; varying float vConf;" +
                 "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vConf = aConf; }",
@@ -5568,7 +5569,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aConf);
         GLES20.glDisable(GLES20.GL_BLEND);
-        if (OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m);
+        if (LivePreview.SHOW_CAMERA && OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m);
     }
 
     /** Screen corners (-1,-1), (1,-1), (-1,1) of the real camera's view in the camera texture, for the overview. */

@@ -13,7 +13,11 @@ import UIKit
 ///   (`PhotoLayout.best`, shared with `PhotoLayout.choose`). The final result can only add to this (more photos,
 ///   a rebuild from the recording), so holes, blur and low resolution show up while you can still fix them.
 enum LivePreview {
-    /// The camera picture's brightness under the preview, 0…1.
+    /// Show the real camera picture while scanning (dimmed, and projected in the wide overview)? rk 9 Nov: off — the
+    /// scan screen shows only what was captured (the mesh, white and photo-filled) on the zebra background, so what
+    /// you see is all you get.
+    static let showCamera = false
+    /// The camera picture's brightness under the preview, 0…1 (when it's shown).
     static let dim: Float = 0.38
     /// Tentative surface (seen a few times) and solid surface, as RGBA.
     static let tentative = SIMD4<Float>(1.0, 0.55, 0.15, 0.40)
@@ -31,6 +35,8 @@ enum LivePreview {
 /// room into each. Photos arrive from LiveCloud's photo queue; the mesh assigns them on the worker queue.
 final class LivePhotoStore: @unchecked Sendable {
     let texture: MTLTexture
+    private let device: MTLDevice
+    private var uploads: MTLCommandQueue?
     /// Per slot: world → photo (u·d, v·d, d) with u, v in 0…1 (row 0 at the top), for the fragment shader.
     let projections: MTLBuffer
 
@@ -50,7 +56,13 @@ final class LivePhotoStore: @unchecked Sendable {
         d.height = LivePreview.textureHeight
         d.arrayLength = LivePreview.slots
         d.usage = .shaderRead
+        #if targetEnvironment(simulator)
+        d.storageMode = .private // the Simulator has no shared textures: photos go up through a blit (VirtualScan)
+        uploads = device.makeCommandQueue()
+        #else
         d.storageMode = .shared
+        #endif
+        self.device = device
         guard let texture = device.makeTexture(descriptor: d),
               let projections = device.makeBuffer(length: LivePreview.slots * MemoryLayout<simd_float4x4>.stride, options: .storageModeShared)
         else { return nil }
@@ -82,9 +94,18 @@ final class LivePhotoStore: @unchecked Sendable {
                 s.entries.removeAll { $0.id == least.id }
             }
             guard let slot else { return }
-            pixels.withUnsafeBytes { raw in
-                texture.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, slice: slot,
-                                withBytes: raw.baseAddress!, bytesPerRow: w * 4, bytesPerImage: w * h * 4)
+            if let uploads, let staging = device.makeBuffer(bytes: pixels, length: pixels.count, options: .storageModeShared),
+               let commands = uploads.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder() {
+                blit.copy(from: staging, sourceOffset: 0, sourceBytesPerRow: w * 4, sourceBytesPerImage: w * h * 4,
+                          sourceSize: MTLSize(width: w, height: h, depth: 1), to: texture, destinationSlice: slot,
+                          destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+                blit.endEncoding()
+                commands.commit()
+            } else {
+                pixels.withUnsafeBytes { raw in
+                    texture.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, slice: slot,
+                                    withBytes: raw.baseAddress!, bytesPerRow: w * 4, bytesPerImage: w * h * 4)
+                }
             }
             projections.contents().bindMemory(to: simd_float4x4.self, capacity: LivePreview.slots)[slot] = Self.projection(photo)
             s.entries.append(Entry(id: k.id, slot: slot, photo: photo))

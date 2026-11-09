@@ -426,9 +426,14 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
             let realView = camera.viewMatrix(for: .portrait)
             let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
-            if overviewView != nil { window?.encodeZebra(encoder, alpha: overview.blend) }
-            // The live preview: the camera picture dimmed, so only what's been scanned (and photographed) is bright.
-            meshRenderer?.encodeDim(encoder, alpha: (1 - LivePreview.dim) * (overviewView != nil ? 1 - overview.blend : 1))
+            if LivePreview.showCamera {
+                if overviewView != nil { window?.encodeZebra(encoder, alpha: overview.blend) }
+                // The live preview: the camera picture dimmed, so only what's been scanned (and photographed) is bright.
+                meshRenderer?.encodeDim(encoder, alpha: (1 - LivePreview.dim) * (overviewView != nil ? 1 - overview.blend : 1))
+            } else {
+                // No camera picture at all: only what was captured, on the zebra background (covers RoomPlan's view).
+                window?.encodeZebra(encoder, alpha: 1)
+            }
             let viewMatrix = overviewView?.view ?? realView
             let projection = overviewView?.projection ?? realProjection
             lastViewProjection = projection * viewMatrix
@@ -437,7 +442,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             // In the wide overview the camera picture is projected onto the mesh from the phone's own position, so it
             // lines up with the scan from any viewpoint (rk 9 Nov: the flat picture showed things twice).
             var live: LiveMeshRenderer.LiveCamera?
-            if overviewView != nil, overview.blend > 0.5, let frame = session?.currentFrame, let got = window?.liveCamera(frame) {
+            if LivePreview.showCamera, overviewView != nil, overview.blend > 0.5, let frame = session?.currentFrame,
+               let got = window?.liveCamera(frame) {
                 live = got.camera
                 let hold = got.hold
                 commands.addCompletedHandler { _ in _ = hold }
@@ -451,7 +457,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
                 // overview is mostly in.
                 window?.encode(encoder, frame: frame, viewSize: view.bounds.size, realView: realView,
                                realProjection: realProjection, viewProjection: projection * viewMatrix, alpha: overview.blend,
-                               image: live == nil)
+                               image: LivePreview.showCamera && live == nil)
             }
         }
         encoder.endEncoding()

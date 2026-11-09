@@ -17,7 +17,10 @@ import java.util.List;
  * Runs on the live-mesh builder thread.
  */
 final class LivePreview {
-    /** The camera picture's brightness under the preview, 0..1. */
+    /** Show the real camera picture while scanning (dimmed, projected in the wide overview)? rk 9 Nov: off. The scan
+     *  screen shows only what was captured (the mesh, white and photo-filled) on the zebra background. */
+    static final boolean SHOW_CAMERA = false;
+    /** The camera picture's brightness under the preview, 0..1 (when it's shown). */
     static final float DIM = 0.38f;
     /** Tentative (seen a few times) and solid surface, RGBA; ScanRenderer.drawLiveMesh. */
     static final float[] TENTATIVE = {1f, 0.55f, 0.15f, 0.40f}, TENTATIVE_EDGE = {1f, 0.45f, 0.1f, 0.85f};
