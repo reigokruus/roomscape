@@ -943,6 +943,14 @@ public class MainActivity extends Activity {
         c.addView(moves);
         walkControls = c;
         c.setVisibility(View.GONE);
+        // Above the system navigation bar (the app draws under it).
+        c.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(dp(16), 0, dp(16), dp(28) + insets.getSystemWindowInsetBottom());
+            FrameLayout.LayoutParams wl = (FrameLayout.LayoutParams) walkHint.getLayoutParams();
+            wl.bottomMargin = dp(40) + insets.getSystemWindowInsetBottom();
+            walkHint.setLayoutParams(wl);
+            return insets;
+        });
         chrome.addView(c, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
         renderer.setEyeHeight(getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("walkEyeHeight", 1.5f));
     }
