@@ -96,11 +96,25 @@ enum RecordingProcessor {
         progress(Progress(stage: "Picking photos", fraction: 0.6, note: nil))
         let photos = try await keyframes(rec.appendingPathComponent("video.mov"), frames: frames, depth: depthFrames, progress: progress, note: note)
 
-        // 3. Write, keeping the old files.
+        // 3. Sharp text: patches where text was seen, straightened onto their surface (DecalFinder).
+        progress(Progress(stage: "Finding text", fraction: 0.9, note: nil))
+        let decalFrames = frames.map { DecalFinder.Frame(time: $0.time, pose: $0.pose, k: $0.k, width: $0.width, height: $0.height) }
+        let decalDepth = depthFrames.map { (time: $0.time, w: $0.w, h: $0.h, mm: $0.mm) }
+        _ = try? await DecalFinder.find(recording: rec, frames: decalFrames, depth: decalDepth,
+                                        out: scan.captureURL.appendingPathComponent("decals.new"),
+                                        pace: { await ThermalGovernor.pace(note: note) })
+
+        // 4. Write, keeping the old files.
         progress(Progress(stage: "Saving", fraction: 0.95, note: nil))
         // Cells seen at least twice (a single sighting is often a stray sample).
         let points = cells.values.filter { $0.n >= 2 }.map { $0.sum / Float($0.n) }
         try write(scan, mesh: mesh, points: points.isEmpty ? mesh.positions : points, photos: photos)
+        let fm = FileManager.default
+        let decals = scan.captureURL.appendingPathComponent("decals"), fresh = scan.captureURL.appendingPathComponent("decals.new")
+        if fm.fileExists(atPath: fresh.path) {
+            if fm.fileExists(atPath: decals.path) { try? fm.moveItem(at: decals, to: scan.captureURL.appendingPathComponent("before-rebuild/decals")) }
+            try? fm.moveItem(at: fresh, to: decals)
+        }
         progress(Progress(stage: "Done", fraction: 1, note: nil))
     }
 

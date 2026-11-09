@@ -51,6 +51,10 @@ case "debugtrack":
     }
 case "compare":
     try Replay.compare(URL(fileURLWithPath: args[1]), out: out)
+case "decals":
+    let sem = DispatchSemaphore(value: 0)
+    Task { do { try await Decals.run(URL(fileURLWithPath: args[1]), out: out) } catch { print("decals failed: \(error)") }; sem.signal() }
+    sem.wait()
 case "replay":
     try Replay.run(URL(fileURLWithPath: args[1]), out: out)
 case "holefill":

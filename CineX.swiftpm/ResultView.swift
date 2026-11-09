@@ -692,6 +692,10 @@ struct ResultView: View {
                 meshNode = mesh
             }
             if let photo {
+                // Sharp text patches over the photo room (shown and hidden with it).
+                if let decals = await Task.detached(priority: .utility) { DecalFinder.node(folder: scan.captureURL) }.value {
+                    photo.addChildNode(decals)
+                }
                 scene.rootNode.addChildNode(photo)
                 photoRoom = photo
                 updateHoles()
