@@ -452,7 +452,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 if let perf = self.live.perf, let file = perf.file {
                     self.live.perf = nil
                     perf.stop()
-                    perf.move(file, into: saved.captureURL, as: "perf-scan")
+                    perf.move(file, into: saved.captureURL, as: self.improving != nil ? "perf-continue" : "perf-scan")
                 }
                 try Task.checkCancellation()
                 log.info("saved \(saved.name, privacy: .public)")

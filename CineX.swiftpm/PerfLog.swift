@@ -117,10 +117,11 @@ final class PerfLog: @unchecked Sendable {
     func move(_ file: URL, into folder: URL, as name: String) {
         let fm = FileManager.default
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        for (src, dst) in [(file, name + ".jsonl"), (file.deletingPathExtension().appendingPathExtension("summary.json"), name + ".summary.json")] {
-            let to = folder.appendingPathComponent(dst)
-            try? fm.removeItem(at: to)
-            try? fm.moveItem(at: src, to: to)
+        // Never over an earlier log (a Continue scan pass used to replace the scan's own): name, name-2, …
+        var base = name, n = 2
+        while fm.fileExists(atPath: folder.appendingPathComponent(base + ".jsonl").path) { base = "\(name)-\(n)"; n += 1 }
+        for (src, dst) in [(file, base + ".jsonl"), (file.deletingPathExtension().appendingPathExtension("summary.json"), base + ".summary.json")] {
+            try? fm.moveItem(at: src, to: folder.appendingPathComponent(dst))
         }
     }
 
