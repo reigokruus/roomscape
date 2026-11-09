@@ -1307,7 +1307,12 @@ public class MainActivity extends Activity {
     private void openScan(ScanStore.Entry e) {
         hideHome();
         if (session != null) session.pause();
+        // Straight to the scan view (never the scanning card, bars or buttons): same reset as scanUi, but viewing.
         scanUi();
+        scanning = false;
+        applyUi();
+        viewerTitle.setText(e.name);
+        nameValue.setText(e.name);
         mainButton.setText("New scan");
         renderer.setStyle(0); // Photo first, like the iPhone app
         glView.queueEvent(() -> renderer.loadScan(e.dir, () -> runOnUiThread(this::viewerUi)));
