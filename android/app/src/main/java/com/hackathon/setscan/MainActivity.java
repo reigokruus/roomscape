@@ -38,6 +38,30 @@ public class MainActivity extends Activity {
     private Button refineButton;
     private Button undoButton, removePersonButton, interviewButton;
     private Button outletButton;
+    private Button recordButton;
+
+    private void toggleRecording() {
+        if (session == null) return;
+        try {
+            if (session.getRecordingStatus() == com.google.ar.core.RecordingStatus.OK) {
+                session.stopRecording();
+                recordButton.setText("Record session");
+                toast("Recording saved");
+                return;
+            }
+            File dir = new File(getExternalFilesDir(null), "recordings");
+            dir.mkdirs();
+            File out = new File(dir, "session-" + android.text.format.DateFormat.format("yyyyMMdd-HHmmss", System.currentTimeMillis()) + ".mp4");
+            session.startRecording(new com.google.ar.core.RecordingConfig(session)
+                    .setMp4DatasetUri(android.net.Uri.fromFile(out)).setAutoStopOnPause(true));
+            recordButton.setText("Stop recording");
+            android.util.Log.i("RoomScape", "recording to " + out);
+            toast("Recording… tap again to stop");
+        } catch (Exception e) {
+            toast("Recording failed: " + e.getMessage());
+            android.util.Log.e("RoomScape", "recording failed: " + e);
+        }
+    }
     private Button lightButton, saveButton, homeButton, improveButton, cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
@@ -498,6 +522,12 @@ public class MainActivity extends Activity {
         liveClaudeButton.setText("Claude live: off");
         liveClaudeButton.setOnClickListener(v -> toggleLiveClaude());
         bar.addView(liveClaudeButton);
+        // Debug: record the session (camera, motion, depth) with ARCore's recorder, for replaying on the Mac /
+        // on the phone later (docs/recordings.md). Saved in the app's files: Android/data/…/files/recordings.
+        recordButton = new Button(this);
+        recordButton.setText("Record session");
+        recordButton.setOnClickListener(v -> toggleRecording());
+        bar.addView(recordButton);
         Button logButton = new Button(this);
         logButton.setText("Copy log");
         logButton.setOnClickListener(v -> {
@@ -542,7 +572,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{homeButton, mainButton, lightButton, objButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, refineButton, undoButton, removePersonButton, interviewButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{homeButton, mainButton, lightButton, objButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, refineButton, undoButton, removePersonButton, interviewButton, exportButton, claudeButton, liveClaudeButton, recordButton, logButton}) {
             if (bt.getParent() != null) ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -767,11 +797,11 @@ public class MainActivity extends Activity {
         Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, undoButton, removePersonButton, interviewButton};
         lightButton.setVisibility(!scanning ? View.VISIBLE : View.GONE); // in the pill row, like the iPhone's Lighting
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
-        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
+        Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton, recordButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
         improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE); // demo: Continue scan finds the saved room by itself
         for (Button b : tools) {
-            boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn;
+            boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn || b == recordButton;
             b.setVisibility(debug && (!scanning || scanTool) ? View.VISIBLE : View.GONE);
         }
         // While scanning, Cancel and Done are their own row at the bottom (as on the iPhone).
@@ -2071,6 +2101,15 @@ public class MainActivity extends Activity {
                     return;
                 }
                 session = new Session(this);
+                // Debug: replay a recorded session instead of the camera (tools/replay-s24.sh):
+                // adb shell am start -n com.hackathon.setscan/.MainActivity --es playback /sdcard/Android/data/…/x.mp4
+                String playback = getIntent().getStringExtra("playback");
+                if (playback != null) {
+                    try {
+                        session.setPlaybackDatasetUri(android.net.Uri.fromFile(new File(playback)));
+                        android.util.Log.i("RoomScape", "playback from " + playback);
+                    } catch (Exception e) { android.util.Log.e("RoomScape", "playback failed: " + e); }
+                }
                 // The renderer picks the depth mode and falls back to another one if tracking never starts.
                 renderer.setSession(session);
             } catch (Exception e) {
