@@ -79,8 +79,18 @@ enum RecordingProcessor {
             if !done("surface") {
                 let clears = (try? JSONSerialization.jsonObject(with: Data(contentsOf: rec.appendingPathComponent("clears.json")))) as? [[String: Any]] ?? []
                 // The surface (TSDF) and the points are worked out side by side, on two cores.
-                async let meshPart = surface(frames: frames, depth: depthFrames, clears: clears, mesh: true, points: false,
-                                             progress: { report("surface", "Building the surface", $0) }, note: note)
+                async let meshPart: (ScanMesh, [SIMD3<Float>]) = {
+                    let t0 = Date()
+                    if useGPU, let mesh = try await gpuSurface(frames: frames, depth: depthFrames, clears: clears,
+                                                                progress: { report("surface", "Building the surface", $0) }, note: note) {
+                        PerfLog.processing?.note("surface on the GPU", ms: Date().timeIntervalSince(t0) * 1000)
+                        return (mesh, [])
+                    }
+                    let r = try await surface(frames: frames, depth: depthFrames, clears: clears, mesh: true, points: false,
+                                              progress: { report("surface", "Building the surface", $0) }, note: note)
+                    PerfLog.processing?.note("surface on the CPU", ms: Date().timeIntervalSince(t0) * 1000)
+                    return r
+                }()
                 async let pointPart = surface(frames: frames, depth: depthFrames, clears: clears, mesh: false, points: true,
                                               progress: { _ in }, note: { _ in })
                 let mesh = try await meshPart.0, points = try await pointPart.1
@@ -128,6 +138,66 @@ enum RecordingProcessor {
     /// The job's progress folder, if a job was stopped part-way (it resumes from there).
     static func hasUnfinished(_ job: Job, _ scan: SavedScan) -> Bool {
         FileManager.default.fileExists(atPath: scan.captureURL.appendingPathComponent("processing-\(job.rawValue)").path)
+    }
+
+    /// Fuse on the GPU (TsdfGPU; harness gpubench: 0.34 s vs 21.7 s on the CPU for a 3-minute recording, surfaces
+    /// within 1%). The CPU fusion below stays as the fallback.
+    static let useGPU = true
+
+    /// The surface fused on the GPU, or nil (no Metal, or a block too big for the phone: then the CPU does it).
+    static func gpuSurface(frames: [FrameRecord], depth depthFrames: [DepthFrame], clears: [[String: Any]],
+                           progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> ScanMesh? {
+        // Each depth frame filtered as for the CPU fusion (medium+ confidence, no flying pixels, 0.2-4 m, not cleared).
+        var prepared: [(pose: simd_float4x4, fx: Float, fy: Float, cx: Float, cy: Float, w: Int, h: Int, m: [Float])] = []
+        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        var fi = 0
+        for (n, d) in depthFrames.enumerated() {
+            while fi + 1 < frames.count, abs(frames[fi + 1].time - d.time) <= abs(frames[fi].time - d.time) { fi += 1 }
+            let f = frames[fi]
+            guard f.tracking == 2 else { continue }
+            let sx = Float(d.w) / Float(f.width), sy = Float(d.h) / Float(f.height)
+            let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
+            var m = [Float](repeating: 0, count: d.w * d.h)
+            func depth(_ x: Int, _ y: Int) -> Float { Float(d.mm[y * d.w + x]) / 1000 }
+            for y in 1..<(d.h - 1) {
+                for x in 1..<(d.w - 1) {
+                    let z = depth(x, y)
+                    guard z > 0.2, z < 4, d.conf.isEmpty || d.conf[y * d.w + x] >= 1 else { continue }
+                    let tol = z * 0.04 + 0.02
+                    if abs(depth(x - 1, y) - z) > tol || abs(depth(x + 1, y) - z) > tol || abs(depth(x, y - 1) - z) > tol || abs(depth(x, y + 1) - z) > tol { continue }
+                    let sample = (x % 8 == 1 && y % 8 == 1) || !clears.isEmpty
+                    if sample {
+                        let p4 = f.pose * SIMD4((Float(x) - cx) * z / fx, -(Float(y) - cy) * z / fy, -z, 1)
+                        let pw = SIMD3(p4.x, p4.y, p4.z)
+                        if !clears.isEmpty, clears.contains(where: { Self.cleared(pw, at: d.time, by: $0) }) { continue }
+                        if x % 8 == 1, y % 8 == 1 { lo = simd_min(lo, pw); hi = simd_max(hi, pw) }
+                    }
+                    m[y * d.w + x] = z
+                }
+            }
+            prepared.append((f.pose, fx, fy, cx, cy, d.w, d.h, m))
+            if n % 50 == 0 { try Task.checkCancellation(); progress(0.3 * Float(n) / Float(depthFrames.count)) }
+        }
+        guard lo.x.isFinite else { return nil }
+        // A phone-sized block (12 M voxels, ~70 MB); bigger rooms go to the CPU.
+        let size = (hi - lo + 0.4) / 0.04
+        guard size.x * size.y * size.z < 12_000_000,
+              let gpu = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5) else { return nil }
+        for (n, d) in prepared.enumerated() {
+            gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+            if n % 32 == 31 {
+                gpu.finish()
+                try Task.checkCancellation()
+                progress(0.3 + 0.6 * Float(n) / Float(prepared.count))
+                await ThermalGovernor.pace(note: note)
+            }
+        }
+        let tsdf = Tsdf(capacity: max(700_000, gpu.voxelCount / 4), voxel: 0.04, truncation: 0.08, carve: 1.5)
+        gpu.copy(into: tsdf)
+        let scratch = Tsdf.MeshScratch()
+        _ = tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: 20, into: scratch)
+        progress(1)
+        return ScanMesh(positions: scratch.positions, triangles: scratch.triangles)
     }
 
     /// Fuses every depth frame into the TSDF (4 cm, as live), skipping what a later tap cleared; points are the depth
