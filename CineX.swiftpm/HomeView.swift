@@ -59,6 +59,9 @@ struct HomeView: View {
                     }
                 }
 
+                // Experimental ultrawide scanner (Experimental/Ultrawide, discardable): its only hook into the app.
+                ExperimentalUltrawideRow { scans = ScanStore.list() }
+
                 Section {
                     Button {
                         pickingImport = true
