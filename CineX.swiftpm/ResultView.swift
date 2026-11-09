@@ -893,7 +893,7 @@ struct RoomSceneView: UIViewRepresentable {
             var off = pov.simdWorldPosition - orbitTarget
             off = simd_quatf(angle: -dx * Self.turn, axis: SIMD3(0, 1, 0)).act(off)
             let right = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), off))
-            let tilted = simd_quatf(angle: dy * Self.turn, axis: right).act(off)
+            let tilted = simd_quatf(angle: -dy * Self.turn, axis: right).act(off) // drag up tilts the view up (rk)
             let elevation = asin(max(-1, min(1, tilted.y / simd_length(tilted))))
             if elevation > -0.15, elevation < 1.5 { off = tilted }
             pov.simdWorldPosition = orbitTarget + off
