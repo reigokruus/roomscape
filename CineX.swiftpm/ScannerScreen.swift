@@ -34,6 +34,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     @Published var hud = ScanHud()
     /// When a tap last cleared part of the scan (the card says so for a moment).
     private var clearedAt = Date.distantPast
+    /// Scan area again: how far the marked areas are scanned, and which way to turn when they're off screen.
+    @Published var areaNote: String?
     private var hudTask: Task<Void, Never>?
     private var lastMemoryWarning: Date?
     let captureView: RoomCaptureView
@@ -206,6 +208,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
 
     func cancel() {
         log.info("cancel")
+        RescanTargets.current = []
         if let recorder = live.recorder {
             live.recorder = nil
             recorder.finish { folder, _ in try? FileManager.default.removeItem(at: folder) } // Cancel discards the scan
@@ -275,6 +278,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                     shown = (hint, level, Date())
                 }
                 let room = await Task.detached(priority: .utility) { cloud?.solidShare() ?? 0 }.value
+                self.areaNote = Self.areaNote(frame: frame, cloud: cloud)
                 let justCleared = Date().timeIntervalSince(self.clearedAt) < 3
                 self.hud = ScanHud(hint: hint, level: level, spot: justCleared ? min(max(0, spot), self.hud.spot) : max(0, spot),
                                    room: justCleared ? room : max(self.hud.room, room))
@@ -292,6 +296,34 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             self.hud = ScanHud(hint: "Cleared, scan that spot again", level: 1, spot: 0,
                                room: self.live.cloud?.solidShare() ?? self.hud.room)
         }
+    }
+
+    /// "This area: x%" (solid share of the points scanned in the marked areas), and a turn hint when they're off screen.
+    private static func areaNote(frame: ARFrame, cloud: LiveCloud?) -> String? {
+        let targets = RescanTargets.current
+        guard !targets.isEmpty else { return nil }
+        var solid = 0, all = 0
+        if let cloud {
+            let n = cloud.count, step = max(1, n / 60_000)
+            let pts = cloud.buffer.contents().bindMemory(to: LivePoint.self, capacity: n)
+            for i in stride(from: 0, to: n, by: step) where RescanTargets.inside(SIMD3(pts[i].x, pts[i].y, pts[i].z), targets) {
+                all += 1
+                if pts[i].rgba >> 24 == 255 { solid += 1 }
+            }
+        }
+        var note = "This area: \(all < 20 ? 0 : Int((Float(solid) / Float(all) * 100).rounded()))%"
+        // Off screen: which way to turn to the nearest marked area.
+        let view = frame.camera.viewMatrix(for: .portrait)
+        if let t = targets.min(by: { simd_distance($0, SIMD3(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)) < simd_distance($1, SIMD3(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)) }) {
+            let c = view * SIMD4(t, 1) // camera: x right, y up, looking down -z
+            let ahead = -c.z
+            let ax = atan2(c.x, max(0.01, ahead)), ay = atan2(c.y, max(0.01, ahead))
+            if ahead < 0.1 || abs(ax) > 0.5 || abs(ay) > 0.6 {
+                let side = abs(c.x) >= abs(c.y) || ahead < 0.1 ? (c.x >= 0 ? "right" : "left") : (c.y >= 0 ? "up" : "down")
+                note += " · turn \(side) to the marked area"
+            }
+        }
+        return note
     }
 
     private func setPhase(_ newPhase: Phase) {
@@ -403,6 +435,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                     if let worldMap { WorldMapStore.save(worldMap, for: saved) }
                     return saved
                 }.value
+                RescanTargets.current = [] // used by the merge just now
                 try Task.checkCancellation()
                 log.info("saved \(saved.name, privacy: .public)")
                 // The raw recording goes into the scan's folder (kept; nothing deletes it automatically).
@@ -630,6 +663,7 @@ struct ScannerScreen: View {
     /// The smaller lines under the hint: Continue scan, heat, and a long scan.
     private func scanNotes(elapsed: TimeInterval) -> [String] {
         var notes: [String] = []
+        if let area = controller.areaNote { notes.append(area) }
         if controller.improving != nil { notes.append("✓ Saved room recognised. Keep scanning, the saved part is shown in blue") }
         if controller.powerSaving { notes.append("The phone is warm, so the live mesh updates less often. Keep scanning") }
         if elapsed > ScanController.suggestedMaxScanSeconds { notes.append("Long scans heat up the phone. Tap Done once every wall is covered in white") }

@@ -102,6 +102,26 @@ extension ScanStore {
         func cell(_ p: LivePoint) -> SIMD3<Int32> {
             SIMD3(Int32((p.x / voxel).rounded(.down)), Int32((p.y / voxel).rounded(.down)), Int32((p.z / voxel).rounded(.down)))
         }
+        // Scan area again: inside the marked areas the new pass replaces the old data, once it covers them at least half as
+        // densely as the old (otherwise the old stays). The old points there are kept in points-before-rescan.bin.
+        let targets = RescanTargets.current
+        var replaceAreas = false
+        if !targets.isEmpty, let capture {
+            let oldIn = points.filter { RescanTargets.inside(SIMD3($0.x, $0.y, $0.z), targets) }
+            let newIn = capture.points.withUnsafeBytes { raw -> Int in
+                let stride = MemoryLayout<LivePoint>.stride
+                return (0..<min(capture.pointCount, raw.count / stride)).filter { i in
+                    let p = raw.loadUnaligned(fromByteOffset: i * stride, as: LivePoint.self)
+                    return RescanTargets.inside(SIMD3(p.x, p.y, p.z), targets)
+                }.count
+            }
+            replaceAreas = newIn * 2 >= oldIn.count && newIn > 200
+            ImproveLog.write("scan area again: \(targets.count) areas, \(oldIn.count) old points there, \(newIn) new: \(replaceAreas ? "replaced" : "kept the old (not enough new coverage)")")
+            if replaceAreas {
+                try? oldIn.withUnsafeBytes { Data($0) }.write(to: folder.appendingPathComponent("points-before-rescan.bin"))
+                points.removeAll { RescanTargets.inside(SIMD3($0.x, $0.y, $0.z), targets) }
+            }
+        }
         for (i, p) in points.enumerated() { cells[cell(p)] = i }
         var added = 0, replaced = 0
         if let capture {
@@ -146,13 +166,38 @@ extension ScanStore {
         keyframes += capture?.keyframes ?? []
 
         // Mesh: the saved one, plus the pass's surfaces where the saved scan had none.
-        let oldMesh = ScanMesh.read(from: folder.appendingPathComponent(ScanMesh.fileName))
+        var oldMesh = ScanMesh.read(from: folder.appendingPathComponent(ScanMesh.fileName))
+        if replaceAreas, let m = oldMesh {
+            // The old surface inside the marked areas makes way for the new pass's (kept in mesh-before-rescan.bin).
+            try? m.write(to: folder.appendingPathComponent("mesh-before-rescan.bin"))
+            var tris: [UInt32] = []
+            for t in stride(from: 0, to: m.triangles.count, by: 3) {
+                let c = (m.positions[Int(m.triangles[t])] + m.positions[Int(m.triangles[t + 1])] + m.positions[Int(m.triangles[t + 2])]) / 3
+                if !RescanTargets.inside(c, targets) { tris += [m.triangles[t], m.triangles[t + 1], m.triangles[t + 2]] }
+            }
+            oldMesh = ScanMesh(positions: m.positions, triangles: tris)
+        }
         let mesh = ScanMesh.merge(old: oldMesh, new: capture?.mesh)
         let merged = CaptureSnapshot(points: points.withUnsafeBytes { Data($0) }, pointCount: points.count,
                                      keyframes: keyframes, voxelSize: voxel, mesh: mesh)
-        try CaptureStore.write(merged, to: folder)
+        // Everything the merge doesn't write itself stays: set the old folder aside, write the merged capture, then
+        // move back every file and folder it didn't replace (sync identity, outlets, the raw recording, backups…),
+        // except the caches rebuilt from the merged data. Data is gold.
+        let aside = folder.deletingLastPathComponent().appendingPathComponent(folder.lastPathComponent + ".before-merge")
+        try? fm.removeItem(at: aside)
+        try fm.moveItem(at: folder, to: aside)
+        do {
+            try CaptureStore.write(merged, to: folder)
+        } catch {
+            try? fm.moveItem(at: aside, to: folder) // put the scan back as it was
+            throw error
+        }
+        for name in (try? fm.contentsOfDirectory(atPath: aside.path)) ?? [] where !rebuiltFiles.contains(name) {
+            let target = folder.appendingPathComponent(name)
+            if !fm.fileExists(atPath: target.path) { try? fm.moveItem(at: aside.appendingPathComponent(name), to: target) }
+        }
+        try? fm.removeItem(at: aside)
         for (name, data) in kept { try? data.write(to: folder.appendingPathComponent(name), options: .atomic) }
-        for name in rebuiltFiles { try? fm.removeItem(at: folder.appendingPathComponent(name)) }
         ImproveHistory.record(Date(), for: scan)
         invalidateThumbnail(scan) // the photo room grew: show the new one on Home
         SyncStore.touch(scan)

@@ -38,6 +38,10 @@ struct ResultView: View {
     @State private var objectHistory: [[RoomObject]] = []
     /// Size of the scan's raw recording (RawRecorder), shown in the room panel; nil without one.
     @State private var recordingBytes: Int64?
+    /// Scan area again: marking the areas to scan again (taps on the room), and the marked spots.
+    @State private var pickingAreas = false
+    @State private var areaTargets: [SIMD3<Float>] = []
+    private let areaRoot: SCNNode = { let n = SCNNode(); n.name = "rescanTargets"; return n }()
     /// Rebuilding from the recording: stage, progress (0…1) and a note (cooling down), or nil.
     @State private var rebuild: RecordingProcessor.Progress?
     @State private var rebuildDone: String?
@@ -110,7 +114,7 @@ struct ResultView: View {
                     RoomSceneView(scene: scene, topView: topView, topTurn: room.map(Self.squaringTurn) ?? 0,
                                   floorY: (lightingOn || objectsOn || walk == .choosing) ? walkFloorY : nil,
                                   onFloorTap: floorTapped,
-                                  onTapRay: objectsOn ? objectTapped : nil,
+                                  onTapRay: pickingAreas ? areaTapped : objectsOn ? objectTapped : nil,
                                   onTwist: objectsOn && selectedMovable ? objectTwisted : nil,
                                   onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
@@ -144,7 +148,8 @@ struct ResultView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controlsHeight = $0 }
             }
             .overlay(alignment: .bottomLeading) {
-                if scene != nil, walkFloorY != nil { walkControls.padding(12) }
+                if pickingAreas { areaBar.padding(12) }
+                else if scene != nil, walkFloorY != nil { walkControls.padding(12) }
             }
             .onChange(of: showOutlets) { _, on in
                 scene?.rootNode.childNode(withName: "outlets", recursively: false)?.isHidden = !on
@@ -181,7 +186,8 @@ struct ResultView: View {
                                 renaming = true
                             }, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
                             onImprove: WorldMapStore.exists(scan) ? onImprove : nil, outletCount: outlets.count,
-                            recordingBytes: recordingBytes)
+                            recordingBytes: recordingBytes,
+                            onScanArea: WorldMapStore.exists(scan) && onImprove != nil ? { startPickingAreas() } : nil)
                     .frame(maxHeight: .infinity)
             } else if walk == .off, let capture {
                 // A room from the Android app (no RoomPlan model): the same panel from its own data.
@@ -441,6 +447,61 @@ struct ResultView: View {
         if let meshNode {
             HoleFill.cutOut(meshNode, objects: cuts)
             BareMesh.refreshWire(meshNode)
+        }
+    }
+
+    // MARK: Scan area again
+
+    private func startPickingAreas() {
+        if objectsOn { toggleObjects() }
+        if lightingOn { toggleLighting() }
+        areaTargets = []
+        areaRoot.childNodes.forEach { $0.removeFromParentNode() }
+        if areaRoot.parent == nil { scene?.rootNode.addChildNode(areaRoot) }
+        pickingAreas = true
+    }
+
+    /// A tap on the room marks an area (a ball around the spot it hit); another tap marks another.
+    private func areaTapped(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> Bool {
+        guard let scene else { return true }
+        let to = origin + dir * 30
+        let hits = scene.rootNode.hitTestWithSegment(from: SCNVector3(origin), to: SCNVector3(to), options: nil)
+            .filter { hit in !(hit.node.parent === areaRoot || hit.node === areaRoot) }
+        guard let hit = hits.first else { return true }
+        let p = SIMD3<Float>(hit.worldCoordinates)
+        areaTargets.append(p)
+        let ball = SCNNode(geometry: SCNSphere(radius: CGFloat(RescanTargets.radius)))
+        let m = SCNMaterial()
+        m.diffuse.contents = UIColor(red: 1, green: 0.6, blue: 0.15, alpha: 0.35)
+        m.lightingModel = .constant
+        m.writesToDepthBuffer = false
+        ball.geometry?.materials = [m]
+        ball.simdPosition = p
+        ball.renderingOrder = 50
+        areaRoot.addChildNode(ball)
+        return true
+    }
+
+    private var areaBar: some View {
+        HStack(spacing: 10) {
+            Text(areaTargets.isEmpty ? "Tap the area to rescan" : "\(areaTargets.count) marked · tap to add more")
+                .font(.callout)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+            Button("Cancel") {
+                pickingAreas = false
+                areaTargets = []
+                areaRoot.childNodes.forEach { $0.removeFromParentNode() }
+            }
+            .buttonStyle(.bordered)
+            Button("Start") {
+                RescanTargets.current = areaTargets
+                pickingAreas = false
+                areaRoot.childNodes.forEach { $0.removeFromParentNode() }
+                onImprove?()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(areaTargets.isEmpty)
         }
     }
 
@@ -1738,6 +1799,8 @@ struct RoomSummary: View {
     var outletCount = 0
     /// The scan's raw recording, bytes (kept for rebuilding later), or nil.
     var recordingBytes: Int64?
+    /// Scan area again: mark parts of the room and scan just those again (nil: not offered).
+    var onScanArea: (() -> Void)?
 
     private var missedWindows: [WindowFinder.Found] { foundWindows.filter { !$0.matchesRoomPlan } }
 
@@ -1757,6 +1820,13 @@ struct RoomSummary: View {
                     .listRowBackground(Color.clear)
                 } footer: {
                     Text("Add parts you missed, or that came out thin or blurry. The phone recognises the room and adds to this scan.")
+                }
+                if let onScanArea {
+                    Section {
+                        Button(action: onScanArea) { Label("Scan area again", systemImage: "scope") }
+                    } footer: {
+                        Text("Tap the parts that came out wrong, then scan just those again. The new scan replaces them once it covers them well.")
+                    }
                 }
             }
             Section("Room") {
