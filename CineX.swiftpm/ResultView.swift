@@ -123,15 +123,7 @@ struct ResultView: View {
                 } else {
                     ProgressView()
                 }
-                if lightingOn, let scene, let lighting {
-                    // Under the controls row, so a large view never covers the buttons.
-                    ShotPreviewInset(scene: scene, setup: lighting, large: $shotLarge)
-                        .padding(.horizontal, shotLarge ? 16 : 10)
-                        .padding(.top, shotLarge ? controlsHeight + 6 : 0)
-                        .padding(.bottom, shotLarge ? 16 : 10)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity,
-                               alignment: shotLarge ? .center : .bottomTrailing)
-                }
+                if lightingOn, let scene, let lighting { shotInset(scene, lighting) }
                 // Must fit a 375-pt-wide phone: compact controls in one row, or two rows if they still don't fit
                 // (large text). A row wider than the screen would also push the panel below off both edges.
                 // The mode buttons carry a word as well as an icon whenever there's room for it.
@@ -309,237 +301,7 @@ struct ResultView: View {
             if newStyle == .model, objectsOn { toggleObjects() }
             showStyle(newStyle)
         }
-        .task {
-            guard !loadStarted else { return }
-            loadStarted = true
-            // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
-            let scan = scan
-            capture = await Task.detached(priority: .utility) { CaptureStore.loadMeta(scan.captureURL) }.value
-            improved = await Task.detached(priority: .utility) { ImproveHistory.dates(scan) }.value
-            shareURL = await Task.detached(priority: .utility) { ScanStore.namedModelCopy(scan) }.value
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<(SCNScene, SCNNode), Error>) in
-                let room = ScanStore.loadRoom(scan)
-                let result = Result { () throws -> (SCNScene, SCNNode) in
-                    let s = try SCNScene(url: scan.modelURL, options: nil)
-                    ResultView.colorize(s.rootNode)
-                    // Gather the model under one node so the splat view can hide it.
-                    let group = SCNNode()
-                    for child in s.rootNode.childNodes { group.addChildNode(child) }
-                    s.rootNode.addChildNode(group)
-                    return (s, group)
-                }
-                return (room, result)
-            }.value
-            room = loaded.0
-            #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-openPlanner"), room != nil { openingPlanner = true }
-            if ProcessInfo.processInfo.arguments.contains("-topView") { topView = true }
-            if ProcessInfo.processInfo.arguments.contains("-shotLarge") { shotLarge = true }
-            #endif
-            switch loaded.1 {
-            case .success(let (s, group)):
-                scene = s
-                modelGroup = group
-            case .failure(let error):
-                loadError = "Could not open the 3D model: \(error.localizedDescription)"
-            }
-
-            // Windows from the photos and LiDAR: RoomPlan misses many (curtained ones especially). Shown on the walls
-            // in both styles, counted in the summary and given to the shoot planner.
-            if let room = loaded.0, let scene, capture != nil {
-                let windows = await Task.detached(priority: .userInitiated) { WindowDetection.load(scan, room: room) }.value
-                foundWindows = windows
-                scene.rootNode.addChildNode(WindowDetection.node(windows, room: room))
-            }
-
-            recordingBytes = await Task.detached(priority: .utility) { () -> Int64? in
-                let folder = scan.captureURL.appendingPathComponent("recording")
-                guard FileManager.default.fileExists(atPath: folder.path) else { return nil }
-                let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL] ?? []
-                return files.reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
-            }.value
-
-            // Power outlets, as orange labels in every view (like the Android app).
-            if let scene {
-                let found = await Task.detached(priority: .utility) { OutletStore.load(scan) }.value
-                outlets = found
-                if !found.isEmpty {
-                    // RoomPlan's floor; scans imported without one were moved so their floor is at 0.
-                    let floor = room.map { RoomShell(room: $0).floorY } ?? 0
-                    let node = OutletStore.node(found, floorY: floor)
-                    node.isHidden = !showOutlets
-                    scene.rootNode.addChildNode(node)
-                }
-            }
-
-            // Photo room, when the scan has a mesh and photos: built in the background, shown by Photo.
-            if let scene {
-                // Painted from the mesh and photos; for a scan imported without a mesh, the package's own room.glb.
-                let photo = await Task.detached(priority: .userInitiated) {
-                    PhotoRoom.build(scan) ?? GLBScene.node(forScan: scan.captureURL)
-                }.value
-                if let mesh = await Task.detached(priority: .utility) { BareMesh.node(scan) }.value {
-                    mesh.isHidden = style != .mesh
-                    scene.rootNode.addChildNode(mesh)
-                    meshNode = mesh
-                }
-                if let photo {
-                    scene.rootNode.addChildNode(photo)
-                    photoRoom = photo
-                    updateHoles()
-                    style = .photo
-                    showStyle(style)
-                }
-            }
-
-            // Splats, when the scan has points: built in the background (cached after the first time), then shown
-            // instead of RoomPlan's boxes. The Splats / Model switch flips between the two.
-            // Scans from the Android app have no RoomPlan model: they get splats, objects and lighting too, in a room
-            // with its floor at 0 (where imports put it) and no walls guessed.
-            let room = loaded.0
-            guard let scene, (capture?.pointCount ?? 0) > 0 else { return }
-            buildingSplats = true
-            let shell = room.map(RoomShell.init(room:)) ?? RoomShell(floorY: 0)
-            // Objects: what was saved (with the user's edits), else RoomPlan's furniture.
-            let saved = RoomObjects.load(scan)
-            let objects = saved?.objects ?? room.map(RoomObjects.fromRoomPlan) ?? []
-            // Shown: the trained splats when the scan was trained before, else the raw ones (also the training's start),
-            // tidied for viewing (see `SplatTidy`).
-            let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], SplatTidy.Result, ObjectsScene.Built)? in
-                guard let base = ScanStore.loadSurfels(scan, room: room), !base.isEmpty else { return nil }
-                let tidy = SplatTidy.tidy(ScanStore.loadTrainedSurfels(scan) ?? base, shell: shell)
-                print("splats shown: \(tidy.surfels.count) (dropped \(tidy.outside) outside the room, \(tidy.floaters) "
-                      + "floaters; \(tidy.onCeiling) on the ceiling)")
-                return (base, tidy, ObjectsScene.build(tidy.surfels, objects: objects, floorY: shell.floorY))
-            }.value
-            buildingSplats = false
-            guard let (base, tidy, parts) = built else { return }
-            let surfels = tidy.surfels
-            let splats = SCNNode()
-            splats.addChildNode(SplatScene.shellNode(shell, colors: tidy.colors))
-            let objectsScene = ObjectsScene()
-            objectsScene.install(parts, objects: objects)
-            splats.addChildNode(objectsScene.root)
-            objectsScene.boxes.isHidden = !objectsOn
-            scene.rootNode.addChildNode(objectsScene.boxes)
-            splats.isHidden = true
-            scene.rootNode.addChildNode(splats)
-            splatGroup = splats
-            self.surfels = surfels
-            updateHoles()
-            self.objectsScene = objectsScene
-            if let modelGroup {
-                let modelObjects = ModelObjects(model: modelGroup)
-                modelObjects.apply(objects)
-                self.modelObjects = modelObjects
-            }
-            self.objects = objects
-            claudeChecked = saved?.claudeChecked ?? false
-            let lightingScene = LightingScene()
-            lightingScene.register(splats)
-            scene.rootNode.addChildNode(lightingScene.root)
-            self.lightingScene = lightingScene
-            self.shell = shell
-            // Photo is the default look: the photo room, or the splats in their scanned colours.
-            style = .photo
-            #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
-            #endif
-            let training = SplatTrainingRun(scan: scan, base: base, shell: shell)
-            training.onPreview = { showSplats($0) }
-            self.training = training
-            #if DEBUG
-            // UI checks in the Simulator: -openPanel lighting | objects
-            let args = ProcessInfo.processInfo.arguments
-            if let i = args.firstIndex(of: "-openPanel"), i + 1 < args.count {
-                if args[i + 1] == "lighting" {
-                    toggleLighting()
-                    if let j = args.firstIndex(of: "-roomDimmer"), j + 1 < args.count, let v = Float(args[j + 1]) {
-                        lighting?.roomDimmer = v
-                    }
-                    if let j = args.firstIndex(of: "-cameraHeight"), j + 1 < args.count, let v = Float(args[j + 1]) {
-                        lighting?.cameraHeight = v
-                    }
-                }
-                if args[i + 1] == "objects" { toggleObjects() }
-                if args.contains("-storyboardView") {
-                    // The storyboard as saved (no new view), opened on the view named after the flag.
-                    storyboardSetup = nil
-                    openingStoryboard = true
-                } else if args.contains("-openStoryboard"), lighting != nil {
-                    // The lighting setup as a new storyboard view.
-                    storyboardSetup = lighting
-                    openingStoryboard = true
-                }
-            }
-            if args.contains("-replayFind"), let saved, let room {
-                // Replays the end of a Claude search with the saved result, starting from RoomPlan's objects only.
-                let found = saved.objects
-                let roomPlanOnly = RoomObjects.fromRoomPlan(room)
-                let built0 = await Task.detached { ObjectsScene.build(surfels, objects: roomPlanOnly, floorY: shell.floorY) }.value
-                objectsScene.install(built0, objects: roomPlanOnly)
-                self.objects = roomPlanOnly
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                print("debug: replaying find with \(found.count) objects")
-                await applyFound(found, previousCount: roomPlanOnly.count, surfels: surfels, floorY: shell.floorY)
-                print("debug: find applied")
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-            if let i = args.firstIndex(of: "-selectKind"), i + 1 < args.count {
-                for kind in args[i + 1].split(separator: ",") {
-                    print("debug: selecting first \(kind)")
-                    selectedObject = objects.first { $0.kind.rawValue == kind }?.id
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    print("debug: selected \(kind), still alive")
-                }
-            }
-            // tools/ui-shots.sh: -style photo|splats|points|mesh, -selectObject <name> (opens Objects with it selected).
-            if let i = args.firstIndex(of: "-style"), i + 1 < args.count {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                switch args[i + 1] {
-                case "splats": style = .splats
-                case "points": style = .points
-                case "mesh": style = .mesh
-                default: style = .photo
-                }
-            }
-            if let i = args.firstIndex(of: "-selectObject"), i + 1 < args.count {
-                if !objectsOn { toggleObjects() }
-                selectedObject = objects.first { $0.label.localizedCaseInsensitiveContains(args[i + 1]) }?.id
-            }
-            if args.contains("-styleModel") {
-                Task {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    print("debug: switching to model; splatGroup hidden before:", splatGroup?.isHidden as Any)
-                    style = .model
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    print("debug: after switch: style", style, "splatGroup hidden:", splatGroup?.isHidden as Any,
-                          "model hidden:", modelGroup?.isHidden as Any)
-                }
-            }
-            // Training on the phone without taps: -train <seconds> [-snapshotPhoto <n>] trains, pauses, and with a photo
-            // number saves Documents/debug-before.png and debug-after.png, the splats seen from that photo's camera.
-            if let i = args.firstIndex(of: "-train"), i + 1 < args.count, let seconds = Double(args[i + 1]) {
-                let photo = args.firstIndex(of: "-snapshotPhoto").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil }
-                if let photo {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000) // SceneKit's first frames skip the splat shaders
-                    debugSnapshot(scene, photo: photo, name: "before")
-                }
-                training.start()
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
-                let live = training.progress
-                training.pause()
-                while training.state == .training || training.state == .preparing {
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                }
-                try? await Task.sleep(nanoseconds: 3_000_000_000) // the last splats swap in
-                let report = "training \(training.state): \(live) / \(training.progress), showing \(self.surfels.count) splats"
-                print("debug: \(report)")
-                try? report.write(to: URL.documentsDirectory.appendingPathComponent("debug-training.txt"), atomically: true, encoding: .utf8)
-                if let photo { debugSnapshot(scene, photo: photo, name: "after") }
-            }
-            #endif
-        }
+        .task { await loadRoom() }
     }
 
     #if DEBUG
@@ -792,6 +554,258 @@ struct ResultView: View {
 
     /// Writes the photo room as RoomScape-<scan date>.glb in the temporary folder and opens the share sheet for it.
     /// Writes the whole scan as a .rmsc package (see `Rmsc`) and opens the share sheet for it.
+    /// Loads the room, its photo room, mesh, splats, objects and the rest (was the body of `.task`; a method so the
+    /// compiler checks it statement by statement instead of as one huge closure).
+    private func loadRoom() async {
+        guard !loadStarted else { return }
+        loadStarted = true
+        // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
+        let scan = scan
+        capture = await Task.detached(priority: .utility) { CaptureStore.loadMeta(scan.captureURL) }.value
+        improved = await Task.detached(priority: .utility) { ImproveHistory.dates(scan) }.value
+        shareURL = await Task.detached(priority: .utility) { ScanStore.namedModelCopy(scan) }.value
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (CapturedRoom?, Result<(SCNScene, SCNNode), Error>) in
+            let room = ScanStore.loadRoom(scan)
+            let result = Result { () throws -> (SCNScene, SCNNode) in
+                let s = try SCNScene(url: scan.modelURL, options: nil)
+                ResultView.colorize(s.rootNode)
+                // Gather the model under one node so the splat view can hide it.
+                let group = SCNNode()
+                for child in s.rootNode.childNodes { group.addChildNode(child) }
+                s.rootNode.addChildNode(group)
+                return (s, group)
+            }
+            return (room, result)
+        }.value
+        room = loaded.0
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-openPlanner"), room != nil { openingPlanner = true }
+        if ProcessInfo.processInfo.arguments.contains("-topView") { topView = true }
+        if ProcessInfo.processInfo.arguments.contains("-shotLarge") { shotLarge = true }
+        #endif
+        switch loaded.1 {
+        case .success(let (s, group)):
+            scene = s
+            modelGroup = group
+        case .failure(let error):
+            loadError = "Could not open the 3D model: \(error.localizedDescription)"
+        }
+
+        // Windows from the photos and LiDAR: RoomPlan misses many (curtained ones especially). Shown on the walls
+        // in both styles, counted in the summary and given to the shoot planner.
+        if let room = loaded.0, let scene, capture != nil {
+            let windows = await Task.detached(priority: .userInitiated) { WindowDetection.load(scan, room: room) }.value
+            foundWindows = windows
+            scene.rootNode.addChildNode(WindowDetection.node(windows, room: room))
+        }
+
+        recordingBytes = await Task.detached(priority: .utility) { () -> Int64? in
+            let folder = scan.captureURL.appendingPathComponent("recording")
+            guard FileManager.default.fileExists(atPath: folder.path) else { return nil }
+            let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL] ?? []
+            return files.reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+        }.value
+
+        // Power outlets, as orange labels in every view (like the Android app).
+        if let scene {
+            let found = await Task.detached(priority: .utility) { OutletStore.load(scan) }.value
+            outlets = found
+            if !found.isEmpty {
+                // RoomPlan's floor; scans imported without one were moved so their floor is at 0.
+                let floor = room.map { RoomShell(room: $0).floorY } ?? 0
+                let node = OutletStore.node(found, floorY: floor)
+                node.isHidden = !showOutlets
+                scene.rootNode.addChildNode(node)
+            }
+        }
+
+        // Photo room, when the scan has a mesh and photos: built in the background, shown by Photo.
+        if let scene {
+            // Painted from the mesh and photos; for a scan imported without a mesh, the package's own room.glb.
+            let photo = await Task.detached(priority: .userInitiated) {
+                PhotoRoom.build(scan) ?? GLBScene.node(forScan: scan.captureURL)
+            }.value
+            if let mesh = await Task.detached(priority: .utility) { BareMesh.node(scan) }.value {
+                mesh.isHidden = style != .mesh
+                scene.rootNode.addChildNode(mesh)
+                meshNode = mesh
+            }
+            if let photo {
+                scene.rootNode.addChildNode(photo)
+                photoRoom = photo
+                updateHoles()
+                style = .photo
+                showStyle(style)
+            }
+        }
+
+        // Splats, when the scan has points: built in the background (cached after the first time), then shown
+        // instead of RoomPlan's boxes. The Splats / Model switch flips between the two.
+        // Scans from the Android app have no RoomPlan model: they get splats, objects and lighting too, in a room
+        // with its floor at 0 (where imports put it) and no walls guessed.
+        let room = loaded.0
+        guard let scene, (capture?.pointCount ?? 0) > 0 else { return }
+        buildingSplats = true
+        let shell = room.map(RoomShell.init(room:)) ?? RoomShell(floorY: 0)
+        // Objects: what was saved (with the user's edits), else RoomPlan's furniture.
+        let saved = RoomObjects.load(scan)
+        let objects = saved?.objects ?? room.map(RoomObjects.fromRoomPlan) ?? []
+        // Shown: the trained splats when the scan was trained before, else the raw ones (also the training's start),
+        // tidied for viewing (see `SplatTidy`).
+        let built = await Task.detached(priority: .userInitiated) { () -> ([SurfelRecord], SplatTidy.Result, ObjectsScene.Built)? in
+            guard let base = ScanStore.loadSurfels(scan, room: room), !base.isEmpty else { return nil }
+            let tidy = SplatTidy.tidy(ScanStore.loadTrainedSurfels(scan) ?? base, shell: shell)
+            print("splats shown: \(tidy.surfels.count) (dropped \(tidy.outside) outside the room, \(tidy.floaters) "
+                  + "floaters; \(tidy.onCeiling) on the ceiling)")
+            return (base, tidy, ObjectsScene.build(tidy.surfels, objects: objects, floorY: shell.floorY))
+        }.value
+        buildingSplats = false
+        guard let (base, tidy, parts) = built else { return }
+        let surfels = tidy.surfels
+        let splats = SCNNode()
+        splats.addChildNode(SplatScene.shellNode(shell, colors: tidy.colors))
+        let objectsScene = ObjectsScene()
+        objectsScene.install(parts, objects: objects)
+        splats.addChildNode(objectsScene.root)
+        objectsScene.boxes.isHidden = !objectsOn
+        scene.rootNode.addChildNode(objectsScene.boxes)
+        splats.isHidden = true
+        scene.rootNode.addChildNode(splats)
+        splatGroup = splats
+        self.surfels = surfels
+        updateHoles()
+        self.objectsScene = objectsScene
+        if let modelGroup {
+            let modelObjects = ModelObjects(model: modelGroup)
+            modelObjects.apply(objects)
+            self.modelObjects = modelObjects
+        }
+        self.objects = objects
+        claudeChecked = saved?.claudeChecked ?? false
+        let lightingScene = LightingScene()
+        lightingScene.register(splats)
+        scene.rootNode.addChildNode(lightingScene.root)
+        self.lightingScene = lightingScene
+        self.shell = shell
+        // Photo is the default look: the photo room, or the splats in their scanned colours.
+        style = .photo
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
+        #endif
+        let training = SplatTrainingRun(scan: scan, base: base, shell: shell)
+        training.onPreview = { showSplats($0) }
+        self.training = training
+        #if DEBUG
+        // UI checks in the Simulator: -openPanel lighting | objects
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-openPanel"), i + 1 < args.count {
+            if args[i + 1] == "lighting" { debugOpenLighting(args) }
+            if args[i + 1] == "objects" { toggleObjects() }
+            if args.contains("-storyboardView") {
+                // The storyboard as saved (no new view), opened on the view named after the flag.
+                storyboardSetup = nil
+                openingStoryboard = true
+            } else if args.contains("-openStoryboard"), lighting != nil {
+                // The lighting setup as a new storyboard view.
+                storyboardSetup = lighting
+                openingStoryboard = true
+            }
+        }
+        if args.contains("-replayFind"), let saved, let room {
+            // Replays the end of a Claude search with the saved result, starting from RoomPlan's objects only.
+            let found = saved.objects
+            let roomPlanOnly = RoomObjects.fromRoomPlan(room)
+            let built0 = await Task.detached { ObjectsScene.build(surfels, objects: roomPlanOnly, floorY: shell.floorY) }.value
+            objectsScene.install(built0, objects: roomPlanOnly)
+            self.objects = roomPlanOnly
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            print("debug: replaying find with \(found.count) objects")
+            await applyFound(found, previousCount: roomPlanOnly.count, surfels: surfels, floorY: shell.floorY)
+            print("debug: find applied")
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        if let i = args.firstIndex(of: "-selectKind"), i + 1 < args.count {
+            for kind in args[i + 1].split(separator: ",") {
+                print("debug: selecting first \(kind)")
+                selectedObject = objects.first { $0.kind.rawValue == kind }?.id
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                print("debug: selected \(kind), still alive")
+            }
+        }
+        await debugStyleAndSelection(args)
+        if args.contains("-styleModel") {
+            Task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                print("debug: switching to model; splatGroup hidden before:", splatGroup?.isHidden as Any)
+                style = .model
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                print("debug: after switch: style", style, "splatGroup hidden:", splatGroup?.isHidden as Any,
+                      "model hidden:", modelGroup?.isHidden as Any)
+            }
+        }
+        // Training on the phone without taps: -train <seconds> [-snapshotPhoto <n>] trains, pauses, and with a photo
+        // number saves Documents/debug-before.png and debug-after.png, the splats seen from that photo's camera.
+        if let i = args.firstIndex(of: "-train"), i + 1 < args.count, let seconds = Double(args[i + 1]) {
+            let photo = args.firstIndex(of: "-snapshotPhoto").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil }
+            if let photo {
+                try? await Task.sleep(nanoseconds: 3_000_000_000) // SceneKit's first frames skip the splat shaders
+                debugSnapshot(scene, photo: photo, name: "before")
+            }
+            training.start()
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+            let live = training.progress
+            training.pause()
+            while training.state == .training || training.state == .preparing {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 3_000_000_000) // the last splats swap in
+            let report = "training \(training.state): \(live) / \(training.progress), showing \(self.surfels.count) splats"
+            print("debug: \(report)")
+            try? report.write(to: URL.documentsDirectory.appendingPathComponent("debug-training.txt"), atomically: true, encoding: .utf8)
+            if let photo { debugSnapshot(scene, photo: photo, name: "after") }
+        }
+        #endif
+    }
+
+    /// The shot preview over the 3D view: under the controls row, so a large view never covers the buttons.
+    @ViewBuilder private func shotInset(_ scene: SCNScene, _ setup: LightingSetup) -> some View {
+        let large = shotLarge
+        let side: CGFloat = large ? 16 : 10
+        let top: CGFloat = large ? controlsHeight + 6 : 0
+        let place: Alignment = large ? .center : .bottomTrailing
+        ShotPreviewInset(scene: scene, setup: setup, large: $shotLarge)
+            .padding(.horizontal, side)
+            .padding(.top, top)
+            .padding(.bottom, side)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: place)
+    }
+
+    #if DEBUG
+    private func debugOpenLighting(_ args: [String]) {
+        toggleLighting()
+        if let j = args.firstIndex(of: "-roomDimmer"), j + 1 < args.count, let v: Float = Float(args[j + 1]) { lighting?.roomDimmer = v }
+        if let j = args.firstIndex(of: "-cameraHeight"), j + 1 < args.count, let v: Float = Float(args[j + 1]) { lighting?.cameraHeight = v }
+    }
+
+    /// tools/ui-shots.sh: -style photo|splats|points|mesh, -selectObject <name> (opens Objects with it selected).
+    private func debugStyleAndSelection(_ args: [String]) async {
+        if let i = args.firstIndex(of: "-style"), i + 1 < args.count {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            switch args[i + 1] {
+            case "splats": style = .splats
+            case "points": style = .points
+            case "mesh": style = .mesh
+            default: style = .photo
+            }
+        }
+        if let i = args.firstIndex(of: "-selectObject"), i + 1 < args.count {
+            if !objectsOn { toggleObjects() }
+            let name = args[i + 1]
+            selectedObject = objects.first { $0.label.localizedCaseInsensitiveContains(name) }?.id
+        }
+    }
+    #endif
+
     /// Builds this scan's surface, points and photos again from its raw recording, in the background, paced by heat.
     /// The files it replaces are kept in before-rebuild/.
     private func rebuildFromRecording() {

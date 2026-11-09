@@ -30,7 +30,7 @@ ios)
   }
   echo "iPhone simulator ($SIM), room $ROOM:"
   shot 1-home 4
-  shot 2-viewer-photo 25 -importRmsc $ROOM
+  shot 2-viewer-photo 60 -importRmsc $ROOM  # the first open builds the photo room and splats
   shot 3-viewer-splats 25 -openLatestScan -style splats
   shot 4-viewer-points 25 -openLatestScan -style points
   shot 5-viewer-mesh 25 -openLatestScan -style mesh
