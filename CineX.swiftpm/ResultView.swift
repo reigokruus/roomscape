@@ -610,7 +610,9 @@ struct ResultView: View {
             }
         }
         // The photo room: leave out its triangles in the old spots (no custom shader: a failed one draws magenta).
-        if let photoRoom { HoleFill.cutOut(photoRoom, boxes: away.map(HoleFill.hideBox)) }
+        if let photoRoom {
+            HoleFill.cutOut(photoRoom, objects: away.map { ($0.id, HoleFill.hideBox($0), $0.removed ? nil : $0.editTransform) })
+        }
     }
 
     /// The selected object can be moved and turned (a movable thing, not removed).
@@ -621,27 +623,30 @@ struct ResultView: View {
 
     /// Where a drag grabbed the selected object: its centre minus the grab point on its base plane (x, z).
     @State private var dragGrab: SIMD2<Float>?
+    @State private var dragPlaneY: Float = 0
 
     /// One finger on the selected object slides it along the floor, as on Android: the touch ray meets the plane of
     /// the object's base, and the object keeps its place under the finger (no jump). One undo step per drag.
     private func objectDragged(_ phase: Int, _ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> Bool {
         guard let id = selectedObject, let i = objects.firstIndex(where: { $0.id == id }) else { return false }
         let o = objects[i]
-        let baseY = o.center.y - o.halfExtents.y
-        guard abs(dir.y) > 1e-4 else { return phase != 0 }
-        let t = (baseY - origin.y) / dir.y
-        guard t > 0 else { return phase != 0 }
-        let p = origin + dir * t
         let now = SIMD2(o.center.x + o.offset.x, o.center.z + o.offset.z)
         switch phase {
         case 0:
-            // Only a drag that starts on the selected object's box moves it; any other drag turns the view.
-            guard objectHit(origin, dir) == id else { return false }
+            // Only a drag that starts on the selected object's box moves it; any other drag turns the view. The drag
+            // runs on the level plane through the point the finger touched (not the floor: from a grazing view the
+            // floor point behind a tall object runs far ahead of the finger), so that point stays under the finger.
+            guard let (hitId, t) = objectHitDistance(origin, dir), hitId == id else { return false }
+            let p = origin + dir * t
+            dragPlaneY = p.y
             objectHistory.append(objects)
             dragGrab = now - SIMD2(p.x, p.z)
             return true
         case 1:
-            guard let grab = dragGrab else { return false }
+            guard let grab = dragGrab, abs(dir.y) > 1e-4 else { return false }
+            let t = (dragPlaneY - origin.y) / dir.y
+            guard t > 0 else { return true }
+            let p = origin + dir * t
             let c = SIMD2(p.x, p.z) + grab
             objects[i].offset = SIMD3(c.x - o.center.x, 0, c.y - o.center.z)
             return true
@@ -675,7 +680,10 @@ struct ResultView: View {
     }
 
     /// The object whose box the ray meets first, if any (movable, not removed; 3 cm margin).
-    private func objectHit(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> UUID? {
+    private func objectHit(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> UUID? { objectHitDistance(origin, dir)?.0 }
+
+    /// The same, with how far along the ray it meets the box.
+    private func objectHitDistance(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> (UUID, Float)? {
         var best: (UUID, Float)?
         for o in objects where !o.kind.isMarker && !o.removed {
             // The ray in the box's own frame (turned by yaw + turn, moved by the offset), slab test with a 3 cm margin.
@@ -697,7 +705,7 @@ struct ResultView: View {
             }
             if hit, best == nil || t0 < best!.1 { best = (o.id, t0) }
         }
-        return best?.0
+        return best
     }
 
     private func floorTapped(_ p: SIMD3<Float>) {

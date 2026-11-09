@@ -159,51 +159,92 @@ enum HoleFill {
         return SCNNode(geometry: g)
     }
 
-    /// Leaves out the photo room's triangles whose middle is inside any of the boxes (world-to-unit-box transforms),
-    /// from 3 cm above their bottom so the floor under them stays: what the Android app does with its hide boxes.
-    /// The full geometry is kept on the node (`originalPhotoGeometry`) so putting back restores it.
-    @MainActor static func cutOut(_ node: SCNNode, boxes: [SCNMatrix4]) {
+    /// Leaves out the photo room's triangles whose middle is inside a removed or moved object's old box (from 3 cm above
+    /// its bottom, so the floor under it stays: what the Android app does with its hide boxes), and draws a moved
+    /// object's own triangles at its new place (`move`: its edit transform; nil when removed). The full geometry is kept,
+    /// so putting back restores it; while only the moves change (a drag), just the copies' transforms are updated.
+    @MainActor static func cutOut(_ node: SCNNode, objects: [(id: UUID, box: SCNMatrix4, move: simd_float4x4?)]) {
         let target = node.geometry != nil ? node : node.childNodes(passingTest: { n, _ in n.geometry != nil }).first
         guard let target, let current = target.geometry else { return }
-        let original = originals[ObjectIdentifier(target)] ?? current
-        originals[ObjectIdentifier(target)] = original
-        if boxes.isEmpty { if target.geometry !== original { target.geometry = original }; return }
-        guard let vertexSource = original.sources(for: .vertex).first else { return }
-        let positions = vertexPositions(vertexSource)
+        let key = ObjectIdentifier(target)
+        let original = originals[key] ?? current
+        originals[key] = original
         let world = target.simdWorldTransform
-        let inv = boxes.map { simd_float4x4($0) }
-        func hidden(_ i: Int, _ j: Int, _ k: Int) -> Bool {
-            guard i < positions.count, j < positions.count, k < positions.count else { return false }
-            let m = (positions[i] + positions[j] + positions[k]) / 3
-            let w = world * SIMD4(m, 1)
-            for b in inv {
-                let q = b * w
-                if abs(q.x) <= 0.5 && abs(q.y) <= 0.5 && abs(q.z) <= 0.5 { return true }
-            }
-            return false
-        }
-        var elements: [SCNGeometryElement] = []
-        for e in original.elements {
-            guard e.primitiveType == .triangles, e.bytesPerIndex == 4 || e.bytesPerIndex == 2 else { elements.append(e); continue }
-            var kept: [Int32] = []
-            e.data.withUnsafeBytes { raw in
-                func index(_ n: Int) -> Int {
-                    e.bytesPerIndex == 4 ? Int(raw.loadUnaligned(fromByteOffset: n * 4, as: UInt32.self))
-                                         : Int(raw.loadUnaligned(fromByteOffset: n * 2, as: UInt16.self))
+        let signature = objects.map { "\($0.id)\(simd_float4x4($0.box))" }.joined()
+        if signatures[key] != signature {
+            signatures[key] = signature
+            for c in target.childNodes where c.name == "movedCopy" { c.removeFromParentNode() }
+            copies[key] = [:]
+            if objects.isEmpty {
+                target.geometry = original
+            } else if let vertexSource = original.sources(for: .vertex).first {
+                let positions = vertexPositions(vertexSource)
+                let inv = objects.map { simd_float4x4($0.box) }
+                func owner(_ i: Int, _ j: Int, _ k: Int) -> Int? {
+                    guard i < positions.count, j < positions.count, k < positions.count else { return nil }
+                    let w = world * SIMD4((positions[i] + positions[j] + positions[k]) / 3, 1)
+                    for (n, b) in inv.enumerated() {
+                        let q = b * w
+                        if abs(q.x) <= 0.5 && abs(q.y) <= 0.5 && abs(q.z) <= 0.5 { return n }
+                    }
+                    return nil
                 }
-                for t in 0..<e.primitiveCount {
-                    let a = index(t * 3), b = index(t * 3 + 1), c = index(t * 3 + 2)
-                    if !hidden(a, b, c) { kept += [Int32(a), Int32(b), Int32(c)] }
+                var kept: [SCNGeometryElement] = []
+                var mine = [[[Int32]]](repeating: [], count: objects.count) // per object, per element
+                for e in original.elements {
+                    guard e.primitiveType == .triangles, e.bytesPerIndex == 4 || e.bytesPerIndex == 2 else {
+                        kept.append(e); for n in mine.indices { mine[n].append([]) }; continue
+                    }
+                    var keep: [Int32] = []
+                    var theirs = [[Int32]](repeating: [], count: objects.count)
+                    e.data.withUnsafeBytes { raw in
+                        func index(_ n: Int) -> Int {
+                            e.bytesPerIndex == 4 ? Int(raw.loadUnaligned(fromByteOffset: n * 4, as: UInt32.self))
+                                                 : Int(raw.loadUnaligned(fromByteOffset: n * 2, as: UInt16.self))
+                        }
+                        for t in 0..<e.primitiveCount {
+                            let a = index(t * 3), b = index(t * 3 + 1), c = index(t * 3 + 2)
+                            if let n = owner(a, b, c) { theirs[n] += [Int32(a), Int32(b), Int32(c)] } else { keep += [Int32(a), Int32(b), Int32(c)] }
+                        }
+                    }
+                    kept.append(SCNGeometryElement(indices: keep, primitiveType: .triangles))
+                    for n in mine.indices { mine[n].append(theirs[n]) }
+                }
+                let cut = SCNGeometry(sources: original.sources, elements: kept)
+                cut.materials = original.materials
+                target.geometry = cut
+                // Each object's own triangles, as a node of its own (drawn where the object is now).
+                for (n, o) in objects.enumerated() {
+                    var elements: [SCNGeometryElement] = [], materials: [SCNMaterial] = []
+                    for (k, idx) in mine[n].enumerated() where !idx.isEmpty {
+                        elements.append(SCNGeometryElement(indices: idx, primitiveType: .triangles))
+                        materials.append(original.materials[min(k, original.materials.count - 1)])
+                    }
+                    guard !elements.isEmpty else { continue }
+                    let g = SCNGeometry(sources: original.sources, elements: elements)
+                    g.materials = materials
+                    let copy = SCNNode(geometry: g)
+                    copy.name = "movedCopy"
+                    target.addChildNode(copy)
+                    copies[key, default: [:]][o.id] = copy
                 }
             }
-            elements.append(SCNGeometryElement(indices: kept, primitiveType: .triangles))
         }
-        let cut = SCNGeometry(sources: original.sources, elements: elements)
-        cut.materials = original.materials
-        target.geometry = cut
+        // Where each copy is drawn: moved by the object's edit (world), in the photo room's own space; hidden when removed.
+        for o in objects {
+            guard let copy = copies[key]?[o.id] else { continue }
+            if let move = o.move {
+                copy.isHidden = false
+                copy.simdTransform = world.inverse * move * world
+            } else {
+                copy.isHidden = true
+            }
+        }
     }
 
     @MainActor private static var originals: [ObjectIdentifier: SCNGeometry] = [:]
+    @MainActor private static var signatures: [ObjectIdentifier: String] = [:]
+    @MainActor private static var copies: [ObjectIdentifier: [UUID: SCNNode]] = [:]
 
     private static func vertexPositions(_ s: SCNGeometrySource) -> [SIMD3<Float>] {
         guard s.usesFloatComponents, s.bytesPerComponent == 4, s.componentsPerVector >= 3 else { return [] }
