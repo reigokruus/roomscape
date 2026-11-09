@@ -49,7 +49,8 @@ A reader must ignore files it doesn't know. A writer may leave out every optiona
     "lux": 180
   },
   "objects": [
-    { "name": "Chair", "center": [x, y, z], "size": [w, h, d], "yaw": 0.3 }
+    { "id": "6F1C…", "name": "Chair", "kind": "chair", "source": "claude", "center": [x, y, z], "size": [w, h, d], "yaw": 0.3,
+      "original": { "center": [x, y, z], "yaw": 0.0 }, "removed": false, "moved": true }
   ]
 }
 ```
@@ -58,7 +59,7 @@ A reader must ignore files it doesn't know. A writer may leave out every optiona
 
 `planes` (optional) lists flat surfaces the exporting phone is confident about, for example plain walls found by the Android app's "flat colour = plane" rule on phones without LiDAR: `[{"kind": "wall" | "floor" | "ceiling" | "surface", "normal": [nx, ny, nz], "d": d, "area": m², "min": [x, y, z], "max": [x, y, z], "color": [r, g, b]}]`, where points on the plane satisfy `normal · p = d`, and `min` / `max` bound the points it was fitted to. Readers may use them to flatten their surface there; nothing else depends on them.
 
-Only `format`, `version` and `name` are required; everything else is optional. `objects` is the simple shared form: a box per object, with yaw in radians around +Y. Richer per-platform object data goes in `ios/` or `android/`.
+Only `format`, `version` and `name` are required; everything else is optional. `objects` is the shared form: a box per movable object, with yaw in radians around +Y (right-handed, +Y up). `center` and `yaw` are where it is now; `original` is where the scan had it (absent = never moved). `size` is width (the box's own x), height, depth (its own z). `id` is stable across phones and syncs; `removed` objects stay in the list (so they can be put back). Readers merge by `id`: a newer package's version of an object wins, and objects the package lacks are kept — an import never drops objects. `source` is `roomPlan`, `claude`, `android` or `catalogue`. Richer per-platform object data (lights, sockets, a catalogue item's own points) goes in `ios/` or `android/`.
 
 ### photos.json
 

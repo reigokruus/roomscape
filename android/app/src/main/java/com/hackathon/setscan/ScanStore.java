@@ -84,10 +84,14 @@ final class ScanStore {
         if (dir == null) dir = new File(root(c), "scan_" + System.currentTimeMillis());
         // What this save changes, for syncing shared scans: a rename, or new points or photos (Continue scan).
         String before = null;
+        boolean samePoints = false;
         try {
             JSONObject om = new JSONObject(readText(new File(dir, "meta.json")));
             JSONArray oo = om.optJSONArray("outlets");
-            before = om.optString("name") + "|" + om.optInt("points") + "|" + om.optInt("photos") + "|" + (oo == null ? 0 : oo.length());
+            JSONArray ob = om.optJSONArray("objects");
+            before = om.optString("name") + "|" + om.optInt("points") + "|" + om.optInt("photos") + "|" + (oo == null ? 0 : oo.length())
+                    + "|" + (ob == null ? "" : ob.toString()).hashCode();
+            samePoints = om.optInt("points") == d.n;
             // Data is gold: never save an empty scan over one that has points or photos (a half-loaded view).
             if (d.n == 0 && d.kfs.isEmpty() && (om.optInt("points") > 0 || om.optInt("photos") > 0))
                 throw new IllegalStateException("not saving an empty scan over " + om.optInt("points") + " points");
@@ -147,6 +151,12 @@ final class ScanStore {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }
+        // Built from the points (the Photo view's surface, room outline, flat planes): kept while the points are the
+        // same; after Continue scan they're stale, and are built again.
+        if (samePoints) for (String keep : new String[]{"surface.ply", "outline.json", "planes.json"}) {
+            File from = new File(dir, keep), to = new File(tmp, keep);
+            if (from.exists() && !to.exists()) copyTree(from, to);
+        }
         // swap in the new version
         File old = new File(dir.getParentFile(), dir.getName() + ".old");
         deleteRec(old);
@@ -155,7 +165,8 @@ final class ScanStore {
         deleteRec(old);
         int outletsAfter = 0;
         try { if (d.outlets != null) outletsAfter = new JSONArray(d.outlets).length(); } catch (Exception ignored) { }
-        String after = d.name + "|" + d.n + "|" + d.kfs.size() + "|" + outletsAfter; // found outlets count as a change too
+        String after = d.name + "|" + d.n + "|" + d.kfs.size() + "|" + outletsAfter // found outlets count as a change too
+                + "|" + (d.objects == null ? "" : new JSONArray(d.objects).toString()).hashCode(); // and object edits
         if (before != null && !before.equals(after) && SyncInfo.file(dir).exists()) SyncInfo.touch(c, dir);
         return dir;
     }

@@ -27,6 +27,8 @@ import java.util.Locale;
  */
 final class SceneObjects {
     static final class Obj {
+        /** Stable id, shared with the other phones (.rmsc "objects"). */
+        String id = java.util.UUID.randomUUID().toString();
         String name;
         // the original box in the scan (world): centre, heading, half sizes, bottom/top
         float cx, cz, cosA = 1, sinA, hu, hv, y0, y1;
@@ -88,6 +90,7 @@ final class SceneObjects {
             for (Obj e : list) if (!e.fromCatalog && Math.hypot(e.cx - it.cx, e.cz - it.cz) < 0.25f && Math.abs(e.y1 - it.y1) < 0.4f) { known = true; break; }
             if (known) continue;
             Obj o = new Obj();
+            o.id = itemId(it);
             o.name = it.name;
             o.cx = it.cx; o.cz = it.cz; o.cosA = it.cosA; o.sinA = it.sinA; o.hu = it.hu; o.hv = it.hv; o.y0 = it.y0; o.y1 = it.y1;
             o.onFloor = it.onFloor;
@@ -95,6 +98,12 @@ final class SceneObjects {
             if (o.n < 30) continue;
             list.add(o);
         }
+    }
+
+    /** The same id for the same found item every time (its name and where it stands, to 10 cm). */
+    static String itemId(RoomItems.Item it) {
+        String k = it.name + "|" + Math.round(it.cx * 10) + "|" + Math.round(it.cz * 10) + "|" + Math.round(it.y1 * 10);
+        return java.util.UUID.nameUUIDFromBytes(k.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
     }
 
     private static String nice(RoomModel.Box b) {
@@ -304,9 +313,9 @@ final class SceneObjects {
     JSONArray toJson() throws Exception {
         JSONArray a = new JSONArray();
         for (Obj o : list) {
-            if (!o.removed && !o.moved() && !o.fromCatalog) continue; // untouched detections are found again on load
+            // All of them (also untouched ones), so they travel with the room to other phones (Rmsc "objects").
             JSONObject j = new JSONObject();
-            j.put("name", o.name); j.put("cx", o.cx); j.put("cz", o.cz); j.put("cosA", o.cosA); j.put("sinA", o.sinA);
+            j.put("id", o.id); j.put("name", o.name); j.put("cx", o.cx); j.put("cz", o.cz); j.put("cosA", o.cosA); j.put("sinA", o.sinA);
             j.put("hu", o.hu); j.put("hv", o.hv); j.put("y0", o.y0); j.put("y1", o.y1); j.put("floor", o.onFloor);
             j.put("ox", o.ox); j.put("oz", o.oz); j.put("turn", o.turn); j.put("removed", o.removed);
             if (o.fromCatalog) { j.put("catalog", true); j.put("pts", b64(o)); }
@@ -324,6 +333,7 @@ final class SceneObjects {
                 JSONObject j = a.getJSONObject(i);
                 Obj o = new Obj();
                 o.name = j.optString("name", "Object");
+                o.id = j.optString("id", o.id);
                 o.cx = (float) j.getDouble("cx"); o.cz = (float) j.getDouble("cz"); o.cosA = (float) j.getDouble("cosA"); o.sinA = (float) j.getDouble("sinA");
                 o.hu = (float) j.getDouble("hu"); o.hv = (float) j.getDouble("hv"); o.y0 = (float) j.getDouble("y0"); o.y1 = (float) j.getDouble("y1");
                 o.onFloor = j.optBoolean("floor", true);

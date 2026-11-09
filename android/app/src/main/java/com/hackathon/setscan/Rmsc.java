@@ -181,6 +181,8 @@ final class Rmsc {
                 if (out.length() > 0) m.put("planes", out);
             }
         } catch (Exception ignored) { }
+        JSONArray objs = sharedObjects(d, floorY);
+        if (objs.length() > 0) m.put("objects", objs);
         JSONArray shared = sharedOutlets(d.outlets, floorY);
         if (shared.length() > 0) m.put("outlets", shared);
         put(z, "manifest.json", m.toString(1).getBytes("UTF-8"));
@@ -338,6 +340,7 @@ final class Rmsc {
             out = existing;
         }
         if (existing != null) mergeOutlets(new File(ctx.getFilesDir(), "scan-backups/" + out.getName()), out);
+        if (existing != null) mergeObjects(new File(ctx.getFilesDir(), "scan-backups/" + out.getName()), out);
         SyncInfo si = SyncInfo.load(ctx, out);
         if (!id.isEmpty()) si.id = id;
         // A repaired scan gets a revision above both, so phones with the empty version take it back.
@@ -349,6 +352,111 @@ final class Rmsc {
         if (peerId != null) { si.shared = true; si.peers.put(peerId, peerName); }
         SyncInfo.save(out, si);
         return new Result(out, outcome);
+    }
+
+    // ---------------------------------------------------------------- objects (shared manifest field)
+
+    /**
+     * The scan's objects as the manifest's shared "objects" (docs/rmsc-format.md): this app's objects (edited or not)
+     * plus Claude's found items not among them, floor at 0. Android's heading A is the shared yaw's opposite.
+     */
+    static JSONArray sharedObjects(ScanStore.Data d, float floorY) {
+        JSONArray out = new JSONArray();
+        try {
+            JSONArray objs = d.objects == null ? new JSONArray() : new JSONArray(d.objects);
+            for (int i = 0; i < objs.length(); i++) {
+                JSONObject j = objs.getJSONObject(i);
+                out.put(sharedObject(j.optString("id", java.util.UUID.randomUUID().toString()), j.optString("name", "Object"),
+                        j.optBoolean("catalog") ? "catalogue" : "android",
+                        (float) j.getDouble("cx"), (float) j.getDouble("cz"), (float) j.getDouble("cosA"), (float) j.getDouble("sinA"),
+                        (float) j.getDouble("hu"), (float) j.getDouble("hv"), (float) j.getDouble("y0"), (float) j.getDouble("y1"),
+                        (float) j.optDouble("ox", 0), (float) j.optDouble("oz", 0), (float) j.optDouble("turn", 0), j.optBoolean("removed"), floorY));
+            }
+            if (d.items != null) {
+                RoomItems ri = new RoomItems(); ri.fromJson(d.items);
+                for (RoomItems.Item it : ri.snapshot()) {
+                    boolean known = false;
+                    for (int i = 0; i < objs.length() && !known; i++) {
+                        JSONObject e = objs.getJSONObject(i);
+                        known = !e.optBoolean("catalog") && Math.hypot(e.getDouble("cx") - it.cx, e.getDouble("cz") - it.cz) < 0.25 && Math.abs(e.getDouble("y1") - it.y1) < 0.4;
+                    }
+                    if (!known) out.put(sharedObject(SceneObjects.itemId(it), it.name, "claude", it.cx, it.cz, it.cosA, it.sinA, it.hu, it.hv, it.y0, it.y1, 0, 0, 0, false, floorY));
+                }
+            }
+        } catch (Exception ignored) { }
+        return out;
+    }
+
+    private static JSONObject sharedObject(String id, String name, String source, float cx, float cz, float cosA, float sinA,
+                                           float hu, float hv, float y0, float y1, float ox, float oz, float turn, boolean removed, float floorY) throws Exception {
+        float yaw0 = (float) -Math.atan2(sinA, cosA), yaw = yaw0 - turn, cy = (y0 + y1) / 2 - floorY;
+        return new JSONObject().put("id", id).put("name", name).put("source", source)
+                .put("center", new JSONArray().put(cx + ox).put(cy).put(cz + oz))
+                .put("size", new JSONArray().put(2 * hu).put(y1 - y0).put(2 * hv))
+                .put("yaw", yaw)
+                .put("original", new JSONObject().put("center", new JSONArray().put(cx).put(cy).put(cz)).put("yaw", yaw0))
+                .put("removed", removed).put("moved", ox != 0 || oz != 0 || turn != 0);
+    }
+
+    /**
+     * The manifest's shared "objects" as this app's object JSON, moved up by dy. Entries without an "original" are
+     * where they always were. `own`: this app's own objects from the package (android/meta.json), whose catalogue
+     * items' points are kept. Own objects missing from the shared list are kept too (nothing is dropped).
+     */
+    static String androidObjects(JSONArray shared, float dy, JSONArray own) {
+        try {
+            JSONArray out = new JSONArray();
+            java.util.HashSet<String> seen = new java.util.HashSet<>();
+            for (int i = 0; shared != null && i < shared.length(); i++) {
+                JSONObject s = shared.getJSONObject(i);
+                JSONArray c = s.getJSONArray("center"), sz = s.getJSONArray("size");
+                JSONObject orig = s.optJSONObject("original");
+                JSONArray oc = orig != null ? orig.getJSONArray("center") : c;
+                float yaw = (float) s.optDouble("yaw", 0), yaw0 = orig != null ? (float) orig.optDouble("yaw", yaw) : yaw;
+                float h = (float) sz.getDouble(1);
+                float cy = (float) oc.getDouble(1);
+                String id = s.optString("id", java.util.UUID.randomUUID().toString());
+                JSONObject j = new JSONObject().put("id", id).put("name", s.optString("name", "Object"))
+                        .put("cx", oc.getDouble(0)).put("cz", oc.getDouble(2))
+                        .put("cosA", Math.cos(yaw0)).put("sinA", -Math.sin(yaw0))
+                        .put("hu", sz.getDouble(0) / 2).put("hv", sz.getDouble(2) / 2)
+                        .put("y0", cy - h / 2 + dy).put("y1", cy + h / 2 + dy).put("floor", cy - h / 2 < 0.1)
+                        .put("ox", c.getDouble(0) - oc.getDouble(0)).put("oz", c.getDouble(2) - oc.getDouble(2))
+                        .put("turn", -(yaw - yaw0)).put("removed", s.optBoolean("removed", false));
+                for (int k = 0; own != null && k < own.length(); k++) {
+                    JSONObject e = own.getJSONObject(k);
+                    if (id.equals(e.optString("id")) && e.optBoolean("catalog")) { j.put("catalog", true); j.put("pts", e.getString("pts")); }
+                }
+                seen.add(id);
+                out.put(j);
+            }
+            for (int k = 0; own != null && k < own.length(); k++) {
+                JSONObject e = own.getJSONObject(k);
+                if (!seen.contains(e.optString("id", ""))) out.put(e);
+            }
+            return out.length() == 0 ? null : out.toString();
+        } catch (Exception e) { return own == null ? null : own.toString(); }
+    }
+
+    /** After a sync update: objects this phone had that the new version lacks are kept (never dropped). */
+    static void mergeObjects(File previousDir, File dir) {
+        try {
+            File pm = new File(previousDir, "meta.json"), nm = new File(dir, "meta.json");
+            if (!pm.exists() || !nm.exists()) return;
+            JSONArray old = new JSONObject(text(pm)).optJSONArray("objects");
+            if (old == null || old.length() == 0) return;
+            JSONObject meta = new JSONObject(text(nm));
+            JSONArray cur = meta.optJSONArray("objects");
+            if (cur == null) cur = new JSONArray();
+            java.util.HashSet<String> ids = new java.util.HashSet<>();
+            for (int j = 0; j < cur.length(); j++) ids.add(cur.getJSONObject(j).optString("id", ""));
+            for (int i = 0; i < old.length(); i++) {
+                JSONObject o = old.getJSONObject(i);
+                if (!ids.contains(o.optString("id", "?"))) cur.put(o);
+            }
+            meta.put("objects", cur);
+            try (FileOutputStream f = new FileOutputStream(nm)) { f.write(meta.toString(1).getBytes("UTF-8")); }
+        } catch (Exception ignored) { }
     }
 
     // ---------------------------------------------------------------- power outlets (shared manifest field)
@@ -516,6 +624,9 @@ final class Rmsc {
                 d.ceiling = a.has("ceiling") ? vecf(a.getJSONArray("ceiling")) : null;
                 d.lux = (float) a.optDouble("lux", 0);
                 JSONArray oa = a.optJSONArray("objects"); d.objects = oa == null ? null : oa.toString();
+                // The shared list is the latest (it may have been edited on another phone): it wins, by id.
+                JSONArray so = m.optJSONArray("objects");
+                if (so != null && so.length() > 0 && so.getJSONObject(0).has("id")) d.objects = androidObjects(so, unshift, oa);
                 JSONArray ol = a.optJSONArray("outlets"); d.outlets = ol == null ? null : ol.toString();
                 JSONArray it = a.optJSONArray("items"); d.items = it == null ? null : it.toString();
                 d.hall = a.optBoolean("hall2", false); d.outletsChecked = a.optInt("roomPass", 0) >= 2;
@@ -534,6 +645,7 @@ final class Rmsc {
                 if (m.has("floorY")) d.floor = new float[]{cx, (float) m.getDouble("floorY"), cz};
                 String ol = androidOutlets(m.optJSONArray("outlets"));
                 if (ol != null) { d.outlets = ol; d.outletsChecked = true; }
+                d.objects = androidObjects(m.optJSONArray("objects"), unshift, null);
                 if (m.has("ceilingY")) d.ceiling = new float[]{cx, (float) m.getDouble("ceilingY"), cz};
             }
             File th = new File(tmp, "thumb.jpg");

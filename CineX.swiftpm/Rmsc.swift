@@ -162,11 +162,7 @@ enum Rmsc {
             ]
         }
         let objects = RoomObjects.load(scan)?.objects ?? room.map(RoomObjects.fromRoomPlan) ?? []
-        manifest["objects"] = objects.filter { !$0.removed && !$0.kind.isMarker }.map { o -> [String: Any] in
-            let c = o.center + o.offset + shift
-            return ["name": o.label, "center": [c.x, c.y, c.z],
-                    "size": [o.halfExtents.x * 2, o.halfExtents.y * 2, o.halfExtents.z * 2], "yaw": o.yaw + o.turn]
-        }
+        manifest["objects"] = RoomObjects.toManifest(objects, dropY: floorY)
         let outlets = OutletStore.load(scan)
         if !outlets.isEmpty { manifest["outlets"] = OutletStore.toManifest(outlets, floorY: floorY) }
         try zip.add("manifest.json", data: try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]))
@@ -243,11 +239,19 @@ enum Rmsc {
             }
         }
         let localOutlets = existing.map(OutletStore.load) ?? []
+        let localObjects = existing.flatMap(RoomObjects.load)
         var scan = try importNew(from: url, zip: zip, manifest: manifest)
         if let existing { scan = try ScanStore.replace(existing, with: scan) }
         // Outlets: the package's, plus any this scan had (an update without outlets never erases them).
         let merged = OutletStore.merge(OutletStore.load(scan), localOutlets)
         OutletStore.save(merged, for: scan)
+        // Objects: the package's version of each, plus any this scan had that the package doesn't (never dropped).
+        if let localObjects {
+            var file = RoomObjects.load(scan) ?? ObjectsFile(objects: [])
+            file.objects = RoomObjects.merge(file.objects, localObjects.objects)
+            file.claudeChecked = file.claudeChecked || localObjects.claudeChecked
+            RoomObjects.write(file, for: scan)
+        }
         var info = SyncStore.info(scan)
         info.id = id ?? info.id
         // A repaired scan gets a revision above both, so the phones that have the empty version take it back.
@@ -356,6 +360,17 @@ enum Rmsc {
             // iOS extras.
             if let map = try zip.read("ios/worldmap.arexperience") { try map.write(to: folder.appendingPathComponent("worldmap.arexperience")) }
             if let objects = try zip.read("ios/objects.json") { try objects.write(to: folder.appendingPathComponent("objects.json")) }
+            // The shared list is the latest (it may have been edited on another phone): it wins, by id; this
+            // phone's own extras (lights, sockets, anything not in it) are kept.
+            if let list = manifest["objects"] as? [[String: Any]], !list.isEmpty {
+                let shared = RoomObjects.fromManifest(list, lift: lift)
+                let hasIds = list.first?["id"] != nil
+                var file = RoomObjects.load(scan) ?? ObjectsFile(objects: [])
+                if hasIds || file.objects.isEmpty {
+                    file.objects = RoomObjects.merge(shared, file.objects)
+                    RoomObjects.write(file, for: scan)
+                }
+            }
             let outlets = OutletStore.fromManifest(manifest["outlets"] as? [[String: Any]], lift: lift)
             if !outlets.isEmpty, let data = try? JSONEncoder().encode(outlets) {
                 try data.write(to: folder.appendingPathComponent("outlets.json"))

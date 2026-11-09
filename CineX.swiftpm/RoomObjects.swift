@@ -57,7 +57,8 @@ enum ObjectKind: String, Codable, CaseIterable {
 
 /// An object in the scanned room and the user's edits to it.
 struct RoomObject: Codable, Identifiable, Equatable {
-    enum Source: String, Codable { case roomPlan, claude }
+    /// Where it came from: RoomPlan, Claude, or another phone (the Android app, its catalogue).
+    enum Source: String, Codable { case roomPlan, claude, android, catalogue }
 
     var id = UUID()
     var kind: ObjectKind
@@ -107,6 +108,54 @@ struct ObjectsFile: Codable {
 
 enum RoomObjects {
     static func url(_ scan: SavedScan) -> URL { scan.captureURL.appendingPathComponent("objects.json") }
+
+    /// The manifest's shared "objects" (docs/rmsc-format.md): every movable thing, with its id, where it is now and
+    /// where the scan had it, and whether it's removed. Moved down by `dropY` (the floor to y = 0).
+    static func toManifest(_ objects: [RoomObject], dropY: Float) -> [[String: Any]] {
+        objects.filter { !$0.kind.isMarker }.map { o in
+            let c = o.center + o.offset, c0 = o.center
+            return ["id": o.id.uuidString, "name": o.label, "kind": o.kind.rawValue, "source": o.source.rawValue,
+                    "center": [c.x, c.y - dropY, c.z],
+                    "size": [o.halfExtents.x * 2, o.halfExtents.y * 2, o.halfExtents.z * 2], "yaw": o.yaw + o.turn,
+                    "original": ["center": [c0.x, c0.y - dropY, c0.z], "yaw": o.yaw],
+                    "removed": o.removed, "moved": simd_length(o.offset) > 0.001 || abs(o.turn) > 0.001]
+        }
+    }
+
+    /// The manifest's shared "objects", moved up by `lift`.
+    static func fromManifest(_ list: [[String: Any]]?, lift: Float) -> [RoomObject] {
+        (list ?? []).compactMap { e in
+            func v3(_ a: Any?) -> SIMD3<Float>? {
+                guard let n = (a as? [NSNumber])?.map(\.floatValue), n.count == 3 else { return nil }
+                return SIMD3(n[0], n[1], n[2])
+            }
+            guard let c = v3(e["center"]), let size = v3(e["size"]) else { return nil }
+            let orig = e["original"] as? [String: Any]
+            let c0 = v3(orig?["center"]) ?? c
+            let yaw = (e["yaw"] as? NSNumber)?.floatValue ?? 0
+            let yaw0 = (orig?["yaw"] as? NSNumber)?.floatValue ?? yaw
+            let name = e["name"] as? String ?? "Object"
+            var o = RoomObject(kind: (e["kind"] as? String).flatMap(ObjectKind.init(rawValue:)) ?? .other, label: name,
+                               source: (e["source"] as? String).flatMap(RoomObject.Source.init(rawValue:)) ?? .android,
+                               center: c0 + SIMD3(0, lift, 0), halfExtents: size / 2, yaw: yaw0)
+            if let id = (e["id"] as? String).flatMap(UUID.init(uuidString:)) { o.id = id }
+            o.removed = e["removed"] as? Bool ?? false
+            o.offset = SIMD3(c.x - c0.x, 0, c.z - c0.z)
+            o.turn = yaw - yaw0
+            return o
+        }
+    }
+
+    /// Both lists by id: `newer`'s version of each object, plus `older`'s objects it doesn't have (nothing dropped).
+    static func merge(_ newer: [RoomObject], _ older: [RoomObject]) -> [RoomObject] {
+        let ids = Set(newer.map(\.id))
+        return newer + older.filter { !ids.contains($0.id) }
+    }
+
+    /// Writes the file without counting it as an edit (imports and sync merges).
+    static func write(_ file: ObjectsFile, for scan: SavedScan) {
+        if let data = try? JSONEncoder().encode(file) { try? data.write(to: url(scan), options: .atomic) }
+    }
 
     static func load(_ scan: SavedScan) -> ObjectsFile? {
         guard let data = try? Data(contentsOf: url(scan)) else { return nil }
