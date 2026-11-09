@@ -33,6 +33,10 @@ struct ResultView: View {
     @State private var savingFile: SharedFile?
     /// Objects mode's undo: the objects before each edit (move, turn, remove, put back), newest last.
     @State private var objectHistory: [[RoomObject]] = []
+    /// Fills for the holes removed or moved objects leave (HoleFill), by object; generated, never saved.
+    @State private var holeFills: [UUID: SCNNode] = [:]
+    @State private var holeFillsPending: Set<UUID> = []
+    private let holeFillRoot: SCNNode = { let n = SCNNode(); n.name = "holeFills"; return n }()
     /// Outlet labels on or off (the ⚡ Outlets button), remembered across scans; on by default.
     @AppStorage("showOutlets") private var showOutlets = true
     /// "Enter the room": picking where to stand, then standing there (first person). See `RoomSceneView`.
@@ -255,6 +259,7 @@ struct ResultView: View {
         }
         .onChange(of: objects) { _, objects in
             objectsScene?.apply(objects, selected: selectedObject)
+            updateHoles()
             modelObjects?.apply(objects)
             if lighting != nil { refreshRoomLight() }
             RoomObjects.save(ObjectsFile(claudeChecked: claudeChecked, objects: objects), for: scan)
@@ -333,6 +338,7 @@ struct ResultView: View {
                 if let photo {
                     scene.rootNode.addChildNode(photo)
                     photoRoom = photo
+                    updateHoles()
                     style = .photo
                     showStyle(style)
                 }
@@ -369,6 +375,7 @@ struct ResultView: View {
             scene.rootNode.addChildNode(splats)
             splatGroup = splats
             self.surfels = surfels
+            updateHoles()
             self.objectsScene = objectsScene
             if let modelGroup {
                 let modelObjects = ModelObjects(model: modelGroup)
@@ -563,6 +570,51 @@ struct ResultView: View {
         let scan = ScanStore.rename(current, to: newTitle)
         renamed = scan
         Task { shareURL = await Task.detached(priority: .utility) { ScanStore.namedModelCopy(scan) }.value }
+    }
+
+    /// Removed or moved objects: their old spot is hidden in the photo room (as the splats already do) and the floor
+    /// and wall it hid get a best-guess fill (HoleFill), made in the background the first time.
+    private func updateHoles() {
+        guard let scene, let shell else { return }
+        if holeFillRoot.parent == nil { scene.rootNode.addChildNode(holeFillRoot) }
+        let away = objects.filter { !$0.kind.isMarker && ($0.removed || simd_length($0.offset) > 0.001 || abs($0.turn) > 0.001) }
+        let awayIds = Set(away.map(\.id))
+        for (id, node) in holeFills { node.isHidden = !awayIds.contains(id) }
+        let surfels = self.surfels
+        if !surfels.isEmpty {
+            for o in away where holeFills[o.id] == nil && !holeFillsPending.contains(o.id) {
+                holeFillsPending.insert(o.id)
+                let floorY = shell.floorY
+                Task {
+                    let fill = await Task.detached(priority: .userInitiated) { () -> (positions: [SIMD3<Float>], colors: [SIMD3<Float>]) in
+                        let r = simd_length(SIMD2(o.halfExtents.x, o.halfExtents.z)) + 0.4
+                        let near = surfels.compactMap { s -> HoleFill.Point? in
+                            guard abs(s.x - o.center.x) <= r, abs(s.z - o.center.z) <= r else { return nil }
+                            let c = SIMD3<Float>(Float(s.rgba & 0xFF), Float((s.rgba >> 8) & 0xFF), Float((s.rgba >> 16) & 0xFF)) / 255
+                            return HoleFill.Point(p: SIMD3(s.x, s.y, s.z), c: c)
+                        }
+                        return HoleFill.build(near, center: SIMD2(o.center.x, o.center.z), u: SIMD2(cos(o.yaw), -sin(o.yaw)),
+                                              hu: o.halfExtents.x, hv: o.halfExtents.z,
+                                              y0: o.center.y - o.halfExtents.y, y1: o.center.y + o.halfExtents.y, floorY: floorY)
+                    }.value
+                    holeFillsPending.remove(o.id)
+                    guard !fill.positions.isEmpty else { return }
+                    let node = HoleFill.node(positions: fill.positions, colors: fill.colors)
+                    holeFillRoot.addChildNode(node)
+                    holeFills[o.id] = node
+                    updateHoles()
+                }
+            }
+        }
+        // The photo room: cut out the old spots (up to 8).
+        if let photoRoom, let materials = photoRoom.geometry?.materials {
+            let boxes = away.prefix(8).map(HoleFill.hideBox)
+            for m in materials {
+                if m.shaderModifiers?[.fragment] == nil { m.shaderModifiers = [.fragment: HoleFill.hideShader] }
+                for i in 0..<8 { m.setValue(NSValue(scnMatrix4: i < boxes.count ? boxes[i] : SCNMatrix4Identity), forKey: "hideBox\(i)") }
+                m.setValue(NSNumber(value: Float(boxes.count)), forKey: "hideCount")
+            }
+        }
     }
 
     /// The selected object can be moved and turned (a movable thing, not removed).
