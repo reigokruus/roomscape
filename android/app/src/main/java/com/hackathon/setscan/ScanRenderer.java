@@ -3434,14 +3434,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Work out which wall faces the viewer (eye position) and what to hide. */
     private void updateCutaway(float ex, float ez, boolean top) {
-        cutActive = viewing && cutaway;
+        // Looking from outside, the ceiling is always left out so you see into the room, like the iPhone (walls stay;
+        // the full cutaway with walls is still the Cut walls tool). Standing inside the room, the ceiling is shown.
+        boolean ceilingOnly = viewing && !cutaway && !walking;
+        cutActive = viewing && (cutaway || ceilingOnly);
         if (!cutActive) return;
         cutFloor = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
         float roomH = boxMaxY - cutFloor;
         cutCeil = roomH > 1.9f ? boxMaxY - 0.3f : 1e9f;
         cutD2 = 1e9f;
         if (roomReady && room.hasLayout && room.ceilingY > cutFloor + 1.9f) cutCeil = room.ceilingY - 0.25f;
-        if (top) { cutDirX = 0; cutDirZ = 0; cutD = 1e9f; return; }
+        if (top || ceilingOnly) { cutDirX = 0; cutDirZ = 0; cutD = 1e9f; return; }
         if (roomReady && room.hasLayout && room.layout.size() >= 3) {
             // Dollhouse view: cut away the (up to two) fitted walls that face the viewer, plus 35 cm inside them,
             // so you look into the room instead of at its outside.
