@@ -481,18 +481,21 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{homeButton, mainButton, lightButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, refineButton, undoButton, removePersonButton, interviewButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
-            ((ViewGroup) bt.getParent()).removeView(bt);
+        for (Button bt : new Button[]{homeButton, mainButton, lightButton, objButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, refineButton, undoButton, removePersonButton, interviewButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+            if (bt.getParent() != null) ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
             bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
             bt.setPadding(dp(12), dp(8), dp(12), dp(8));
-            bars.addView(bt);
+            Ios.pill(bt);
+            // In the viewer these live in the top bar (Back, Share) and under the 3D view (Continue scan), like iOS.
+            if (bt != homeButton && bt != exportButton && bt != improveButton) bars.addView(bt);
         }
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);
         chrome.addView(bars, blp);
+        toolBars = bars; toolBarsLp = blp;
         sizeBtn = sizeButton; logBtn = logButton;
         try { debug = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("debug", false); } catch (Exception ignored) { }
         mainButton.setOnLongClickListener(v -> {
@@ -503,8 +506,7 @@ public class MainActivity extends Activity {
             return true;
         });
         buildHud(chrome);
-        exportButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF1D6B86));
-        exportButton.setTextColor(Color.WHITE);
+        buildViewerChrome(chrome);
         lightPanel = buildLightPanel();
         lightPanel.setVisibility(View.GONE);
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
@@ -535,10 +537,11 @@ public class MainActivity extends Activity {
                             .build());
         } catch (Throwable ignored) { }
         spendView = new TextView(this);
-        spendView.setTextColor(0xFFE8F4F8); spendView.setTextSize(12);
+        // Small and quiet, like a caption: grey on a faint pill.
+        spendView.setTextColor(Ios.SECONDARY); spendView.setTextSize(11);
         android.graphics.drawable.GradientDrawable sbg = new android.graphics.drawable.GradientDrawable();
-        sbg.setColor(0xC0101418); sbg.setCornerRadius(dp(10));
-        spendView.setBackground(sbg); spendView.setPadding(dp(10), dp(4), dp(10), dp(4));
+        sbg.setColor(0x801C1C1E); sbg.setCornerRadius(dp(10));
+        spendView.setBackground(sbg); spendView.setPadding(dp(8), dp(3), dp(8), dp(3));
         spendView.setOnClickListener(v -> toast("What Claude has cost on your API key: this session, and in total on this phone (estimate)."));
         FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
         sp.topMargin = dp(38); sp.rightMargin = dp(14);
@@ -684,6 +687,121 @@ public class MainActivity extends Activity {
         status.setVisibility(debug || (!scanning && (renderer.lighting.enabled || renderer.planningPreview)) ? View.VISIBLE : View.GONE);
         if (hud != null) hud.setVisibility(scanning ? View.VISIBLE : View.GONE);
         if (procBox != null && scanning) procBox.setVisibility(View.GONE);
+        // Viewer, laid out like the iPhone: Back / title / ✦ / Share on top, Photo | Splats | Points under it,
+        // Continue scan under the 3D view; Rename, Undo, Remove person, Interview, Ask Claude and New scan in ✦.
+        boolean viewer = !scanning;
+        if (viewerTop != null) {
+            viewerTop.setVisibility(viewer ? View.VISIBLE : View.GONE);
+            styleSwitch.setVisibility(viewer ? View.VISIBLE : View.GONE);
+            viewerBottom.setVisibility(viewer ? View.VISIBLE : View.GONE);
+            viewerTitle.setText(renderer.currentName != null ? renderer.currentName : "Scan");
+            updateStyleSwitch();
+            // The tool buttons sit just above Continue scan in the viewer.
+            viewerBottom.post(() -> {
+                int want = viewer ? viewerBottom.getHeight() + dp(4) : dp(56);
+                if (toolBarsLp.bottomMargin != want) { toolBarsLp.bottomMargin = want; toolBars.setLayoutParams(toolBarsLp); }
+            });
+        }
+        menuActions.clear();
+        if (viewer) {
+            for (Button b : new Button[]{saveButton, undoButton, removePersonButton, interviewButton, claudeButton, mainButton}) {
+                if (b.getVisibility() == View.VISIBLE || b == claudeButton || b == mainButton) menuActions.add(b);
+                b.setVisibility(View.GONE);
+            }
+        }
+    }
+
+    // ---------------- viewer chrome, matching the iPhone app ----------------
+
+    private LinearLayout viewerTop, viewerBottom, styleSwitch;
+    private View toolBars;
+    private FrameLayout.LayoutParams toolBarsLp;
+    private TextView viewerTitle;
+    private final java.util.List<Button> menuActions = new java.util.ArrayList<>();
+    private final TextView[] styleTabs = new TextView[3];
+
+    private void buildViewerChrome(FrameLayout chrome) {
+        // Top bar: ‹ Back, the scan's name, ✦ (more actions), Share.
+        viewerTop = new LinearLayout(this);
+        viewerTop.setOrientation(LinearLayout.HORIZONTAL);
+        viewerTop.setGravity(Gravity.CENTER_VERTICAL);
+        viewerTop.setBackgroundColor(Ios.BACKGROUND);
+        viewerTop.setPadding(dp(4), dp(34), dp(4), dp(4));
+        homeButton.setText("‹ Back");
+        Ios.textButton(homeButton);
+        viewerTop.addView(homeButton);
+        viewerTitle = new TextView(this);
+        viewerTitle.setTextColor(Color.WHITE);
+        viewerTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        viewerTitle.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
+        viewerTitle.setGravity(Gravity.CENTER);
+        viewerTitle.setSingleLine(true);
+        viewerTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        viewerTop.addView(viewerTitle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button more = new Button(this);
+        more.setText("✦");
+        Ios.textButton(more);
+        more.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        more.setOnClickListener(v -> showViewerMenu());
+        viewerTop.addView(more);
+        exportButton.setText("Share");
+        Ios.textButton(exportButton);
+        viewerTop.addView(exportButton);
+        chrome.addView(viewerTop, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP));
+
+        // Photo | Splats | Points, an iOS segmented control.
+        styleSwitch = new LinearLayout(this);
+        styleSwitch.setOrientation(LinearLayout.HORIZONTAL);
+        styleSwitch.setPadding(dp(2), dp(2), dp(2), dp(2));
+        android.graphics.drawable.GradientDrawable sbg = new android.graphics.drawable.GradientDrawable();
+        sbg.setColor(0xE61C1C1E); sbg.setCornerRadius(dp(9));
+        styleSwitch.setBackground(sbg);
+        String[] names = {"Photo", "Splats", "Points"};
+        for (int i = 0; i < 3; i++) {
+            final int s = i;
+            TextView t = new TextView(this);
+            t.setText(names[i]);
+            t.setTextColor(Color.WHITE);
+            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            t.setGravity(Gravity.CENTER);
+            t.setPadding(dp(16), dp(6), dp(16), dp(6));
+            t.setOnClickListener(v -> { renderer.setStyle(s); updateStyleSwitch(); splatButton.setText(renderer.styleLabel()); });
+            styleTabs[i] = t;
+            styleSwitch.addView(t);
+        }
+        FrameLayout.LayoutParams swp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+        swp.topMargin = dp(92); swp.leftMargin = dp(16);
+        chrome.addView(styleSwitch, swp);
+
+        // Under the 3D view: Continue scan, prominent, with its explanation.
+        viewerBottom = new LinearLayout(this);
+        viewerBottom.setOrientation(LinearLayout.VERTICAL);
+        viewerBottom.setPadding(dp(16), dp(10), dp(16), dp(18));
+        viewerBottom.setBackgroundColor(0xE6000000);
+        improveButton.setText("Continue scan");
+        Ios.filled(improveButton);
+        viewerBottom.addView(improveButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)));
+        viewerBottom.addView(Ios.footer(this, "Add parts you missed, or that came out thin or blurry. The phone recognises the room and adds to this scan."));
+        chrome.addView(viewerBottom, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+    }
+
+    private void updateStyleSwitch() {
+        int s = renderer.style();
+        for (int i = 0; i < 3; i++) {
+            android.graphics.drawable.GradientDrawable on = new android.graphics.drawable.GradientDrawable();
+            on.setColor(0xFF636366); on.setCornerRadius(dp(7));
+            styleTabs[i].setBackground(i == s ? on : null);
+            styleTabs[i].setTypeface(i == s ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
+        }
+    }
+
+    /** ✦: the scan's other actions, as the iPhone app groups them in its menus. */
+    private void showViewerMenu() {
+        java.util.List<Button> items = new java.util.ArrayList<>(menuActions);
+        String[] labels = new String[items.size()];
+        for (int i = 0; i < labels.length; i++) labels[i] = items.get(i).getText().toString();
+        new android.app.AlertDialog.Builder(this).setTitle(renderer.currentName != null ? renderer.currentName : "Scan")
+                .setItems(labels, (d, which) -> items.get(which).performClick()).show();
     }
 
     private android.widget.ProgressBar bar(int color) {
@@ -863,42 +981,43 @@ public class MainActivity extends Activity {
     private View scanChrome; // status + buttons, hidden on the home screen
 
     private View buildHome() {
+        // Laid out like the iPhone app's Home: logo, inset-grouped cards on black, grey footers, saved scans as rows.
         home = new FrameLayout(this);
-        home.setBackgroundColor(0xFF101216);
+        home.setBackgroundColor(Ios.BACKGROUND);
         android.widget.ScrollView sv = new android.widget.ScrollView(this);
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(dp(16), dp(40), dp(16), dp(24));
-        TextView title = new TextView(this);
-        title.setText("RoomScape");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
-        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        col.addView(title);
-        TextView sub = new TextView(this);
-        sub.setText("Scan a room, plan the shot.");
-        sub.setTextColor(0xFFAAB0BA);
-        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        sub.setPadding(0, 0, 0, dp(16));
-        col.addView(sub);
-        Button newScan = new Button(this);
-        newScan.setText("+  New scan");
-        newScan.setAllCaps(false);
-        newScan.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-        newScan.setOnClickListener(v -> startNewScan());
-        col.addView(newScan, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)));
-        Button openRmsc = new Button(this); openRmsc.setText("Open a room file (.rmsc)"); openRmsc.setAllCaps(false); openRmsc.setOnClickListener(v -> pickRmsc()); col.addView(openRmsc);
-        Button browseCatalog = new Button(this); browseCatalog.setText("Browse item catalog (offline)"); browseCatalog.setOnClickListener(v -> nativePlanning.showCatalog()); col.addView(browseCatalog);
-        Button pilot = new Button(this); pilot.setText("Interested in a paid pilot? (optional)"); pilot.setAllCaps(false); pilot.setOnClickListener(v -> pilotIntake.open()); col.addView(pilot);
-        TextView saved = new TextView(this);
-        saved.setText("Saved scans");
-        saved.setTextColor(Color.WHITE);
-        saved.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-        saved.setPadding(0, dp(24), 0, dp(8));
-        col.addView(saved);
+        col.setPadding(dp(16), dp(44), dp(16), dp(28));
+        android.widget.ImageView logo = new android.widget.ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        logo.setAdjustViewBounds(true);
+        logo.setContentDescription("RoomScape");
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(120));
+        lp.gravity = Gravity.CENTER_HORIZONTAL;
+        lp.bottomMargin = dp(8);
+        col.addView(logo, lp);
+
+        col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_scan, "New room scan", true, false, v -> startNewScan())));
+        col.addView(Ios.footer(this, "Walk slowly around the room and point the phone at every wall, window, door and piece of furniture."));
+        col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_import, "Import a scan (.rmsc)", false, false, v -> pickRmsc())));
+        col.addView(Ios.footer(this, "Open a room scanned with RoomScape on another phone. Or send one from a nearby phone: open a scan there and tap Share → Send to nearby phone."));
+        col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_list, "Item catalog", false, true, v -> nativePlanning.showCatalog())));
+        col.addView(Ios.footer(this, "Lights, stands and grip you can place in a room, with sizes and power draw. Works offline."));
+
+        col.addView(Ios.header(this, "Saved scans"));
         homeList = new LinearLayout(this);
         homeList.setOrientation(LinearLayout.VERTICAL);
         col.addView(homeList);
+        col.addView(Ios.footer(this, "Touch and hold a scan to rename or delete it."));
+
+        TextView pilot = new TextView(this);
+        pilot.setText("Interested in a paid pilot?");
+        pilot.setTextColor(Ios.SECONDARY);
+        pilot.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        pilot.setGravity(Gravity.CENTER);
+        pilot.setPadding(0, dp(24), 0, dp(8));
+        pilot.setOnClickListener(v -> pilotIntake.open());
+        col.addView(pilot);
         sv.addView(col);
         home.addView(sv);
         return home;
@@ -920,7 +1039,6 @@ public class MainActivity extends Activity {
     }
 
     private void refreshHome() {
-        homeList.removeAllViews();
         new Thread(() -> {
             java.util.List<ScanStore.Entry> es = ScanStore.list(this);
             java.util.List<android.graphics.Bitmap> th = new java.util.ArrayList<>();
@@ -928,57 +1046,54 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 homeList.removeAllViews();
                 if (es.isEmpty()) {
-                    TextView t = new TextView(this);
-                    t.setText("No scans yet. Scans are saved here automatically.");
-                    t.setTextColor(0xFFAAB0BA);
-                    t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-                    homeList.addView(t);
+                    homeList.addView(Ios.card(this, Ios.row(this, 0, "No scans yet. They're saved here automatically.", false, false, null)));
                     return;
                 }
-                LinearLayout row = null;
-                for (int i = 0; i < es.size(); i++) {
-                    if (i % 2 == 0) {
-                        row = new LinearLayout(this);
-                        row.setOrientation(LinearLayout.HORIZONTAL);
-                        homeList.addView(row);
-                    }
-                    View card = scanCard(es.get(i), th.get(i));
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-                    lp.setMargins(dp(4), dp(4), dp(4), dp(8));
-                    row.addView(card, lp);
-                }
-                if (es.size() % 2 == 1) row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+                View[] rows = new View[es.size()];
+                for (int i = 0; i < es.size(); i++) rows[i] = scanRow(es.get(i), th.get(i));
+                homeList.addView(Ios.card(this, rows));
             });
         }).start();
     }
 
-    private View scanCard(ScanStore.Entry e, android.graphics.Bitmap thumb) {
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackgroundColor(0xFF1C2028);
-        c.setPadding(dp(6), dp(6), dp(6), dp(8));
+    /** A saved scan as an iPhone-style list row: thumbnail, name (and date when it has a name), chevron. */
+    private View scanRow(ScanStore.Entry e, android.graphics.Bitmap thumb) {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(dp(16), dp(8), dp(12), dp(8));
+        r.setBackground(Ios.pressable());
         android.widget.ImageView iv = new android.widget.ImageView(this);
         iv.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
-        iv.setBackgroundColor(0xFF2A2F38);
+        android.graphics.drawable.GradientDrawable tb = new android.graphics.drawable.GradientDrawable();
+        tb.setColor(Color.BLACK); tb.setCornerRadius(dp(8));
+        iv.setBackground(tb);
+        iv.setClipToOutline(true);
         if (thumb != null) iv.setImageBitmap(thumb);
-        c.addView(iv, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(200)));
+        r.addView(iv, new LinearLayout.LayoutParams(dp(88), dp(66)));
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(dp(12), 0, dp(8), 0);
+        String when = android.text.format.DateFormat.format("d MMM yyyy, HH:mm", e.modified).toString();
+        boolean named = e.name != null && !e.name.isEmpty() && !e.name.startsWith("Room ");
         TextView name = new TextView(this);
-        name.setText(e.name);
+        name.setText(named ? e.name : when);
         name.setTextColor(Color.WHITE);
-        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        name.setPadding(dp(2), dp(6), dp(2), 0);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         name.setSingleLine(true);
-        c.addView(name);
-        TextView info = new TextView(this);
-        info.setText(android.text.format.DateFormat.format("d MMM, HH:mm", e.modified) + " · " + String.format(java.util.Locale.US, "%,d", e.points) + " pts"
-                + (e.corners > 0 ? " · " + e.corners + " corners" : ""));
-        info.setTextColor(0xFF9AA0AA);
-        info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        info.setPadding(dp(2), 0, dp(2), 0);
-        c.addView(info);
-        c.setOnClickListener(v -> openScan(e));
-        c.setOnLongClickListener(v -> { scanMenu(e); return true; });
-        return c;
+        text.addView(name);
+        if (named) {
+            TextView sub = new TextView(this);
+            sub.setText(when);
+            sub.setTextColor(Ios.SECONDARY);
+            sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            text.addView(sub);
+        }
+        r.addView(text, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        r.addView(Ios.chevron(this));
+        r.setOnClickListener(v -> openScan(e));
+        r.setOnLongClickListener(v -> { scanMenu(e); return true; });
+        return r;
     }
 
     private void scanMenu(ScanStore.Entry e) {
@@ -1026,6 +1141,7 @@ public class MainActivity extends Activity {
         if (session != null) session.pause();
         scanUi();
         mainButton.setText("New scan");
+        renderer.setStyle(0); // Photo first, like the iPhone app
         glView.queueEvent(() -> renderer.loadScan(e.dir, () -> runOnUiThread(this::viewerUi)));
     }
 

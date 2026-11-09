@@ -4551,6 +4551,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return styleLabel();
     }
 
+    /** 0 = photo surface, 1 = splats, 2 = dots (the viewer's Photo | Splats | Points switch). */
+    void setStyle(int s) { style = Math.max(0, Math.min(2, s)); }
+    int style() { return style; }
+
     String styleLabel() { return style == 0 ? "Style: photo" : style == 1 ? "Style: splats" : "Style: dots"; }
 
     private void drawPoints(float[] m, float sizeScale) {

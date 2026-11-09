@@ -1,0 +1,4 @@
+<!-- Material icon (Apache 2.0), tinted with RoomScape's accent like the iPhone app's SF Symbols. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#EDB14D" android:pathData="M19,9h-4V3H9v6H5l7,7 7,-7zM5,18v2h14v-2H5z" />
+</vector>

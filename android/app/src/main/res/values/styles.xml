@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark, with the iPhone app's amber accent: dialogs, menus and pickers match the iOS look. -->
+    <style name="RoomScape" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:colorAccent">#EDB14D</item>
+        <item name="android:colorPrimary">#000000</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:alertDialogTheme">@style/RoomScape.Dialog</item>
+    </style>
+    <style name="RoomScape.Dialog" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
+        <item name="android:colorAccent">#EDB14D</item>
+    </style>
+</resources>
