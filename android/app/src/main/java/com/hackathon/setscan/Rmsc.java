@@ -196,13 +196,33 @@ final class Rmsc {
         File existing = id.isEmpty() ? null : SyncInfo.find(ctx, id);
         int outcome = NEW;
         SyncInfo prev = null;
+        boolean repair = false;
+        JSONObject counts = m.optJSONObject("counts");
+        boolean incomingHas = counts != null && (counts.optInt("points") > 0 || counts.optInt("photos") > 0);
         if (existing != null) {
             prev = SyncInfo.load(ctx, existing);
-            if (rev <= prev.revision) {
+            int lp = 0, lf = 0;
+            try { JSONObject lm = new JSONObject(text(new File(existing, "meta.json"))); lp = lm.optInt("points"); lf = lm.optInt("photos"); } catch (Exception ignored) { }
+            boolean localHas = lp > 0 || lf > 0;
+            // Data is gold: a package without points or photos never replaces a scan that has them (only its name
+            // and version are taken), and a scan that lost its data takes a full package back, whatever its version.
+            if (localHas && !incomingHas) {
+                if (rev > prev.revision) {
+                    String nm = m.optString("name", "");
+                    if (!nm.isEmpty() && !nm.startsWith("Room ")) ScanStore.rename(existing, nm);
+                    prev = SyncInfo.load(ctx, existing);
+                    prev.revision = rev; prev.revisionBy = by; prev.syncedRevision = rev;
+                }
+                if (peerId != null) { prev.shared = true; prev.peers.put(peerId, peerName); }
+                SyncInfo.save(existing, prev);
+                return new Result(existing, UNCHANGED);
+            }
+            repair = !localHas && incomingHas;
+            if (rev <= prev.revision && !repair) {
                 if (peerId != null) SyncInfo.markShared(ctx, existing, peerId, peerName, rev);
                 return new Result(existing, UNCHANGED);
             }
-            if (prev.revision > prev.syncedRevision && prev.syncedRevision > 0) {
+            if (!repair && prev.revision > prev.syncedRevision && prev.syncedRevision > 0) {
                 outcome = CONFLICT;
                 File copy = new File(existing.getParentFile(), "scan_" + System.currentTimeMillis());
                 ScanStore.copyTree(existing, copy);
@@ -217,16 +237,22 @@ final class Rmsc {
         File out = importFrom(ctx, uri);
         if (existing != null) {
             // Swap the new version into the old folder; the old one stays until the swap worked.
-            File old = new File(existing.getParentFile(), existing.getName() + ".replaced");
+            // The replaced version is kept as a backup (the last one per scan), outside the scan list.
+            File backups = new File(ctx.getFilesDir(), "scan-backups");
+            backups.mkdirs();
+            File old = new File(backups, existing.getName());
             deleteRec(old);
             if (!existing.renameTo(old)) throw new Exception("could not update the scan");
             if (!out.renameTo(existing)) { old.renameTo(existing); throw new Exception("could not update the scan"); }
-            deleteRec(old);
             out = existing;
         }
         SyncInfo si = SyncInfo.load(ctx, out);
         if (!id.isEmpty()) si.id = id;
-        si.revision = rev; si.revisionBy = by; si.syncedRevision = rev; si.modified = System.currentTimeMillis();
+        // A repaired scan gets a revision above both, so phones with the empty version take it back.
+        si.revision = repair ? Math.max(rev, prev == null ? 0 : prev.revision) + 1 : rev;
+        si.revisionBy = repair ? SyncInfo.deviceId(ctx) : by;
+        si.syncedRevision = repair ? 0 : rev;
+        si.modified = System.currentTimeMillis();
         if (prev != null) { for (java.util.Map.Entry<String, String> e : prev.peers.entrySet()) si.peers.putIfAbsent(e.getKey(), e.getValue()); si.shared |= prev.shared; }
         if (peerId != null) { si.shared = true; si.peers.put(peerId, peerName); }
         SyncInfo.save(out, si);

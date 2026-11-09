@@ -188,6 +188,13 @@ enum ScanStore {
     /// Puts `new`'s files in place of `old`'s (same name, date and place in the list) and deletes `new`'s name.
     static func replace(_ old: SavedScan, with new: SavedScan) throws -> SavedScan {
         let fm = FileManager.default
+        // Keep the version being replaced (the last one per scan) in Documents/.sync-backup/<name>/.
+        let backup = directory.appendingPathComponent(".sync-backup", isDirectory: true).appendingPathComponent(old.name, isDirectory: true)
+        try? fm.removeItem(at: backup)
+        try? fm.createDirectory(at: backup, withIntermediateDirectories: true)
+        for a in [old.modelURL, old.dataURL, old.captureURL, old.thumbnailURL, old.titleURL] where fm.fileExists(atPath: a.path) {
+            try? fm.copyItem(at: a, to: backup.appendingPathComponent(a.lastPathComponent))
+        }
         for (a, b) in [(old.modelURL, new.modelURL), (old.dataURL, new.dataURL), (old.captureURL, new.captureURL),
                        (old.thumbnailURL, new.thumbnailURL), (old.titleURL, new.titleURL)] {
             try? fm.removeItem(at: a)

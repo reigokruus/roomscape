@@ -84,8 +84,13 @@ final class ScanStore {
         if (dir == null) dir = new File(root(c), "scan_" + System.currentTimeMillis());
         // What this save changes, for syncing shared scans: a rename, or new points or photos (Continue scan).
         String before = null;
-        try { JSONObject om = new JSONObject(readText(new File(dir, "meta.json"))); before = om.optString("name") + "|" + om.optInt("points") + "|" + om.optInt("photos"); }
-        catch (Exception ignored) { }
+        try {
+            JSONObject om = new JSONObject(readText(new File(dir, "meta.json")));
+            before = om.optString("name") + "|" + om.optInt("points") + "|" + om.optInt("photos");
+            // Data is gold: never save an empty scan over one that has points or photos (a half-loaded view).
+            if (d.n == 0 && d.kfs.isEmpty() && (om.optInt("points") > 0 || om.optInt("photos") > 0))
+                throw new IllegalStateException("not saving an empty scan over " + om.optInt("points") + " points");
+        } catch (IllegalStateException e) { throw e; } catch (Exception ignored) { }
         File tmp = new File(dir.getParentFile(), dir.getName() + ".saving");
         deleteRec(tmp);
         new File(tmp, "kf").mkdirs();

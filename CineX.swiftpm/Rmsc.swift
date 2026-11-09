@@ -187,16 +187,34 @@ enum Rmsc {
         var outcome = ImportResult.Outcome.new
         var existing: SavedScan?
         var previous: SyncInfo?
+        var repair = false
+        let counts = manifest["counts"] as? [String: Any] ?? [:]
+        let incomingHasData = ((counts["points"] as? NSNumber)?.intValue ?? 0) > 0 || ((counts["photos"] as? NSNumber)?.intValue ?? 0) > 0
         if let id, let local = SyncStore.scan(withId: id) {
             let info = SyncStore.info(local)
-            if revision <= info.revision {
+            let meta = CaptureStore.loadMeta(local.captureURL)
+            let localHasData = (meta?.pointCount ?? 0) > 0 || (meta?.keyframeCount ?? 0) > 0
+            // Data is gold: a package without points or photos never replaces a scan that has them (only its name
+            // and version are taken), and a scan that lost its data takes a full package back, whatever its version.
+            if localHasData && !incomingHasData {
+                var i = info
+                if revision > i.revision {
+                    if let title = manifest["name"] as? String, !title.isEmpty, !title.hasPrefix("Room ") { _ = ScanStore.rename(local, to: title, touch: false) }
+                    i.revision = revision; i.revisionBy = by; i.syncedRevision = revision
+                }
+                if let peer { i.shared = true; i.peers[peer.id] = peer.name }
+                SyncStore.save(i, for: local)
+                return ImportResult(scan: local, outcome: revision > info.revision ? .updated : .unchanged)
+            }
+            repair = !localHasData && incomingHasData
+            if revision <= info.revision, !repair {
                 if let peer { SyncStore.markShared(local, with: peer.id, name: peer.name, synced: revision) }
                 return ImportResult(scan: local, outcome: .unchanged)
             }
             existing = local
             previous = info
             // Changed here too since the last sync: keep this phone's version as a copy under a new id.
-            if info.revision > info.syncedRevision, info.syncedRevision > 0 {
+            if !repair, info.revision > info.syncedRevision, info.syncedRevision > 0 {
                 outcome = .conflict
                 try ScanStore.duplicate(local, title: "\(local.displayName) (copy from \(Nearby.localName))")
             } else {
@@ -207,14 +225,16 @@ enum Rmsc {
         if let existing { scan = try ScanStore.replace(existing, with: scan) }
         var info = SyncStore.info(scan)
         info.id = id ?? info.id
-        info.revision = revision
-        info.revisionBy = by
+        // A repaired scan gets a revision above both, so the phones that have the empty version take it back.
+        info.revision = repair ? max(revision, previous?.revision ?? 0) + 1 : revision
+        info.revisionBy = repair ? SyncStore.deviceId : by
         info.modified = Date()
-        info.syncedRevision = revision
+        info.syncedRevision = repair ? 0 : revision
         if let previous { info.peers.merge(previous.peers) { a, _ in a }; info.shared = info.shared || previous.shared }
         if let peer { info.shared = true; info.peers[peer.id] = peer.name }
         SyncStore.save(info, for: scan)
         if existing == nil { ScanStore.invalidateThumbnail(scan) }
+        if repair { Task { @MainActor in Nearby.shared.syncSoon() } }
         return ImportResult(scan: scan, outcome: outcome)
     }
 
