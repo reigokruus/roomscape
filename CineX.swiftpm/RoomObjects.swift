@@ -115,7 +115,11 @@ enum RoomObjects {
 
     static func save(_ file: ObjectsFile, for scan: SavedScan) {
         try? FileManager.default.createDirectory(at: scan.captureURL, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(file) { try? data.write(to: url(scan), options: .atomic) }
+        let old = try? Data(contentsOf: url(scan))
+        if let data = try? JSONEncoder().encode(file) {
+            try? data.write(to: url(scan), options: .atomic)
+            if let old, data != old { SyncStore.touch(scan) } // an edit: syncs to the phones it's shared with
+        }
     }
 
     /// RoomPlan's own furniture: accurate 3D boxes, no Claude needed.

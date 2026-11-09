@@ -228,7 +228,7 @@ extension HomeView {
             let result = await Task.detached(priority: .userInitiated) { () -> Result<SavedScan, Error> in
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                return Result { try Rmsc.importScan(from: url) }
+                return Result { try Rmsc.importScan(from: url).scan }
             }.value
             importing = false
             switch result {
@@ -251,6 +251,9 @@ extension HomeView {
 private struct ScanThumbnailView: View {
     let scan: SavedScan
     @State private var image: UIImage?
+    @State private var shared = false
+    /// Changes when a synced update arrives, so the thumbnail is read again.
+    @ObservedObject private var nearby = Nearby.shared
 
     var body: some View {
         ZStack {
@@ -263,8 +266,13 @@ private struct ScanThumbnailView: View {
         }
         .frame(width: 88, height: 66)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .task(id: scan.id) {
+        // Shared rooms (synced with other phones): a small badge in the corner.
+        .overlay(alignment: .bottomTrailing) {
+            if shared { SharedBadge().padding(3) }
+        }
+        .task(id: "\(scan.id)-\(nearby.received?.scan.id ?? "")") {
             let scan = scan
+            shared = await Task.detached(priority: .utility) { SyncStore.info(scan).shared }.value
             image = await Task.detached(priority: .utility) { () -> UIImage? in
                 guard let url = ScanStore.ensureThumbnail(scan) else { return nil }
                 return UIImage(contentsOfFile: url.path)
@@ -294,4 +302,16 @@ struct RenameRoomAlert: ViewModifier {
 struct ScanRequest: Identifiable {
     let id = UUID()
     let improving: SavedScan?
+}
+
+/// The "shared" mark: this room syncs with other phones.
+struct SharedBadge: View {
+    var body: some View {
+        Image(systemName: "person.2.fill")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.black)
+            .padding(4)
+            .background(Color.accentColor, in: Circle())
+            .accessibilityLabel("Shared")
+    }
 }

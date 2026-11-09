@@ -696,15 +696,15 @@ public class MainActivity extends Activity {
         if (viewerTop != null) {
             viewerTop.setVisibility(viewer ? View.VISIBLE : View.GONE);
             styleSwitch.setVisibility(viewer ? View.VISIBLE : View.GONE);
-            viewerBottom.setVisibility(viewer ? View.VISIBLE : View.GONE);
+            viewerPanel.setVisibility(viewer ? View.VISIBLE : View.GONE);
             viewerTitle.setText(renderer.currentName != null ? renderer.currentName : "Scan");
             nameValue.setText(renderer.currentName != null ? renderer.currentName : "Add a name");
             String size = renderer.roomSizeText();
             sizeValue.setText(size != null ? size : "—");
             updateStyleSwitch();
             // The tool buttons sit just above Continue scan in the viewer.
-            viewerBottom.post(() -> {
-                int want = viewer ? viewerBottom.getHeight() + dp(4) : dp(56);
+            viewerPanel.post(() -> {
+                int want = viewer ? viewerPanel.getHeight() + dp(4) : dp(56);
                 if (toolBarsLp.bottomMargin != want) { toolBarsLp.bottomMargin = want; toolBars.setLayoutParams(toolBarsLp); }
             });
         }
@@ -721,6 +721,8 @@ public class MainActivity extends Activity {
 
     private LinearLayout viewerTop, viewerBottom, styleSwitch;
     private View toolBars;
+    /** The scrolling panel under the 3D view (holds viewerBottom). */
+    private android.widget.ScrollView viewerPanel;
     private FrameLayout.LayoutParams toolBarsLp;
     private TextView viewerTitle;
     private final java.util.List<Button> menuActions = new java.util.ArrayList<>();
@@ -812,9 +814,20 @@ public class MainActivity extends Activity {
         sizeValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         sizeRow.addView(sizeValue);
         viewerBottom.addView(Ios.card(this, nameRow, sizeRow));
-        chrome.addView(viewerBottom, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+        // Below the 3D view, like the iPhone's list: an opaque panel that scrolls, at most ~45% of the screen.
+        viewerBottom.setBackgroundColor(Ios.BACKGROUND);
+        viewerPanel = new android.widget.ScrollView(this) {
+            @Override protected void onMeasure(int w, int h) {
+                int max = (int) (getResources().getDisplayMetrics().heightPixels * 0.45f);
+                super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST));
+            }
+        };
+        viewerPanel.setBackgroundColor(Ios.BACKGROUND);
+        viewerPanel.setFillViewport(false);
+        viewerPanel.addView(viewerBottom);
+        chrome.addView(viewerPanel, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
         buildWalkChrome(chrome);
-        blockTouches(viewerTop, styleSwitch, viewerBottom, toolBars, walkControls);
+        blockTouches(viewerTop, styleSwitch, walkControls);
     }
 
     // ---------------- Enter the room (first person), as on the iPhone ----------------
@@ -911,7 +924,7 @@ public class MainActivity extends Activity {
         if (state == 0) glView.queueEvent(renderer::exitWalk);
         if (objPanel.getVisibility() == View.VISIBLE) setObjectMode(false);
         boolean viewerChrome = state == 0;
-        viewerBottom.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
+        viewerPanel.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
         toolBars.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
         styleSwitch.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
         walkHint.setVisibility(state == 1 ? View.VISIBLE : View.GONE);
@@ -1154,7 +1167,12 @@ public class MainActivity extends Activity {
         android.widget.ScrollView sv = new android.widget.ScrollView(this);
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(dp(16), dp(44), dp(16), dp(28));
+        col.setPadding(dp(16), dp(48), dp(16), dp(28));
+        // Below the status bar (whatever its height), plus the iPhone's spacing.
+        col.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(dp(16), insets.getSystemWindowInsetTop() + dp(48), dp(16), dp(28) + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
         android.widget.ImageView logo = new android.widget.ImageView(this);
         logo.setImageResource(R.drawable.logo);
         logo.setAdjustViewBounds(true);
@@ -1243,14 +1261,16 @@ public class MainActivity extends Activity {
         text.setOrientation(LinearLayout.VERTICAL);
         text.setPadding(dp(12), 0, dp(8), 0);
         String when = android.text.format.DateFormat.format("d MMM yyyy, HH:mm", e.modified).toString();
+        // Unnamed scans are called "Room <date>" (made here, or by an iPhone export): show just their own date.
         boolean named = e.name != null && !e.name.isEmpty() && !e.name.startsWith("Room ");
+        if (!named && e.name != null && e.name.startsWith("Room ")) when = e.name.substring(5);
         TextView name = new TextView(this);
         name.setText(named ? e.name : when);
         name.setTextColor(Color.WHITE);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         name.setSingleLine(true);
         text.addView(name);
-        if (named) {
+        if (false) {
             TextView sub = new TextView(this);
             sub.setText(when);
             sub.setTextColor(Ios.SECONDARY);
@@ -1320,7 +1340,7 @@ public class MainActivity extends Activity {
 
     private void saveScan() {
         String def = renderer.currentName != null ? renderer.currentName
-                : "Room " + android.text.format.DateFormat.format("d MMM HH:mm", System.currentTimeMillis());
+                : "Room " + android.text.format.DateFormat.format("d MMM yyyy, HH:mm", System.currentTimeMillis());
         askName("Save scan as", def, name -> {
             updateStatus("Saving \"" + name + "\"...");
             File dir = renderer.currentDir;

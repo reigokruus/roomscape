@@ -117,9 +117,12 @@ enum Rmsc {
 
         // Manifest.
         let iso = ISO8601DateFormatter()
+        let sync = SyncStore.info(scan)
         var manifest: [String: Any] = [
             "format": "rmsc", "version": 1,
-            "name": scan.title ?? scan.defaultDisplayName,
+            "id": sync.id, "revision": sync.revision, "revisionBy": sync.revisionBy,
+            // Unnamed: "Room <date>" in one fixed format, which Android also uses and shows as just the date.
+            "name": scan.title ?? "Room " + { let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "d MMM yyyy, HH:mm"; return f.string(from: scan.date) }(),
             "created": iso.string(from: scan.date),
             "modified": iso.string(from: Date()),
             "source": ["platform": "ios", "app": "RoomScape",
@@ -164,12 +167,60 @@ enum Rmsc {
 
     // MARK: Import
 
-    /// Makes a new saved scan from a .rmsc file (never overwrites one). Slow: call off the main thread.
-    static func importScan(from url: URL) throws -> SavedScan {
+    struct ImportResult {
+        enum Outcome { case new, updated, unchanged, conflict }
+        var scan: SavedScan
+        var outcome: Outcome
+    }
+
+    /// Imports a .rmsc. A package whose `id` matches a scan here updates that scan in place when it's a newer
+    /// revision (if both sides changed it, this phone's version is kept as a copy first: data is never lost);
+    /// anything else becomes a new scan. `peer` is the phone it came from (the scan is then shared with it).
+    /// Slow: call off the main thread.
+    static func importScan(from url: URL, peer: (id: String, name: String)? = nil) throws -> ImportResult {
         let zip = try Zip.Reader(url: url)
         guard let manifestData = try zip.read("manifest.json"),
-              let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
-              manifest["format"] as? String == "rmsc" else { throw Failure.notRmsc }
+              let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any] else { throw Failure.notRmsc }
+        let id = manifest["id"] as? String
+        let revision = (manifest["revision"] as? NSNumber)?.intValue ?? 1
+        let by = manifest["revisionBy"] as? String ?? peer?.id ?? ""
+        var outcome = ImportResult.Outcome.new
+        var existing: SavedScan?
+        var previous: SyncInfo?
+        if let id, let local = SyncStore.scan(withId: id) {
+            let info = SyncStore.info(local)
+            if revision <= info.revision {
+                if let peer { SyncStore.markShared(local, with: peer.id, name: peer.name, synced: revision) }
+                return ImportResult(scan: local, outcome: .unchanged)
+            }
+            existing = local
+            previous = info
+            // Changed here too since the last sync: keep this phone's version as a copy under a new id.
+            if info.revision > info.syncedRevision, info.syncedRevision > 0 {
+                outcome = .conflict
+                try ScanStore.duplicate(local, title: "\(local.displayName) (copy from \(Nearby.localName))")
+            } else {
+                outcome = .updated
+            }
+        }
+        var scan = try importNew(from: url, zip: zip, manifest: manifest)
+        if let existing { scan = try ScanStore.replace(existing, with: scan) }
+        var info = SyncStore.info(scan)
+        info.id = id ?? info.id
+        info.revision = revision
+        info.revisionBy = by
+        info.modified = Date()
+        info.syncedRevision = revision
+        if let previous { info.peers.merge(previous.peers) { a, _ in a }; info.shared = info.shared || previous.shared }
+        if let peer { info.shared = true; info.peers[peer.id] = peer.name }
+        SyncStore.save(info, for: scan)
+        if existing == nil { ScanStore.invalidateThumbnail(scan) }
+        return ImportResult(scan: scan, outcome: outcome)
+    }
+
+    /// Makes a new saved scan from a .rmsc file. Slow: call off the main thread.
+    private static func importNew(from url: URL, zip: Zip.Reader, manifest: [String: Any]) throws -> SavedScan {
+        guard manifest["format"] as? String == "rmsc" else { throw Failure.notRmsc }
         if let v = manifest["version"] as? Int, v > 1 { throw Failure.newerVersion(v) }
         let fm = FileManager.default
 
@@ -271,7 +322,7 @@ enum Rmsc {
 
             let meta = CaptureMeta(pointCount: points.count, keyframeCount: records.count, voxelSize: LiveCloud.voxel)
             try encoder.encode(meta).write(to: folder.appendingPathComponent("meta.json"))
-            if let title = manifest["name"] as? String, !title.isEmpty { scan = ScanStore.rename(scan, to: title) }
+            if let title = manifest["name"] as? String, !title.isEmpty { scan = ScanStore.rename(scan, to: title, touch: false) }
             return scan
         } catch {
             ScanStore.delete(scan)

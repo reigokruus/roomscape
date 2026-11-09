@@ -30,10 +30,17 @@ final class Nearby: ObservableObject {
 
     @Published var peers: [Peer] = []
     @Published var request: Request?
-    /// Set when a scan was imported (shown briefly on Home).
+    /// Set when a scan arrived or was updated (shown briefly on Home): the scan, the note to show.
     @Published var received: (scan: SavedScan, from: String)?
+    /// Every RoomScape phone seen on the network while the app is open (for syncing shared scans), by device id.
+    private var allPeers: [String: Peer] = [:]
+    private var syncing = false
+    private var syncTimer: Timer?
+    private var syncPending = false
 
     let deviceId: String
+    /// This phone's name, for code off the main actor.
+    nonisolated static var localName: String { UserDefaults.standard.string(forKey: "nearbyName") ?? "this phone" }
     /// What other phones see: the name the user gave this phone ("RK's iPhone"). iOS only tells apps "iPhone".
     @Published var deviceName: String
     /// True until the user has named this phone.
@@ -91,11 +98,19 @@ final class Nearby: ObservableObject {
         } catch {
             print("nearby: listener failed: \(error)")
         }
+        browse()
+        syncTimer?.invalidate()
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in Task { @MainActor in Nearby.shared.syncSoon() } }
     }
 
     func stop() {
         listener?.cancel()
         listener = nil
+    }
+
+    /// A phone this one already shares a scan with, or was told to always accept: may read and update shared scans.
+    private func knows(_ id: String) -> Bool {
+        trusted.contains(id) || SyncStore.sharedScans().contains { $0.info.peers[id] != nil }
     }
 
     private func serve(_ connection: NWConnection) {
@@ -104,31 +119,50 @@ final class Nearby: ObservableObject {
         HTTP.readRequest(connection, bodyTo: file) { [weak self] head in
             Task { @MainActor in
                 guard let self else { return }
-                guard let head, head.method == "POST", head.path == "/rmsc" else {
-                    HTTP.respond(connection, 400, "Bad request"); try? FileManager.default.removeItem(at: file); return
-                }
+                guard let head else { HTTP.respond(connection, 400, "Bad request"); return }
                 let id = head.headers["x-device-id"] ?? "unknown"
                 let name = head.headers["x-device-name"] ?? "A phone"
+                // Sync: the shared scans and their revisions, and a shared scan's package, for phones it's shared with.
+                if head.method == "GET" {
+                    guard self.knows(id) else { HTTP.respond(connection, 403, "Unknown phone"); return }
+                    if head.path == "/scans" {
+                        let list = SyncStore.sharedScans().map { ["id": $0.info.id, "revision": $0.info.revision,
+                                                                  "modified": ISO8601DateFormatter().string(from: $0.info.modified)] as [String: Any] }
+                        HTTP.respond(connection, 200, data: (try? JSONSerialization.data(withJSONObject: list)) ?? Data("[]".utf8), type: "application/json")
+                    } else if head.path.hasPrefix("/rmsc/"), let scan = SyncStore.scan(withId: String(head.path.dropFirst(6))), SyncStore.info(scan).shared {
+                        Task.detached(priority: .utility) {
+                            let data = (try? Rmsc.export(scan)).flatMap { try? Data(contentsOf: $0) }
+                            if let data { HTTP.respond(connection, 200, data: data, type: "application/vnd.roomscape.rmsc+zip") }
+                            else { HTTP.respond(connection, 500, "Couldn't pack the scan") }
+                        }
+                    } else {
+                        HTTP.respond(connection, 404, "Not found")
+                    }
+                    return
+                }
+                guard head.method == "POST", head.path == "/rmsc", FileManager.default.fileExists(atPath: file.path) else {
+                    HTTP.respond(connection, 400, "Bad request"); try? FileManager.default.removeItem(at: file); return
+                }
                 let fileName = head.headers["x-file-name"] ?? "scan.rmsc"
                 let finish: (Bool) -> Void = { accept in
                     guard accept else {
                         HTTP.respond(connection, 403, "Declined"); try? FileManager.default.removeItem(at: file); return
                     }
                     Task.detached(priority: .userInitiated) {
-                        let result = Result { try Rmsc.importScan(from: file) }
+                        let result = Result { try Rmsc.importScan(from: file, peer: (id, name)) }
                         try? FileManager.default.removeItem(at: file)
                         await MainActor.run {
                             switch result {
-                            case .success(let scan):
+                            case .success(let r):
                                 HTTP.respond(connection, 200, "OK")
-                                self.received = (scan, name)
+                                self.note(r, from: name)
                             case .failure(let error):
                                 HTTP.respond(connection, 422, error.localizedDescription)
                             }
                         }
                     }
                 }
-                if self.trusted.contains(id) {
+                if self.knows(id) {
                     finish(true)
                 } else {
                     self.request = Request(deviceId: id, deviceName: name, fileName: fileName) { [weak self] answer in
@@ -145,9 +179,71 @@ final class Nearby: ObservableObject {
         request.answer(answer)
     }
 
+    /// Shows what a received package did: a new scan, an update, or an update plus a kept copy.
+    private func note(_ r: Rmsc.ImportResult, from name: String) {
+        switch r.outcome {
+        case .new: received = (r.scan, "Scan received from \(name)")
+        case .updated: received = (r.scan, "Updated from \(name)")
+        case .conflict: received = (r.scan, "Updated from \(name); your changes kept as a copy")
+        case .unchanged: break
+        }
+    }
+
+    // MARK: Syncing shared scans
+
+    /// Syncs shared scans with the phones around in a moment (after a change, or when a phone appears).
+    func syncSoon() {
+        guard !syncPending else { return }
+        syncPending = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            syncPending = false
+            await syncAll()
+        }
+    }
+
+    /// For every known phone around: compare the shared scans both have, pull newer ones, push ours where newer.
+    private func syncAll() async {
+        guard !syncing else { return }
+        syncing = true
+        defer { syncing = false }
+        let mine = SyncStore.sharedScans()
+        guard !mine.isEmpty else { return }
+        for peer in allPeers.values where knows(peer.id) {
+            guard let (status, data) = await HTTP.fetch(peer.endpoint, "GET", "/scans", headers: headers()), status == 200,
+                  let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { continue }
+            for item in list {
+                guard let id = item["id"] as? String, let theirs = item["revision"] as? Int,
+                      let local = mine.first(where: { $0.info.id == id }) else { continue }
+                let ours = SyncStore.info(local.scan).revision
+                if theirs > ours {
+                    guard let (s, pkg) = await HTTP.fetch(peer.endpoint, "GET", "/rmsc/\(id)", headers: headers()), s == 200 else { continue }
+                    let file = FileManager.default.temporaryDirectory.appendingPathComponent("sync-\(UUID().uuidString).rmsc")
+                    guard (try? pkg.write(to: file)) != nil else { continue }
+                    let result = await Task.detached(priority: .utility) { try? Rmsc.importScan(from: file, peer: (peer.id, peer.name)) }.value
+                    try? FileManager.default.removeItem(at: file)
+                    if let result { note(result, from: peer.name) }
+                } else if ours > theirs {
+                    guard let file = await Task.detached(priority: .utility, operation: { try? Rmsc.export(local.scan) }).value,
+                          let body = try? Data(contentsOf: file) else { continue }
+                    var h = headers()
+                    h["Content-Type"] = "application/vnd.roomscape.rmsc+zip"
+                    h["X-File-Name"] = file.lastPathComponent.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "scan.rmsc"
+                    if let (s, _) = await HTTP.fetch(peer.endpoint, "POST", "/rmsc", headers: h, body: body), s == 200 {
+                        SyncStore.markShared(local.scan, with: peer.id, name: peer.name, synced: ours)
+                    }
+                }
+            }
+        }
+    }
+
+    private func headers() -> [String: String] {
+        ["X-Device-Id": deviceId, "X-Device-Name": deviceName.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(.init(charactersIn: " -_."))) ?? "phone"]
+    }
+
     // MARK: Sending
 
-    /// Looks for other RoomScape phones while the send sheet is open.
+    /// Looks for other RoomScape phones while the app is open (the send sheet lists them; sync uses them).
     func browse() {
         guard browser == nil else { return }
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: .tcp)
@@ -163,18 +259,19 @@ final class Nearby: ObservableObject {
             }
             Task { @MainActor in
                 guard let self else { return }
-                self.peers = found.filter { $0.id != self.deviceId }.sorted { $0.name < $1.name }
+                let others = found.filter { $0.id != self.deviceId }
+                let fresh = others.contains { self.allPeers[$0.id] == nil }
+                self.peers = others.sorted { $0.name < $1.name }
+                self.allPeers = Dictionary(others.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                if fresh { self.syncSoon() }
             }
         }
         browser.start(queue: queue)
         self.browser = browser
     }
 
-    func stopBrowsing() {
-        browser?.cancel()
-        browser = nil
-        peers = []
-    }
+    /// The send sheet closed: browsing goes on in the background for sync.
+    func stopBrowsing() {}
 
     enum SendResult { case sent, declined, failed(String) }
 
@@ -249,7 +346,9 @@ enum HTTP {
                         .removingPercentEncoding ?? ""
                 }
                 let head = Head(method: first[0], path: first[1], headers: headers)
-                guard let length = Int(headers["content-length"] ?? ""), length > 0, length < 1_000_000_000 else { done(nil); return }
+                let length = Int(headers["content-length"] ?? "") ?? 0
+                if length == 0 { done(head); return } // GET: no body
+                guard length < 1_000_000_000 else { done(nil); return }
                 FileManager.default.createFile(atPath: file.path, contents: nil)
                 guard let out = try? FileHandle(forWritingTo: file) else { done(nil); return }
                 let start = buffer[end.upperBound...]
@@ -271,9 +370,63 @@ enum HTTP {
     }
 
     static func respond(_ c: NWConnection, _ status: Int, _ text: String) {
-        let body = Data(text.utf8)
-        let head = "HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r\nContent-Type: text/plain\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        respond(c, status, data: Data(text.utf8), type: "text/plain")
+    }
+
+    static func respond(_ c: NWConnection, _ status: Int, data body: Data, type: String) {
+        let head = "HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         c.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in c.cancel() })
+    }
+
+    /// One request to a nearby phone; the reply's status and body (read whole). Nil if it couldn't connect.
+    static func fetch(_ endpoint: NWEndpoint, _ method: String, _ path: String, headers: [String: String], body: Data? = nil) async -> (Int, Data)? {
+        await withCheckedContinuation { continuation in
+            let c = NWConnection(to: endpoint, using: .tcp)
+            var done = false
+            func finish(_ r: (Int, Data)?) {
+                guard !done else { return }
+                done = true
+                c.cancel()
+                continuation.resume(returning: r)
+            }
+            c.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    var head = "\(method) \(path) HTTP/1.1\r\nHost: roomscape\r\nContent-Length: \(body?.count ?? 0)\r\nConnection: close\r\n"
+                    for (k, v) in headers { head += "\(k): \(v)\r\n" }
+                    c.send(content: Data((head + "\r\n").utf8) + (body ?? Data()), completion: .contentProcessed { _ in })
+                    var buffer = Data()
+                    func read() {
+                        c.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, complete, error in
+                            if let data { buffer.append(data) }
+                            if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                                let lines = String(decoding: buffer[buffer.startIndex..<end.lowerBound], as: UTF8.self).components(separatedBy: "\r\n")
+                                let status = Int(lines.first?.split(separator: " ").dropFirst().first ?? "") ?? 0
+                                let length = lines.compactMap { l -> Int? in
+                                    let p = l.split(separator: ":", maxSplits: 1)
+                                    return p.count == 2 && p[0].lowercased() == "content-length" ? Int(p[1].trimmingCharacters(in: .whitespaces)) : nil
+                                }.first
+                                let bodyBytes = buffer.count - (end.upperBound - buffer.startIndex)
+                                if let length, bodyBytes >= length {
+                                    finish((status, Data(buffer[end.upperBound..<(end.upperBound + length)]))); return
+                                }
+                                if complete || error != nil { finish((status, Data(buffer[end.upperBound...]))); return }
+                            } else if complete || error != nil {
+                                finish(nil); return
+                            }
+                            read()
+                        }
+                    }
+                    read()
+                case .failed, .cancelled:
+                    finish(nil)
+                default:
+                    break
+                }
+            }
+            c.start(queue: DispatchQueue(label: "RoomScape.nearby.fetch"))
+            DispatchQueue.global().asyncAfter(deadline: .now() + 180) { finish(nil) }
+        }
     }
 
     /// The status code of a reply, or nil if the connection ended first.
@@ -369,7 +522,10 @@ struct SendNearbySheet: View {
             let result = await Nearby.shared.send(file, to: peer, deviceId: id, deviceName: name)
             sending = nil
             switch result {
-            case .sent: status = "Sent. It's open as a new scan on \(peer.name)."
+            case .sent:
+                status = "Sent. It's in \(peer.name)'s scans, and changes on either phone now sync."
+                let rev = SyncStore.info(scan).revision
+                SyncStore.markShared(scan, with: peer.id, name: peer.name, synced: rev)
             case .declined: status = "\(peer.name) declined the scan."
             case .failed(let why): status = "Couldn't send: \(why)"
             }

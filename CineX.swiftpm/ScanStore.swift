@@ -103,9 +103,11 @@ enum ScanStore {
             .sorted { $0.date > $1.date }
     }
 
-    /// Names the scan (an empty name goes back to the date) and returns it with the new title.
+    /// Names the scan (an empty name goes back to the date) and returns it with the new title. A rename is a change
+    /// that syncs to the phones the scan is shared with (`touch`).
     @discardableResult
-    static func rename(_ scan: SavedScan, to title: String) -> SavedScan {
+    static func rename(_ scan: SavedScan, to title: String, touch: Bool = true) -> SavedScan {
+        defer { if touch { SyncStore.touch(scan) } }
         var renamed = scan
         renamed.title = cleanTitle(title)
         if let t = renamed.title {
@@ -181,6 +183,33 @@ enum ScanStore {
     static func loadTrainedSurfels(_ scan: SavedScan) -> [SurfelRecord]? {
         guard let splats = Surfels.read(from: trainedSurfelsURL(scan)), !splats.isEmpty else { return nil }
         return splats
+    }
+
+    /// Puts `new`'s files in place of `old`'s (same name, date and place in the list) and deletes `new`'s name.
+    static func replace(_ old: SavedScan, with new: SavedScan) throws -> SavedScan {
+        let fm = FileManager.default
+        for (a, b) in [(old.modelURL, new.modelURL), (old.dataURL, new.dataURL), (old.captureURL, new.captureURL),
+                       (old.thumbnailURL, new.thumbnailURL), (old.titleURL, new.titleURL)] {
+            try? fm.removeItem(at: a)
+            if fm.fileExists(atPath: b.path) { try fm.moveItem(at: b, to: a) }
+        }
+        var scan = old
+        scan.title = (try? String(contentsOf: old.titleURL, encoding: .utf8)).flatMap(cleanTitle)
+        return scan
+    }
+
+    /// A copy of the scan under a new name and a new sync id (kept when a synced update would replace it).
+    static func duplicate(_ scan: SavedScan, title: String) throws {
+        let fm = FileManager.default
+        let name = newScanName(Date())
+        let copy = SavedScan(name: name, modelURL: directory.appendingPathComponent(name + ".usdz"),
+                             dataURL: directory.appendingPathComponent(name + ".json"), date: Date())
+        for (a, b) in [(scan.modelURL, copy.modelURL), (scan.dataURL, copy.dataURL), (scan.captureURL, copy.captureURL),
+                       (scan.thumbnailURL, copy.thumbnailURL)] where fm.fileExists(atPath: a.path) {
+            try fm.copyItem(at: a, to: b)
+        }
+        try? fm.removeItem(at: SyncStore.url(copy)) // a new identity
+        _ = rename(copy, to: title, touch: false)
     }
 
     static func delete(_ scan: SavedScan) {

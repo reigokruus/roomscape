@@ -155,6 +155,7 @@ extension ScanStore {
         for name in rebuiltFiles { try? fm.removeItem(at: folder.appendingPathComponent(name)) }
         ImproveHistory.record(Date(), for: scan)
         invalidateThumbnail(scan) // the photo room grew: show the new one on Home
+        SyncStore.touch(scan)
         // The pass's own map is only in the saved scan's coordinates when nothing had to be mapped back.
         // The pass's map was moved onto the saved scan by the hand-off guess (see `ScanController.finish`): it replaces
         // the saved map (and so covers the new areas too) when the fit agrees with that guess within 10 cm and 3°.

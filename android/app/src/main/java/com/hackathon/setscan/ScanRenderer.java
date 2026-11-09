@@ -5045,11 +5045,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
-        objects.draw(mvp, height, proj[5] * height / 2f);
-        if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
+        // A thumbnail frame shows just the room: no labels, markers or props.
+        boolean clean = photoThumbWanted && photos.ready && style == 0 && !walking && meshTris > 0 && currentDir != null;
+        if (!clean) objects.draw(mvp, height, proj[5] * height / 2f);
+        if (clean) { }
+        else if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
         else { drawProps(mvp); if (roomReady && overlays && !planningPreview) drawRoom(mvp, simple); }
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        if (clean) { System.arraycopy(mvp, 0, viewMvp, 0, 16); photoThumbWanted = false; savePhotoThumb(); return; }
         if (overlays) drawPath(mvp);
         drawOutlets(mvp);
         drawInterview(mvp);
@@ -5057,7 +5061,6 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (lighting.enabled) drawLightGizmos(mvp);
         else if (plan != null && overlays) drawPlan(mvp, plan);
         if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
-        if (photoThumbWanted && photos.ready && style == 0 && !walking && meshTris > 0 && currentDir != null) { photoThumbWanted = false; savePhotoThumb(); }
     }
 
     private FloatBuffer scratch = ByteBuffer.allocateDirect(4096 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();

@@ -183,6 +183,11 @@ struct ResultView: View {
                     Label("Plan a Shoot", systemImage: "sparkles")
                 }
             }
+            if SyncStore.info(current).shared {
+                Image(systemName: "person.2.fill")
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityLabel("Shared: syncs with other phones")
+            }
             if exportingGLB {
                 ProgressView()
             } else if photoRoom != nil || capture != nil {
