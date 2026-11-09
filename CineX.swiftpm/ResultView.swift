@@ -286,6 +286,7 @@ struct ResultView: View {
                 if let photo {
                     scene.rootNode.addChildNode(photo)
                     photoRoom = photo
+                    style = .photo
                     showStyle(style)
                 }
             }
@@ -332,7 +333,8 @@ struct ResultView: View {
             scene.rootNode.addChildNode(lightingScene.root)
             self.lightingScene = lightingScene
             self.shell = shell
-            style = .mesh
+            // Photo is the default look: the photo room, or the splats in their scanned colours.
+            style = .photo
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
             #endif
