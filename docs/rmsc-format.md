@@ -83,6 +83,27 @@ Only `format`, `version` and `name` are required; everything else is optional. `
   - otherwise it builds its own view from `points.ply`, `photos` and `depth`.
 - **Continue scan works across platforms** by geometric alignment against `points.ply` (Android's ContinueAlign; iOS needs the same fallback). The iOS world map only helps on iOS.
 
+### Power outlets (`outlets` in manifest.json)
+
+Optional, version 1. These are power outlets found in the room, for example by the Android app's Claude photo search:
+
+```json
+"outlets": [
+  { "kind": "outlet", "count": 2, "position": [1.2, 0.04, -0.8], "heightAboveFloor": 0.04,
+    "views": 3, "source": "claude" }
+]
+```
+
+- `kind` is one of `outlet`, `power strip` or `floor socket`.
+- `count` is the number of sockets.
+- `position` is in the package's coordinates, like everything else.
+- `heightAboveFloor` is metres above `floorY`.
+- `views` (how many photos showed it) and `source` are optional.
+
+Apps show each outlet as a label, e.g. "Outlet ×2 · 4 cm up", and count them in the room summary. A found outlet is a
+change, so it raises the scan's `revision` and syncs. When a synced update replaces a scan, the outlets of both versions
+are merged: within 15 cm counts as the same outlet. An update without outlets never erases them.
+
 ## Sending to a nearby phone
 
 Inside the RoomScape apps only (not the system share sheet): a scan's own menu has **Send to nearby phone**, and the

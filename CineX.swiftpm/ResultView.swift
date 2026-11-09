@@ -27,6 +27,8 @@ struct ResultView: View {
     /// The scan's photos painted onto its fused mesh (`PhotoRoom`): what Photo shows when the scan has both; else the
     /// splats in their scanned colours.
     @State private var photoRoom: SCNNode?
+    /// Power outlets in the room (from .rmsc: the Android app's Claude search), shown as labels in the 3D view.
+    @State private var outlets: [RoomOutlet] = []
     /// "Enter the room": picking where to stand, then standing there (first person). See `RoomSceneView`.
     @State private var walk: WalkState = .off
     /// Held ▲ (+1) or ▼ (-1) while standing in the room.
@@ -162,7 +164,7 @@ struct ResultView: View {
                                 newTitle = current.title ?? ""
                                 renaming = true
                             }, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
-                            onImprove: WorldMapStore.exists(scan) ? onImprove : nil)
+                            onImprove: WorldMapStore.exists(scan) ? onImprove : nil, outletCount: outlets.count)
                     .frame(maxHeight: .infinity)
             }
         }
@@ -291,6 +293,17 @@ struct ResultView: View {
                 let windows = await Task.detached(priority: .userInitiated) { WindowDetection.load(scan, room: room) }.value
                 foundWindows = windows
                 scene.rootNode.addChildNode(WindowDetection.node(windows, room: room))
+            }
+
+            // Power outlets, as orange labels in every view (like the Android app).
+            if let scene {
+                let found = await Task.detached(priority: .utility) { OutletStore.load(scan) }.value
+                outlets = found
+                if !found.isEmpty {
+                    // RoomPlan's floor; scans imported without one were moved so their floor is at 0.
+                    let floor = room.map { RoomShell(room: $0).floorY } ?? 0
+                    scene.rootNode.addChildNode(OutletStore.node(found, floorY: floor))
+                }
             }
 
             // Photo room, when the scan has a mesh and photos: built in the background, shown by Photo.
@@ -1232,6 +1245,8 @@ struct RoomSummary: View {
     var objects: [RoomObject] = []
     var improved: [Date] = []
     var onImprove: (() -> Void)?
+    /// Power outlets found in the room (synced from the Android app's search).
+    var outletCount = 0
 
     private var missedWindows: [WindowFinder.Found] { foundWindows.filter { !$0.matchesRoomPlan } }
 
@@ -1273,6 +1288,9 @@ struct RoomSummary: View {
                 LabeledContent("Walls", value: "\(room.walls.count)")
                 LabeledContent("Windows (natural light)", value: "\(room.windows.count + missedWindows.count)")
                 LabeledContent("Doors", value: "\(room.doors.count)")
+                if outletCount > 0 {
+                    LabeledContent("Power outlets", value: "\(outletCount)")
+                }
                 if !room.openings.isEmpty {
                     LabeledContent("Openings", value: "\(room.openings.count)")
                 }

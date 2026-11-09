@@ -86,7 +86,8 @@ final class ScanStore {
         String before = null;
         try {
             JSONObject om = new JSONObject(readText(new File(dir, "meta.json")));
-            before = om.optString("name") + "|" + om.optInt("points") + "|" + om.optInt("photos");
+            JSONArray oo = om.optJSONArray("outlets");
+            before = om.optString("name") + "|" + om.optInt("points") + "|" + om.optInt("photos") + "|" + (oo == null ? 0 : oo.length());
             // Data is gold: never save an empty scan over one that has points or photos (a half-loaded view).
             if (d.n == 0 && d.kfs.isEmpty() && (om.optInt("points") > 0 || om.optInt("photos") > 0))
                 throw new IllegalStateException("not saving an empty scan over " + om.optInt("points") + " points");
@@ -152,7 +153,9 @@ final class ScanStore {
         if (dir.exists() && !dir.renameTo(old)) throw new Exception("could not replace the old save");
         if (!tmp.renameTo(dir)) throw new Exception("could not write the save");
         deleteRec(old);
-        String after = d.name + "|" + d.n + "|" + d.kfs.size();
+        int outletsAfter = 0;
+        try { if (d.outlets != null) outletsAfter = new JSONArray(d.outlets).length(); } catch (Exception ignored) { }
+        String after = d.name + "|" + d.n + "|" + d.kfs.size() + "|" + outletsAfter; // found outlets count as a change too
         if (before != null && !before.equals(after) && SyncInfo.file(dir).exists()) SyncInfo.touch(c, dir);
         return dir;
     }

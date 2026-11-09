@@ -142,6 +142,8 @@ final class Rmsc {
         room.put("corners", cs);
         if (d.lux > 0) room.put("lux", d.lux);
         m.put("room", room);
+        JSONArray shared = sharedOutlets(d.outlets, floorY);
+        if (shared.length() > 0) m.put("outlets", shared);
         put(z, "manifest.json", m.toString(1).getBytes("UTF-8"));
 
         // thumbnail and the Android extras
@@ -246,6 +248,7 @@ final class Rmsc {
             if (!out.renameTo(existing)) { old.renameTo(existing); throw new Exception("could not update the scan"); }
             out = existing;
         }
+        if (existing != null) mergeOutlets(new File(ctx.getFilesDir(), "scan-backups/" + out.getName()), out);
         SyncInfo si = SyncInfo.load(ctx, out);
         if (!id.isEmpty()) si.id = id;
         // A repaired scan gets a revision above both, so phones with the empty version take it back.
@@ -257,6 +260,73 @@ final class Rmsc {
         if (peerId != null) { si.shared = true; si.peers.put(peerId, peerName); }
         SyncInfo.save(out, si);
         return new Result(out, outcome);
+    }
+
+    // ---------------------------------------------------------------- power outlets (shared manifest field)
+
+    /** Android's outlets ([x, y, z, views, sockets, type] each) as the manifest's shared "outlets" list. */
+    static JSONArray sharedOutlets(String androidJson, float floorY) {
+        JSONArray out = new JSONArray();
+        if (androidJson == null) return out;
+        try {
+            JSONArray a = new JSONArray(androidJson);
+            for (int i = 0; i < a.length(); i++) {
+                JSONArray r = a.getJSONArray(i);
+                float x = (float) r.getDouble(0), y = (float) r.getDouble(1), zz = (float) r.getDouble(2);
+                String type = r.optString(5, "wall socket");
+                String kind = type.contains("strip") ? "power strip" : type.contains("floor") ? "floor socket" : "outlet";
+                out.put(new JSONObject().put("kind", kind).put("count", r.optInt(4, 1))
+                        .put("position", new JSONArray().put(x).put(y).put(zz)).put("heightAboveFloor", y - floorY)
+                        .put("views", r.optInt(3, 1)).put("source", "claude"));
+            }
+        } catch (Exception ignored) { }
+        return out;
+    }
+
+    /** The manifest's shared "outlets" as Android's own outlet JSON, or null when there are none. */
+    static String androidOutlets(JSONArray shared) {
+        if (shared == null || shared.length() == 0) return null;
+        try {
+            JSONArray out = new JSONArray();
+            for (int i = 0; i < shared.length(); i++) {
+                JSONObject o = shared.getJSONObject(i);
+                JSONArray p = o.getJSONArray("position");
+                String kind = o.optString("kind", "outlet");
+                String type = kind.contains("strip") ? "power strip" : kind.contains("floor") ? "floor socket" : "wall socket";
+                out.put(new JSONArray().put(p.getDouble(0)).put(p.getDouble(1)).put(p.getDouble(2))
+                        .put(o.optInt("views", 1)).put(o.optInt("count", 1)).put(type));
+            }
+            return out.toString();
+        } catch (Exception e) { return null; }
+    }
+
+    /**
+     * After an update replaced a scan: keep the outlets the previous version had. Both lists are merged by position
+     * (within 15 cm is the same outlet), so an update without outlets never erases them.
+     */
+    static void mergeOutlets(File previousDir, File dir) {
+        try {
+            File pm = new File(previousDir, "meta.json"), nm = new File(dir, "meta.json");
+            if (!pm.exists() || !nm.exists()) return;
+            JSONArray old = new JSONObject(text(pm)).optJSONArray("outlets");
+            if (old == null || old.length() == 0) return;
+            JSONObject meta = new JSONObject(text(nm));
+            JSONArray cur = meta.optJSONArray("outlets");
+            if (cur == null) cur = new JSONArray();
+            for (int i = 0; i < old.length(); i++) {
+                JSONArray o = old.getJSONArray(i);
+                boolean same = false;
+                for (int j = 0; j < cur.length() && !same; j++) {
+                    JSONArray c = cur.getJSONArray(j);
+                    double dx = o.getDouble(0) - c.getDouble(0), dy = o.getDouble(1) - c.getDouble(1), dz = o.getDouble(2) - c.getDouble(2);
+                    same = dx * dx + dy * dy + dz * dz < 0.15 * 0.15;
+                }
+                if (!same) cur.put(o);
+            }
+            meta.put("outlets", cur);
+            if (cur.length() > 0) meta.put("roomPass", Math.max(2, meta.optInt("roomPass", 0)));
+            try (FileOutputStream f = new FileOutputStream(nm)) { f.write(meta.toString(1).getBytes("UTF-8")); }
+        } catch (Exception ignored) { }
     }
 
     private static JSONObject peekManifest(Context ctx, Uri uri) throws Exception {
@@ -367,6 +437,8 @@ final class Rmsc {
                     cx = (lo[0] + hi[0]) / 2; cz = (lo[2] + hi[2]) / 2;
                 }
                 if (m.has("floorY")) d.floor = new float[]{cx, (float) m.getDouble("floorY"), cz};
+                String ol = androidOutlets(m.optJSONArray("outlets"));
+                if (ol != null) { d.outlets = ol; d.outletsChecked = true; }
                 if (m.has("ceilingY")) d.ceiling = new float[]{cx, (float) m.getDouble("ceilingY"), cz};
             }
             File th = new File(tmp, "thumb.jpg");

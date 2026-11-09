@@ -148,6 +148,8 @@ enum Rmsc {
             return ["name": o.label, "center": [c.x, c.y, c.z],
                     "size": [o.halfExtents.x * 2, o.halfExtents.y * 2, o.halfExtents.z * 2], "yaw": o.yaw + o.turn]
         }
+        let outlets = OutletStore.load(scan)
+        if !outlets.isEmpty { manifest["outlets"] = OutletStore.toManifest(outlets, floorY: floorY) }
         try zip.add("manifest.json", data: try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]))
         try zip.finish()
         return url
@@ -221,8 +223,12 @@ enum Rmsc {
                 outcome = .updated
             }
         }
+        let localOutlets = existing.map(OutletStore.load) ?? []
         var scan = try importNew(from: url, zip: zip, manifest: manifest)
         if let existing { scan = try ScanStore.replace(existing, with: scan) }
+        // Outlets: the package's, plus any this scan had (an update without outlets never erases them).
+        let merged = OutletStore.merge(OutletStore.load(scan), localOutlets)
+        OutletStore.save(merged, for: scan)
         var info = SyncStore.info(scan)
         info.id = id ?? info.id
         // A repaired scan gets a revision above both, so the phones that have the empty version take it back.
@@ -331,6 +337,10 @@ enum Rmsc {
             // iOS extras.
             if let map = try zip.read("ios/worldmap.arexperience") { try map.write(to: folder.appendingPathComponent("worldmap.arexperience")) }
             if let objects = try zip.read("ios/objects.json") { try objects.write(to: folder.appendingPathComponent("objects.json")) }
+            let outlets = OutletStore.fromManifest(manifest["outlets"] as? [[String: Any]], lift: lift)
+            if !outlets.isEmpty, let data = try? JSONEncoder().encode(outlets) {
+                try data.write(to: folder.appendingPathComponent("outlets.json"))
+            }
             if let room = try zip.read("ios/room.json") { try room.write(to: scan.dataURL) }
             if let model = try zip.read("ios/model.usdz") {
                 try model.write(to: modelURL)
