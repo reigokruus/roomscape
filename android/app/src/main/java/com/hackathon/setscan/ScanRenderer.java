@@ -282,10 +282,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             surfDone = s; surfBase = s; surfPending = s;
             if (autoStage == 3) glTasks.add(() -> {
                 if (autoStage != 3) return;
-                autoStage = 4; autoProgress("Step 4 of 4 · Refining detail against your photos", 0.65f);
-                String l = toggleTraining();
-                activity.trainingLabel(l);
-                if (!training) { autoStage = 5; autoProgress("Done", 1f); }
+                // demo: no refining (training made the splats worse every time), finish here
+                autoStage = 5; autoProgress("Done", 1f); autosave();
             });
             log("splats: " + n + " surfels (" + s.flat + " on flat surfaces, " + s.curved + " curved/edges, " + s.lonely + " lonely) in "
                     + (System.currentTimeMillis() - t0) + " ms");
@@ -664,6 +662,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float[] improveBase;             // its points (sub-sampled), to check which corners match
     private int improveBaseN;
     private volatile float[] improveT;       // new scan -> saved scan: {cos, sin, tx, ty, tz}
+    // "Continue scan" (demo): the saved room is found automatically from the points, no corner taps
+    private volatile boolean contAuto;
+    private volatile ContinueAlign.Base contBase;
+    private volatile boolean contBusy;
+    private long contLastMs;
+    private float[] contPrev; private int contAgree;
+    private volatile float contScore, contLockedScore;
+    private float appendSimplify;            // > 0: the saved scan is merged in simplified (one point per cell of this size)
+    private int depthOnlyFirst = -1;         // > 0: the depth AI only looks at the first photos (the new pass)
 
     interface SaveDone { void done(File dir, String error); }
 
@@ -681,6 +688,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     for (int i = 0; i < sn * 4; i++) { d.splNrm[i] = ss.nrm.get(i); d.splCol[i] = ss.col.get(i); }
                 }
                 try { if (objects.edited) d.objects = objects.toJson().toString(); } catch (Exception e) { logError("objects save", e); }
+                d.hall = hallDone;
                 try { d.outletsChecked = outlets.checked; if (!outlets.list.isEmpty()) d.outlets = outlets.toJson(); if (!roomItems.list.isEmpty()) d.items = roomItems.toJson(); } catch (Exception e) { logError("outlets save", e); }
                 // thumbnail: the frame just drawn
                 java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
@@ -735,7 +743,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread: open a saved scan in the viewer. Photos stream in one by one. */
     void loadScan(File dir, Runnable done) {
         reset();
-        improveDir = null; improveT = null;
+        improveDir = null; improveT = null; contAuto = false; contBase = null;
         idle = false; viewing = true; sensors.active = false;
         lastPlanes = new java.util.ArrayList<>();
         currentDir = dir;
@@ -748,6 +756,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             loadPlanning(dir); if (done != null) done.run();
             if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
+            if (AUTO_PROCESS && DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) // older scans: place the back wall once, no rescan
+                glTasks.add(() -> { if (!hallDone) { hallDone = true; estimateHall(surfGen, false); } });
         });
     }
 
@@ -760,6 +770,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         new Thread(() -> {
             try {
                 ScanStore.Data d = ScanStore.load(dir);
+                if (appendSimplify > 0) simplifyLoaded(d, appendSimplify);
                 if (currentName == null || replaceMarks) currentName = d.name;
                 loadedAny = true;
                 if (d.lux > 0) { loadedLux = d.lux; Lighting.ROOM_LUX = d.lux; }
@@ -784,12 +795,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         cornerList.addAll(d.corners); wallList.addAll(d.walls);
                         markFloor = d.floor; markCeiling = d.ceiling;
                     }
-                    if (replaceMarks && d.splN > 0) {
+                    if (replaceMarks && d.splN > 0 && !DEMO_FAR) { // demo: refined splats were always worse, rebuild plain ones
                         Surfels ls = Surfels.empty(d.splN);
                         ls.pos.put(d.splPos).position(0); ls.raw.put(d.splPos).position(0); ls.nrm.put(d.splNrm).position(0); ls.col.put(d.splCol).position(0);
                         ls.trained = true; loadedSplats = ls;
                     }
-                    if (replaceMarks) { outlets.fromJson(d.outlets, d.outletsChecked); roomItems.fromJson(d.items); }
+                    if (replaceMarks) { outlets.fromJson(d.outlets, d.outletsChecked); roomItems.fromJson(d.items); hallDone = d.hall; }
                     if (replaceMarks && d.objects != null) try { objects.fromJson(new org.json.JSONArray(d.objects), pos, col, count); } catch (Exception e) { logError("objects load", e); }
                 });
                 int room = Math.max(0, 80 - photos.keyframes.size());
@@ -811,10 +822,90 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }).start();
     }
 
+    /** Continue scan: the saved scan's points merged to one per cell (average position and colour), so it costs far less memory. */
+    private void simplifyLoaded(ScanStore.Data d, float cell) {
+        int n = d.n, cap = 1 << 21, maxCells = cap * 6 / 10;
+        LongIntMap m = new LongIntMap(cap);
+        int cn = 0;
+        float[] sp = new float[Math.min(n, maxCells) * 3]; int[] sc = new int[Math.min(n, maxCells) * 3], cnt = new int[Math.min(n, maxCells)];
+        for (int i = 0; i < n; i++) {
+            float x = d.pos[i * 3], y = d.pos[i * 3 + 1], z = d.pos[i * 3 + 2];
+            long k = ContinueAlign.key(x, y, z, cell);
+            int j = m.get(k);
+            if (j < 0) { if (cn >= cnt.length) continue; j = cn++; m.put(k, j); }
+            sp[j * 3] += x; sp[j * 3 + 1] += y; sp[j * 3 + 2] += z;
+            sc[j * 3] += d.col[i * 3] & 255; sc[j * 3 + 1] += d.col[i * 3 + 1] & 255; sc[j * 3 + 2] += d.col[i * 3 + 2] & 255;
+            cnt[j]++;
+        }
+        float[] p = new float[cn * 3]; byte[] c = new byte[cn * 3];
+        for (int j = 0; j < cn; j++) {
+            float w = cnt[j];
+            for (int a = 0; a < 3; a++) { p[j * 3 + a] = sp[j * 3 + a] / w; c[j * 3 + a] = (byte) Math.round(sc[j * 3 + a] / w); }
+        }
+        log(String.format(java.util.Locale.US, "continue: saved scan simplified %,d -> %,d points (%.0f cm cells)", n, cn, cell * 100));
+        d.pos = p; d.col = c; d.n = cn;
+    }
+
+    /** GL thread, while continuing a scan: look for the saved room every 1.5 s until found, then keep following it. */
+    private void maybeContinueAlign(long nowMs) {
+        ContinueAlign.Base b = contBase;
+        if (!contAuto || b == null || contBusy || count < 1500) return;
+        boolean locked = improveT != null;
+        if (nowMs - contLastMs < (locked ? 4000 : 1500)) return;
+        contLastMs = nowMs;
+        int n = count, step = Math.max(1, n / 20000), k = 0;
+        float[] sm = new float[(n / step + 1) * 3];
+        for (int i = 0; i < n; i += step) { if (obs[i] == 0) continue; sm[k * 3] = pos.get(i * 3); sm[k * 3 + 1] = pos.get(i * 3 + 1); sm[k * 3 + 2] = pos.get(i * 3 + 2); k++; }
+        final int sn = k; final float[] cur = improveT;
+        contBusy = true;
+        new Thread(() -> {
+            try {
+                long t0 = System.currentTimeMillis();
+                ContinueAlign.Probes pr = ContinueAlign.probes(sm, sn);
+                if (pr.coarseCells < 60) return; // too little seen yet
+                if (cur != null) {
+                    ContinueAlign.Result r = ContinueAlign.findNear(b, pr, cur);
+                    if (r != null && r.score >= 0.8f * contLockedScore && improveDir != null) { improveT = r.t; contScore = r.score; contLockedScore = Math.max(contLockedScore * 0.9f, r.score); }
+                    return;
+                }
+                ContinueAlign.Result r = ContinueAlign.findGlobal(b, pr);
+                if (r == null) return;
+                contScore = r.score;
+                boolean clear = r.score >= 0.33f && r.score >= 1.4f * r.second;
+                float[] p = contPrev;
+                boolean same = p != null && Math.abs(Math.atan2(r.t[1], r.t[0]) - Math.atan2(p[1], p[0])) < Math.toRadians(4) && Math.hypot(r.t[2] - p[2], r.t[4] - p[4]) < 0.25f && Math.abs(r.t[3] - p[3]) < 0.2f;
+                contAgree = clear ? (same ? contAgree + 1 : 1) : 0;
+                contPrev = r.t;
+                log(String.format(java.util.Locale.US, "continue: match %.0f%% (next best %.0f%%), %d cells seen, %s, %d ms",
+                        r.score * 100, r.second * 100, pr.coarseCells, clear ? (contAgree >= 2 ? "recognised" : "checking") : "not sure", System.currentTimeMillis() - t0));
+                if (contAgree >= 2 && improveDir != null && contAuto) {
+                    improveT = r.t; contLockedScore = r.score;
+                    activity.toast(String.format(java.util.Locale.US, "Recognised the saved room (%.0f%% match). Ready, keep scanning: the saved part is shown in blue.", r.score * 100));
+                }
+            } catch (Throwable e) { logError("continue align", new RuntimeException(e)); }
+            finally { contBusy = false; }
+        }).start();
+    }
+
+    private static final float[] CONT_GHOST_COL = {0.45f, 0.8f, 1f, 0.35f};
+    private final float[] contInv = new float[16], contMvp = new float[16];
+
+    /** While continuing: the saved scan (simplified) drawn where it was recognised. */
+    private void drawContinueGhost(float[] m) {
+        float[] t = improveT; ContinueAlign.Base b = contBase;
+        if (!contAuto || t == null || b == null || b.ghostN == 0) return;
+        float[] T = {t[0], 0, t[1], 0, 0, 1, 0, 0, -t[1], 0, t[0], 0, t[2], t[3], t[4], 1};
+        Matrix.invertM(contInv, 0, T, 0);
+        Matrix.multiplyMM(contMvp, 0, m, 0, contInv, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        planDraw(contMvp, b.ghost, GLES20.GL_POINTS, CONT_GHOST_COL, 5f * height / 1000f);
+    }
+
     /** GL thread: a fresh scan (not tied to a save yet). */
     void startNewScan() {
         reset();
-        improveDir = null; improveT = null; currentDir = null; currentName = null;
+        improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
         idle = false;
     }
 
@@ -835,10 +926,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         improveName = currentName;
         currentDir = dir;
         improveBase = null; improveBaseN = 0;
+        contAuto = DEMO_FAR; contBase = null; contBusy = false; contPrev = null; contAgree = 0; contScore = 0; contLockedScore = 0; contLastMs = 0;
         new Thread(() -> {
             try {
                 ScanStore.Data d = ScanStore.load(dir);
                 improveName = d.name;
+                if (contAuto) {
+                    long t0 = System.currentTimeMillis();
+                    ContinueAlign.Base b = ContinueAlign.buildBase(d.pos, d.n);
+                    contBase = b;
+                    log("continue: saved scan " + d.n + " points -> " + b.qn + " match cells, " + b.ghostN + " overlay points (" + (System.currentTimeMillis() - t0) + " ms)");
+                }
                 int step = Math.max(1, d.n / 150000), k = 0;
                 float[] b = new float[(d.n / step + 1) * 3];
                 for (int i = 0; i < d.n; i += step) { b[k * 3] = d.pos[i * 3]; b[k * 3 + 1] = d.pos[i * 3 + 1]; b[k * 3 + 2] = d.pos[i * 3 + 2]; k++; }
@@ -850,6 +948,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     String improveHint() {
         if (improveDir == null) return null;
+        if (contAuto) return "Continuing \"" + (improveName == null ? "scan" : improveName) + "\": point the phone at a part you already scanned. You'll get a message when the saved room is recognised.";
         if (improveCorners.size() < 2) return "This saved scan has no room corners marked, so the two scans can't be lined up. Scan normally; it will be kept as a new scan.";
         return "Improving \"" + (improveName == null ? "scan" : improveName) + "\": tap two of the room's corners (Room corner) to line this scan up with the saved one, then scan the parts you want sharper.";
     }
@@ -928,9 +1027,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float[] t = improveT;
         File dir = improveDir;
         improveDir = null;
+        boolean wasAuto = contAuto;
+        contAuto = false; contBase = null;
         if (t == null) {
             currentDir = null; currentName = null; // keep it as its own scan
-            activity.toast("Not lined up with the saved scan (no matching corners), so this is kept as a new scan.");
+            activity.toast(wasAuto ? "The saved room wasn't recognised, so this is kept as a new scan." : "Not lined up with the saved scan (no matching corners), so this is kept as a new scan.");
             enterViewer();
             startAuto();
             return;
@@ -962,7 +1063,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log("improve: merging " + count + " new points into " + dir);
         activity.updateStatus("Merging with the saved scan...");
         currentDir = dir;
+        depthOnlyFirst = photos.keyframes.size(); // the saved photos were processed already
+        appendSimplify = wasAuto ? 0.04f : 0;
         appendSaved(dir, true, () -> {
+            appendSimplify = 0;
             enterViewer();
             startAuto();
             activity.updateStatus(String.format(java.util.Locale.US, "Merged: %,d points from this pass + the saved scan = %,d points, %d photos. Run Depth AI and Clean up, then Save.\n%s",
@@ -981,6 +1085,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     String toggleDepthAI() {
         if (depthRunning) { depthRunning = false; return "Depth AI"; }
         final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
+        if (depthOnlyFirst > 0 && depthOnlyFirst < kfs.size()) kfs.subList(depthOnlyFirst, kfs.size()).clear();
         if (kfs.isEmpty()) { activity.updateStatus("No photos were saved during this scan, so there is nothing for the depth AI to look at."); return "Depth AI"; }
         training = false;
         // JPEG every photo now (GL thread), so the pass can keep reading photos while the app is in the background
@@ -1033,7 +1138,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int c = (Y / 8) * cw + X / 8;
                         if (cd[c] == 0 || d < cd[c]) { cd[c] = d; cuu[c] = (float) X / iw - 0.5f; cvv[c] = (float) Y / ih - 0.5f; cr[c] = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))]; }
                     }
+                    float cdMax = 0; for (float q : cd) cdMax = Math.max(cdMax, q);
                     float[] ab = fitInverseDepth(cd, cr, cuu, cvv);
+                    if (ab != null) lastAb = ab;
+                    else if (DEMO_FAR && lastAb != null) { ab = lastAb; log("depth AI: photo " + ki + " looks out past what the phone measured, using the last photo's scale"); }
                     if (ab == null) { log("depth AI: photo " + ki + " skipped (too few ARCore points to scale it)"); continue; }
                     errSum += ab[4]; done++;
                     // 2) back-project a 192x108 grid of the photo with the fitted depth
@@ -1045,8 +1153,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int X = Math.min(iw - 1, Math.max(0, (int) pt[0])), Y = Math.min(ih - 1, Math.max(0, (int) pt[1]));
                         float r = D[Math.min(DepthNet.IH - 1, (int) (Y * sy)) * DepthNet.IW + Math.min(DepthNet.IW - 1, (int) (X * sx))];
                         float inv = ab[0] * r + ab[1] + ab[2] * ((float) X / iw - 0.5f) + ab[3] * ((float) Y / ih - 0.5f);
-                        float dd = inv > 0.15f ? 1f / inv : 0;
-                        gd[gv * GU + gu] = dd > 0 && fillsGap(cd, cw, chh, X / 8, Y / 8, dd) ? dd : 0;
+                        float dd = inv > (DEMO_FAR ? 1f / FAR_MAX : 0.15f) ? 1f / inv : 0;
+                        gd[gv * GU + gu] = dd > 0 && (fillsGap(cd, cw, chh, X / 8, Y / 8, dd) || (DEMO_FAR && farGap(cd, cw, chh, X / 8, Y / 8, dd, cdMax))) ? dd : 0;
                         gc[gv * GU + gu] = pix[Y * iw + X];
                     }
                     final float[] P = new float[GU * GV * 3]; final byte[] C = new byte[GU * GV * 3];
@@ -1055,7 +1163,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     for (int gv = 1; gv < GV - 1; gv++) for (int gu = 1; gu < GU - 1; gu++) {
                         int g = gv * GU + gu;
                         float d = gd[g];
-                        if (d <= 0.2f || d > 6f) continue;
+                        if (d <= 0.2f || d > (DEMO_FAR ? FAR_MAX : 6f)) continue;
                         // flying pixels at depth edges: drop where the neighbours disagree by more than 4 %
                         float mx = Math.max(Math.max(Math.abs(gd[g - 1] - d), Math.abs(gd[g + 1] - d)), Math.max(Math.abs(gd[g - GU] - d), Math.abs(gd[g + GU] - d)));
                         if (mx > 0.04f * d) continue;
@@ -1070,7 +1178,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     }
                     final int mm = m; final float camX = pm[12], camY = pm[13], camZ = pm[14];
                     glTasks.add(() -> addDepthPoints(P, C, mm, camX, camY, camZ));
-                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Step 1 of 4 · Sharpening depth from your photos (%d/%d)", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
+                    if (autoStage == 1) autoProgress(String.format(java.util.Locale.US, "Step 1 of 3 · Sharpening depth from your photos (%d/%d)", ki + 1, kfs.size()), 0.02f + 0.48f * (ki + 1) / kfs.size());
                     float each = (System.currentTimeMillis() - t0) / 1000f / (ki + 1);
                     activity.updateStatus(String.format(java.util.Locale.US,
                             "Depth AI: photo %d of %d (%.1f s each). Each photo's depth is guessed by a neural net and scaled with ARCore's measurements (agrees to %.0f%%). %,d points so far.",
@@ -1102,6 +1210,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * 2 cells agrees with the AI depth (6 % + 3 cm) and none disagrees. Everywhere else ARCore's measurement wins.
      * Before this, AI points were added on top of measured surfaces and stacked them into layers (scan1150 pillar).
      */
+    /**
+     * DEMO (rk, auditorium from the podium): beyond what the phone measured, keep the AI's guess out to FAR_MAX.
+     * Only where nothing nearby was measured and it is further than anything measured in this photo. Scale is
+     * extrapolated from the near points, so far walls are an estimate (maybe 10-20 % off at 20 m), not a measurement.
+     */
+    static final boolean DEMO_FAR = true;
+    private static float[] lastAb; // scale of the last photo that had enough measured points
+    static final float FAR_MAX = 30f;
+    static boolean farGap(float[] cd, int cw, int ch, int cx, int cy, float d, float cdMax) {
+        if (d <= 3.5f || d > FAR_MAX) return false; // everything the phone did not measure, from 3.5 m out
+        for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
+            int x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= cw || y >= ch) continue;
+            if (cd[y * cw + x] > 0) return false;
+        }
+        return true;
+    }
+
     static boolean fillsGap(float[] cd, int cw, int ch, int cx, int cy, float d) {
         if (d > 3.5f) return false;
         if (cx < 0 || cy < 0 || cx >= cw || cy >= ch || cd[cy * cw + cx] > 0) return false;
@@ -1176,7 +1302,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         for (int i = 0; i < m && count < MAX_POINTS; i++) {
             float x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
             rgb[0] = C[i * 3] & 255; rgb[1] = C[i * 3 + 1] & 255; rgb[2] = C[i * 3 + 2] & 255;
-            tsdf.integrate(camX, camY, camZ, x, y, z, rgb);
+            float ddx = x - camX, ddy = y - camY, ddz = z - camZ;
+            if (ddx * ddx + ddy * ddy + ddz * ddz < 64f) tsdf.integrate(camX, camY, camZ, x, y, z, rgb); // far estimates: points only
             long vk = key(x, y, z);
             int hit = voxels.get(vk);
             if (hit >= 0) { refine(hit, x, y, z, rgb); continue; }
@@ -1197,13 +1324,238 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         activity.depthDone();
         activity.updateStatus(String.format(java.util.Locale.US, "Depth AI done: %,d points added. Cleaning up now...", depthAdded));
         if (autoStage == 1) autoStage = 2;
+        if (DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) { hallDone = true; estimateHall(gen, true); return; }
         startCleanUp();
+    }
+
+    /**
+     * DEMO (rk, hall from the stage): the depth AI's far distances flatten out (its fit is scaled by near points, and
+     * 1/d = a r + b caps d near 1/b: scan 17:10 had nothing past 8 m in a ~18 m hall). Claude estimates the back wall
+     * from the photos and the measured width; everything beyond 4 m straight ahead is stretched so the far end lands there.
+     */
+    private boolean hallDone;
+    private void estimateHall(int gen, boolean thenCleanUp) {
+        final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
+        try { ScanExport.readKeyframes(photos, width, height); } catch (Throwable e) { logError("hall jpg", new RuntimeException(e)); }
+        // the main direction the phone looked, and the middle of where it stood
+        float fx = 0, fz = 0, cx = 0, cy = 0, cz = 0;
+        for (PhotoRoom.Keyframe k : kfs) { fx -= k.pose[8]; fz -= k.pose[10]; cx += k.pose[12]; cy += k.pose[13]; cz += k.pose[14]; }
+        float fl = (float) Math.hypot(fx, fz);
+        if (fl < 1e-3f) { if (thenCleanUp) startCleanUp(); return; }
+        final float ux = fx / fl, uz = fz / fl, ox = cx / kfs.size(), oy = cy / kfs.size(), oz = cz / kfs.size();
+        final int n = count;
+        float[] al = new float[n], lat = new float[n], ys = new float[n];
+        for (int i = 0; i < n; i++) {
+            float dx = pos.get(i * 3) - ox, dz = pos.get(i * 3 + 2) - oz;
+            al[i] = dx * ux + dz * uz; lat[i] = -dx * uz + dz * ux; ys[i] = pos.get(i * 3 + 1);
+        }
+        float[] sa = al.clone(), sl = lat.clone(), sy = ys.clone();
+        java.util.Arrays.sort(sa); java.util.Arrays.sort(sl); java.util.Arrays.sort(sy);
+        final float farNow = sa[(int) (n * 0.995f)], width = sl[(int) (n * 0.97f)] - sl[(int) (n * 0.03f)];
+        final float floor = roomReady ? room.floorY : sy[(int) (n * 0.01f)], top = sy[(int) (n * 0.99f)];
+        final String measured = String.format(java.util.Locale.US,
+                "- room width across the view (wall to wall where measured): %.1f m\n- camera height above the floor: %.1f m\n"
+                + "- highest measured point above the floor: %.1f m\n- the phone moved %.1f m sideways while scanning\n"
+                + "- the phone's own estimate of the far end (unreliable past 5 m): %.1f m",
+                width, oy - floor, top - floor, sideways(kfs, ux, uz), farNow);
+        // photos looking straight out (level, along the main direction), spread across the stage
+        java.util.List<PhotoRoom.Keyframe> pick = new java.util.ArrayList<>();
+        java.util.List<PhotoRoom.Keyframe> sorted = new java.util.ArrayList<>(kfs);
+        sorted.sort((a, b) -> Float.compare(-(-a.pose[8] * ux - a.pose[10] * uz) + Math.abs(a.pose[9]), -(-b.pose[8] * ux - b.pose[10] * uz) + Math.abs(b.pose[9])));
+        for (PhotoRoom.Keyframe k : sorted) { if (pick.size() >= 4) break; if (k.jpg != null) pick.add(k); }
+        final String key = activity.claudeKey();
+        activity.updateProcess("Claude is estimating how deep the hall is", 0.5f);
+        new Thread(() -> {
+            double[] est = null;
+            try {
+                java.util.List<String> b64 = new java.util.ArrayList<>();
+                for (PhotoRoom.Keyframe k : pick) {
+                    android.graphics.Bitmap img = ObjectNamer.uprightFromJpg(k, new android.graphics.Matrix());
+                    if (img != null) { b64.add(ClaudeHelper.jpegBase64(img, 1280)); img.recycle(); }
+                }
+                if (!b64.isEmpty()) est = ClaudeHelper.estimateHall(key, b64, measured);
+            } catch (Throwable e) { logError("hall estimate", new RuntimeException(e)); }
+            final double[] e = est;
+            glTasks.add(() -> {
+                if (gen != surfGen) return;
+                float target = e == null ? Float.NaN : (float) e[0];
+                log("hall: " + measured.replace("\n", "; ") + " -> Claude: back wall " + target + " m (" + ClaudeHelper.lastHallWhy + ")");
+                final float s0 = 4f;
+                if (!Float.isNaN(target)) takeUndo("Claude's back wall");
+                if (!Float.isNaN(target) && farNow > s0 + 0.5f && target > farNow) {
+                    float k = Math.min(4f, (target - s0) / (farNow - s0));
+                    int moved = 0;
+                    for (int i = 0; i < count; i++) {
+                        float dx = pos.get(i * 3) - ox, dz = pos.get(i * 3 + 2) - oz;
+                        float a = dx * ux + dz * uz;
+                        if (a <= s0) continue;
+                        float add = (a - s0) * (k - 1);
+                        pos.put(i * 3, pos.get(i * 3) + ux * add); pos.put(i * 3 + 2, pos.get(i * 3 + 2) + uz * add);
+                        moved++;
+                    }
+                    rebuildVoxelIndex(); uploaded = 0; refineCursor = 0; surfCount = 0;
+                    // a reopened scan shows its trained splats: move them the same way
+                    for (Surfels ss : new Surfels[]{surfDone, surfShown, surfBase}) {
+                        if (ss == null || ss.stretched == gen + 1) continue;
+                        ss.stretched = gen + 1;
+                        for (int i = 0; i < ss.n; i++) {
+                            float dx = ss.pos.get(i * 3) - ox, dz = ss.pos.get(i * 3 + 2) - oz;
+                            float a = dx * ux + dz * uz;
+                            if (a <= s0) continue;
+                            float add = (a - s0) * (k - 1);
+                            ss.pos.put(i * 3, ss.pos.get(i * 3) + ux * add); ss.pos.put(i * 3 + 2, ss.pos.get(i * 3 + 2) + uz * add);
+                            ss.raw.put(i * 3, ss.raw.get(i * 3) + ux * add); ss.raw.put(i * 3 + 2, ss.raw.get(i * 3 + 2) + uz * add);
+                        }
+                    }
+                    if (surfDone != null) surfPending = surfDone; // re-send to the GPU
+                    log(String.format(java.util.Locale.US, "hall: stretched %d far points x%.2f so the back wall is at %.1f m (was %.1f m)", moved, k, target, farNow));
+                    activity.toast(String.format(java.util.Locale.US, "Claude puts the back wall about %.0f m away", target));
+                }
+                if (!Float.isNaN(target) && target > 2f) {
+                    double[] ee = e;
+                    roughRoom(ox, oz, ux, uz, target, ee != null && ee.length > 2 ? (float) ee[2] : Float.NaN);
+                }
+                if (thenCleanUp) startCleanUp(); else { activity.updateProcess(null, -1); surfCount = 0; surfShown = null; buildSurfels(); autosave(); }
+            });
+        }).start();
+    }
+
+    /**
+     * DEMO: commit to a rough box room. The back wall is a plane at Claude's distance (points past it are put onto
+     * it), the side walls sit where the scan saw them, the floor is the floor; every 6 cm patch of those surfaces
+     * that has no scan point within ~10 cm gets one, coloured like the rest of that surface. So the far end is a
+     * best guess that stays put, and the gaps between scanned spots are closed.
+     */
+    private void roughRoom(float ox, float oz, float ux, float uz, float back, float ceilEst) {
+        int n = count;
+        if (n < 1000) return;
+        float[] al = new float[n], lat = new float[n], ys = new float[n];
+        for (int i = 0; i < n; i++) {
+            float dx = pos.get(i * 3) - ox, dz = pos.get(i * 3 + 2) - oz;
+            al[i] = dx * ux + dz * uz; lat[i] = -dx * uz + dz * ux; ys[i] = pos.get(i * 3 + 1);
+        }
+        float[] sl = lat.clone(), sy = ys.clone(), sa = al.clone();
+        java.util.Arrays.sort(sl); java.util.Arrays.sort(sy); java.util.Arrays.sort(sa);
+        float left = sl[(int) (n * 0.02f)], right = sl[(int) (n * 0.98f)];
+        float floor = roomReady ? room.floorY : sy[(int) (n * 0.01f)];
+        float ceil = sy[(int) (n * 0.99f)];
+        if (!Float.isNaN(ceilEst) && ceilEst > 2f && ceilEst < 20f) ceil = Math.max(ceil, floor + ceilEst);
+        float front = Math.max(sa[(int) (n * 0.01f)], -1f);
+        // 1) stick to the back wall: anything past it goes onto it
+        int snapped = 0;
+        for (int i = 0; i < n; i++) {
+            if (al[i] <= back) continue;
+            float add = back - al[i];
+            pos.put(i * 3, pos.get(i * 3) + ux * add); pos.put(i * 3 + 2, pos.get(i * 3 + 2) + uz * add);
+            al[i] = back; snapped++;
+        }
+        // 2) what is there already, in 10 cm cells
+        java.util.HashSet<Long> have = new java.util.HashSet<>();
+        for (int i = 0; i < n; i++) have.add(cell10(al[i], lat[i], ys[i]));
+        // colour of each surface: median of the points near it
+        int[] cBack = surfaceColour(al, lat, ys, n, 0, back, 0.6f), cLeft = surfaceColour(al, lat, ys, n, 1, left, 0.4f),
+              cRight = surfaceColour(al, lat, ys, n, 1, right, 0.4f), cFloor = surfaceColour(al, lat, ys, n, 2, floor, 0.1f);
+        int added = 0; final float st = 0.06f;
+        int[] rgb = new int[3];
+        // back wall (lateral x height), side walls (along x height), floor (along x lateral)
+        for (int pass = 0; pass < 4; pass++) {
+            float a0, a1, b0, b1; int[] c;
+            if (pass == 0) { a0 = left; a1 = right; b0 = floor; b1 = ceil; c = cBack; }
+            else if (pass == 1 || pass == 2) { a0 = Math.max(front, 0.5f); a1 = back; b0 = floor; b1 = ceil; c = pass == 1 ? cLeft : cRight; }
+            else { a0 = Math.max(front, 0.5f); a1 = back; b0 = left; b1 = right; c = cFloor; }
+            for (float a = a0; a <= a1; a += st) for (float b = b0; b <= b1; b += st) {
+                float A, L, Y;
+                if (pass == 0) { A = back; L = a; Y = b; }
+                else if (pass == 1) { A = a; L = left; Y = b; }
+                else if (pass == 2) { A = a; L = right; Y = b; }
+                else { A = a; L = b; Y = floor; }
+                if (near10(have, A, L, Y)) continue;
+                if (count >= MAX_POINTS) break;
+                float x = ox + A * ux - L * uz, z = oz + A * uz + L * ux;
+                float j = ((Float.floatToIntBits(x * 7.3f + z * 3.1f + Y) & 15) - 8) * 1.5f; // a little texture, not flat paint
+                rgb[0] = clamp255(c[0] + j); rgb[1] = clamp255(c[1] + j); rgb[2] = clamp255(c[2] + j);
+                addPoint(x, Y, z, rgb);
+                obs[count - 1] = 2; col.put((count - 1) * 4 + 3, (byte) 255);
+                added++;
+            }
+        }
+        rebuildVoxelIndex(); uploaded = 0; refineCursor = 0;
+        log(String.format(java.util.Locale.US, "rough room: back wall at %.1f m (%d points put onto it), width %.1f m, height %.1f m, %d gap points added",
+                back, snapped, right - left, ceil - floor, added));
+        activity.toast(String.format(java.util.Locale.US, "Rough room: %.0f × %.0f m, back wall about %.0f m away. Tap Undo if it looks wrong.", right - left, back - Math.max(front, 0), back));
+    }
+
+    private static int clamp255(float v) { return v < 0 ? 0 : v > 255 ? 255 : Math.round(v); }
+
+    private static long cell10(float a, float l, float y) {
+        long ia = (long) Math.floor(a / 0.1f) + 100000, il = (long) Math.floor(l / 0.1f) + 100000, iy = (long) Math.floor(y / 0.1f) + 100000;
+        return (ia << 40) | (il << 20) | iy;
+    }
+
+    private static boolean near10(java.util.HashSet<Long> have, float a, float l, float y) {
+        for (int da = -1; da <= 1; da++) for (int dl = -1; dl <= 1; dl++) for (int dy = -1; dy <= 1; dy++)
+            if (have.contains(cell10(a + da * 0.1f, l + dl * 0.1f, y + dy * 0.1f))) return true;
+        return false;
+    }
+
+    /** Median colour of the points within band of a surface (axis 0 = along, 1 = lateral, 2 = height). */
+    private int[] surfaceColour(float[] al, float[] lat, float[] ys, int n, int axis, float at, float band) {
+        int m = 0; int[] r = new int[Math.min(n, 20000)], g = new int[r.length], b = new int[r.length];
+        int step = Math.max(1, n / 200000);
+        for (int i = 0; i < n && m < r.length; i += step) {
+            float v = axis == 0 ? al[i] : axis == 1 ? lat[i] : ys[i];
+            if (Math.abs(v - at) > band) continue;
+            r[m] = col.get(i * 4) & 255; g[m] = col.get(i * 4 + 1) & 255; b[m] = col.get(i * 4 + 2) & 255; m++;
+        }
+        if (m == 0) return new int[]{150, 150, 150};
+        java.util.Arrays.sort(r, 0, m); java.util.Arrays.sort(g, 0, m); java.util.Arrays.sort(b, 0, m);
+        return new int[]{r[m / 2], g[m / 2], b[m / 2]};
+    }
+
+    // ---- undo the last AI change (demo) ----
+    private float[] undoPos; private byte[] undoCol, undoObs; private int undoCount; private Surfels undoSurf; private String undoWhat;
+
+    /** GL thread: remember the scan as it is now, before an AI change. */
+    private void takeUndo(String what) {
+        int n = count;
+        undoPos = new float[n * 3]; undoCol = new byte[n * 4]; undoObs = new byte[n];
+        for (int i = 0; i < n * 3; i++) undoPos[i] = pos.get(i);
+        for (int i = 0; i < n * 4; i++) undoCol[i] = col.get(i);
+        System.arraycopy(obs, 0, undoObs, 0, n);
+        undoCount = n; undoWhat = what;
+        Surfels s = surfShown;
+        undoSurf = s == null ? null : s.copy();
+    }
+
+    /** GL thread: put back what was there before the last AI change. Returns a message. */
+    String undo() {
+        if (undoPos == null) return "Nothing to undo";
+        if (training) training = false;
+        int n = undoCount;
+        for (int i = 0; i < n * 3; i++) pos.put(i, undoPos[i]);
+        for (int i = 0; i < n * 4; i++) col.put(i, undoCol[i]);
+        System.arraycopy(undoObs, 0, obs, 0, n);
+        count = n; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
+        Surfels s = undoSurf;
+        if (s != null) { surfGen++; surfDone = s; surfBase = s; surfPending = s; trainer = null; }
+        else { surfCount = 0; surfShown = null; buildSurfels(); }
+        String what = undoWhat;
+        undoPos = null; undoCol = null; undoObs = null; undoSurf = null; undoWhat = null;
+        autosave();
+        return "Undid: " + what;
+    }
+
+    private static float sideways(java.util.List<PhotoRoom.Keyframe> kfs, float ux, float uz) {
+        float lo = 1e9f, hi = -1e9f;
+        for (PhotoRoom.Keyframe k : kfs) { float l = -k.pose[12] * uz + k.pose[14] * ux; lo = Math.min(lo, l); hi = Math.max(hi, l); }
+        return hi - lo;
     }
 
     private volatile boolean cleaning;
 
     // ---- automatic processing after a scan: depth AI -> clean-up -> splats -> a round of training ----
-    static final boolean AUTO_PROCESS = true;
+    static final boolean AUTO_PROCESS = false; // demo: keep only what the live scan captured (no depth AI, clean-up, back-wall guess or refining)
     static final int AUTO_STEPS = 400;           // training steps (~4 min on the S24; 150 left the splats blotchy)
     private volatile int autoStage;             // 0 off, 1 depth AI, 2 clean-up, 3 splats, 4 training, 5 done
 
@@ -1316,7 +1668,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         autosave(); // right away: Android may close the app in the background, and the scan only lives in memory
         if (!AUTO_PROCESS) return;
         autoStage = 1;
-        autoProgress("Step 1 of 4 · Sharpening depth from your photos", 0.02f);
+        autoProgress("Step 1 of 3 · Sharpening depth from your photos", 0.02f);
         if (photos.keyframes.isEmpty()) { autoStage = 2; startCleanUp(); return; }
         toggleDepthAI();
         if (!depthRunning) { autoStage = 2; startCleanUp(); }
@@ -1347,7 +1699,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (autoStage == 0 || autoStage == 5) return;
         log("auto: " + what + " failed, skipping ahead");
         if (autoStage == 1) glTasks.add(() -> { autoStage = 2; startCleanUp(); });
-        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Step 3 of 4 · Building the photo-real 3D view", 0.6f); buildSurfels(); });
+        else if (autoStage == 2) glTasks.add(() -> { autoStage = 3; autoProgress("Step 3 of 3 · Building the photo-real 3D view", 0.6f); buildSurfels(); });
         else { autoStage = 5; autoProgress("Done", 1f); }
     }
 
@@ -1367,7 +1719,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         final float[][] walls = uw;
         activity.updateStatus("Cleaning up the scan: finding floor, ceiling and walls...");
-        if (autoStage == 2) autoProgress("Step 2 of 4 · Straightening floor and walls", 0.52f);
+        if (autoStage == 2) autoProgress("Step 2 of 3 · Straightening floor and walls", 0.52f);
         new Thread(() -> { try {
             long t0 = System.currentTimeMillis();
             CleanUp c = CleanUp.run(ps, cs, n, walls);
@@ -1388,7 +1740,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = n; uploaded = 0; refineCursor = 0;
         rebuildVoxelIndex();
         analyseRoom();
-        if (autoStage == 2) { autoStage = 3; autoProgress("Step 3 of 4 · Building the photo-real 3D view", 0.6f); autosave(); }
+        if (autoStage == 2) { autoStage = 3; autoProgress("Step 3 of 3 · Building the photo-real 3D view", 0.6f); autosave(); }
         buildSurfels();
         activity.updateStatus(c.summary + "\nBuilding splats now (a few seconds), then you can Train splats.\n" + (roomReady ? room.summary : ""));
     }
@@ -1402,6 +1754,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     boolean isTraining() { return training; }
 
     /** GL thread: start or pause the training. Returns the button label. */
+    /** GL thread: another round of training on the scan as it is (its photos and splats), then save. Returns a message. */
+    String refineAgain() {
+        if (training || (autoStage > 0 && autoStage < 5)) return "Already working on it…";
+        if (surfBase == null) return "The model is still loading. Try again in a moment.";
+        autoStage = 4;
+        // the photos are the better source here (depth is noisy): let splats move further to match them, starting
+        // fresh from the current model so each Refine builds on the last
+        takeUndo("Refine");
+        Trainer.MAX_T = 0.5f; Trainer.POS_LR = 3f; trainer = null;
+        Surfels cur = surfShown;
+        if (cur != null && cur.trained && cur.n > 0) surfBase = cur; // continue from the trained model, not the raw scan
+        autoProgress("Refining the model against your photos", 0.65f);
+        String l = toggleTraining();
+        if (!training) { autoStage = 5; activity.updateProcess(null, -1); return "Couldn't refine: no photos in this scan."; }
+        activity.trainingLabel(l);
+        return "Refining: about " + AUTO_STEPS + " steps, saved when done";
+    }
+
     String toggleTraining() {
         if (training) { training = false; return "Train splats"; }
         final Surfels base = surfBase;
@@ -2717,7 +3087,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     int recordedFrames() { return recs.size(); }
 
-    /** Screen rotation relative to the phone's natural (portrait) orientation; the app is locked to landscape. */
+    /** Screen rotation relative to the phone's natural (portrait) orientation; the demo turns with the phone (portrait or landscape). */
     private int displayRotation() {
         try { return activity.getWindowManager().getDefaultDisplay().getRotation(); } catch (Throwable e) { return 1; }
     }
@@ -2729,8 +3099,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthRunning = false; cleaning = false; glTasks.clear();
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
-        voxels.clear();
-        roomShown = 0; shownHint = null; tooFast = tooFar = false;
+        voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
+        roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
@@ -2774,6 +3144,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Tap on the scan: move the subject to the nearest scanned point under the finger. */
     void pickSubject(float tx, float ty) {
+        if (demoTool != 0 && count > 0) { demoTap(tx, ty); return; }
         if (sceneIdx == 0 || count == 0) return;
         float best = (40f * height / 1000f) * (40f * height / 1000f) + 400f, bestW = Float.MAX_VALUE;
         int bestI = -1;
@@ -2791,6 +3162,223 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (bestI < 0) return;
         subjectPick = new float[]{pos.get(bestI * 3), pos.get(bestI * 3 + 1), pos.get(bestI * 3 + 2)};
         replan();
+    }
+
+    // ---------------- demo: remove the person on stage, then a basic interview setup ----------------
+    volatile int demoTool;                    // 0 off, 1 next tap removes a person, 2 next tap places the interview
+    private float[] personSpot;               // x, local floor y, z of the last removed person
+    private volatile float[] ivPerson, ivCam, ivLights, ivRays, ivCones; // interview set, world lines / triangles
+
+    private int pickIndex(float tx, float ty) {
+        float best = (40f * height / 1000f) * (40f * height / 1000f) + 400f, bestW = Float.MAX_VALUE;
+        int bestI = -1;
+        float[] m = viewMvp;
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+            if (cw <= 0.05f) continue;
+            float sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / cw + 1f) * 0.5f * width;
+            float sy = (1f - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw) * 0.5f * height;
+            float d = (sx - tx) * (sx - tx) + (sy - ty) * (sy - ty);
+            if (d < best - 25f || (d < best + 25f && cw < bestW)) { best = Math.min(best, d); bestW = cw; bestI = i; }
+        }
+        return bestI;
+    }
+
+    /** The floor under a spot: the most common height of the points around it (the stage, not the hall floor). */
+    private float localFloor(float sx, float sy, float sz) {
+        int bins = 60; int[] h = new int[bins]; float lo = sy - 2.5f;
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            if (y > sy + 0.05f || y < lo) continue;
+            float r = (float) Math.hypot(x - sx, z - sz);
+            if (r < 0.35f || r > 1.6f) continue;
+            h[Math.min(bins - 1, (int) ((y - lo) / 0.05f))]++;
+        }
+        int bi = -1;
+        for (int b = 0; b < bins; b++) if (h[b] > 30 && (bi < 0 || h[b] > h[bi])) bi = b;
+        if (bi < 0) return roomReady ? Math.min(room.floorY, sy) : sy - 1.0f;
+        return lo + (bi + 1) * 0.05f;
+    }
+
+    private void demoTap(float tx, float ty) {
+        int tool = demoTool; demoTool = 0;
+        int i = pickIndex(tx, ty);
+        if (i < 0) { activity.toast("Nothing there. Tap right on the person."); return; }
+        float sx = pos.get(i * 3), sy = pos.get(i * 3 + 1), sz = pos.get(i * 3 + 2);
+        float fl = localFloor(sx, sy, sz);
+        if (tool == 2) { buildInterview(sx, fl, sz); activity.toast("Interview set placed: subject, camera and 3 lights."); return; }
+        removePerson(sx, sy, sz, fl);
+    }
+
+    /** Everything standing on the floor there, joined up (12 cm gaps), within 0.7 m of the tap and up to 2.3 m tall. */
+    private void removePerson(float sx, float sy, float sz, float fl) {
+        final float V = 0.06f, R = 0.7f;
+        java.util.HashMap<Long, Integer> cells = new java.util.HashMap<>();
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            if (y < fl + 0.05f || y > fl + 2.3f || Math.hypot(x - sx, z - sz) > R) continue;
+            cells.merge(ContinueAlign.key(x, y, z, V), 1, Integer::sum);
+        }
+        // start from the candidate cells next to the tap
+        java.util.ArrayDeque<long[]> q = new java.util.ArrayDeque<>();
+        java.util.HashSet<Long> in = new java.util.HashSet<>();
+        int ix0 = (int) Math.floor(sx / V), iy0 = (int) Math.floor(Math.max(sy, fl + 0.1f) / V), iz0 = (int) Math.floor(sz / V);
+        for (int dx = -3; dx <= 3; dx++) for (int dy = -3; dy <= 3; dy++) for (int dz = -3; dz <= 3; dz++) {
+            long k = ContinueAlign.key((ix0 + dx + 0.5f) * V, (iy0 + dy + 0.5f) * V, (iz0 + dz + 0.5f) * V, V);
+            if (cells.containsKey(k) && in.add(k)) q.add(new long[]{ix0 + dx, iy0 + dy, iz0 + dz});
+        }
+        if (q.isEmpty()) { activity.toast("That doesn't look like something standing there. Tap the person's body."); return; }
+        while (!q.isEmpty()) {
+            long[] c = q.poll();
+            for (int dx = -2; dx <= 2; dx++) for (int dy = -2; dy <= 2; dy++) for (int dz = -2; dz <= 2; dz++) {
+                long nx = c[0] + dx, ny = c[1] + dy, nz = c[2] + dz;
+                long k = ContinueAlign.key((nx + 0.5f) * V, (ny + 0.5f) * V, (nz + 0.5f) * V, V);
+                if (cells.containsKey(k) && in.add(k)) q.add(new long[]{nx, ny, nz});
+            }
+        }
+        takeUndo("Remove person");
+        int j = 0, removed = 0;
+        double cx = 0, cz = 0;
+        for (int i = 0; i < count; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            boolean gone = y >= fl + 0.05f && y <= fl + 2.3f && Math.hypot(x - sx, z - sz) <= R && in.contains(ContinueAlign.key(x, y, z, V));
+            if (gone) { removed++; cx += x; cz += z; continue; }
+            if (j != i) {
+                pos.put(j * 3, x); pos.put(j * 3 + 1, y); pos.put(j * 3 + 2, z);
+                for (int a = 0; a < 4; a++) col.put(j * 4 + a, col.get(i * 4 + a));
+                obs[j] = obs[i]; seenStamp[j] = seenStamp[i]; thru[j] = thru[i];
+            }
+            j++;
+        }
+        count = j; uploaded = 0; refineCursor = 0;
+        rebuildVoxelIndex();
+        if (removed > 0) personSpot = new float[]{(float) (cx / removed), fl, (float) (cz / removed)};
+        surfCount = 0; surfShown = null; buildSurfels();
+        autosave();
+        log(String.format(java.util.Locale.US, "removed person: %d points, %d cells, floor %.2f", removed, in.size(), fl));
+        activity.toast(removed > 0 ? "Person removed (" + removed + " points). Undo puts them back." : "Nothing removed.");
+    }
+
+    /** Toggle the interview set: at the removed person's spot, or (none yet) where the next tap lands. Returns a message. */
+    String interviewToggle() {
+        if (ivPerson != null) { ivPerson = null; return "Interview set hidden"; }
+        float[] p = personSpot;
+        if (p != null) { buildInterview(p[0], p[1], p[2]); return "Interview set placed where the person stood"; }
+        demoTool = 2;
+        return "Tap the spot on stage where the person should stand";
+    }
+
+    private static final class Lines {
+        float[] a = new float[600]; int n;
+        void v(float x, float y, float z) { if (n + 3 > a.length) a = java.util.Arrays.copyOf(a, a.length * 2); a[n++] = x; a[n++] = y; a[n++] = z; }
+        void seg(float[] p, float[] q) { v(p[0], p[1], p[2]); v(q[0], q[1], q[2]); }
+        float[] get() { return java.util.Arrays.copyOf(a, n); }
+    }
+
+    private void buildInterview(float px, float fl, float pz) {
+        // the subject faces where the scan was taken from (the audience side)
+        double sx = 0, sz = 0; int pn = 0;
+        for (int i = 0; i < pathCount; i++) { sx += path.get(i * 3); sz += path.get(i * 3 + 2); pn++; }
+        float fx, fz;
+        if (pn > 0) { fx = (float) (sx / pn) - px; fz = (float) (sz / pn) - pz; } else { fx = (float) Math.sin(yaw); fz = (float) Math.cos(yaw); }
+        float fl2 = (float) Math.hypot(fx, fz);
+        if (fl2 < 1e-3f) { fx = 0; fz = 1; } else { fx /= fl2; fz /= fl2; }
+        final float rx = -fz, rz = fx; // the subject's left/right
+        final float ffx = fx, ffz = fz;
+        java.util.function.BiFunction<float[], Float, float[]> W = (ab, h) -> new float[]{px + ab[0] * ffx + ab[1] * rx, fl + h, pz + ab[0] * ffz + ab[1] * rz};
+        // subject: a simple standing figure
+        Lines per = new Lines();
+        float[] head = W.apply(new float[]{0, 0}, 1.62f);
+        for (int k = 0; k < 16; k++) {
+            double a0 = k * Math.PI / 8, a1 = (k + 1) * Math.PI / 8;
+            per.seg(W.apply(new float[]{0, 0.1f * (float) Math.cos(a0)}, 1.62f + 0.12f * (float) Math.sin(a0)), W.apply(new float[]{0, 0.1f * (float) Math.cos(a1)}, 1.62f + 0.12f * (float) Math.sin(a1)));
+        }
+        float[] neck = W.apply(new float[]{0, 0}, 1.5f), hip = W.apply(new float[]{0, 0}, 0.95f);
+        per.seg(neck, hip);
+        float[] shL = W.apply(new float[]{0, 0.21f}, 1.44f), shR = W.apply(new float[]{0, -0.21f}, 1.44f);
+        per.seg(shL, shR);
+        per.seg(shL, W.apply(new float[]{0.05f, 0.27f}, 0.85f)); per.seg(shR, W.apply(new float[]{0.05f, -0.27f}, 0.85f));
+        float[] hL = W.apply(new float[]{0, 0.11f}, 0.95f), hR = W.apply(new float[]{0, -0.11f}, 0.95f);
+        per.seg(hL, hR);
+        per.seg(hL, W.apply(new float[]{0, 0.13f}, 0f)); per.seg(hR, W.apply(new float[]{0, -0.13f}, 0f));
+        // camera on a tripod, 2.2 m in front at eye height, with its field of view
+        Lines cam = new Lines();
+        float[] C = W.apply(new float[]{2.2f, 0}, 1.5f);
+        box(cam, C, 0.11f, 0.08f, 0.08f, ffx, ffz);
+        for (int k = 0; k < 3; k++) {
+            double a = k * 2 * Math.PI / 3;
+            cam.seg(new float[]{C[0], C[1] - 0.08f, C[2]}, new float[]{C[0] + 0.35f * (float) Math.cos(a), fl, C[2] + 0.35f * (float) Math.sin(a)});
+        }
+        float[] lens = W.apply(new float[]{2.09f, 0}, 1.5f);
+        float[][] fr = new float[4][];
+        for (int k = 0; k < 4; k++) fr[k] = W.apply(new float[]{0.0f, (k == 0 || k == 3 ? 1 : -1) * 0.75f}, 1.5f + (k < 2 ? 0.42f : -0.42f));
+        for (int k = 0; k < 4; k++) { cam.seg(lens, fr[k]); cam.seg(fr[k], fr[(k + 1) % 4]); }
+        // lights: key, fill and back, each on a stand, pointing at the face, with its beam
+        Lines li = new Lines(), ray = new Lines(), cone = new Lines();
+        float[] face = W.apply(new float[]{0, 0}, 1.55f);
+        float[][] at = {{1.8f, 40, 2.2f}, {2.2f, -55, 1.9f}, {1.6f, 160, 2.4f}};
+        for (float[] L : at) {
+            double a = Math.toRadians(L[1]);
+            float[] H = W.apply(new float[]{L[0] * (float) Math.cos(a), L[0] * (float) Math.sin(a)}, L[2]);
+            float[] base = {H[0], fl, H[2]};
+            li.seg(base, new float[]{H[0], H[1] - 0.15f, H[2]});
+            for (int k = 0; k < 3; k++) { double b = k * 2 * Math.PI / 3 + 0.5; li.seg(new float[]{H[0], fl + 0.3f, H[2]}, new float[]{H[0] + 0.4f * (float) Math.cos(b), fl, H[2] + 0.4f * (float) Math.sin(b)}); }
+            float dx = face[0] - H[0], dy = face[1] - H[1], dz = face[2] - H[2], dl = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+            dx /= dl; dy /= dl; dz /= dl;
+            float hl = (float) Math.hypot(dx, dz);
+            box(li, H, 0.15f, 0.15f, 0.15f, dx / Math.max(hl, 1e-3f), dz / Math.max(hl, 1e-3f));
+            // beam: from the light's front to a circle around the face and a little past it
+            float ux = -dz, uz = dx; float ul = (float) Math.hypot(ux, uz); ux /= ul; uz /= ul;          // sideways
+            float wx = dy * uz, wy = dz * ux - dx * uz, wz = -dy * ux; // w = d x u
+            float wl = (float) Math.sqrt(wx * wx + wy * wy + wz * wz); wx /= wl; wy /= wl; wz /= wl;
+            float len = dl * 1.15f, rad = 0.55f * 1.15f;
+            float[] src = {H[0] + dx * 0.16f, H[1] + dy * 0.16f, H[2] + dz * 0.16f};
+            float[] end = {H[0] + dx * len, H[1] + dy * len, H[2] + dz * len};
+            int segs = 24;
+            float[] prev = null;
+            for (int k = 0; k <= segs; k++) {
+                double t = k * 2 * Math.PI / segs; float c = (float) Math.cos(t) * rad, sn = (float) Math.sin(t) * rad;
+                float[] e = {end[0] + c * ux + sn * wx, end[1] + sn * wy, end[2] + c * uz + sn * wz};
+                if (k % 3 == 0 && k < segs) ray.seg(src, e);
+                if (prev != null) { ray.seg(prev, e); cone.v(src[0], src[1], src[2]); cone.v(prev[0], prev[1], prev[2]); cone.v(e[0], e[1], e[2]); }
+                prev = e;
+            }
+        }
+        ivCam = cam.get(); ivLights = li.get(); ivRays = ray.get(); ivCones = cone.get();
+        ivPerson = per.get();
+        log(String.format(java.util.Locale.US, "interview set at %.2f %.2f %.2f facing %.2f %.2f", px, fl, pz, ffx, ffz));
+    }
+
+    /** A wireframe box centred at c, turned to face (fx, fz) horizontally; a = half length along f, b = half width, h = half height. */
+    private static void box(Lines l, float[] c, float a, float b, float h, float fx, float fz) {
+        float rx = -fz, rz = fx;
+        float[][] p = new float[8][];
+        for (int k = 0; k < 8; k++) {
+            float sa = (k & 1) == 0 ? -a : a, sb = (k & 2) == 0 ? -b : b, sh = (k & 4) == 0 ? -h : h;
+            p[k] = new float[]{c[0] + sa * fx + sb * rx, c[1] + sh, c[2] + sa * fz + sb * rz};
+        }
+        int[][] e = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+        for (int[] q : e) l.seg(p[q[0]], p[q[1]]);
+    }
+
+    private static final float[] IV_PERSON = {1f, 1f, 1f, 0.95f}, IV_CAM = {0.35f, 0.85f, 1f, 1f}, IV_LIGHT = {0.95f, 0.66f, 0.23f, 1f},
+            IV_RAY = {1f, 0.85f, 0.45f, 0.55f}, IV_CONE = {1f, 0.85f, 0.45f, 0.10f};
+
+    private void drawInterview(float[] m) {
+        float[] per = ivPerson;
+        if (per == null) return;
+        float dens = height / 1000f;
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        planDraw(m, ivCones, GLES20.GL_TRIANGLES, IV_CONE, 1);
+        GLES20.glLineWidth(2f * dens);
+        planDraw(m, ivRays, GLES20.GL_LINES, IV_RAY, 1);
+        GLES20.glLineWidth(4f * dens);
+        planDraw(m, ivLights, GLES20.GL_LINES, IV_LIGHT, 1);
+        planDraw(m, ivCam, GLES20.GL_LINES, IV_CAM, 1);
+        planDraw(m, per, GLES20.GL_LINES, IV_PERSON, 1);
     }
 
     private float boxHalfX, boxHalfZ, boxMinY, boxMaxY;
@@ -3044,6 +3632,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private boolean displaySet;
+    private int lastRotation = -1;
 
     @Override
     public void onDrawFrame(GL10 gl) {
@@ -3051,7 +3640,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (idle) { for (Runnable r; (r = glTasks.poll()) != null; ) r.run(); return; }
         if (viewing) { drawViewer(); return; }
         if (session == null) return;
-        if (!displaySet) { session.setDisplayGeometry(displayRotation(), width, height); displaySet = true; }
+        if (frameNo % 10 == 0 && displayRotation() != lastRotation) displaySet = false; // turned upside down (same size, so no onSurfaceChanged)
+        if (!displaySet) { lastRotation = displayRotation(); session.setDisplayGeometry(lastRotation, width, height); displaySet = true; }
         if (!textureSet) { session.setCameraTextureName(bgTex); textureSet = true; }
         Frame frame;
         try {
@@ -3146,6 +3736,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             drawPaint(mvp);
             if (LIVE_MESH) { maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); }
             else if (LIVE_DISCS) drawLiveDiscs(mvp);
+            if (contAuto && improveDir != null) { maybeContinueAlign(nowMs); drawContinueGhost(mvp); }
             float[] tap = pendingTap;
             if (tap != null) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
             maybeStartLiveRoom(nowMs);
@@ -3484,7 +4075,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
-                    if (mm < 200 || mm > 4000) { depthRejectedRange++; continue; }
+                    if (mm < 200 || mm > (DEMO_FAR ? 8000 : 4000)) { depthRejectedRange++; continue; }
                     depthPixels++;
                     int cv = cbuf != null ? cbuf.get(v * cRow + u * cPix) & 0xFF : 255;
                     if (cv < 40) { depthRejectedConf++; continue; } // below this the S24's raw depth is mostly noise (scan3 replay)
@@ -4208,7 +4799,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int level; String hint, sub = null;
         float d = detailHere;
         tooFast = moveSpeed > (tooFast ? 0.45f : 0.6f); // a slow walk (~0.4 m/s) is fine
-        tooFar = farShare > (tooFar ? 0.45f : 0.6f);
+        tooFar = !DEMO_FAR && farShare > (tooFar ? 0.45f : 0.6f); // demo: looking out over a hall is the point
         if (ts != TrackingState.TRACKING) {
             level = 2;
             hint = lastFail == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_FEATURES ? "Lost track: point at something with texture, not a plain wall"
@@ -4223,7 +4814,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (d < 0.35f) { level = 2; hint = LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
         else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = "This spot is done. Move on to the next red area"; }
-        if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
+        if (improveDir != null && contAuto) sub = improveT != null ? "✓ Saved room recognised. Keep scanning, the saved part is shown in blue"
+                : contBase == null ? "Loading the saved scan…" : "Point at a part you scanned before so it can find its place" + (contScore > 0 ? String.format(java.util.Locale.US, " (best match %.0f%%)", contScore * 100) : "");
+        else if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
         else if (photoJustTaken()) sub = "📷 Photo " + photos.keyframes.size() + " taken, keep swaying";
         else if (guideText != null && level == 0) sub = guideText;
         // keep a hint up for 1.5 s, unless something more urgent replaces it
@@ -4316,6 +4909,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         if (overlays) drawPath(mvp);
         drawOutlets(mvp);
+        drawInterview(mvp);
         System.arraycopy(mvp, 0, viewMvp, 0, 16);
         if (lighting.enabled) drawLightGizmos(mvp);
         else if (plan != null && overlays) drawPlan(mvp, plan);

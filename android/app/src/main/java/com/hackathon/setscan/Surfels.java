@@ -23,6 +23,7 @@ final class Surfels {
     final ByteBuffer col;            // rgba, a = opacity
     int n; // may be less than the buffers' capacity (reused by the Trainer)
     int flat, curved, lonely;
+    int stretched;                   // demo hall stretch applied (generation + 1), so it isn't applied twice
     boolean trained;                 // from the Trainer (no settle animation)
 
     private Surfels(int n) {
@@ -34,6 +35,17 @@ final class Surfels {
     }
 
     static Surfels empty(int n) { return new Surfels(n); }
+
+    /** A full copy (for Undo). */
+    Surfels copy() {
+        Surfels c = new Surfels(n);
+        FloatBuffer a = pos.duplicate(); a.position(0); a.limit(n * 3); c.pos.put(a); c.pos.position(0);
+        a = raw.duplicate(); a.position(0); a.limit(n * 3); c.raw.put(a); c.raw.position(0);
+        a = nrm.duplicate(); a.position(0); a.limit(n * 4); c.nrm.put(a); c.nrm.position(0);
+        ByteBuffer b = col.duplicate(); b.position(0); b.limit(n * 4); c.col.put(b); c.col.position(0);
+        c.flat = flat; c.curved = curved; c.lonely = lonely; c.stretched = stretched; c.trained = trained;
+        return c;
+    }
 
     /** Surfels for the points src/srcCol (colours copied, opacity 1). */
     static Surfels build(FloatBuffer src, ByteBuffer srcCol, int n) {

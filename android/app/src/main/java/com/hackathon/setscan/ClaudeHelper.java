@@ -267,6 +267,46 @@ final class ClaudeHelper {
         }
     }
 
+    /**
+     * DEMO (hall from the stage): Claude estimates how far the back wall is, from photos looking out plus what the
+     * phone did measure. Returns {back wall distance m, hall width m, ceiling height m} (NaN when unsure) or null.
+     */
+    static double[] estimateHall(String apiKey, List<String> photosB64, String measured) throws Exception {
+        AnthropicClient client = AnthropicOkHttpClient.builder().apiKey(apiKey).build();
+        try {
+            List<BetaContentBlockParam> content = new ArrayList<>();
+            for (String b : photosB64) content.add(image(b));
+            content.add(BetaContentBlockParam.ofText(
+                    "These photos were taken from one spot (a stage or the front of a room), looking out into the space. "
+                    + "The phone measured the near part in 3D but its sensor only reaches about 5 m, so the far end is unknown.\n"
+                    + "What the phone measured:\n" + measured + "\n"
+                    + "Estimate the distance from the camera to the far (back) wall straight ahead, in metres. Use every cue: "
+                    + "the measured width and how wide the back wall looks compared with it, rows of chairs (about 0.9 m apart), "
+                    + "doors (about 2.1 m tall), tables, people (about 1.75 m), ceiling lights, perspective. "
+                    + "Reply with only JSON: {\"back_wall_m\": 0, \"width_m\": 0, \"ceiling_m\": 0, \"why\": \"one short sentence\"}"));
+            MessageCreateParams params = MessageCreateParams.builder()
+                    .model(MODEL)
+                    .maxTokens(4000L)
+                    .addUserMessageOfContentBlockParams(content)
+                    .addBeta("server-side-fallback-2026-07-01")
+                    .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
+                    .build();
+            BetaMessage msg = client.beta().messages().create(params);
+            count(msg);
+            StringBuilder text = new StringBuilder();
+            for (BetaContentBlock b : msg.content()) b.text().ifPresent(x -> text.append(x.text()));
+            String t = text.toString();
+            int a = t.indexOf('{'), b = t.lastIndexOf('}');
+            if (a < 0 || b <= a) return null;
+            JSONObject o = new JSONObject(t.substring(a, b + 1));
+            lastHallWhy = o.optString("why", "");
+            return new double[]{o.optDouble("back_wall_m", Double.NaN), o.optDouble("width_m", Double.NaN), o.optDouble("ceiling_m", Double.NaN)};
+        } finally {
+            client.close();
+        }
+    }
+    static volatile String lastHallWhy = "";
+
     static List<Det> parseDetect(String text) throws Exception {
         int a = text.indexOf('{'), b = text.lastIndexOf('}');
         if (a < 0 || b <= a) throw new IllegalStateException("no JSON in the reply");

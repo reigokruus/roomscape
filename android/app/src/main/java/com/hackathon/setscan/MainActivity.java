@@ -35,6 +35,8 @@ public class MainActivity extends Activity {
     private Session session;
     private boolean installRequested;
     private TextView status;
+    private Button refineButton;
+    private Button undoButton, removePersonButton, interviewButton;
     private Button lightButton, saveButton, homeButton, improveButton, cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
@@ -280,7 +282,7 @@ public class MainActivity extends Activity {
         saveButton.setOnClickListener(v -> saveScan());
         bar.addView(saveButton);
         improveButton = new Button(this);
-        improveButton.setText("Improve scan");
+        improveButton.setText("Continue scan");
         improveButton.setVisibility(View.GONE);
         improveButton.setOnClickListener(v -> improveScan());
         bar.addView(improveButton);
@@ -301,6 +303,26 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> trainButton.setText(label));
         }));
         bar.addView(trainButton);
+        refineButton = new Button(this);
+        refineButton.setText("Refine");
+        refineButton.setVisibility(View.GONE);
+        refineButton.setOnClickListener(v -> glView.queueEvent(() -> { String m = renderer.refineAgain(); toast(m); }));
+        bar.addView(refineButton);
+        undoButton = new Button(this);
+        undoButton.setText("Undo");
+        undoButton.setVisibility(View.GONE);
+        undoButton.setOnClickListener(v -> glView.queueEvent(() -> { String m = renderer.undo(); toast(m); }));
+        bar.addView(undoButton);
+        removePersonButton = new Button(this);
+        removePersonButton.setText("Remove person");
+        removePersonButton.setVisibility(View.GONE);
+        removePersonButton.setOnClickListener(v -> { glView.queueEvent(() -> renderer.demoTool = 1); toast("Tap the person you want removed"); });
+        bar.addView(removePersonButton);
+        interviewButton = new Button(this);
+        interviewButton.setText("Interview");
+        interviewButton.setVisibility(View.GONE);
+        interviewButton.setOnClickListener(v -> glView.queueEvent(() -> toast(renderer.interviewToggle())));
+        bar.addView(interviewButton);
         exportButton = new Button(this);
         exportButton.setText("Share");
         exportButton.setVisibility(View.GONE);
@@ -364,7 +386,7 @@ public class MainActivity extends Activity {
         row2.addView(logButton);
         FlowRow bars = new FlowRow(this, dp(4));
         bars.setPadding(dp(6), dp(4), dp(6), dp(4));
-        for (Button bt : new Button[]{homeButton, mainButton, lightButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
+        for (Button bt : new Button[]{homeButton, mainButton, lightButton, catalogButton, scannedItemsButton, previewButton, saveButton, improveButton, depthButton, cleanButton, trainButton, planButton, viewButton, cutButton, topButton, splatButton, sizeButton, refineButton, undoButton, removePersonButton, interviewButton, exportButton, claudeButton, liveClaudeButton, logButton}) {
             ((ViewGroup) bt.getParent()).removeView(bt);
             bt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             bt.setAllCaps(false);
@@ -551,12 +573,12 @@ public class MainActivity extends Activity {
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
         renderer.overlays = debug;
-        Button[] viewerMain = {homeButton, exportButton, objButton, saveButton};
+        Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, undoButton, removePersonButton, interviewButton};
         lightButton.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // lighting is parked for now (rk: just the model)
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
-        improveButton.setVisibility(debug && !scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE); // needs corner taps, which are off
+        improveButton.setVisibility(!scanning && renderer.currentDir != null ? View.VISIBLE : View.GONE); // demo: Continue scan finds the saved room by itself
         for (Button b : tools) {
             boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn;
             b.setVisibility(debug && (!scanning || scanTool) ? View.VISIBLE : View.GONE);
@@ -731,7 +753,7 @@ public class MainActivity extends Activity {
     void autoSaved(String name, String err) {
         runOnUiThread(() -> {
             if (name == null) { toast("Couldn't save the scan: " + err); return; }
-            if (!scanning && debug) improveButton.setVisibility(View.VISIBLE);
+            if (!scanning) improveButton.setVisibility(View.VISIBLE);
             if (!scanning && !name.equals(lastSavedName)) { lastSavedName = name; toast("Saved as \"" + name + "\". Tap Rename to change it."); }
         });
     }
@@ -920,7 +942,7 @@ public class MainActivity extends Activity {
                 if (out != null) {
                     toast("Saved \"" + name + "\"");
                     updateStatus("Saved \"" + name + "\". Improve scan adds a second pass that lines up with this one.");
-                    if (debug) improveButton.setVisibility(View.VISIBLE);
+                    improveButton.setVisibility(View.VISIBLE);
                 } else updateStatus("Save failed: " + err);
             })));
         });
