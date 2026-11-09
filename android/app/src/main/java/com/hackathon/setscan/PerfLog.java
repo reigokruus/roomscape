@@ -37,6 +37,7 @@ final class PerfLog {
     private ScheduledExecutorService timer;
     private int frames; private double frameMs;
     private final Map<String, double[]> notes = new HashMap<>(); // name -> {sum ms, count}
+    private final Map<String, double[]> noteTotals = new HashMap<>(); // name -> {sum ms, count, max ms}, whole run
     private final Map<String, double[]> sums = new HashMap<>();  // stage -> {seconds, cpuSec, frames, frameMs, maxThermal, peakRssMB, samples, little, mid, big}
     private static final int CORES = Runtime.getRuntime().availableProcessors();
     private static final long TICK_HZ = 100; // USER_HZ
@@ -56,7 +57,7 @@ final class PerfLog {
             f.getParentFile().mkdirs();
             file = f; out = new FileWriter(f, false);
             this.stage = stage; started = lastSample = System.nanoTime();
-            lastThread.clear(); notes.clear(); sums.clear(); frames = 0; frameMs = 0;
+            lastThread.clear(); notes.clear(); noteTotals.clear(); sums.clear(); frames = 0; frameMs = 0;
             JSONObject o = new JSONObject();
             o.put("event", "start"); o.put("stage", stage); o.put("cores", CORES); o.put("clusters", new JSONArray(cluster));
             o.put("device", Build.MODEL + (Build.VERSION.SDK_INT >= 31 ? " " + Build.SOC_MODEL : ""));
@@ -69,7 +70,10 @@ final class PerfLog {
 
     void stage(String s) { stage = s; }
     synchronized void frame(double ms) { frames++; frameMs += ms; }
-    synchronized void note(String name, double ms) { double[] n = notes.computeIfAbsent(name, k -> new double[2]); n[0] += ms; n[1]++; }
+    synchronized void note(String name, double ms) {
+        double[] n = notes.computeIfAbsent(name, k -> new double[2]); n[0] += ms; n[1]++;
+        double[] t = noteTotals.computeIfAbsent(name, k -> new double[3]); t[0] += ms; t[1]++; t[2] = Math.max(t[2], ms);
+    }
     File file() { return file; }
 
     /** Stops and writes the summary (<name>.summary.json). */
@@ -91,6 +95,13 @@ final class PerfLog {
                 st.put("maxThermalStatus", v[4]); st.put("peakRssMB", v[5]);
                 s.put(e.getKey(), st);
             }
+            JSONObject timed = new JSONObject();
+            for (Map.Entry<String, double[]> e : noteTotals.entrySet()) {
+                double[] t = e.getValue();
+                timed.put(e.getKey(), new JSONObject().put("meanMs", Math.round(t[0] / Math.max(1, t[1]) * 10) / 10.0)
+                        .put("maxMs", Math.round(t[2])).put("calls", (long) t[1]).put("totalSeconds", Math.round(t[0] / 100) / 10.0));
+            }
+            s.put("timed", timed);
             Files.write(new File(file.getParent(), file.getName().replace(".jsonl", ".summary.json")).toPath(), s.toString(2).getBytes());
         } catch (Exception e) { android.util.Log.e("RoomScape", "perf summary: " + e); }
     }

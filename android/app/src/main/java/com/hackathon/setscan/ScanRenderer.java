@@ -4096,7 +4096,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (!textureSet) { session.setCameraTextureName(bgTex); textureSet = true; }
         Frame frame;
         try {
+            long upT0 = System.nanoTime();
             frame = session.update();
+            perf.note("ms: ARCore update", (System.nanoTime() - upT0) / 1e6);
         } catch (Exception e) {
             updateErrors++;
             logError("session.update", e);
@@ -4183,12 +4185,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             System.arraycopy(curPose, 0, prevPose, 0, 16);
             havePrevPose = true;
             if (nowMs >= settleUntil) {
+                // Per-stage times in the hardware log (S24 drew at 10.5 fps with the GL thread ~80% busy; rk 9 Nov).
+                long intT0 = System.nanoTime();
                 try {
                     integrate(frame, camera);
                 } catch (Exception e) {
                     logError("integrate", e);
                 }
+                long phT0 = System.nanoTime();
+                perf.note("ms: depth fusion (all)", (phT0 - intT0) / 1e6);
                 try { if (depthSupported) maybePhoto(frame, camera); } catch (Exception e) { logError("photo", e); }
+                perf.note("ms: photo", (System.nanoTime() - phT0) / 1e6);
             }
             updateGuide(camera, nowMs);
             recordPath(camera.getPose());
@@ -4204,7 +4211,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 frame.transformCoordinates2d(com.google.ar.core.Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
                         new float[]{-1, -1, 1, -1, -1, 1}, com.google.ar.core.Coordinates2d.TEXTURE_NORMALIZED, ovCamUv);
             }
-            if (LIVE_MESH) { maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); }
+            if (LIVE_MESH) { long lmT0 = System.nanoTime(); maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); perf.note("ms: live mesh draw", (System.nanoTime() - lmT0) / 1e6); }
             else if (LIVE_DISCS) drawLiveDiscs(mvp);
             if (contAuto && improveDir != null) { maybeContinueAlign(nowMs); drawContinueGhost(mvp); }
             float[] tap = pendingTap;
@@ -4546,6 +4553,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 } catch (Throwable ignored) { }
                 recs.add(r);
             }
+            long pxT0 = System.nanoTime();
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
@@ -4588,7 +4596,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (count >= MAX_POINTS) return;
                 }
             }
+            long cvT0 = System.nanoTime();
+            perf.note("ms: depth fusion pixels", (cvT0 - pxT0) / 1e6);
             carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
+            perf.note("ms: carve", (System.nanoTime() - cvT0) / 1e6);
             if (depthPixelsFrame > 300) { float fs = (float) farPixelsFrame / depthPixelsFrame; farShare = farShare < 0 ? fs : farShare * 0.7f + fs * 0.3f; }
             float cf = centreSolid(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m);
             if (cf < 0 && frameHits > 200) cf = (float) frameSolid / frameHits;
