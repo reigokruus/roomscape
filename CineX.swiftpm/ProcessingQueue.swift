@@ -4,7 +4,37 @@ import SwiftUI
 import UIKit
 import os
 
-private let log = Logger(subsystem: "RoomScape", category: "Processing")
+/// The processing log: the system log, and Documents/processing-log.txt (copied off the phone to check background
+/// runs from the Mac; reading the system log from there needs an admin). Kept under ~200 KB.
+private enum log {
+    static let logger = Logger(subsystem: "RoomScape", category: "Processing")
+    private static let lock = NSLock()
+    static var file: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("processing-log.txt") }
+
+    static func info(_ s: String) { logger.info("\(s, privacy: .public)"); append(s) }
+    static func error(_ s: String) { logger.error("\(s, privacy: .public)"); append("ERROR " + s) }
+
+    private static func append(_ s: String) {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let state = ProcessInfo.processInfo.thermalState.rawValue
+        let line = "\(f.string(from: Date())) [thermal \(state)] \(s)\n"
+        lock.lock(); defer { lock.unlock() }
+        let url = file
+        if let h = try? FileHandle(forWritingTo: url) {
+            defer { try? h.close() }
+            if let size = try? h.seekToEnd(), size > 200_000 {
+                try? h.close()
+                let old = (try? Data(contentsOf: url)) ?? Data()
+                try? (old.suffix(100_000) + Data(line.utf8)).write(to: url)
+                return
+            }
+            try? h.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: url)
+        }
+    }
+}
 
 /// Processing after the scan (rk 9 Nov: "record raw now, process later"): jobs on scans' raw recordings, one at a
 /// time, paced by the phone's heat, carrying on in the background.
@@ -57,7 +87,7 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
            let scan = ScanStore.list().first(where: RecordingProcessor.hasRecording) {
             let item = Item(scan: scan.name, job: job)
             if !items.contains(item) { items.append(item) }
-            log.info("test: queued \(job.rawValue, privacy: .public) for \(scan.name, privacy: .public)")
+            log.info("test: queued \(job.rawValue) for \(scan.name)")
         }
     }
 
@@ -136,13 +166,14 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
             }
             return true
         } catch {
-            log.info("continued task not started: \(error.localizedDescription, privacy: .public)")
+            log.info("continued task not started: \(error.localizedDescription)")
             return false
         }
     }
 
     /// The system started a task for the queue (continued processing, or the later resume).
     private func runInSystemTask(_ task: BGTask) {
+        log.info("system task started: \(task.identifier) (\(type(of: task)))")
         systemTask = task
         task.expirationHandler = { [weak self] in
             MainActor.assumeIsolated {
@@ -165,6 +196,7 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
     /// Without a system task: runs while the app is open, plus the short time iOS gives an app that was just left.
     /// If that runs out, a background-processing task resumes it later.
     private func runInApp() {
+        log.info("running in the app (app state \(UIApplication.shared.applicationState.rawValue))")
         appBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Processing room scan") { [weak self] in
             MainActor.assumeIsolated {
                 self?.runner?.cancel()
@@ -186,7 +218,7 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
         request.requiresExternalPower = false
         request.requiresNetworkConnectivity = false
         do { try BGTaskScheduler.shared.submit(request); log.info("resume scheduled") } catch {
-            log.info("resume not scheduled: \(error.localizedDescription, privacy: .public) (resumes when the app opens)")
+            log.info("resume not scheduled: \(error.localizedDescription) (resumes when the app opens)")
         }
     }
 
@@ -200,7 +232,7 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
             current = item
             progress = RecordingProcessor.Progress(stage: "Starting", fraction: 0, note: nil)
             report()
-            log.info("processing \(item.scan, privacy: .public): \(item.job.rawValue, privacy: .public)")
+            log.info("processing \(item.scan): \(item.job.rawValue)")
             let job = Task.detached(priority: .utility) {
                 try await RecordingProcessor.run(item.job, on: scan) { p in
                     Task { @MainActor in ProcessingQueue.shared.update(p) }
@@ -211,12 +243,12 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
                 try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
                 items.removeAll { $0 == item }
                 finished = Finished(scan: item.scan, job: item.job, error: nil)
-                log.info("processed \(item.scan, privacy: .public)")
+                log.info("processed \(item.scan)")
             } catch is CancellationError {
                 return stopped()
             } catch {
                 // Kept in the scan's processing folder; "Rebuild from recording" tries again.
-                log.error("processing failed: \(String(describing: error), privacy: .public)")
+                log.error("processing failed: \(String(describing: error))")
                 items.removeAll { $0 == item }
                 finished = Finished(scan: item.scan, job: item.job, error: error.localizedDescription)
             }
@@ -229,6 +261,7 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
     }
 
     private func stopped() -> Bool {
+        log.info("stopped part-way: \(current?.scan ?? "?") resumes from its last finished stage")
         inner = nil
         current = nil
         progress = nil
@@ -237,6 +270,8 @@ private let log = Logger(subsystem: "RoomScape", category: "Processing")
 
     private func update(_ p: RecordingProcessor.Progress) {
         guard current != nil else { return }
+        if p.fraction < 0, p.note != progress?.note { log.info("note: \(p.note ?? "continuing")") }
+        if p.fraction >= 0, !p.stage.isEmpty, p.stage != progress?.stage { log.info("stage: \(p.stage)") }
         if p.fraction < 0 { progress?.note = p.note } else { progress = .init(stage: p.stage, fraction: p.fraction, note: progress?.note) }
         report()
     }
