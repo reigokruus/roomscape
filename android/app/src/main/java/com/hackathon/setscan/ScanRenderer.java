@@ -3600,7 +3600,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void setEyeHeight(float h) { eyeH = h; if (walking) eye[1] = walkFloorY() + h; }
 
     void pan(float dx, float dy) {
-        float s = dist * 0.0006f;
+        float s = dist * 0.0014f; // two-finger pan (rk: 0.0006 was too slow; turning stays as is)
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
         if (topView) {
             target[0] -= dx * s; target[2] -= dy * s;
