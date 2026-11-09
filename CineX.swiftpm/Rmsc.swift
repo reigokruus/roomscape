@@ -140,6 +140,9 @@ enum Rmsc {
                     let a = w.center - w.right * w.halfWidth, b = w.center + w.right * w.halfWidth
                     return [a.x, a.z, b.x, b.z, w.halfHeight * 2]
                 },
+                // RoomPlan's counts, so other apps show the same numbers.
+                "windows": room?.windows.count ?? 0,
+                "doors": room?.doors.count ?? 0,
             ]
         }
         let objects = RoomObjects.load(scan)?.objects ?? room.map(RoomObjects.fromRoomPlan) ?? []

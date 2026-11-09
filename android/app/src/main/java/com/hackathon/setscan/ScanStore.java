@@ -143,7 +143,7 @@ final class ScanStore {
         if (d.ceiling != null) m.put("ceiling", vec(d.ceiling));
         try (FileOutputStream f = new FileOutputStream(new File(tmp, "meta.json"))) { f.write(m.toString(1).getBytes("UTF-8")); }
         // Kept across saves: the sync identity, and package parts this app doesn't use (an iPhone's ios/ folder).
-        for (String keep : new String[]{"sync.json", "rmsc-extra", "splats.bin"}) {
+        for (String keep : new String[]{"sync.json", "rmsc-extra", "splats.bin", "source-manifest.json"}) {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }
@@ -158,6 +158,17 @@ final class ScanStore {
         String after = d.name + "|" + d.n + "|" + d.kfs.size() + "|" + outletsAfter; // found outlets count as a change too
         if (before != null && !before.equals(after) && SyncInfo.file(dir).exists()) SyncInfo.touch(c, dir);
         return dir;
+    }
+
+    /** Found power outlets into the saved scan's meta.json; a change syncs to the phones a shared scan is with. */
+    static void writeOutlets(File dir, String outletsJson) throws Exception {
+        File f = new File(dir, "meta.json");
+        JSONObject m = new JSONObject(readText(f));
+        JSONArray now = new JSONArray(outletsJson), before = m.optJSONArray("outlets");
+        m.put("outlets", now);
+        m.put("roomPass", Math.max(2, m.optInt("roomPass", 0)));
+        try (FileOutputStream o = new FileOutputStream(f)) { o.write(m.toString(1).getBytes("UTF-8")); }
+        if (!now.toString().equals(before == null ? "[]" : before.toString()) && SyncInfo.file(dir).exists()) SyncInfo.touch(dir);
     }
 
     static void copyTree(File from, File to) throws Exception {

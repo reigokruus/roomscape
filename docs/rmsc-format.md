@@ -45,6 +45,7 @@ A reader must ignore files it doesn't know. A writer may leave out every optiona
   "room": {
     "corners": [[x, y, z], ...],
     "walls":   [[x1, z1, x2, z2, height], ...],
+    "windows": 1, "doors": 1,
     "lux": 180
   },
   "objects": [

@@ -451,6 +451,11 @@ final class Rmsc {
             File out = ScanStore.save(ctx, null, d);
             File ios = new File(tmp, "ios");
             if (ios.exists()) ScanStore.copyTree(ios, new File(out, "rmsc-extra/ios")); // kept for the iPhone
+            // The sending phone's own mesh (an iPhone's live-scan mesh): shown in Photo instead of a rebuilt one, and
+            // written back out on export. Its manifest too, for the room's size, walls, windows and doors.
+            File mp = new File(tmp, "mesh.ply");
+            if (mp.exists()) ScanStore.copyTree(mp, new File(out, "rmsc-extra/mesh.ply"));
+            ScanStore.copyTree(new File(tmp, "manifest.json"), new File(out, "source-manifest.json"));
             File sp = new File(tmp, "android/splats.bin");
             if (sp.exists()) copy(sp, new File(out, "splats.bin"));
             if (d.thumb != null) d.thumb.recycle();

@@ -231,6 +231,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * with the photos, so Photo looks like the iPhone's photo room. Progress shows in the processing card.
      */
     private void fuseSavedDepth() {
+        // The sending phone's own mesh, when the package had one (an iPhone scan): the same surface as there.
+        final File meshPly = currentDir == null ? null : new File(currentDir, "rmsc-extra/mesh.ply");
+        if (meshPly != null && meshPly.exists()) {
+            final int gen0 = surfGen;
+            new Thread(() -> { try {
+                Object[] mesh = readMeshPly(meshPly);
+                final FloatBuffer pos = (FloatBuffer) mesh[0]; final ByteBuffer col = (ByteBuffer) mesh[1]; final int tris = (Integer) mesh[2];
+                log("photo room surface from the package's mesh: " + tris + " triangles");
+                if (tris > 0) glTasks.add(() -> { if (gen0 == surfGen) { meshPosAll = pos; meshColAll = col; meshVerts = tris * 3; meshTris = tris; buildPhotos(); } });
+            } catch (Throwable e) { logError("package mesh", new RuntimeException(e)); } }, "package-mesh").start();
+            return;
+        }
         final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
         int withDepth = 0;
         for (PhotoRoom.Keyframe k : kfs) if (k.depth != null && k.dfx > 0) withDepth++;
@@ -1688,6 +1700,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("outlets: " + found + " sightings -> " + n + " outlets from " + kfs.size() + " photos" + (ok ? "" : " (stopped by an error)"));
             activity.updateProcess(null, -1);
             activity.outletsFound(n, roomItems.list.size(), ok);
+            // Saved straight into the scan (the full autosave waits for a viewer frame, which never comes if you've
+            // left the scan), so the outlets are kept and, in a shared room, sync to the other phones.
+            if (ok && currentDir != null) try { ScanStore.writeOutlets(currentDir, outlets.toJson()); } catch (Exception e) { logError("outlets save", e); }
             if (ok) glTasks.add(this::autosave);
         }).start();
     }
@@ -4678,10 +4693,54 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Throwable e) { logError("photo thumbnail", new RuntimeException(e)); } }, "photo-thumb").start();
     }
 
+    /** A binary PLY mesh (x y z float, red green blue uchar, faces as uchar-count int lists) as a triangle soup. */
+    private static Object[] readMeshPly(File f) throws Exception {
+        byte[] all = java.nio.file.Files.readAllBytes(f.toPath());
+        String head = new String(all, 0, Math.min(all.length, 4096), "US-ASCII");
+        int end = head.indexOf("end_header\n");
+        if (end < 0) throw new Exception("no PLY header");
+        int nv = 0, nf = 0;
+        for (String line : head.substring(0, end).split("\n")) {
+            String[] w = line.trim().split(" ");
+            if (w.length == 3 && w[0].equals("element")) { if (w[1].equals("vertex")) nv = Integer.parseInt(w[2]); else if (w[1].equals("face")) nf = Integer.parseInt(w[2]); }
+        }
+        ByteBuffer b = ByteBuffer.wrap(all, end + "end_header\n".length(), all.length - end - "end_header\n".length()).order(ByteOrder.LITTLE_ENDIAN);
+        float[] v = new float[nv * 3]; byte[] c = new byte[nv * 3];
+        for (int i = 0; i < nv; i++) { v[i * 3] = b.getFloat(); v[i * 3 + 1] = b.getFloat(); v[i * 3 + 2] = b.getFloat(); c[i * 3] = b.get(); c[i * 3 + 1] = b.get(); c[i * 3 + 2] = b.get(); }
+        java.util.ArrayList<int[]> faces = new java.util.ArrayList<>();
+        for (int i = 0; i < nf; i++) {
+            int k = b.get() & 0xFF; int[] p = new int[k];
+            for (int j = 0; j < k; j++) p[j] = b.getInt();
+            for (int j = 1; j + 1 < k; j++) faces.add(new int[]{p[0], p[j], p[j + 1]});
+        }
+        int tris = faces.size();
+        FloatBuffer pos = ByteBuffer.allocateDirect(Math.max(1, tris * 9) * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        ByteBuffer col = ByteBuffer.allocateDirect(Math.max(4, tris * 12)).order(ByteOrder.nativeOrder());
+        for (int[] t : faces) for (int vi : t) {
+            if (vi < 0 || vi >= nv) vi = 0;
+            pos.put(v[vi * 3]).put(v[vi * 3 + 1]).put(v[vi * 3 + 2]);
+            col.put(c[vi * 3]).put(c[vi * 3 + 1]).put(c[vi * 3 + 2]).put((byte) 255);
+        }
+        pos.position(0); col.position(0);
+        return new Object[]{pos, col, tris};
+    }
+
+    /** The sending phone's manifest (kept on import), for the room's size and counts as measured there. */
+    private org.json.JSONObject sourceManifest() {
+        try { return currentDir == null ? null : new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(new File(currentDir, "source-manifest.json").toPath()), "UTF-8")); }
+        catch (Exception e) { return null; }
+    }
+
     /** The scan's summary rows for the viewer, like the iPhone's: {section, label, value}. */
     java.util.List<String[]> roomFacts() {
         java.util.List<String[]> f = new java.util.ArrayList<>();
-        if (roomReady && room.hasLayout && !room.layout.isEmpty()) f.add(new String[]{"Room", "Walls", String.valueOf(room.layout.size())});
+        org.json.JSONObject sm = sourceManifest();
+        org.json.JSONObject sr = sm == null ? null : sm.optJSONObject("room");
+        if (sr != null && sr.optJSONArray("walls") != null && sr.optJSONArray("walls").length() > 0) {
+            f.add(new String[]{"Room", "Walls", String.valueOf(sr.optJSONArray("walls").length())});
+            if (sr.has("windows")) f.add(new String[]{"Room", "Windows", String.valueOf(sr.optInt("windows"))});
+            if (sr.has("doors")) f.add(new String[]{"Room", "Doors", String.valueOf(sr.optInt("doors"))});
+        } else if (roomReady && room.hasLayout && !room.layout.isEmpty()) f.add(new String[]{"Room", "Walls", String.valueOf(room.layout.size())});
         int outletCount; synchronized (outlets) { outletCount = outlets.list.size(); }
         if (outletCount > 0) f.add(new String[]{"Room", "Power outlets", String.valueOf(outletCount)});
         if (!objects.list.isEmpty()) f.add(new String[]{"Room", "Objects", String.valueOf(objects.list.size())});
@@ -4692,6 +4751,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** "8.2 × 5.3 m, 2.9 m high" from the scan's extent, or null before it's loaded. */
     String roomSizeText() {
+        // As measured by the phone that scanned it (an iPhone's RoomPlan walls), when the package said.
+        org.json.JSONObject sm = sourceManifest();
+        org.json.JSONArray walls = sm == null || sm.optJSONObject("room") == null ? null : sm.optJSONObject("room").optJSONArray("walls");
+        if (walls != null && walls.length() > 0) {
+            float x0 = 1e9f, x1 = -1e9f, z0 = 1e9f, z1 = -1e9f, hh = 0;
+            for (int i = 0; i < walls.length(); i++) {
+                org.json.JSONArray w = walls.optJSONArray(i);
+                if (w == null || w.length() < 5) continue;
+                for (int k = 0; k < 4; k += 2) { float x = (float) w.optDouble(k), z = (float) w.optDouble(k + 1); x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+                hh = Math.max(hh, (float) w.optDouble(4));
+            }
+            float h = sm.has("ceilingY") ? (float) (sm.optDouble("ceilingY") - sm.optDouble("floorY", 0)) : hh;
+            if (x1 > x0) return String.format(java.util.Locale.US, "%.1f × %.1f m, %.1f m high", Math.max(x1 - x0, z1 - z0), Math.min(x1 - x0, z1 - z0), h);
+        }
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
         if (w <= 0 || d <= 0) return null;
         return String.format(java.util.Locale.US, "%.1f × %.1f m, %.1f m high", Math.max(w, d), Math.min(w, d), h);
