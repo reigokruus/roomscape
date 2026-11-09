@@ -10,6 +10,8 @@ import SwiftUI
 final class LiveCapture {
     let device: MTLDevice?
     let cloud: LiveCloud?
+    /// RoomPlan's LiDAR mesh, drawn live instead of the discs once ARKit has some.
+    let mesh: LiveMesh?
     let session: ARSession
     private var link: CADisplayLink?
     private var discView: LiveDiscsMTKView?
@@ -26,11 +28,13 @@ final class LiveCapture {
         self.session = session
         device = MTLCreateSystemDefaultDevice()
         cloud = device.flatMap { LiveCloud(device: $0) }
+        mesh = device.map { LiveMesh(device: $0) }
     }
 
     func start() {
         guard link == nil, let cloud else { return }
         worker.async { cloud.reset() }
+        mesh?.reset()
         let link = CADisplayLink(target: WeakTarget(self), selector: #selector(WeakTarget.tick))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
         link.add(to: .main, forMode: .common)
@@ -44,6 +48,7 @@ final class LiveCapture {
                                            : CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
         discView?.preferredFramesPerSecond = on ? 6 : 12
         if let cloud { worker.async { cloud.setPowerSaving(on) } }
+        mesh?.setPowerSaving(on)
     }
 
     /// iOS warned about memory: let the cloud give some back.
@@ -178,6 +183,10 @@ final class LiveCapture {
     }
 
     fileprivate func tick() {
+        // Mesh anchors only: the frame itself isn't kept.
+        if let mesh, let anchors = session.currentFrame?.anchors {
+            mesh.offer(anchors.compactMap { $0 as? ARMeshAnchor })
+        }
         guard !busy, let cloud, let frame = session.currentFrame, frame.timestamp != lastFrameTime else { return }
         lastFrameTime = frame.timestamp
         busy = true
@@ -206,7 +215,7 @@ final class LiveDiscsMTKView: MTKView {
 
     init?(live: LiveCapture) {
         guard let device = live.device, let cloud = live.cloud,
-              let renderer = LiveDiscRenderer(device: device, cloud: cloud) else { return nil }
+              let renderer = LiveDiscRenderer(device: device, cloud: cloud, mesh: live.mesh) else { return nil }
         self.renderer = renderer
         super.init(frame: .zero, device: device)
         isOpaque = false
@@ -237,6 +246,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
 
     weak var session: ARSession?
     private let cloud: LiveCloud
+    private let meshRenderer: LiveMeshRenderer?
     private let queue: MTLCommandQueue
     private let depthPipeline: MTLRenderPipelineState
     private let colorPipeline: MTLRenderPipelineState
@@ -250,7 +260,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         var cell: Float
     }
 
-    init?(device: MTLDevice, cloud: LiveCloud) {
+    init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?) {
         let options = MTLCompileOptions()
         // Both passes must put every tile at exactly the same depth.
         options.preserveInvariance = true
@@ -284,6 +294,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let depthWrite = depthState(.less, write: true),
               let depthEqual = depthState(.lessEqual, write: false) else { return nil }
         self.cloud = cloud
+        meshRenderer = mesh.flatMap { LiveMeshRenderer(device: device, mesh: $0) }
         self.queue = queue
         self.depthPipeline = depthPipeline
         self.colorPipeline = colorPipeline
@@ -299,10 +310,23 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let commands = queue.makeCommandBuffer(),
               let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
         let count = cloud.count
-        if count > 0, let camera = session?.currentFrame?.camera, view.bounds.width > 0 {
+        if let camera = session?.currentFrame?.camera, view.bounds.width > 0 {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
             let viewMatrix = camera.viewMatrix(for: .portrait)
             let projection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
+            // The live LiDAR mesh once ARKit has one; until then (or without it) the discs.
+            if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix) != true, count > 0 {
+                drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection)
+            }
+        }
+        encoder.endEncoding()
+        commands.present(drawable)
+        commands.commit()
+    }
+
+    private func drawDiscs(_ encoder: MTLRenderCommandEncoder, count: Int, viewMatrix: simd_float4x4,
+                           projection: simd_float4x4) {
+        do {
             var uniforms = Uniforms(viewProjection: projection * viewMatrix,
                                     cameraPosition: viewMatrix.inverse.columns.3,
                                     halfSize: cloud.voxelSize * 0.7, cell: Self.cell)
@@ -317,9 +341,6 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             encoder.setDepthStencilState(depthEqual)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
         }
-        encoder.endEncoding()
-        commands.present(drawable)
-        commands.commit()
     }
 
     /// One instance per spot, four vertices each: a square tile on the spot's plane, edges along the wall and up on
