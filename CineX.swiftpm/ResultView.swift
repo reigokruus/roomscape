@@ -31,6 +31,8 @@ struct ResultView: View {
     @State private var walk: WalkState = .off
     /// Held ▲ (+1) or ▼ (-1) while standing in the room.
     @State private var walkMove = 0
+    /// Eye height above the floor when standing in the room, metres; remembered.
+    @AppStorage("walkEyeHeight") private var eyeHeight = 1.5
     /// The photo room as a .glb (`PhotoRoomExport`), being written or ready to share (AirDrop, Save to Files).
     @State private var exportingGLB = false
     @State private var glbFile: SharedFile?
@@ -87,7 +89,8 @@ struct ResultView: View {
                     RoomSceneView(scene: scene, topView: topView, topTurn: room.map(Self.squaringTurn) ?? 0,
                                   floorY: (lightingOn || objectsOn || walk == .choosing) ? walkFloorY : nil,
                                   onFloorTap: floorTapped,
-                                  standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove)
+                                  standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
+                                  eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
                 } else if let loadError {
                     Text(loadError).padding()
                 } else {
@@ -529,8 +532,15 @@ struct ResultView: View {
         }
     }
 
-    /// The floor height for standing in the room: RoomPlan's floor.
+    /// The floor height for standing in the room: RoomPlan's floor plane.
     private var walkFloorY: Float? { shell?.floorY ?? room.map { RoomShell(room: $0).floorY } }
+
+    /// Highest eye height: 2.2 m, and 10 cm under RoomPlan's ceiling.
+    private var maxEyeHeight: Double {
+        let s = shell ?? room.map { RoomShell(room: $0) }
+        guard let s, let ceiling = s.ceilingY else { return 2.2 }
+        return max(0.3, min(2.2, Double(ceiling - s.floorY) - 0.1))
+    }
 
     /// Enter the room / the floor hint / ▲▼ and Exit while standing in it.
     @ViewBuilder private var walkControls: some View {
@@ -563,6 +573,18 @@ struct ResultView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 Spacer()
+                // Eye height: taller / shorter, 10 cm a tap.
+                VStack(spacing: 4) {
+                    Button { eyeHeight = min(maxEyeHeight, (eyeHeight + 0.1)) } label: { Image(systemName: "chevron.up") }
+                        .accessibilityLabel("Taller")
+                    Text(String(format: "%.2f m", min(eyeHeight, maxEyeHeight)))
+                        .font(.caption.monospacedDigit())
+                    Button { eyeHeight = max(0.3, min(eyeHeight, maxEyeHeight) - 0.1) } label: { Image(systemName: "chevron.down") }
+                        .accessibilityLabel("Shorter")
+                }
+                .buttonStyle(.bordered)
+                .padding(6)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 VStack(spacing: 8) {
                     HoldButton(systemImage: "arrowtriangle.up.fill") { walkMove = $0 ? 1 : 0 }
                     HoldButton(systemImage: "arrowtriangle.down.fill") { walkMove = $0 ? -1 : 0 }
@@ -809,6 +831,8 @@ struct RoomSceneView: UIViewRepresentable {
     var walkFloorY: Float? = nil
     /// Held ▲ (+1) / ▼ (-1): walk forward or back, level, in the look direction.
     var walkMove = 0
+    /// Eye height above the floor while standing, metres.
+    var eyeHeight: Float = 1.5
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -830,7 +854,18 @@ struct RoomSceneView: UIViewRepresentable {
         var walkGestures: [UIGestureRecognizer] = []
         var link: CADisplayLink?
         var lastStep: CFTimeInterval = 0
-        static let eyeHeight: Float = 1.6
+        var eyeHeight: Float = 1.5
+
+        /// A new eye height while standing: rise or sink there.
+        func setEyeHeight(_ h: Float) {
+            guard h != eyeHeight else { return }
+            eyeHeight = h
+            guard let standing else { return }
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0.3
+            walkCamera.simdPosition.y = standing.y + h
+            SCNTransaction.commit()
+        }
 
         func applyLook() {
             walkCamera.simdOrientation = simd_quatf(angle: yaw, axis: SIMD3(0, 1, 0)) * simd_quatf(angle: pitch, axis: SIMD3(1, 0, 0))
@@ -842,7 +877,7 @@ struct RoomSceneView: UIViewRepresentable {
             let wasInside = standing != nil
             standing = p
             if let p {
-                let eye = SIMD3(p.x, p.y + Self.eyeHeight, p.z)
+                let eye = SIMD3(p.x, p.y + eyeHeight, p.z)
                 marker(at: p)
                 if !wasInside {
                     // Start from the current view, facing the same way, level-ish.
@@ -1034,6 +1069,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.onFloorTap = onFloorTap
         context.coordinator.walkFloorY = walkFloorY
         context.coordinator.walkMove = walkMove
+        context.coordinator.setEyeHeight(eyeHeight)
         context.coordinator.setStanding(standAt)
         guard standAt == nil, context.coordinator.lastTop != topView else { return }
         context.coordinator.lastTop = topView

@@ -66,10 +66,36 @@ final class LiveGhost: @unchecked Sendable {
             cell.normal += abs(simd_cross(b - a, c - a))  // area-weighted, sign-free: which axis the surface faces
             cells[key] = cell
         }
-        // Covered: cells with surface, grown by one cell so the edges of the blue areas aren't meshed again either.
+        // Covered: only the inside of the blue areas. A cell counts when its 8 neighbours along its own surface (allowing
+        // a step of one cell towards or away from it, for curves and noise) also have surface, so the outer cell of
+        // every blue area (~15 cm) is scanned again and the new surface overlaps the old one there. The cell in front of
+        // and behind a covered one count too, since depth noise puts samples there.
+        let surface = Set(cells.filter { $0.value.count >= 3 }.keys)
         var covered = Set<SIMD3<Int32>>()
-        for (key, cell) in cells where cell.count >= 3 {
-            for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 { covered.insert(key &+ SIMD3(dx, dy, dz)) } } }
+        for key in surface {
+            let n = cells[key]!.normal
+            let axis = n.x >= n.y && n.x >= n.z ? 0 : (n.y >= n.z ? 1 : 2)
+            let (u, v) = axis == 0 ? (1, 2) : (axis == 1 ? (0, 2) : (0, 1))
+            var inside = true
+            neighbours: for du: Int32 in -1...1 {
+                for dv: Int32 in -1...1 where du != 0 || dv != 0 {
+                    var found = false
+                    for da: Int32 in -1...1 {
+                        var k = key
+                        k[u] += du
+                        k[v] += dv
+                        k[axis] += da
+                        if surface.contains(k) { found = true; break }
+                    }
+                    if !found { inside = false; break neighbours }
+                }
+            }
+            guard inside else { continue }
+            for da: Int32 in -1...1 {
+                var k = key
+                k[axis] += da
+                covered.insert(k)
+            }
         }
         coverage.withLock { $0.cells = covered }
         var vertices: [LiveMesh.Vertex] = [], triangles: [UInt32] = [], edges: [UInt32] = []
