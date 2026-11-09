@@ -17,12 +17,38 @@ final class LiveGhost: @unchecked Sendable {
     }
 
     private let state = OSAllocatedUnfairLock<(buffers: Buffers?, transform: simd_float4x4?)>(initialState: (nil, nil))
+    /// The saved scan's 15 cm cells with surface (its coordinates), and the live session → saved scan transform.
+    private let coverage = OSAllocatedUnfairLock<(cells: Set<SIMD3<Int32>>?, toSaved: simd_float4x4?)>(initialState: (nil, nil))
+
+    private let active = OSAllocatedUnfairLock(initialState: false)
+
+    /// Continuing a scan: from now on the discs stay hidden and nothing is meshed until the saved scan is loaded and
+    /// lined up.
+    func activate() { active.withLock { $0 = true } }
+    var isActive: Bool { active.withLock { $0 } }
+
+    /// While continuing a scan: a test for "the saved scan already has this spot" (live session coordinates), so the
+    /// pass doesn't fuse and mesh the blue areas again. Nil when not continuing. Until the pass is lined up with the
+    /// saved scan, every spot counts as covered (nothing is meshed yet).
+    func coveredTest() -> ((SIMD3<Float>) -> Bool)? {
+        let c = coverage.withLock { $0 }
+        guard active.withLock({ $0 }) else { return nil }
+        guard let cells = c.cells else { return { _ in true } }
+        guard let m = c.toSaved else { return { _ in true } }
+        return { p in
+            let q = m * SIMD4(p, 1)
+            return cells.contains(SIMD3<Int32>((SIMD3(q.x, q.y, q.z) / LiveGhost.cell).rounded(.down)))
+        }
+    }
 
     /// The squares, and where the saved scan sits in the live session (nil = not known yet: hidden).
     var current: (buffers: Buffers?, transform: simd_float4x4?) { state.withLock { $0 } }
 
     /// Maps the saved scan's coordinates into the live session's.
-    func setTransform(_ m: simd_float4x4) { state.withLock { $0.transform = m } }
+    func setTransform(_ m: simd_float4x4) {
+        state.withLock { $0.transform = m }
+        coverage.withLock { $0.toSaved = m.inverse }
+    }
 
     /// Builds the squares from the saved mesh. Call off the main thread.
     func load(_ mesh: ScanMesh, device: MTLDevice) {
@@ -40,6 +66,12 @@ final class LiveGhost: @unchecked Sendable {
             cell.normal += abs(simd_cross(b - a, c - a))  // area-weighted, sign-free: which axis the surface faces
             cells[key] = cell
         }
+        // Covered: cells with surface, grown by one cell so the edges of the blue areas aren't meshed again either.
+        var covered = Set<SIMD3<Int32>>()
+        for (key, cell) in cells where cell.count >= 3 {
+            for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 { covered.insert(key &+ SIMD3(dx, dy, dz)) } } }
+        }
+        coverage.withLock { $0.cells = covered }
         var vertices: [LiveMesh.Vertex] = [], triangles: [UInt32] = [], edges: [UInt32] = []
         for (key, cell) in cells where cell.count >= 3 {
             let n = cell.normal

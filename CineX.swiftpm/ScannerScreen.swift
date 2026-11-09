@@ -160,6 +160,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         // Continue scan: show what the saved scan already covers, in blue, once it's lined up.
         if let improving, let device = live.device {
             let ghost = live.ghost
+            ghost.activate()
             Task.detached(priority: .utility) {
                 if let mesh = ScanMesh.read(from: improving.captureURL.appendingPathComponent(ScanMesh.fileName)) {
                     ghost.load(mesh, device: device)

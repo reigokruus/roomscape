@@ -203,10 +203,11 @@ final class LiveCapture {
         busy = true
         // One frame at a time, released as soon as it's read, so ARKit never runs short of camera buffers.
         let mesh = mesh
+        let covered = ghost.coveredTest()
         let p = frame.camera.transform.columns.3
         let camera = SIMD3<Float>(p.x, p.y, p.z), time = frame.timestamp
         worker.async { [weak self] in
-            cloud.integrate(frame, tsdf: mesh?.tsdf)
+            cloud.integrate(frame, tsdf: mesh?.tsdf, covered: covered)
             DispatchQueue.main.async { self?.busy = false }
         }
         // A separate block, so the frame is already let go while the mesh is built.
@@ -264,6 +265,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let cloud: LiveCloud
     private let meshRenderer: LiveMeshRenderer?
     private let ghostRenderer: LiveGhostRenderer?
+    private let ghost: LiveGhost
     private let queue: MTLCommandQueue
     private let depthPipeline: MTLRenderPipelineState
     private let colorPipeline: MTLRenderPipelineState
@@ -313,6 +315,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         self.cloud = cloud
         meshRenderer = mesh.flatMap { LiveMeshRenderer(device: device, mesh: $0) }
         ghostRenderer = LiveGhostRenderer(device: device, ghost: ghost)
+        self.ghost = ghost
         self.queue = queue
         self.depthPipeline = depthPipeline
         self.colorPipeline = colorPipeline
@@ -333,7 +336,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             let viewMatrix = camera.viewMatrix(for: .portrait)
             let projection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
             // The live LiDAR mesh once ARKit has one; until then (or without it) the discs.
-            if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix) != true, count > 0 {
+            // Continue scan never shows the discs: they'd cover the saved (blue) areas again.
+            if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix) != true, count > 0, !ghost.isActive {
                 drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection)
             }
             ghostRenderer?.encode(encoder, viewProjection: projection * viewMatrix)

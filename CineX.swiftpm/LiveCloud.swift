@@ -172,7 +172,8 @@ final class LiveCloud: @unchecked Sendable {
     /// Adds one ARKit frame's LiDAR depth. Reads the frame's buffers and returns without keeping the frame.
     /// When `tsdf` is given, every fourth depth pixel each way (about one ray per 4 cm voxel at room distance) is also
     /// fused into it, for the live mesh.
-    func integrate(_ frame: ARFrame, tsdf: Tsdf? = nil) {
+    /// `covered` (Continue scan) says which spots the saved scan already has: those aren't fused into `tsdf`.
+    func integrate(_ frame: ARFrame, tsdf: Tsdf? = nil, covered: ((SIMD3<Float>) -> Bool)? = nil) {
         let time = frame.timestamp
         guard case .normal = frame.camera.trackingState else {
             trackingNormalSince = nil
@@ -228,6 +229,7 @@ final class LiveCloud: @unchecked Sendable {
 
         var n = count
         var frameHits = 0, frameSolid = 0
+        var fusedSamples = 0, newSamples = 0
 
         // Every second depth pixel: about one sample per 2 cm cell at room distances.
         for v in stride(from: 1, to: dh - 1, by: 2) {
@@ -250,7 +252,12 @@ final class LiveCloud: @unchecked Sendable {
                 let pc = cam(u, v, d)
                 let world = pose * SIMD4<Float>(pc, 1)
                 if let tsdf, u & 3 == 1, v & 3 == 1 {
-                    tsdf.integrate(origin: position, point: SIMD3(world.x, world.y, world.z))
+                    let point = SIMD3(world.x, world.y, world.z)
+                    fusedSamples += 1
+                    if covered?(point) != true {
+                        newSamples += 1
+                        tsdf.integrate(origin: position, point: point)
+                    }
                 }
                 // Surface normal from the four neighbours, turned to face the camera, then into world space.
                 var nc = simd_cross(cam(u + 1, v, dr) - cam(u - 1, v, dl), cam(u, v - 1, du) - cam(u, v + 1, dd))
@@ -322,6 +329,8 @@ final class LiveCloud: @unchecked Sendable {
             let share = Float(frameSolid) / Float(frameHits)
             detailHere = detailHere < 0 ? share : detailHere * 0.8 + share * 0.2
         }
+        // Continue scan: a photo only when at least a quarter of the view is new (not the saved scan's blue areas).
+        if covered != nil, fusedSamples > 0, newSamples * 4 < fusedSamples { return }
         captureKeyframeIfMoved(frame, pose: pose)
     }
 
