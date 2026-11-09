@@ -26,6 +26,10 @@ final class PerfLog: @unchecked Sendable {
         var gpu: Double = 0, frames = 0, gaps = 0
         var notes: [String: [Double]] = [:]
         var battery: (Float, Int) = (-1, 0)
+        // Whole-log totals (heat per scan): seconds in each thermal state, battery at the start, CPU and GPU seconds.
+        var thermalSeconds = [Double](repeating: 0, count: 4)
+        var batteryStart: Float = -1
+        var cpuTotal = 0.0, gpuTotal = 0.0, elapsed = 0.0
         // For the summary, per stage.
         var sums: [String: Sums] = [:]
     }
@@ -99,14 +103,24 @@ final class PerfLog: @unchecked Sendable {
     func stop() {
         timer?.cancel(); timer = nil
         sample()
-        let (file, sums, handle) = lock.withLock { s -> (URL?, [String: Sums], FileHandle?) in
-            let r = (s.file, s.sums, s.handle); s.handle = nil; s.file = nil; return r
+        let (file, sums, handle, totals) = lock.withLock { s -> (URL?, [String: Sums], FileHandle?, State) in
+            let r = (s.file, s.sums, s.handle, s); s.handle = nil; s.file = nil; return r
         }
         try? handle?.close()
         guard let file else { return }
         lastFile = file
         let summary = file.deletingPathExtension().appendingPathExtension("summary.json")
         var out: [String: Any] = ["pCores": Self.cores.p, "eCores": Self.cores.e]
+        // Per-scan totals, to compare heat before/after changes.
+        let minutes = max(0.001, totals.elapsed / 60)
+        out["total"] = [
+            "seconds": totals.elapsed,
+            "secondsByThermalState": ["nominal": totals.thermalSeconds[0], "fair": totals.thermalSeconds[1],
+                                      "serious": totals.thermalSeconds[2], "critical": totals.thermalSeconds[3]],
+            "cpuCoreSeconds": totals.cpuTotal, "gpuBusySeconds": totals.gpuTotal,
+            "batteryStartPercent": totals.batteryStart * 100, "batteryEndPercent": totals.battery.0 * 100,
+            "batteryDropPercentPerMinute": totals.batteryStart >= 0 && totals.battery.0 >= 0 ? Double(totals.batteryStart - totals.battery.0) * 100 / minutes : -1,
+        ]
         for (stage, s) in sums {
             let n = Double(max(1, s.samples))
             var notes: [String: Any] = [:]
@@ -175,6 +189,9 @@ final class PerfLog: @unchecked Sendable {
             sums.maxThermal = max(sums.maxThermal, thermal); sums.peakMemoryMB = max(sums.peakMemoryMB, memory)
             for (k, v) in s.notes { sums.notes[k, default: 0] += v.reduce(0, +); sums.noteCounts[k, default: 0] += v.count }
             s.sums[s.stage] = sums
+            s.thermalSeconds[min(3, max(0, thermal))] += dt
+            if s.batteryStart < 0, battery.0 >= 0 { s.batteryStart = battery.0 }
+            s.cpuTotal += cpuDelta; s.gpuTotal += s.gpu; s.elapsed += dt
             s.lastTicks = ticks; s.lastCPU = cpu; s.lastSample = now
             s.gpu = 0; s.frames = 0; s.gaps = 0; s.notes = [:]
         }

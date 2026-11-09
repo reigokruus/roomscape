@@ -24,12 +24,22 @@ enum ThermalGovernor {
 
     /// Call between batches: rests a little when warm, and waits while hot (calling `note` with what to show,
     /// then nil when it continues).
+    /// For short GPU bursts (fusion on the GPU): race to idle (rk 9 Nov: "less time working overall per scan").
+    /// Finishing in seconds and then resting heats the phone less than trickling along for minutes, so only a
+    /// critical phone waits.
+    static func paceBurst(note: @escaping @Sendable (String?) -> Void) async {
+        guard state == .critical else { return }
+        await pace(note: note)
+    }
+
     static func pace(note: @escaping @Sendable (String?) -> Void) async {
         switch state {
         case .nominal, .fair:
             if ProcessInfo.processInfo.isLowPowerModeEnabled { try? await Task.sleep(nanoseconds: 50_000_000) }
         case .serious:
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            // A short rest only (was 0.4 s every batch: a hot phone's rebuild of a 6-minute scan took minutes of
+            // mostly waiting, keeping it busy and warm for longer).
+            try? await Task.sleep(nanoseconds: 100_000_000)
         default:
             note("Cooling down, continuing shortly")
             while state == .critical, fake == nil || fake == .critical {

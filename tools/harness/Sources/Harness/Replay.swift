@@ -259,6 +259,7 @@ enum GPUBench {
         }
         let t3 = Date()
         let tsdf = Tsdf(capacity: 12_000_000, voxel: voxel, truncation: max(0.03, voxel * 2), carve: 1.5)
+        tsdf.unseenAsEmpty = ProcessInfo.processInfo.environment["UNSEEN"] == "1"
         gpu.copy(into: tsdf)
         let gpuMesh = Fusion.mesh(tsdf)
         let extractTime = Date().timeIntervalSince(t3)

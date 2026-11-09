@@ -211,7 +211,7 @@ enum RecordingProcessor {
                 if gpu.failed { return nil } // e.g. the app went to the background mid-way: the CPU starts over
                 try Task.checkCancellation()
                 progress(0.15 + 0.8 * Float(n) / Float(depthFrames.count))
-                await ThermalGovernor.pace(note: note)
+                await ThermalGovernor.paceBurst(note: note)
             }
         }
         gpu.finish()
