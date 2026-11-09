@@ -11,6 +11,9 @@ Phones disconnected at 22:45; work from the copies in recordings/ (never committ
 - Tsdf.unseenAsEmpty on: thin things in front of a wall get their sides; fills edge holes (19:00 room: 0.8% → 0.1% missing vs CPU, no junk in renders).
 - PhotoLayout.best: occlusion checked at the centre and three inner corners (bar photos no longer painted onto the wall behind; shared by live preview and photo room).
 - DetailZones (DetailZones.swift): close-up spots → 1.2 m cubes at 1.5 cm; harness ZONES=1. On 20:33: 53 spots, 24 zones, 929k fine triangles in 13 s (too many: needs flat-area decimation before it can go live).
+- Splats view + splat training removed on both phones (1384608); Sharpen (the training) is gone with it.
+- Lighting lights the photo room on both phones (c04eee2). iPhone checked in the Simulator (tools/ui-shots/20261109-231204/7-lighting.png); S24 builds, not yet seen running.
+  The splat data stays internally: Objects (moving/removing things), hole fill, the storyboard and Lighting's fallback still read it. Removing it means porting those first.
 - Race-to-idle pacing, per-scan heat totals, memory checkpoints, rescan logs (installed 22:35 on the iPhone; S24 logger installed by rk 22:35).
 
 ## Open
