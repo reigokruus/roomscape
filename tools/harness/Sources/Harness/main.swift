@@ -51,6 +51,10 @@ case "debugtrack":
     }
 case "compare":
     try Replay.compare(URL(fileURLWithPath: args[1]), out: out)
+case "why":
+    Why.run(URL(fileURLWithPath: args[1]), SIMD3(Float(args[2])!, Float(args[3])!, Float(args[4])!))
+case "align":
+    Align.run(iphone: URL(fileURLWithPath: args[1]), s24: URL(fileURLWithPath: args[2]), out: URL(fileURLWithPath: "harness-out/align-top.png"))
 case "gpubench":
     // harness gpubench <recording> [voxel metres] [frame to render from] [gpuonly]
     try GPUBench.run(URL(fileURLWithPath: args[1]), voxel: args.count > 2 ? Float(args[2]) ?? 0.04 : 0.04,

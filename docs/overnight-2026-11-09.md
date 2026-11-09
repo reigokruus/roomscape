@@ -20,3 +20,11 @@ Phones disconnected at 22:45; work from the copies in recordings/ (never committ
 - S24 vs iPhone (22:37 vs 22:39): align, map where S24 filled better (chair back, white cupboard by the door, bars), classify, prototype hole-only fill.
 - S24: big X4 core idle (0 s), drawing at 10.5 fps; height 2.21 m on a rough scan (ceiling barely covered).
 - S24 GPU (Xclipse 940, Vulkan 1.3 / GLES 3.2 via ANGLE): port the TSDF kernel as a GLES 3.1 compute shader.
+
+## S24 22:37 vs iPhone 22:39 (harness align / why)
+- Aligned: yaw 348°, S24 scale 0.97, 87% of the S24 surface within 15 cm of the iPhone's; 21.5% S24-only.
+- The S24-only areas checked against the iPhone's own recording (harness why): mostly the iPhone's LiDAR saw
+  *past* those spots or something nearer, with high confidence (so the S24 surface there is offset or phantom,
+  not an iPhone hole); one spot (1.1 m up, near the chair) had matching high-confidence iPhone depth and iPhone
+  surface 6–12 cm away: an alignment residual, not a hole. rk's chair-back / cupboard / bars spots still need
+  locating by hand in renders.

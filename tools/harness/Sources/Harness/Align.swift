@@ -1,0 +1,171 @@
+import Foundation
+import simd
+
+/// Lines up an S24 scan with an iPhone scan of the same room and shows where the S24 has surface the iPhone lacks
+/// (rk 9 Nov: "the S24 has some parts filled in even better than the iPhone").
+/// `harness align <iPhone capture folder> <S24 scan folder>`: floors matched, then yaw, scale and position searched on
+/// a floor-plan grid, refined with ICP; prints the S24-only areas and writes a top view (grey = iPhone, red = S24 only).
+enum Align {
+    static func readPly(_ url: URL) -> [SIMD3<Float>] {
+        guard let data = try? Data(contentsOf: url), let end = data.range(of: Data("end_header\n".utf8)) else { return [] }
+        let header = String(decoding: data[..<end.lowerBound], as: UTF8.self)
+        guard let line = header.split(separator: "\n").first(where: { $0.hasPrefix("element vertex") }), let n = Int(line.split(separator: " ")[2]) else { return [] }
+        let stride = 15 // x y z float, r g b uchar
+        let base = end.upperBound
+        return data.withUnsafeBytes { raw in
+            (0..<n).map { i in
+                let o = base + i * stride
+                return SIMD3(raw.loadUnaligned(fromByteOffset: o, as: Float.self), raw.loadUnaligned(fromByteOffset: o + 4, as: Float.self),
+                             raw.loadUnaligned(fromByteOffset: o + 8, as: Float.self))
+            }
+        }
+    }
+
+    static func floorY(_ p: [SIMD3<Float>]) -> Float {
+        let ys = p.map(\.y).sorted()
+        return ys.isEmpty ? 0 : ys[ys.count / 50]
+    }
+
+    static func run(iphone: URL, s24: URL, out: URL) {
+        let a0 = Replay.readMesh(iphone.appendingPathComponent("mesh.bin")) ?? []
+        let b0 = readPly(s24.appendingPathComponent("surface.ply"))
+        guard !a0.isEmpty, !b0.isEmpty else { print("missing meshes (\(a0.count), \(b0.count))"); return }
+        // Floors at 0.
+        let fa = floorY(a0), fb = floorY(b0)
+        let a = a0.map { $0 - SIMD3(0, fa, 0) }, b = b0.map { $0 - SIMD3(0, fb, 0) }
+        print(String(format: "iPhone floor at y %.2f (heights below are above the floor; add this for iPhone coordinates)", fa))
+        // Floor plans of the walls and furniture (0.3–2.0 m up), 10 cm cells.
+        func plan(_ p: [SIMD3<Float>]) -> Set<SIMD2<Int32>> {
+            Set(p.filter { $0.y > 0.3 && $0.y < 2.0 }.map { SIMD2(Int32(($0.x / 0.1).rounded(.down)), Int32(($0.z / 0.1).rounded(.down))) })
+        }
+        let pa = plan(a)
+        let ca = a.reduce(.zero, +) / Float(a.count), cb = b.reduce(.zero, +) / Float(b.count)
+        var best = (score: -1, yaw: Float(0), scale: Float(1), t: SIMD2<Float>.zero)
+        let band = b.filter { $0.y > 0.3 && $0.y < 2.0 }
+        let sample = Array(band.enumerated().filter { $0.offset % max(1, band.count / 800) == 0 }.map(\.element))
+        for scale in [Float(0.86), 0.88, 0.90, 0.92, 0.94, 0.97, 1.0] {
+            for deg in stride(from: Float(0), to: 360, by: 4) {
+                let r = deg * .pi / 180, c = cos(r), s = sin(r)
+                // Rotate/scale about the S24's centre, then search the shift on the grid around the iPhone's centre.
+                let moved = sample.map { q -> SIMD2<Float> in
+                    let x = (q.x - cb.x) * scale, z = (q.z - cb.z) * scale
+                    return SIMD2(c * x - s * z, s * x + c * z)
+                }
+                for dx in stride(from: Float(-1.5), through: 1.5, by: 0.15) { for dz in stride(from: Float(-1.5), through: 1.5, by: 0.15) {
+                    let t = SIMD2(ca.x + dx, ca.z + dz)
+                    var score = 0
+                    for m in moved where pa.contains(SIMD2(Int32(((m.x + t.x) / 0.1).rounded(.down)), Int32(((m.y + t.y) / 0.1).rounded(.down)))) { score += 1 }
+                    if score > best.score { best = (score, deg, scale, t) }
+                } }
+            }
+        }
+        let r = best.yaw * .pi / 180
+        func transform(_ q: SIMD3<Float>) -> SIMD3<Float> {
+            let x = (q.x - cb.x) * best.scale, z = (q.z - cb.z) * best.scale
+            return SIMD3(cos(r) * x - sin(r) * z + best.t.x, q.y * best.scale, sin(r) * x + cos(r) * z + best.t.y)
+        }
+        var bt = b.map(transform)
+        // ICP (translation and yaw only, a few rounds) on points with a partner within 15 cm.
+        var grid: [SIMD3<Int32>: [SIMD3<Float>]] = [:]
+        for p in a { grid[SIMD3<Int32>((p / 0.15).rounded(.down)), default: []].append(p) }
+        func nearest(_ p: SIMD3<Float>) -> SIMD3<Float>? {
+            let k = SIMD3<Int32>((p / 0.15).rounded(.down))
+            var bestP: SIMD3<Float>?, bestD = Float(0.15 * 0.15)
+            for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 {
+                for q in grid[k &+ SIMD3(dx, dy, dz)] ?? [] { let d = simd_distance_squared(p, q); if d < bestD { bestD = d; bestP = q } }
+            } } }
+            return bestP
+        }
+        for _ in 0..<8 {
+            var shift = SIMD3<Float>.zero, n = 0
+            for (i, p) in bt.enumerated() where i % 5 == 0 { if let q = nearest(p) { shift += q - p; n += 1 } }
+            guard n > 0 else { break }
+            bt = bt.map { $0 + shift / Float(n) }
+        }
+        // Where the S24 has surface the iPhone lacks (no iPhone corner within 6 cm).
+        var ag = Set<SIMD3<Int32>>()
+        for p in a { ag.insert(SIMD3<Int32>((p / 0.06).rounded(.down))) }
+        func covered(_ p: SIMD3<Float>) -> Bool {
+            let k = SIMD3<Int32>((p / 0.06).rounded(.down))
+            for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 where ag.contains(k &+ SIMD3(dx, dy, dz)) { return true } } }
+            return false
+        }
+        let onlyS24 = bt.filter { !covered($0) }
+        var matched = 0
+        for (i, p) in bt.enumerated() where i % 3 == 0 && nearest(p) != nil { matched += 1 }
+        print(String(format: "aligned: yaw %.0f°, S24 scale %.2f, %d%% of S24 surface within 15 cm of the iPhone's", best.yaw, best.scale, matched * 300 / max(1, bt.count)))
+        print(String(format: "S24-only surface: %d of %d corners (%.1f%%)", onlyS24.count, bt.count, Float(onlyS24.count) * 100 / Float(bt.count)))
+        // The biggest S24-only clusters (30 cm blocks): where they are and how high.
+        var blocks: [SIMD3<Int32>: Int] = [:]
+        for p in onlyS24 { blocks[SIMD3<Int32>((p / 0.3).rounded(.down)), default: 0] += 1 }
+        for (k, n) in blocks.sorted(by: { $0.value > $1.value }).prefix(8) {
+            let c = (SIMD3<Float>(k) + 0.5) * 0.3
+            print(String(format: "  %5d S24-only corners around x %.1f, y %.1f (height), z %.1f", n, c.x, c.y, c.z))
+        }
+        // Top view: iPhone grey, S24-only red; 2 cm per pixel.
+        let all = a + onlyS24
+        let lo = all.reduce(SIMD3<Float>(repeating: .infinity)) { simd_min($0, $1) }, hi = all.reduce(SIMD3<Float>(repeating: -.infinity)) { simd_max($0, $1) }
+        let w = Int((hi.x - lo.x) / 0.02) + 1, h = Int((hi.z - lo.z) / 0.02) + 1
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        func put(_ p: SIMD3<Float>, _ c: (UInt8, UInt8, UInt8)) {
+            let x = Int((p.x - lo.x) / 0.02), y = Int((p.z - lo.z) / 0.02)
+            guard x >= 0, y >= 0, x < w, y < h else { return }
+            let o = (y * w + x) * 4; px[o] = c.0; px[o + 1] = c.1; px[o + 2] = c.2; px[o + 3] = 255
+        }
+        for p in a where p.y < 2.2 { put(p, (150, 150, 150)) }
+        for p in onlyS24 where p.y < 2.2 { put(p, (220, 40, 40)) }
+        Images.png(px, width: w, height: h, to: out)
+        print("top view: \(out.path)")
+    }
+}
+
+/// Why the iPhone has no surface at a spot: every frame of its recording that saw the spot, what its depth said there.
+/// `harness why <recording> x y z` (iPhone world coordinates).
+enum Why {
+    static func run(_ dir: URL, _ p: SIMD3<Float>) {
+        guard let fd = try? Data(contentsOf: dir.appendingPathComponent("frames.bin")), let dd = try? Data(contentsOf: dir.appendingPathComponent("depth.bin")) else { return }
+        var frames: [(t: Double, pose: simd_float4x4, k: simd_float3x3, w: Int, h: Int)] = []
+        for i in 0..<(fd.count / 120) {
+            fd.withUnsafeBytes { b in
+                let o = i * 120
+                var c: [SIMD4<Float>] = []
+                for j in 0..<4 { c.append(b.loadUnaligned(fromByteOffset: o + 8 + j * 16, as: SIMD4<Float>.self)) }
+                var k: [SIMD3<Float>] = []
+                for j in 0..<3 { let q = o + 72 + j * 12; k.append(SIMD3(b.loadUnaligned(fromByteOffset: q, as: Float.self), b.loadUnaligned(fromByteOffset: q + 4, as: Float.self), b.loadUnaligned(fromByteOffset: q + 8, as: Float.self))) }
+                frames.append((b.loadUnaligned(fromByteOffset: o, as: Double.self), simd_float4x4(c[0], c[1], c[2], c[3]), simd_float3x3(k[0], k[1], k[2]),
+                               Int(b.loadUnaligned(fromByteOffset: o + 108, as: Int32.self)), Int(b.loadUnaligned(fromByteOffset: o + 112, as: Int32.self))))
+            }
+        }
+        var at = 0, fi = 0
+        var seen = 0, confCount = [0, 0, 0], agree = 0, nearer = 0, farther = 0, none = 0, dists: [Float] = []
+        while at + 12 <= dd.count {
+            let t = dd.subdata(in: at..<(at + 8)).withUnsafeBytes { $0.loadUnaligned(as: Double.self) }
+            let len = Int(dd.subdata(in: (at + 8)..<(at + 12)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })
+            at += 12
+            guard at + len <= dd.count, let raw = try? (dd.subdata(in: at..<(at + len)) as NSData).decompressed(using: .lzfse) as Data else { break }
+            at += len
+            while fi + 1 < frames.count, abs(frames[fi + 1].t - t) <= abs(frames[fi].t - t) { fi += 1 }
+            let f = frames[fi]
+            let w = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt16.self) }), h = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 2, as: UInt16.self) })
+            let c = f.pose.inverse * SIMD4(p, 1)
+            let z = -c.z
+            guard z > 0.2 else { continue }
+            let sx = Float(w) / Float(f.w), sy = Float(h) / Float(f.h)
+            let u = Int(f.k[0][0] * sx * c.x / z + f.k[2][0] * sx), v = Int(f.k[2][1] * sy - f.k[1][1] * sy * c.y / z)
+            guard u >= 0, v >= 0, u < w, v < h else { continue }
+            seen += 1
+            dists.append(z)
+            raw.withUnsafeBytes { b in
+                let d = Float(b.loadUnaligned(fromByteOffset: 4 + (v * w + u) * 2, as: UInt16.self)) / 1000
+                let cf = Int(b.loadUnaligned(fromByteOffset: 4 + w * h * 2 + v * w + u, as: UInt8.self))
+                confCount[min(2, cf)] += 1
+                if d <= 0 { none += 1 } else if abs(d - z) < 0.08 { agree += 1 } else if d < z { nearer += 1 } else { farther += 1 }
+            }
+        }
+        dists.sort()
+        print(String(format: "spot (%.2f, %.2f, %.2f): in view in %d depth frames, %.1f–%.1f m away (median %.1f)", p.x, p.y, p.z, seen,
+                     dists.first ?? 0, dists.last ?? 0, dists.isEmpty ? 0 : dists[dists.count / 2]))
+        print("  depth there: \(agree) agree (±8 cm), \(nearer) something nearer in front, \(farther) further (seen through / past it), \(none) no depth")
+        print("  confidence: low \(confCount[0]), medium \(confCount[1]), high \(confCount[2])")
+    }
+}
