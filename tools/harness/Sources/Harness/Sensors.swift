@@ -37,6 +37,8 @@ struct Frame {
     var truth: simd_float4x4
     var arkit: simd_float4x4
     var depth: UltraCapture.DepthFrame
+    /// Brightness 0…1 at each depth pixel (the camera picture registered to the depth, as the app does).
+    var intensity: [Float]
     /// 0 low, 1 medium, 2 high, like ARConfidenceLevel.
     var confidence: [UInt8]
     /// The gyro's rotation since the previous frame (camera coordinates, current to previous), with bias and noise.
@@ -96,8 +98,8 @@ enum Sensors {
             let yawDrift = profile.yawDriftPerMetre * walked * .pi / 180
             var arkit = simd_float4x4(simd_quatf(angle: yawDrift, axis: SIMD3(0, 1, 0))) * truth
             arkit.columns.3 += SIMD4(driftDir * profile.drift * walked + SIMD3(rng.gauss(), rng.gauss(), rng.gauss()) * 0.002, 0)
-            let (depth, conf) = render(room, profile, truth, time: Double(t), moved: walked, rng: &rng)
-            out.append(Frame(time: Double(t), truth: truth, arkit: arkit, depth: depth, confidence: conf, gyro: gyro, walked: walked))
+            let (depth, conf, gray) = render(room, profile, truth, time: Double(t), moved: walked, rng: &rng)
+            out.append(Frame(time: Double(t), truth: truth, arkit: arkit, depth: depth, intensity: gray, confidence: conf, gyro: gyro, walked: walked))
         }
         return out
     }
@@ -105,14 +107,17 @@ enum Sensors {
     /// One depth frame: noise growing with distance, dropouts (dark, glossy, glass, grazing, out of range, plain
     /// surfaces for depth from motion), flying pixels at depth edges, and a confidence map.
     static func render(_ room: Room, _ p: Profile, _ pose: simd_float4x4, time: TimeInterval, moved: Float, rng: inout Rand)
-        -> (UltraCapture.DepthFrame, [UInt8]) {
+        -> (UltraCapture.DepthFrame, [UInt8], [Float]) {
         let w = p.depthWidth, h = p.depthHeight, f = p.fx, cx = Float(w) / 2, cy = Float(h) / 2
         let r = simd_float3x3(pose.columns.0.ux3, pose.columns.1.ux3, pose.columns.2.ux3), o = pose.columns.3.ux3
         var truth = [Float](repeating: 0, count: w * h)
         var conf = [UInt8](repeating: 2, count: w * h)
         var depth = [Float](repeating: 0, count: w * h)
+        var gray = [Float](repeating: 0.02, count: w * h)
+        let light = SIMD3(room.size.x / 2, room.size.y - 0.05, room.size.z / 2)
+        let exposure = 1 + 0.06 * sin(Float(time) * 0.7)
         guard moved >= p.needsMotion else {
-            return (UltraCapture.DepthFrame(depth: depth, width: w, height: h, fx: f, fy: f, cx: cx, cy: cy, time: time), [UInt8](repeating: 0, count: w * h))
+            return (UltraCapture.DepthFrame(depth: depth, width: w, height: h, fx: f, fy: f, cx: cx, cy: cy, time: time), [UInt8](repeating: 0, count: w * h), gray)
         }
         // This frame's slow warp: a gentle tilt and bowl across the picture.
         let gx = rng.gauss() * p.warp, gy = rng.gauss() * p.warp, bowl = rng.gauss() * p.warp
@@ -124,6 +129,11 @@ enum Sensors {
                 let z = hit.t * dc.z // depth along the optical axis
                 let i = y * w + x
                 truth[i] = z
+                // Brightness as the camera sees it: shaded colour, slow exposure change, sensor noise.
+                let toLight = light - hit.point, ll = simd_length(toLight)
+                let lambert = max(0, simd_dot(hit.normal, toLight / ll)) / (1 + 0.15 * ll * ll)
+                let c = room.colour(hit) * (0.35 + 0.9 * lambert) * exposure
+                gray[i] = hit.material.dropout > 0.85 ? 0.9 : max(0, min(1, (c.x + c.y + c.z) / 3 + rng.gauss() * 0.01))
                 let cosA = abs(simd_dot(hit.normal, dw))
                 var drop = hit.material.dropout
                 if cosA < 0.17 { drop = max(drop, 0.7); conf[i] = 0 }
@@ -148,7 +158,7 @@ enum Sensors {
                 }
             }
         }
-        return (UltraCapture.DepthFrame(depth: depth, width: w, height: h, fx: f, fy: f, cx: cx, cy: cy, time: time), conf)
+        return (UltraCapture.DepthFrame(depth: depth, width: w, height: h, fx: f, fy: f, cx: cx, cy: cy, time: time), conf, gray)
     }
 
     /// A camera picture (RGB 0…255) from a pose: Lambert shading from a light at the ceiling's middle, slow

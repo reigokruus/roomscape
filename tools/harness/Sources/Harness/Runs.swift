@@ -189,6 +189,9 @@ enum Calibration {
 // MARK: Tests
 
 enum Runs {
+    /// Leave the brightness out (depth-only tracking), for comparison.
+    static var depthOnly = false
+
     /// The experimental tracker (ICP + gyro, depth only) against ground truth: drift, loop closure, and the mesh it
     /// gives; and the same mesh from the ARKit-like poses for comparison.
     static func track(_ scenario: Scenario, _ profile: Profile, out: URL) {
@@ -206,7 +209,7 @@ enum Runs {
                 let r = simd_float3x3(f.truth.columns.0.ux3, f.truth.columns.1.ux3, f.truth.columns.2.ux3)
                 tracker.begin(gravity: r.transpose * SIMD3(0, -1, 0))
             }
-            let res = tracker.track(f.depth, gyro: f.gyro)
+            let res = tracker.track(f.depth, intensity: Runs.depthOnly ? nil : f.intensity, gyro: f.gyro)
             if i == 0 { align = f.truth * tracker.pose.inverse }
             if res.ok { poses.append(align * tracker.pose) } else { poses.append(nil); failed += 1 }
         }
@@ -214,8 +217,8 @@ enum Runs {
         for (f, p) in zip(frames, poses) { if let p { errs.append(simd_distance(p.columns.3.ux3, f.truth.columns.3.ux3)) } }
         let lastOK = Array(zip(frames, poses)).last { $0.1 != nil }
         let walked = frames.last?.walked ?? 1
-        print(String(format: "  tracker: %d/%d frames rejected; position error mean %.1f cm, max %.1f cm; end error %.1f cm (%.1f%% of the %.1f m walked)",
-                     failed, frames.count, 100 * errs.reduce(0, +) / Float(max(1, errs.count)), 100 * (errs.max() ?? 0),
+        print(String(format: "  tracker (%@): %d/%d frames rejected, %d relocalised; position error mean %.1f cm, max %.1f cm; end error %.1f cm (%.1f%% of the %.1f m walked)",
+                     Runs.depthOnly ? "depth only" : "depth + brightness", failed, frames.count, tracker.relocalised, 100 * errs.reduce(0, +) / Float(max(1, errs.count)), 100 * (errs.max() ?? 0),
                      100 * (errs.last ?? .nan), 100 * (errs.last ?? .nan) / walked, walked))
         if let lastOK, let p = lastOK.1 {
             let r0 = simd_float3x3(frames[0].truth.columns.0.ux3, frames[0].truth.columns.1.ux3, frames[0].truth.columns.2.ux3)

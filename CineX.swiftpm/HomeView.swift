@@ -166,6 +166,14 @@ struct HomeView: View {
                 if args.contains("-openLatestScan"), path.isEmpty, let latest = scans.first {
                     path = [latest]
                 }
+                // tools/ui-shots.sh: -importRmsc <path> imports a test room (once) and opens it.
+                if let i = args.firstIndex(of: "-importRmsc"), i + 1 < args.count, path.isEmpty {
+                    let url = URL(fileURLWithPath: args[i + 1])
+                    if let scan = try? Rmsc.importScan(from: url).scan {
+                        scans = ScanStore.list()
+                        path = [scan]
+                    }
+                }
                 if args.contains("-openGear") { debugGear = true }
                 if args.contains("-openPlanning") { debugPlanning = true }
                 #endif

@@ -461,6 +461,20 @@ struct ResultView: View {
                     print("debug: selected \(kind), still alive")
                 }
             }
+            // tools/ui-shots.sh: -style photo|splats|points|mesh, -selectObject <name> (opens Objects with it selected).
+            if let i = args.firstIndex(of: "-style"), i + 1 < args.count {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                switch args[i + 1] {
+                case "splats": style = .splats
+                case "points": style = .points
+                case "mesh": style = .mesh
+                default: style = .photo
+                }
+            }
+            if let i = args.firstIndex(of: "-selectObject"), i + 1 < args.count {
+                if !objectsOn { toggleObjects() }
+                selectedObject = objects.first { $0.label.localizedCaseInsensitiveContains(args[i + 1]) }?.id
+            }
             if args.contains("-styleModel") {
                 Task {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)

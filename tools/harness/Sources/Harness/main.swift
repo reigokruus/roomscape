@@ -10,6 +10,7 @@ import simd
 //   harness all                                every test on every scenario
 
 let args = Array(CommandLine.arguments.dropFirst())
+Runs.depthOnly = args.contains("depthonly")
 let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("harness-out")
 try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 func profile(_ s: String?) -> Profile { s == "s24" ? .s24 : .iPhone15Pro }
@@ -35,7 +36,7 @@ case "debugtrack":
             let r = simd_float3x3(f.truth.columns.0.ux3, f.truth.columns.1.ux3, f.truth.columns.2.ux3)
             tracker.begin(gravity: r.transpose * SIMD3(0, -1, 0))
         }
-        let res = tracker.track(f.depth, gyro: useGyro ? f.gyro : nil)
+        let res = tracker.track(f.depth, intensity: Runs.depthOnly ? nil : f.intensity, gyro: useGyro ? f.gyro : nil)
         if i == 0 { align = f.truth * tracker.pose.inverse }
         let p = align * tracker.pose
         let e = simd_distance(p.columns.3.ux3, f.truth.columns.3.ux3)
