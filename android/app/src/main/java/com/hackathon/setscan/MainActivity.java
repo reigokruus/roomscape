@@ -40,12 +40,44 @@ public class MainActivity extends Activity {
     private Button outletButton;
     private Button recordButton;
 
+    /** Every scan records itself (rk 9 Nov): ARCore's recorder, from the scan's start to Done; kept with the scan. */
+    static final boolean AUTO_RECORD = true;
+    /** The recording of the scan in progress, and a finished one waiting to move into its scan's folder. */
+    private File recordingFile, finishedRecording;
+
+    private void startRecordingIfNeeded() {
+        try {
+            if (session == null || session.getRecordingStatus() == com.google.ar.core.RecordingStatus.OK) return;
+            File dir = new File(getExternalFilesDir(null), "recordings");
+            dir.mkdirs();
+            recordingFile = new File(dir, "scan-" + android.text.format.DateFormat.format("yyyyMMdd-HHmmss", System.currentTimeMillis()) + ".mp4");
+            session.startRecording(new com.google.ar.core.RecordingConfig(session)
+                    .setMp4DatasetUri(android.net.Uri.fromFile(recordingFile)).setAutoStopOnPause(false));
+            android.util.Log.i("RoomScape", "auto recording to " + recordingFile);
+        } catch (Exception e) { android.util.Log.e("RoomScape", "auto recording failed: " + e); }
+    }
+
+    /** After a save: the finished recording moves into the scan's folder as recording.mp4. */
+    private void attachRecording() {
+        File rec = finishedRecording, dir = renderer.currentDir;
+        if (rec == null || dir == null || !rec.exists()) return;
+        finishedRecording = null;
+        new Thread(() -> {
+            File to = new File(dir, "recording.mp4");
+            try {
+                if (!rec.renameTo(to)) { java.nio.file.Files.copy(rec.toPath(), to.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING); rec.delete(); }
+                android.util.Log.i("RoomScape", "recording kept with the scan: " + to + " (" + to.length() / 1_000_000 + " MB)");
+            } catch (Exception e) { android.util.Log.e("RoomScape", "keeping the recording failed: " + e); }
+        }).start();
+    }
+
     /** Ends a recording if one is running (Done, Cancel, leaving the scan or the app). */
     private void stopRecordingIfAny() {
         try {
             if (session != null && session.getRecordingStatus() == com.google.ar.core.RecordingStatus.OK) {
                 session.stopRecording();
                 android.util.Log.i("RoomScape", "recording stopped");
+                if (recordingFile != null) { finishedRecording = recordingFile; recordingFile = null; }
             }
         } catch (Exception e) { android.util.Log.e("RoomScape", "stop recording: " + e); }
         if (recordButton != null) recordButton.setText("Record session");
@@ -1432,6 +1464,7 @@ public class MainActivity extends Activity {
     void autoSaved(String name, String err) {
         runOnUiThread(() -> {
             if (name == null) { toast("Couldn't save the scan: " + err); return; }
+            attachRecording();
             if (!scanning) improveButton.setVisibility(View.VISIBLE);
             if (!scanning && !name.equals(lastSavedName)) { lastSavedName = name; toast("Saved as \"" + name + "\". Tap Rename to change it."); }
         });
@@ -1495,6 +1528,7 @@ public class MainActivity extends Activity {
 
     private void showHome() {
         stopRecordingIfAny();
+        attachRecording(); // leaving keeps the scan (autosaved), so its recording too
         if (walkState != 0) setWalk(0);
         if (session != null) session.pause();
         glView.queueEvent(() -> renderer.goHome());
@@ -1508,6 +1542,9 @@ public class MainActivity extends Activity {
     /** Cancel while scanning: throw the scan away, as on the iPhone (asks first after a minute of scanning). */
     private void cancelScan() {
         Runnable discard = () -> {
+            // Cancel discards the scan, and its recording with it.
+            stopRecordingIfAny();
+            if (finishedRecording != null) { finishedRecording.delete(); finishedRecording = null; }
             if (session != null) session.pause();
             glView.queueEvent(() -> renderer.discardScan(() -> {
                 scanChrome.setVisibility(View.GONE);
@@ -2155,6 +2192,7 @@ public class MainActivity extends Activity {
         if (session == null) return;
         try {
             session.resume();
+            if (scanning && AUTO_RECORD) startRecordingIfNeeded();
         } catch (CameraNotAvailableException e) {
             updateStatus("Camera not available, try reopening the app.");
         }

@@ -5188,6 +5188,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (!objects.list.isEmpty()) f.add(new String[]{"Room", "Objects", String.valueOf(objects.list.size())});
         f.add(new String[]{"Capture", "Points", String.format(java.util.Locale.US, "%,d", count)});
         f.add(new String[]{"Capture", "Photos", String.valueOf(photos.keyframes.size())});
+        File rec = currentDir == null ? null : new File(currentDir, "recording.mp4");
+        if (rec != null && rec.exists()) f.add(new String[]{"Capture", "Raw recording", String.format(java.util.Locale.US, "%.0f MB", rec.length() / 1e6)});
         return f;
     }
 

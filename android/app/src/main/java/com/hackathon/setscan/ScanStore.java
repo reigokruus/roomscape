@@ -151,6 +151,9 @@ final class ScanStore {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }
+        // The raw recording (big): moved, not copied.
+        File recFrom = new File(dir, "recording.mp4"), recTo = new File(tmp, "recording.mp4");
+        if (recFrom.exists() && !recTo.exists() && !recFrom.renameTo(recTo)) copyTree(recFrom, recTo);
         // Built from the points (the Photo view's surface, room outline, flat planes): kept while the points are the
         // same; after Continue scan they're stale, and are built again.
         if (samePoints) for (String keep : new String[]{"surface.ply", "outline.json", "planes.json"}) {
