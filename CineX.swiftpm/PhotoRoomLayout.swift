@@ -200,7 +200,11 @@ enum PhotoLayout {
             if cosA < 0.25 { continue }
             let score = cosA * cosA / distance
             if score <= bestScore { continue }
-            guard inside(photo, a), inside(photo, b), inside(photo, c), !occluded(photo, centre) else { continue }
+            // Not hidden anywhere on the triangle: the centre and the corners pulled slightly in (rk 9 Nov: the photo of
+            // a 3 cm bar was painted onto the wall behind it, as splatters, when only the centre was checked).
+            guard inside(photo, a), inside(photo, b), inside(photo, c), !occluded(photo, centre),
+                  !occluded(photo, centre + (a - centre) * 0.8), !occluded(photo, centre + (b - centre) * 0.8),
+                  !occluded(photo, centre + (c - centre) * 0.8) else { continue }
             best = k
             bestScore = score
         }

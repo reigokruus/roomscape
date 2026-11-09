@@ -259,9 +259,63 @@ enum GPUBench {
         }
         let t3 = Date()
         let tsdf = Tsdf(capacity: 12_000_000, voxel: voxel, truncation: max(0.03, voxel * 2), carve: 1.5)
-        tsdf.unseenAsEmpty = ProcessInfo.processInfo.environment["UNSEEN"] == "1"
+        if let u = ProcessInfo.processInfo.environment["UNSEEN"] { tsdf.unseenAsEmpty = u == "1" }
         gpu.copy(into: tsdf)
-        let gpuMesh = Fusion.mesh(tsdf)
+        var gpuMesh = Fusion.mesh(tsdf)
+        // ZONES=1: close-up detail zones (DetailZones) fused again at 1.5 cm, their fine surface replacing the coarse.
+        if ProcessInfo.processInfo.environment["ZONES"] == "1" {
+            let tz = Date()
+            var zones: [DetailZones.Zone] = []
+            for d in depth {
+                if let p = DetailZones.focus(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy) { DetailZones.add(p, to: &zones) }
+            }
+            let settled = DetailZones.settled(zones)
+            var positions = gpuMesh.positions, triangles: [UInt32] = []
+            for t in stride(from: 0, to: gpuMesh.triangles.count, by: 3) {
+                let c = (positions[Int(gpuMesh.triangles[t])] + positions[Int(gpuMesh.triangles[t + 1])] + positions[Int(gpuMesh.triangles[t + 2])]) / 3
+                if !settled.contains(where: { DetailZones.contains($0, c) }) { triangles += gpuMesh.triangles[t..<(t + 3)] }
+            }
+            var fineTris = 0
+            for z in settled {
+                let h = SIMD3<Float>(repeating: DetailZones.size / 2)
+                guard let fine = TsdfGPU(min: z.centre - h, max: z.centre + h, voxel: DetailZones.voxel, truncation: DetailZones.voxel * 2, carve: 1.5) else { continue }
+                for d in depth {
+                    var m = d.m
+                    for i in m.indices where m[i] > DetailZones.maxDepth { m[i] = 0 }
+                    fine.integrate(depth: m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+                }
+                let ft = Tsdf(capacity: 2_000_000, voxel: DetailZones.voxel, truncation: DetailZones.voxel * 2, carve: 1.5)
+                fine.copy(into: ft)
+                let fm = Fusion.mesh(ft)
+                let base = UInt32(positions.count)
+                positions += fm.positions
+                for t in stride(from: 0, to: fm.triangles.count, by: 3) {
+                    let c = (fm.positions[Int(fm.triangles[t])] + fm.positions[Int(fm.triangles[t + 1])] + fm.positions[Int(fm.triangles[t + 2])]) / 3
+                    if DetailZones.contains(z, c) { triangles += [fm.triangles[t] + base, fm.triangles[t + 1] + base, fm.triangles[t + 2] + base]; fineTris += 1 }
+                }
+            }
+            gpuMesh.positions = positions; gpuMesh.triangles = triangles
+            print(String(format: "zones: %d close-up spots, %d settled; %d fine triangles; %.2f s", zones.count, settled.count, fineTris, Date().timeIntervalSince(tz)))
+            for z in settled { print(String(format: "  zone at %.2f, %.2f, %.2f (%d frames)", z.centre.x, z.centre.y, z.centre.z, z.frames)) }
+        }
+        // BAR=x,y: measure the thickness of a bar through depth pixel (x, y) of the view's frame (axis by PCA).
+        if let bar = ProcessInfo.processInfo.environment["BAR"]?.split(separator: ",").compactMap({ Int($0) }), bar.count == 2, let view,
+           let i = depthFrameIndex.firstIndex(where: { $0 >= view }) {
+            let d = depth[i], z = d.m[bar[1] * d.w + bar[0]]
+            let p4 = d.pose * SIMD4((Float(bar[0]) + 0.5 - d.cx) * z / d.fx, -(Float(bar[1]) + 0.5 - d.cy) * z / d.fy, -z, 1)
+            let P = SIMD3(p4.x, p4.y, p4.z)
+            let near = gpuMesh.positions.filter { simd_distance($0, P) < 0.12 }
+            if near.count > 10 {
+                let mean = near.reduce(.zero, +) / Float(near.count)
+                var cov = simd_float3x3()
+                for q in near { let e = q - mean; cov += simd_float3x3(e * e.x, e * e.y, e * e.z) }
+                var axis = SIMD3<Float>(1, 0.3, 0.2)
+                for _ in 0..<50 { axis = simd_normalize(cov * axis) }
+                let ring = near.filter { abs(simd_dot($0 - mean, axis)) < 0.08 }.map { simd_length(($0 - mean) - simd_dot($0 - mean, axis) * axis) }.sorted()
+                let r = ring.isEmpty ? 0 : ring[min(ring.count - 1, ring.count * 9 / 10)]
+                print(String(format: "bar at (%d, %d), %.2f m from the camera: %d mesh corners within 12 cm; thickness (2 x 90th-percentile distance from the axis) %.1f cm", bar[0], bar[1], z, near.count, r * 200))
+            } else { print("bar: only \(near.count) mesh corners near it") }
+        }
         let extractTime = Date().timeIntervalSince(t3)
         print(String(format: "voxel %.1f cm: GPU block %d voxels (%.0f MB), %d triangles", voxel * 100, gpu.voxelCount, Double(gpu.voxelCount) * 6 / 1e6, gpuMesh.triangles.count / 3))
         if let view, view < frames.count {
