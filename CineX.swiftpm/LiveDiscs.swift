@@ -103,6 +103,7 @@ final class LiveCapture {
             let removed = cloud.removeWhere(inCone)
             if let t = clearTime { recorder?.cleared(time: t, viewProjection: vp, center: point, radius: radius, viewSize: size, limit: limit) }
             _ = mesh?.tsdf.clearWhere(inCone)
+            mesh?.clearGPU(inCone)
             // The photo choices there are worked out again for what gets scanned next.
             var centre = SIMD3<Float>.zero, hits: Float = 0
             for i in Swift.stride(from: 0, to: n, by: stride) {
@@ -262,7 +263,7 @@ final class LiveCapture {
         _ = p
         let camera = frame.camera.transform, time = frame.timestamp
         worker.async { [weak self] in
-            cloud.integrate(frame, tsdf: mesh?.tsdf, covered: covered)
+            cloud.integrate(frame, tsdf: mesh?.tsdf, covered: covered, mesh: mesh)
             DispatchQueue.main.async { self?.busy = false }
         }
         // A separate block, so the frame is already let go while the mesh is built.

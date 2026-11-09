@@ -46,6 +46,13 @@ final class LiveMesh: @unchecked Sendable {
     /// parts vanish); the whole of a normal room now stays on screen.
     static let radius: Float = 8
 
+    /// Fuse on the GPU (TsdfGPU: a 12 × 4.8 × 12 m block around where the scan started, ~65 MB): every
+    /// confident depth pixel, not every 4th, so the mesh fills in faster. The CPU Tsdf stays the fallback and is what
+    /// the mesh is extracted from (the GPU block is copied into it before each build).
+    static let useGPU = true
+    private var gpu: TsdfGPU?
+    private var gpuFailed = false
+
     private let device: MTLDevice
     private let published = OSAllocatedUnfairLock<Buffers?>(initialState: nil)
 
@@ -69,11 +76,39 @@ final class LiveMesh: @unchecked Sendable {
     /// Worker queue.
     func reset() {
         tsdf.clear()
+        gpu = nil
+        gpuFailed = false
         assigner.reset()
         filled.withLock { $0 = (0, 0) }
         lastBuild = 0
         lastDuration = 0
         published.withLock { $0 = nil }
+    }
+
+    /// Worker queue: true when depth goes to the GPU block (made around `origin`, the phone, on the first frame).
+    func gpuReady(origin: SIMD3<Float>) -> Bool {
+        guard Self.useGPU, !gpuFailed else { return false }
+        if gpu == nil {
+            gpu = TsdfGPU(device: device, min: origin + SIMD3(-6, -2.2, -6), max: origin + SIMD3(6, 2.6, 6),
+                          voxel: tsdf.vs, truncation: tsdf.trunc, carve: tsdf.carve)
+            if gpu == nil { gpuFailed = true; return false }
+        }
+        return true
+    }
+
+    /// Worker queue: one frame's depth (metres, 0 = none) into the GPU block.
+    func fuseGPU(depth: [Float], width: Int, height: Int, pose: simd_float4x4, fx: Float, fy: Float, cx: Float, cy: Float) {
+        gpu?.integrate(depth: depth, width: width, height: height, pose: pose, fx: fx, fy: fy, cx: cx, cy: cy, step: 2)
+    }
+
+    /// Worker queue: tap to clear in the GPU block too.
+    func clearGPU(_ test: (SIMD3<Float>) -> Bool) { _ = gpu?.clearWhere(test) }
+
+    /// Worker queue: the GPU block into the CPU Tsdf, for extraction.
+    private func syncFromGPU() {
+        guard let gpu else { return }
+        tsdf.clear()
+        gpu.copy(into: tsdf)
     }
 
     /// Worker queue: tap to clear, the photo choices there are worked out again.
@@ -86,9 +121,10 @@ final class LiveMesh: @unchecked Sendable {
 
     /// Worker queue, after a frame was fused: rebuilds the mesh around the camera if it's time.
     func rebuildIfDue(camera pose: simd_float4x4, time: TimeInterval) {
-        guard time - lastBuild >= max(interval, lastDuration * 5), tsdf.count > 50 else { return }
+        guard time - lastBuild >= max(interval, lastDuration * 5), gpu != nil || tsdf.count > 50 else { return }
         cameraPose = pose
         let camera = SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+        syncFromGPU()
         lastBuild = time
         let started = CACurrentMediaTime()
         defer { lastDuration = CACurrentMediaTime() - started }
@@ -99,6 +135,7 @@ final class LiveMesh: @unchecked Sendable {
 
     /// Worker queue: the whole room's surface, for saving with the scan (the photo room is painted onto it).
     func wholeMesh() -> ScanMesh? {
+        syncFromGPU()
         let all = Tsdf.MeshScratch()
         guard tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: Self.solidWeight, into: all) > 0 else { return nil }
         return ScanMesh(positions: all.positions, triangles: all.triangles)

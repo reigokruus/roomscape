@@ -194,7 +194,7 @@ final class LiveCloud: @unchecked Sendable {
     /// When `tsdf` is given, every fourth depth pixel each way (about one ray per 4 cm voxel at room distance) is also
     /// fused into it, for the live mesh.
     /// `covered` (Continue scan) says which spots the saved scan already has: those aren't fused into `tsdf`.
-    func integrate(_ frame: ARFrame, tsdf: Tsdf? = nil, covered: ((SIMD3<Float>) -> Bool)? = nil) {
+    func integrate(_ frame: ARFrame, tsdf: Tsdf? = nil, covered: ((SIMD3<Float>) -> Bool)? = nil, mesh: LiveMesh? = nil) {
         let time = frame.timestamp
         guard case .normal = frame.camera.trackingState else {
             trackingNormalSince = nil
@@ -253,6 +253,8 @@ final class LiveCloud: @unchecked Sendable {
         var fusedSamples = 0, newSamples = 0
 
         tsdf?.beginFrame()
+        // The GPU fusion (LiveMesh.useGPU) gets every confident pixel this loop looks at, each filling its 2 × 2 block.
+        var gpuDepth: [Float]? = tsdf != nil && mesh?.gpuReady(origin: position) == true ? [Float](repeating: 0, count: dw * dh) : nil
         // Every second depth pixel: about one sample per 2 cm cell at room distances.
         for v in stride(from: 1, to: dh - 1, by: 2) {
             for u in stride(from: 1, to: dw - 1, by: 2) {
@@ -273,7 +275,15 @@ final class LiveCloud: @unchecked Sendable {
                 }
                 let pc = cam(u, v, d)
                 let world = pose * SIMD4<Float>(pc, 1)
-                if let tsdf, u & 3 == 1, v & 3 == 1 {
+                if gpuDepth != nil {
+                    let point = SIMD3(world.x, world.y, world.z)
+                    fusedSamples += 1
+                    if covered?(point) != true {
+                        newSamples += 1
+                        gpuDepth![v * dw + u] = d; gpuDepth![v * dw + u + 1] = d
+                        gpuDepth![(v + 1) * dw + u] = d; gpuDepth![(v + 1) * dw + u + 1] = d
+                    }
+                } else if let tsdf, u & 3 == 1, v & 3 == 1 {
                     let point = SIMD3(world.x, world.y, world.z)
                     fusedSamples += 1
                     if covered?(point) != true {
@@ -342,6 +352,8 @@ final class LiveCloud: @unchecked Sendable {
                 }
             }
         }
+
+        if let gpuDepth, let mesh { mesh.fuseGPU(depth: gpuDepth, width: dw, height: dh, pose: pose, fx: fx, fy: fy, cx: cx, cy: cy) }
 
         let total = n
         countLock.withLock { $0 = total }

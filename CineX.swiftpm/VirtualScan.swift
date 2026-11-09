@@ -26,7 +26,9 @@ struct VirtualScanScreen: View {
             Color.black.ignoresSafeArea()
             GeometryReader { g in
                 ZStack {
-                    if let image = player.image {
+                    if !LivePreview.showCamera {
+                        ZebraBackground() // as the scan screen: only what was captured, no camera picture
+                    } else if let image = player.image {
                         // The recording keeps the sensor's landscape frame: turned a quarter clockwise for portrait.
                         Image(decorative: image, scale: 1)
                             .resizable()
@@ -86,7 +88,6 @@ struct VirtualScanScreen: View {
             // The video read in order (seeking for every picture was far too slow).
             let video = VideoFrames(url: folder.appendingPathComponent("video.mov"))
             let fuser = Fuser(mesh: mesh, photos: photos)
-            FileHandle.standardError.write("virtual: \(frames.count) frames, \(depth.count) depth\n".data(using: .utf8)!)
             var di = 0, fi = 0
             var t = 0.0
             let end = (frames.last?.time ?? first.time) - first.time
@@ -151,6 +152,8 @@ struct VirtualScanScreen: View {
             let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
             let origin = SIMD3(f.pose.columns.3.x, f.pose.columns.3.y, f.pose.columns.3.z)
             mesh.tsdf.beginFrame()
+            // The GPU fusion when it's on (LiveMesh.useGPU), as the live scan does: every confident pixel.
+            var gpuDepth: [Float]? = mesh.gpuReady(origin: origin) ? [Float](repeating: 0, count: d.w * d.h) : nil
             var good = 0, all = 0
             func depth(_ x: Int, _ y: Int) -> Float { Float(d.mm[y * d.w + x]) / 1000 }
             for v in stride(from: 1, to: d.h - 1, by: 4) {
@@ -161,11 +164,16 @@ struct VirtualScanScreen: View {
                     let tol = z * 0.04 + 0.02
                     if abs(depth(u - 1, v) - z) > tol || abs(depth(u + 1, v) - z) > tol || abs(depth(u, v - 1) - z) > tol || abs(depth(u, v + 1) - z) > tol { continue }
                     good += 1
+                    samples += 1
+                    if gpuDepth != nil {
+                        for dy in 0..<4 { for dx in 0..<4 where v + dy < d.h && u + dx < d.w { gpuDepth![(v + dy) * d.w + u + dx] = z } }
+                        continue
+                    }
                     let p4 = f.pose * SIMD4((Float(u) + 0.5 - cx) * z / fx, (cy - (Float(v) + 0.5)) * z / fy, -z, 1)
                     mesh.tsdf.integrate(origin: origin, point: SIMD3(p4.x, p4.y, p4.z))
-                    samples += 1
                 }
             }
+            if let gpuDepth { mesh.fuseGPU(depth: gpuDepth, width: d.w, height: d.h, pose: f.pose, fx: fx, fy: fy, cx: cx, cy: cy) }
             spot = all == 0 ? 0 : Float(good) / Float(all)
         }
 
@@ -289,7 +297,7 @@ struct VirtualMeshView: UIViewRepresentable {
             MainActor.assumeIsolated {
                 guard let renderer, let queue, let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
                       let commands = queue.makeCommandBuffer(), let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
-                renderer.encodeDim(encoder, alpha: 1 - LivePreview.dim)
+                if LivePreview.showCamera { renderer.encodeDim(encoder, alpha: 1 - LivePreview.dim) }
                 let vp = Self.projection(k: player.k, image: player.imageSize, view: view.bounds.size) * player.pose.inverse
                 _ = renderer.encode(encoder, viewProjection: vp)
                 encoder.endEncoding()

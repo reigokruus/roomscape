@@ -109,6 +109,20 @@ final class TsdfGPU {
         }
     }
 
+    /// Resets every voxel whose centre passes the test (tap to clear while scanning); returns how many.
+    func clearWhere(_ test: (SIMD3<Float>) -> Bool) -> Int {
+        finish()
+        let s = sdf.contents().bindMemory(to: Float.self, capacity: voxelCount)
+        let w = weight.contents().bindMemory(to: UInt16.self, capacity: voxelCount)
+        let nx = Int(dims.x), ny = Int(dims.y)
+        var cleared = 0
+        for i in 0..<voxelCount where w[i] > 0 {
+            let v = origin &+ SIMD3(Int32(i % nx), Int32((i / nx) % ny), Int32(i / (nx * ny)))
+            if test((SIMD3<Float>(v) + 0.5) * vs) { w[i] = 0; s[i] = 0; cleared += 1 }
+        }
+        return cleared
+    }
+
     private static let source = """
     #include <metal_stdlib>
     using namespace metal;
