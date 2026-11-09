@@ -385,10 +385,6 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             if overviewView != nil, let frame = session?.currentFrame {
                 window?.encode(encoder, frame: frame, viewSize: view.bounds.size, realView: realView,
                                realProjection: realProjection, viewProjection: projection * viewMatrix, alpha: overview.blend)
-                if let buffers = liveMesh?.buffers {
-                    window?.encodeMesh(encoder, mesh: buffers, realView: realView, realProjection: realProjection,
-                                       viewProjection: projection * viewMatrix, alpha: overview.blend)
-                }
             }
         }
         encoder.endEncoding()
