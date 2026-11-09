@@ -12,6 +12,8 @@ final class LiveCapture {
     let cloud: LiveCloud?
     /// The live mesh fused from LiDAR depth, drawn instead of the discs once it has triangles.
     let mesh: LiveMesh?
+    /// Continue scan: the saved scan's coarse outline in blue (see `LiveGhost`).
+    let ghost = LiveGhost()
     let session: ARSession
     private var link: CADisplayLink?
     private var discView: LiveDiscsMTKView?
@@ -229,7 +231,7 @@ final class LiveDiscsMTKView: MTKView {
 
     init?(live: LiveCapture) {
         guard let device = live.device, let cloud = live.cloud,
-              let renderer = LiveDiscRenderer(device: device, cloud: cloud, mesh: live.mesh) else { return nil }
+              let renderer = LiveDiscRenderer(device: device, cloud: cloud, mesh: live.mesh, ghost: live.ghost) else { return nil }
         self.renderer = renderer
         super.init(frame: .zero, device: device)
         isOpaque = false
@@ -261,6 +263,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     weak var session: ARSession?
     private let cloud: LiveCloud
     private let meshRenderer: LiveMeshRenderer?
+    private let ghostRenderer: LiveGhostRenderer?
     private let queue: MTLCommandQueue
     private let depthPipeline: MTLRenderPipelineState
     private let colorPipeline: MTLRenderPipelineState
@@ -274,7 +277,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         var cell: Float
     }
 
-    init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?) {
+    init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?, ghost: LiveGhost) {
         let options = MTLCompileOptions()
         // Both passes must put every tile at exactly the same depth.
         options.preserveInvariance = true
@@ -309,6 +312,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let depthEqual = depthState(.lessEqual, write: false) else { return nil }
         self.cloud = cloud
         meshRenderer = mesh.flatMap { LiveMeshRenderer(device: device, mesh: $0) }
+        ghostRenderer = LiveGhostRenderer(device: device, ghost: ghost)
         self.queue = queue
         self.depthPipeline = depthPipeline
         self.colorPipeline = colorPipeline
@@ -332,6 +336,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix) != true, count > 0 {
                 drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection)
             }
+            ghostRenderer?.encode(encoder, viewProjection: projection * viewMatrix)
         }
         encoder.endEncoding()
         commands.present(drawable)

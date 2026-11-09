@@ -19,6 +19,35 @@ struct ScanMesh: Sendable {
         try data.write(to: url)
     }
 
+    /// `old` plus the triangles of `new` (already in `old`'s coordinates) whose centre isn't within ~4–8 cm of `old`'s
+    /// surface, i.e. what a Continue-scan pass added. Either may be missing.
+    static func merge(old: ScanMesh?, new: ScanMesh?) -> ScanMesh? {
+        guard let new, !new.triangles.isEmpty else { return old }
+        guard let old, !old.triangles.isEmpty else { return new }
+        let cell: Float = 0.04
+        func key(_ p: SIMD3<Float>) -> SIMD3<Int32> { SIMD3<Int32>((p / cell).rounded(.down)) }
+        var covered = Set<SIMD3<Int32>>()
+        for p in old.positions {
+            let k = key(p)
+            for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 { covered.insert(k &+ SIMD3(dx, dy, dz)) } } }
+        }
+        var out = old
+        var remap = [Int32](repeating: -1, count: new.positions.count)
+        for t in 0..<(new.triangles.count / 3) {
+            let i = (0..<3).map { Int(new.triangles[t * 3 + $0]) }
+            let centre = (new.positions[i[0]] + new.positions[i[1]] + new.positions[i[2]]) / 3
+            if covered.contains(key(centre)) { continue }
+            for v in i {
+                if remap[v] < 0 {
+                    remap[v] = Int32(out.positions.count)
+                    out.positions.append(new.positions[v])
+                }
+                out.triangles.append(UInt32(remap[v]))
+            }
+        }
+        return out
+    }
+
     static func read(from url: URL) -> ScanMesh? {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count >= 12,
               data.prefix(4) == Data("MSH1".utf8) else { return nil }

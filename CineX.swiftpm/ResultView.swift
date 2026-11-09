@@ -910,14 +910,14 @@ struct RoomSummary: View {
                         Button {
                             onImprove()
                         } label: {
-                            Label("Improve this scan", systemImage: "plus.viewfinder")
+                            Label("Continue scan", systemImage: "plus.viewfinder")
                         }
                     }
                 } header: {
                     Text("Capture")
                 } footer: {
                     if onImprove != nil {
-                        Text("Scan again over parts that came out thin or blurry. The phone recognises the room by itself and adds the new points and photos to this scan.")
+                        Text("Add to this scan: parts you missed, or that came out thin or blurry. The phone recognises the room by itself and adds the new surfaces, points and photos to this scan.")
                     }
                 }
             }

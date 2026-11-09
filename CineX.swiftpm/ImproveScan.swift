@@ -49,7 +49,7 @@ extension ScanStore {
     }
 
     /// Files in the capture folder that the result screen saved and that stay valid after a merge.
-    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json", ScanMesh.fileName]
+    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json"]
     /// Caches built from the points and photos: rebuilt from the merged ones the next time the scan opens.
     private static let rebuiltFiles = ["surfels.bin", "trained.bin", "windows.json"]
 
@@ -130,13 +130,23 @@ extension ScanStore {
                     cameraToWorld: simd_float4x4(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
                                                  SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15])),
                     fx: r.fx, fy: r.fy, cx: r.cx, cy: r.cy, width: r.width, height: r.height, jpeg: jpeg, exposure: r.exposure))
+                // Keep the photo's depth, for the photo room's hidden-surface check.
+                if let file = r.depthFile, let w = r.depthWidth, let h = r.depthHeight,
+                   let raw = try? Data(contentsOf: folder.appendingPathComponent(file)), raw.count == w * h * 2 {
+                    keyframes[keyframes.count - 1].depth = raw.withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
+                    keyframes[keyframes.count - 1].depthWidth = w
+                    keyframes[keyframes.count - 1].depthHeight = h
+                }
             }
         }
         let oldPhotos = keyframes.count
         keyframes += capture?.keyframes ?? []
 
+        // Mesh: the saved one, plus the pass's surfaces where the saved scan had none.
+        let oldMesh = ScanMesh.read(from: folder.appendingPathComponent(ScanMesh.fileName))
+        let mesh = ScanMesh.merge(old: oldMesh, new: capture?.mesh)
         let merged = CaptureSnapshot(points: points.withUnsafeBytes { Data($0) }, pointCount: points.count,
-                                     keyframes: keyframes, voxelSize: voxel)
+                                     keyframes: keyframes, voxelSize: voxel, mesh: mesh)
         try CaptureStore.write(merged, to: folder)
         for (name, data) in kept { try? data.write(to: folder.appendingPathComponent(name), options: .atomic) }
         for name in rebuiltFiles { try? fm.removeItem(at: folder.appendingPathComponent(name)) }
@@ -239,6 +249,11 @@ enum ImproveAlignment {
         }
         out.points = points
         out.keyframes = capture.keyframes.map { var k = $0; k.cameraToWorld = m * k.cameraToWorld; return k }
+        out.mesh = capture.mesh.map { mesh in
+            var mesh = mesh
+            mesh.positions = mesh.positions.map { simd_make_float3(m * SIMD4($0, 1)) }
+            return mesh
+        }
         return out
     }
 }
