@@ -2593,13 +2593,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // Where on screen a point is, and how far from the camera (clip w); null when behind it.
         // Pass 1: how far the surface under the tap is (near the middle of the circle).
         float[] near = new float[2048]; int nn = 0;
+        float mx = 0, my = 0, mz = 0;
         for (int i = 0; i < count; i += Math.max(1, count / 200000)) {
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
             float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
             if (cw <= 0.05f) continue;
             float px = (m[0] * x + m[4] * y + m[8] * z + m[12]) / cw * w2 + w2, py = h2 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw * h2;
             float dx = px - tx, dy = py - ty;
-            if (dx * dx + dy * dy < r2 * 0.12f && nn < near.length) near[nn++] = cw;
+            if (dx * dx + dy * dy < r2 * 0.12f && nn < near.length) { near[nn++] = cw; mx += x; my += y; mz += z; }
         }
         if (nn < 5) { log("tap to clear: nothing scanned under the tap (" + nn + " points)"); activity.toast("Nothing scanned there yet"); return; }
         java.util.Arrays.sort(near, 0, nn);
@@ -2614,6 +2615,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int removed = removePointsWhere(inCone);
         int vox = tsdf.clearWhere(inCone) + detail.clearWhere(inCone);
         liveMeshAt = 0; // the live mesh follows at once
+        livePreview.forget(mx / nn, my / nn, mz / nn, 0.5f); // the photo choices there are worked out again
         int sc = 0; for (int i = 0; i < count; i++) if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++;
         solidCount = sc;
         roomShown = count > 0 ? Math.min(roomShown, (float) sc / count) : 0; // the Room bar drops too
@@ -3419,7 +3421,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); livePreview.reset(); liveGroupTex.clear(); liveGroupPos.clear(); liveGroupUv.clear(); liveGroupVerts.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -5441,69 +5443,94 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private int liveMeshProg, liveMeshTriVerts, liveMeshLineVerts;
     private final int[] liveMeshVbo = new int[4];
 
+    /** The live preview's photo choices (LivePreview). */
+    final LivePreview livePreview = new LivePreview();
+    private int dimProg, livePhotoProg;
+    private final java.util.List<Integer> liveGroupTex = new java.util.ArrayList<>(), liveGroupVerts = new java.util.ArrayList<>();
+    private final java.util.List<java.nio.FloatBuffer> liveGroupPos = new java.util.ArrayList<>(), liveGroupUv = new java.util.ArrayList<>();
+
     /** GL thread: every ~1 s, copy the voxels near the phone and build their mesh on another thread. */
     private void maybeLiveMesh(Camera camera, long nowMs) {
         if (liveMeshBusy || liveMeshNew != null || nowMs - liveMeshAt < LIVE_MESH_MS || tsdf.size() < 50) return; // the last one is uploaded before its buffers are reused
         liveMeshAt = nowMs; liveMeshBusy = true;
         com.google.ar.core.Pose p = camera.getPose();
         final float px = p.tx(), py = p.ty(), pz = p.tz();
+        float[] z = p.getZAxis();
+        final float fx = -z[0], fy = -z[1], fz = -z[2];
         final int gen = surfGen;
+        // The photos as they are now (their fields don't change after capture; the list does, on this thread).
+        final java.util.List<PhotoRoom.Keyframe> kfs = new java.util.ArrayList<>(photos.keyframes);
         new Thread(() -> {
             try {
                 Tsdf near = tsdf.copyNear(px, py, pz, 3.5f, liveScratch); // read while the GL thread keeps fusing: fine for a preview
                 liveScratch = near; near.reuseBuffers = true;
                 int nt = near.extractMesh();
-                int nv = nt * 3;
-                if (liveLines == null || liveLines.capacity() < nt * 18) {
-                    int cap = Math.max(1, nt * 6 + nt * 3);
-                    liveLines = ByteBuffer.allocateDirect(cap * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
-                    liveLineConf = ByteBuffer.allocateDirect(cap).order(ByteOrder.nativeOrder());
-                }
-                java.nio.FloatBuffer lines = liveLines; ByteBuffer lc = liveLineConf;
-                lines.clear(); lc.clear();
-                float[] v = new float[9]; byte[] c = new byte[3];
-                for (int t = 0; t < nt; t++) {
-                    for (int k = 0; k < 9; k++) v[k] = near.meshPos.get(t * 9 + k);
-                    for (int k = 0; k < 3; k++) c[k] = near.meshConf.get(t * 3 + k);
-                    for (int e = 0; e < 3; e++) {
-                        int a = e, b = (e + 1) % 3;
-                        lines.put(v[a * 3]).put(v[a * 3 + 1]).put(v[a * 3 + 2]).put(v[b * 3]).put(v[b * 3 + 1]).put(v[b * 3 + 2]);
-                        lc.put(c[a]).put(c[b]);
-                    }
-                }
-                lines.flip(); lc.flip();
-                if (gen == surfGen) liveMeshNew = new Object[]{near.meshPos, near.meshConf, lines, lc, new int[]{nv, nt * 6}};
+                LivePreview.Result r = livePreview.build(near.meshPos, near.meshConf, nt, kfs, px, py, pz, fx, fy, fz);
+                if (gen == surfGen) liveMeshNew = new Object[]{r};
             } catch (Throwable e) { logError("live mesh", new RuntimeException(e)); }
             finally { liveMeshBusy = false; }
         }).start();
     }
 
-    /** Light see-through polygons over the camera with a wireframe; new surfaces are tinted orange until well seen. */
+    /**
+     * The live preview (LivePreview): the camera dimmed, triangles with their photo drawn with it at full brightness,
+     * the rest as light see-through polygons with a wireframe, orange until well seen, then white.
+     */
     private void drawLiveMesh(float[] m) {
         Object[] nm = liveMeshNew;
         if (nm != null) {
             liveMeshNew = null;
+            LivePreview.Result r = (LivePreview.Result) nm[0];
             if (liveMeshVbo[0] == 0) GLES20.glGenBuffers(4, liveMeshVbo, 0);
-            int[] counts = (int[]) nm[4];
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[0] * 12, (java.nio.Buffer) nm[0], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.restVerts) * 12, r.restPos, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[1]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[0], (java.nio.Buffer) nm[1], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.restVerts), r.restConf, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[2]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[1] * 12, (java.nio.Buffer) nm[2], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.lineVerts) * 12, r.lines, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[3]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, counts[1], (java.nio.Buffer) nm[3], GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.lineVerts), r.lineConf, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
-            liveMeshTriVerts = counts[0]; liveMeshLineVerts = counts[1];
+            liveMeshTriVerts = r.restVerts; liveMeshLineVerts = r.lineVerts;
+            liveGroupTex.clear(); liveGroupTex.addAll(r.groupTex);
+            liveGroupPos.clear(); liveGroupPos.addAll(r.groupPos);
+            liveGroupUv.clear(); liveGroupUv.addAll(r.groupUv);
+            liveGroupVerts.clear(); liveGroupVerts.addAll(r.groupVerts);
+        }
+        drawLiveDim(1f - LivePreview.DIM);
+        if (liveMeshTriVerts == 0 && liveGroupTex.isEmpty()) return;
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        // Photo-filled triangles, opaque, with the photo the Photo view will use.
+        if (!liveGroupTex.isEmpty()) {
+            if (livePhotoProg == 0) livePhotoProg = program(
+                    "uniform mat4 uMvp; attribute vec3 aPos; attribute vec2 aUv; varying vec2 vUv;" +
+                    "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vUv = aUv; }",
+                    "precision mediump float; uniform sampler2D uTex; varying vec2 vUv;" +
+                    "void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb, 1.0); }");
+            GLES20.glUseProgram(livePhotoProg);
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(livePhotoProg, "uMvp"), 1, false, m, 0);
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(livePhotoProg, "uTex"), 0);
+            int aPos = GLES20.glGetAttribLocation(livePhotoProg, "aPos"), aUv = GLES20.glGetAttribLocation(livePhotoProg, "aUv");
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
+            for (int g = 0; g < liveGroupTex.size(); g++) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, liveGroupTex.get(g));
+                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, liveGroupPos.get(g));
+                GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 0, liveGroupUv.get(g));
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, liveGroupVerts.get(g));
+            }
+            GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
         if (liveMeshTriVerts == 0) return;
         if (liveMeshProg == 0) liveMeshProg = program(
                 "uniform mat4 uMvp; attribute vec3 aPos; attribute float aConf; varying float vConf;" +
                 "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vConf = aConf; }",
-                "precision mediump float; uniform vec4 uCol; uniform vec4 uNew; varying float vConf;" +
-                "void main(){ gl_FragColor = mix(uNew, uCol, smoothstep(0.15, 0.6, vConf)); }");
+                "precision mediump float; uniform vec4 uCol; uniform vec4 uNew; uniform float uConfirmed; varying float vConf;" +
+                "void main(){ gl_FragColor = mix(uNew, uCol, smoothstep(0.15, uConfirmed, vConf)); }");
         GLES20.glUseProgram(liveMeshProg);
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(liveMeshProg, "uMvp"), 1, false, m, 0);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(liveMeshProg, "uConfirmed"), LivePreview.CONFIRMED);
         int aPos = GLES20.glGetAttribLocation(liveMeshProg, "aPos"), aConf = GLES20.glGetAttribLocation(liveMeshProg, "aConf");
         int uCol = GLES20.glGetUniformLocation(liveMeshProg, "uCol"), uNew = GLES20.glGetUniformLocation(liveMeshProg, "uNew");
         GLES20.glEnable(GLES20.GL_BLEND);
@@ -5512,15 +5539,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // fill: writes depth so the wireframe behind a wall stays hidden
         GLES20.glEnable(GLES20.GL_POLYGON_OFFSET_FILL);
         GLES20.glPolygonOffset(1f, 1f);
-        GLES20.glUniform4f(uCol, 0.92f, 0.94f, 1f, 0.42f);
-        GLES20.glUniform4f(uNew, 1f, 0.55f, 0.15f, 0.40f);
+        float[] sc = LivePreview.SOLID, tc = LivePreview.TENTATIVE, se = LivePreview.SOLID_EDGE, te = LivePreview.TENTATIVE_EDGE;
+        GLES20.glUniform4f(uCol, sc[0], sc[1], sc[2], sc[3]);
+        GLES20.glUniform4f(uNew, tc[0], tc[1], tc[2], tc[3]);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[1]); GLES20.glVertexAttribPointer(aConf, 1, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, liveMeshTriVerts);
         GLES20.glDisable(GLES20.GL_POLYGON_OFFSET_FILL);
         // wireframe
-        GLES20.glUniform4f(uCol, 1f, 1f, 1f, 0.75f);
-        GLES20.glUniform4f(uNew, 1f, 0.45f, 0.1f, 0.85f);
+        GLES20.glUniform4f(uCol, se[0], se[1], se[2], se[3]);
+        GLES20.glUniform4f(uNew, te[0], te[1], te[2], te[3]);
         GLES20.glLineWidth(Math.max(1f, height / 1400f));
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[2]); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[3]); GLES20.glVertexAttribPointer(aConf, 1, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
@@ -5528,6 +5556,29 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aConf);
         GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    /** A black veil over the whole view (the live preview's dimmed camera). */
+    private final java.nio.FloatBuffer dimQuad = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().put(new float[]{-1, -1, 1, -1, -1, 1, 1, 1});
+    private void drawLiveDim(float alpha) {
+        if (alpha <= 0.01f) return;
+        if (dimProg == 0) dimProg = program("attribute vec2 aPos; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }",
+                "precision mediump float; uniform float uA; void main(){ gl_FragColor = vec4(0.0, 0.0, 0.0, uA); }");
+        GLES20.glUseProgram(dimProg);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(dimProg, "uA"), alpha);
+        int aPos = GLES20.glGetAttribLocation(dimProg, "aPos");
+        dimQuad.position(0);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDepthMask(false);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, dimQuad);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDepthMask(true);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
     }
 
     /** Live during the scan: every captured spot as a disc over the camera, rimmed red (seen once) -> yellow -> green (solid). */
@@ -5589,6 +5640,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
+        if (LIVE_MESH && d >= 0 && (livePreview.filledRoom > 0 || livePreview.filledInView > 0)) d = Math.min(d, livePreview.filledInView);
         tooFast = moveSpeed > (tooFast ? 0.45f : 0.6f); // a slow walk (~0.4 m/s) is fine
         tooFar = !DEMO_FAR && farShare > (tooFar ? 0.45f : 0.6f); // demo: looking out over a hall is the point
         if (ts != TrackingState.TRACKING) {
@@ -5622,6 +5674,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             solidCount = sc;
         }
         float room = count > 0 ? Math.min(1f, (float) solidCount / count) : 0f;
+        // What you get is what you see (LivePreview): the bars count surface that has its photo, not only its shape.
+        if (LIVE_MESH && (livePreview.filledRoom > 0 || livePreview.filledInView > 0)) room *= livePreview.filledRoom;
         roomShown = Math.max(roomShown, room);
         activity.updateHud(hint, sub, level, Math.max(0f, d), roomShown, count);
     }

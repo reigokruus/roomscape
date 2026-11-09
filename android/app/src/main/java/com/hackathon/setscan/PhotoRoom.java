@@ -21,7 +21,11 @@ final class PhotoRoom {
     static final int MAX_KEYFRAMES = 90, MAX_WIDE = MAX_KEYFRAMES - 15;
     static final int TEX_W = 1024, TEX_H = 512; // power of two so we can mipmap; uv is normalized so the squash doesn't matter
 
+    private static final java.util.concurrent.atomic.AtomicInteger NEXT_ID = new java.util.concurrent.atomic.AtomicInteger();
+
     static final class Keyframe {
+        /** Stays with this photo (the live preview remembers which photo it picked by this). */
+        final int id = NEXT_ID.incrementAndGet();
         int tex;
         byte[] jpg;                    // the photo as saved (cached, so autosaves don't re-encode it)
         float[] view = new float[16];  // world -> camera
@@ -286,6 +290,12 @@ final class PhotoRoom {
             float nl = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
             if (nl < 1e-9f) { pick[t] = -1; plainTris++; continue; }
             nx /= nl; ny /= nl; nz /= nl;
+            if (!relaxed && t * 3 < proxyFrom) { // the usual case: the same choice as the live scan preview (LivePreview)
+                int best = best(keyframes, v, uv, 0, 0, null);
+                pick[t] = best;
+                if (best >= 0) { perKf[best]++; texturedTris++; } else plainTris++;
+                continue;
+            }
             int best = -1; float bestScore = 0, prevScore = 0;
             int prev = relaxed && t > 0 ? pick[t - 1] : -1;
             for (int k = 0; k < nk; k++) {
@@ -341,8 +351,38 @@ final class PhotoRoom {
         ready = true;
     }
 
+    /**
+     * The best photo for one triangle (v: 3 corners), or -1: close and head-on (cos² / distance), every corner inside the
+     * photo, the centre not hidden behind something nearer in its depth. Only photos with id > fromId are tried, and
+     * only a score above beat wins; score[0] gets the winner's score. Shared by the photo room and the live preview.
+     */
+    static int best(List<Keyframe> keyframes, float[] v, float[] uv, int fromId, float beat, float[] score) {
+        float cx = (v[0] + v[3] + v[6]) / 3, cy = (v[1] + v[4] + v[7]) / 3, cz = (v[2] + v[5] + v[8]) / 3;
+        float ux = v[3] - v[0], uy = v[4] - v[1], uz = v[5] - v[2], wx = v[6] - v[0], wy = v[7] - v[1], wz = v[8] - v[2];
+        float nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+        float nl = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (nl < 1e-9f) return -1;
+        nx /= nl; ny /= nl; nz /= nl;
+        int best = -1; float bestScore = beat;
+        for (int k = 0; k < keyframes.size(); k++) {
+            Keyframe kf = keyframes.get(k);
+            if (kf.id <= fromId) continue;
+            float dx = kf.px - cx, dy = kf.py - cy, dz = kf.pz - cz;
+            float dist = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist < 0.15f || dist > 4.5f) continue;
+            float cosA = Math.abs(nx * dx + ny * dy + nz * dz) / dist;
+            if (cosA < 0.25f) continue;
+            float sc = cosA * cosA / dist;
+            if (sc <= bestScore) continue;
+            if (!project(kf, v, uv) || occluded(kf, cx, cy, cz)) continue;
+            best = k; bestScore = sc;
+        }
+        if (score != null) score[0] = bestScore;
+        return best;
+    }
+
     /** Projects the 3 vertices into the keyframe; uv in 0..1 (t = image row / height). False if outside the photo. */
-    private static boolean project(Keyframe k, float[] v, float[] uv) {
+    static boolean project(Keyframe k, float[] v, float[] uv) {
         float[] m = k.view;
         for (int i = 0; i < 3; i++) {
             float x = v[i * 3], y = v[i * 3 + 1], z = v[i * 3 + 2];
