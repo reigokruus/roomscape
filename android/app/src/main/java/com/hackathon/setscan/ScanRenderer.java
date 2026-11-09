@@ -3538,9 +3538,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Exception e) { logError("catalog place", e); }
     }
 
+    /** Drag sensitivity, radians per screen pixel (rk: much gentler than the old 0.008). */
+    static final float TURN = 0.0025f;
+
     void orbit(float dx, float dy) {
-        yaw -= dx * 0.008f;
-        pitch = clamp(pitch + dy * 0.008f, -1.5f, 1.55f);
+        yaw -= dx * TURN;
+        pitch = clamp(pitch + dy * TURN, -1.5f, 1.55f);
     }
 
     void zoom(float f) { dist = clamp(dist / f, 0.05f, 100f); }
@@ -3587,7 +3590,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Drag to look around (the scene follows the finger); pitch kept short of straight up or down. */
     void look(float dx, float dy) {
-        float s = 0.005f * walkFov / 60f;
+        float s = 0.002f * walkFov / 60f;
         walkYaw += dx * s;
         walkPitch = clamp(walkPitch + dy * s, -1.3f, 1.3f);
     }
@@ -3597,7 +3600,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void setEyeHeight(float h) { eyeH = h; if (walking) eye[1] = walkFloorY() + h; }
 
     void pan(float dx, float dy) {
-        float s = dist * 0.0015f;
+        float s = dist * 0.0006f;
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
         if (topView) {
             target[0] -= dx * s; target[2] -= dy * s;
