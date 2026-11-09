@@ -1711,10 +1711,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void drawOutlets(float[] m) {
         java.util.List<Outlets.Outlet> ls = outlets.snapshot();
         if (ls.isEmpty()) return;
-        float fy = lighting.floorY, dens = height / 1000f;
+        float fy = lighting.floorY, dens = activity.getResources().getDisplayMetrics().density;
         for (Outlets.Outlet o : ls) {
-            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, new float[]{0, 0, 0, 1f}, 30 * dens);
-            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, OUTLET_COL, 22 * dens);
+            // A 12 dp orange dot with a thin dark ring, as on the iPhone.
+            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, new float[]{0, 0, 0, 1f}, 14 * dens);
+            planDraw(m, new float[]{o.x, o.y, o.z}, GLES20.GL_POINTS, OUTLET_COL, 12 * dens);
             drawLabel(m, o.x, o.y + 0.08f, o.z, o.label(fy), false);
         }
     }
@@ -2828,12 +2829,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int[] v : labelTex.values()) GLES20.glDeleteTextures(1, new int[]{v[0]}, 0);
             labelTex.clear();
         }
-        float sp = activity.getResources().getDisplayMetrics().scaledDensity;
+        // Same as the iPhone's labels: 13.5 dp semibold text in a ~27 dp pill, growing with large text sizes only a
+        // little (capped at 1.2x), so labels stay readable without covering the room.
+        android.util.DisplayMetrics dm = activity.getResources().getDisplayMetrics();
+        float sp = Math.min(dm.scaledDensity, dm.density * 1.2f);
         android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        paint.setTextSize(13 * sp);
+        paint.setTextSize(13.5f * sp);
+        paint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
         paint.setColor(0xFFFFFFFF);
-        int pad = (int) (5 * sp);
-        int w = (int) Math.ceil(paint.measureText(text)) + 2 * pad, h = (int) Math.ceil(paint.getFontSpacing()) + pad;
+        int pad = (int) (10 * dm.density);
+        int w = (int) Math.ceil(paint.measureText(text)) + 2 * pad, h = (int) Math.ceil(27 * sp);
         android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
         android.graphics.Canvas cv = new android.graphics.Canvas(bmp);
         android.graphics.Paint bg = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);

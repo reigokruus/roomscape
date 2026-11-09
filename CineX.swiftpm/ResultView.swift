@@ -889,7 +889,15 @@ struct RoomSceneView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate, SCNSceneRendererDelegate {
+        /// The 3D view's height in points, for sizing labels on screen (set on the main thread, read when rendering).
+        var viewHeight: CGFloat = 0
+
+        func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+            guard let scene = renderer.scene, let pov = renderer.pointOfView else { return }
+            OutletStore.screenSizes(in: scene, camera: pov, viewHeight: viewHeight > 0 ? viewHeight : 360, fov: pov.camera?.fieldOfView ?? 60)
+        }
+
         // Orbit, our own instead of SceneKit's camera control (whose two-finger pan often turned into a rotation):
         // one finger turns around the target, two fingers pan and pinch-zoom together, like the Android app.
         var orbitTarget = SIMD3<Float>(0, 0, 0)
@@ -1134,6 +1142,8 @@ struct RoomSceneView: UIViewRepresentable {
         let view = SCNView()
         view.scene = scene
         view.allowsCameraControl = false // our own orbit controls (see Coordinator.orbitBy)
+        view.delegate = context.coordinator // sizes the outlet labels on screen each frame
+        view.isPlaying = true
         view.autoenablesDefaultLighting = true
         view.backgroundColor = .black
         view.antialiasingMode = .multisampling4X
@@ -1221,6 +1231,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.floorY = floorY
         context.coordinator.onFloorTap = onFloorTap
         context.coordinator.walkFloorY = walkFloorY
+        context.coordinator.viewHeight = view.bounds.height
         context.coordinator.walkMove = walkMove
         context.coordinator.setEyeHeight(eyeHeight)
         context.coordinator.setStanding(standAt)

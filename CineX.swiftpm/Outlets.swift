@@ -58,14 +58,15 @@ enum OutletStore {
     }
 
     /// Orange lightning pills over each outlet, always facing the camera and drawn on top, like the Android app.
+    /// Sized in points on screen, not metres: `RoomSceneView` rescales them every frame (see `screenSizes`), so they
+    /// stay ~27 pt tall at any distance, the same as on Android.
     static func node(_ outlets: [RoomOutlet], floorY: Float) -> SCNNode {
         let root = SCNNode()
         root.name = "outlets"
         for o in outlets {
-            let text = "⚡ " + o.label(floorY: floorY)
-            let image = pill(text)
-            let width = image.size.width * 0.0035 // 3.5 mm per point: readable across a room
-            let plane = SCNPlane(width: width, height: width * image.size.height / image.size.width)
+            let image = pill("⚡ " + o.label(floorY: floorY))
+            // A unit-tall plane; the per-frame scale makes it image.size.height points tall.
+            let plane = SCNPlane(width: image.size.width / image.size.height, height: 1)
             let m = SCNMaterial()
             m.diffuse.contents = image
             m.lightingModel = .constant
@@ -74,29 +75,75 @@ enum OutletStore {
             m.isDoubleSided = true
             plane.materials = [m]
             let label = SCNNode(geometry: plane)
-            label.simdPosition = o.point + SIMD3(0, 0.12, 0)
+            label.name = "screen:\(Double(image.size.height)):1.4" // points tall : offset above the dot, in heights
             label.constraints = [SCNBillboardConstraint()]
-            label.renderingOrder = 100
-            let dot = SCNNode(geometry: SCNSphere(radius: 0.025))
-            dot.geometry?.firstMaterial?.diffuse.contents = UIColor(red: 0.93, green: 0.69, blue: 0.30, alpha: 1)
-            dot.geometry?.firstMaterial?.lightingModel = .constant
-            dot.simdPosition = o.point
-            dot.renderingOrder = 100
-            root.addChildNode(dot)
-            root.addChildNode(label)
+            label.renderingOrder = 101
+            let ring = SCNNode(geometry: SCNPlane(width: 1, height: 1))
+            ring.geometry?.firstMaterial = dotMaterial(UIColor.black, size: 14)
+            ring.name = "screen:14:0"
+            ring.constraints = [SCNBillboardConstraint()]
+            ring.renderingOrder = 100
+            let dot = SCNNode(geometry: SCNPlane(width: 1, height: 1))
+            dot.geometry?.firstMaterial = dotMaterial(UIColor(red: 1, green: 0.62, blue: 0.1, alpha: 1), size: 12)
+            dot.name = "screen:12:0"
+            dot.constraints = [SCNBillboardConstraint()]
+            dot.renderingOrder = 101
+            // One anchor per outlet at its position; the sized parts sit in it (see `screenSizes`).
+            let anchor = SCNNode()
+            anchor.simdPosition = o.point
+            anchor.addChildNode(ring)
+            anchor.addChildNode(dot)
+            anchor.addChildNode(label)
+            root.addChildNode(anchor)
         }
         return root
     }
 
+    private static func dotMaterial(_ color: UIColor, size: CGFloat) -> SCNMaterial {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).image { _ in
+            color.setFill()
+            UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 64, height: 64)).fill()
+        }
+        let m = SCNMaterial()
+        m.diffuse.contents = image
+        m.lightingModel = .constant
+        m.readsFromDepthBuffer = false
+        m.writesToDepthBuffer = false
+        m.isDoubleSided = true
+        return m
+    }
+
+    /// Every frame: scale the outlet labels and dots so they keep their size in points on screen, lifting each
+    /// label above its dot. `viewHeight` in points, `fov` the camera's vertical field of view in degrees.
+    static func screenSizes(in scene: SCNScene, camera: SCNNode, viewHeight: CGFloat, fov: CGFloat) {
+        guard let root = scene.rootNode.childNode(withName: "outlets", recursively: false), viewHeight > 0 else { return }
+        let metresPerPoint = 2 * tan(Float(fov) * .pi / 360) / Float(viewHeight)
+        let eye = camera.simdWorldPosition
+        for anchor in root.childNodes {
+            let d = max(0.05, simd_distance(eye, anchor.simdWorldPosition))
+            for n in anchor.childNodes {
+                guard let parts = n.name?.split(separator: ":"), parts.count == 3, parts[0] == "screen",
+                      let points = Float(parts[1]), let lift = Float(parts[2]) else { continue }
+                let s = d * metresPerPoint * points
+                n.simdScale = SIMD3(repeating: s)
+                n.simdPosition = SIMD3(0, s * lift, 0)
+            }
+        }
+    }
+
     /// The label as an image: white text on a dark orange pill.
+    /// 13.5 pt semibold white text in a ~27 pt pill (the Android label's colours), growing with large text sizes only
+    /// up to 1.2x.
     private static func pill(_ text: String) -> UIImage {
-        let font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        let scale = min(1.2, UIFontMetrics(forTextStyle: .footnote).scaledValue(for: 1))
+        let font = UIFont.systemFont(ofSize: 13.5 * scale, weight: .semibold)
         let size = (text as NSString).size(withAttributes: [.font: font])
-        let box = CGSize(width: ceil(size.width) + 20, height: ceil(size.height) + 10)
+        let box = CGSize(width: ceil(size.width) + 20, height: ceil(27 * scale))
         return UIGraphicsImageRenderer(size: box).image { _ in
-            UIColor(red: 0.55, green: 0.30, blue: 0.08, alpha: 0.9).setFill()
+            UIColor(red: 0.50, green: 0.25, blue: 0.06, alpha: 0.82).setFill()
             UIBezierPath(roundedRect: CGRect(origin: .zero, size: box), cornerRadius: box.height / 2).fill()
-            (text as NSString).draw(at: CGPoint(x: 10, y: 5), withAttributes: [.font: font, .foregroundColor: UIColor.white])
+            (text as NSString).draw(at: CGPoint(x: 10, y: (box.height - size.height) / 2),
+                                    withAttributes: [.font: font, .foregroundColor: UIColor.white])
         }
     }
 }
