@@ -34,7 +34,10 @@ final class Nearby: ObservableObject {
     @Published var received: (scan: SavedScan, from: String)?
 
     let deviceId: String
-    let deviceName: String
+    /// What other phones see: the name the user gave this phone ("RK's iPhone"). iOS only tells apps "iPhone".
+    @Published var deviceName: String
+    /// True until the user has named this phone.
+    var needsName: Bool { UserDefaults.standard.string(forKey: "nearbyName") == nil }
     private var listener: NWListener?
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "RoomScape.nearby")
@@ -50,8 +53,17 @@ final class Nearby: ObservableObject {
             deviceId = UUID().uuidString
             UserDefaults.standard.set(deviceId, forKey: "nearbyDeviceId")
         }
-        // iOS only gives apps a generic name ("iPhone"); a short id tells two iPhones apart.
-        deviceName = "\(UIDevice.current.model) \(deviceId.prefix(4))"
+        deviceName = UserDefaults.standard.string(forKey: "nearbyName") ?? UIDevice.current.model
+    }
+
+    /// Renames this phone for other phones (advertised again right away). The id stays, so trust is kept.
+    func rename(_ name: String) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        UserDefaults.standard.set(String(clean.prefix(40)), forKey: "nearbyName")
+        deviceName = String(clean.prefix(40))
+        stop()
+        start()
     }
 
     // MARK: Receiving
@@ -291,10 +303,20 @@ struct SendNearbySheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var status: String?
     @State private var sending: String?
+    @State private var name = ""
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    TextField("Your phone's name", text: $name)
+                        .submitLabel(.done)
+                        .onSubmit { nearby.rename(name) }
+                } header: {
+                    Text("Your phone's name")
+                } footer: {
+                    Text(nearby.needsName ? "Give this phone a name, like \"RK's iPhone\". Other phones see it when you send them a scan." : "Other phones see this name.")
+                }
                 Section {
                     if nearby.peers.isEmpty {
                         HStack(spacing: 10) {
@@ -325,11 +347,18 @@ struct SendNearbySheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
         }
-        .onAppear { nearby.browse() }
-        .onDisappear { nearby.stopBrowsing() }
+        .onAppear {
+            name = nearby.needsName ? "" : nearby.deviceName
+            nearby.browse()
+        }
+        .onDisappear {
+            if !name.trimmingCharacters(in: .whitespaces).isEmpty, name != nearby.deviceName { nearby.rename(name) }
+            nearby.stopBrowsing()
+        }
     }
 
     private func send(to peer: Nearby.Peer) {
+        if !name.trimmingCharacters(in: .whitespaces).isEmpty, name != nearby.deviceName { nearby.rename(name) }
         sending = peer.id
         status = "Packing the scan…"
         let scan = scan, id = nearby.deviceId, name = nearby.deviceName

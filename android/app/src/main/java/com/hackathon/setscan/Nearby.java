@@ -47,7 +47,9 @@ final class Nearby {
     private final MainActivity act;
     private final NsdManager nsd;
     private final SharedPreferences prefs;
-    final String deviceId, deviceName;
+    final String deviceId;
+    /** What other phones see: the name the user set (here or in Android's About phone), else the model. */
+    String deviceName;
     private ServerSocket server;
     private NsdManager.RegistrationListener registration;
     private WifiManager.MulticastLock lock;
@@ -60,7 +62,23 @@ final class Nearby {
         String id = prefs.getString("id", null);
         if (id == null) { id = UUID.randomUUID().toString(); prefs.edit().putString("id", id).apply(); }
         deviceId = id;
-        deviceName = Build.MODEL + " " + id.substring(0, 4).toUpperCase(Locale.US);
+        String n = prefs.getString("name", null);
+        if (n == null) {
+            try { n = android.provider.Settings.Global.getString(act.getContentResolver(), android.provider.Settings.Global.DEVICE_NAME); }
+            catch (Exception ignored) { }
+        }
+        deviceName = n == null || n.trim().isEmpty() ? Build.MODEL : n.trim();
+    }
+
+    /** Renames this phone for other phones (advertised again right away). The id stays, so trust is kept. */
+    void rename(String name) {
+        String n = name == null ? "" : name.trim();
+        if (n.isEmpty() || n.equals(deviceName)) return;
+        if (n.length() > 40) n = n.substring(0, 40);
+        prefs.edit().putString("name", n).apply();
+        deviceName = n;
+        stop();
+        start();
     }
 
     // ---------------------------------------------------------------- receiving
@@ -221,6 +239,19 @@ final class Nearby {
         // A dialog shows either a message or a list, never both: the help goes above the list in a layout of its own.
         android.widget.LinearLayout box = new android.widget.LinearLayout(act);
         box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.TextView nameLabel = new android.widget.TextView(act);
+        nameLabel.setText("YOUR PHONE'S NAME");
+        nameLabel.setTextColor(Ios.SECONDARY);
+        nameLabel.setTextSize(12);
+        nameLabel.setPadding(Ios.dp(act, 20), Ios.dp(act, 8), Ios.dp(act, 20), 0);
+        box.addView(nameLabel);
+        final android.widget.EditText nameField = new android.widget.EditText(act);
+        nameField.setSingleLine(true);
+        nameField.setText(deviceName);
+        nameField.setSelectAllOnFocus(true);
+        android.widget.LinearLayout.LayoutParams nlp = new android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        nlp.leftMargin = Ios.dp(act, 16); nlp.rightMargin = Ios.dp(act, 16);
+        box.addView(nameField, nlp);
         android.widget.TextView help = new android.widget.TextView(act);
         help.setText("Phones with RoomScape open on the same Wi-Fi appear below. The first time, the other phone asks to accept scans from this one.");
         help.setTextColor(Ios.SECONDARY);
@@ -244,8 +275,11 @@ final class Nearby {
                 .setView(box)
                 .setNegativeButton("Close", null)
                 .create();
-        list.setOnItemClickListener((parent, view, which, id) -> { dialog.dismiss(); send(scanDir, found.get(which)); });
-        dialog.setOnDismissListener(d -> { try { nsd.stopServiceDiscovery(discovery[0]); } catch (Exception ignored) { } });
+        list.setOnItemClickListener((parent, view, which, id) -> { rename(nameField.getText().toString()); dialog.dismiss(); send(scanDir, found.get(which)); });
+        dialog.setOnDismissListener(d -> {
+            rename(nameField.getText().toString());
+            try { nsd.stopServiceDiscovery(discovery[0]); } catch (Exception ignored) { }
+        });
         dialog.show();
     }
 
