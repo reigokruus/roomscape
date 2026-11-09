@@ -21,3 +21,9 @@ struct RoomObject {
     var halfExtents: SIMD3<Float>
     var yaw: Float
 }
+
+/// The app's hardware-use log (PerfLog.swift); the harness doesn't log.
+final class PerfLog: @unchecked Sendable {
+    nonisolated(unsafe) static var processing: PerfLog?
+    func note(_ name: String, ms: Double) {}
+}

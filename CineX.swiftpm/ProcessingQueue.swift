@@ -233,7 +233,15 @@ private enum log {
             progress = RecordingProcessor.Progress(stage: "Starting", fraction: 0, note: nil)
             report()
             log.info("processing \(item.scan): \(item.job.rawValue)")
-            let job = Task.detached(priority: .utility) {
+            // Hardware use while processing (PerfLog), kept with the scan.
+            let perf = PerfLog()
+            perf.start(scan.captureURL.appendingPathComponent("perf-processing-\(item.job.rawValue).jsonl"), stage: "starting")
+            PerfLog.processing = perf
+            defer { perf.stop(); PerfLog.processing = nil }
+            // Full speed (performance cores) while the app is open; background work goes to the efficiency cores.
+            let priority: TaskPriority = UIApplication.shared.applicationState == .active ? .userInitiated : .utility
+            log.info("priority: \(priority == .userInitiated ? "userInitiated (app open)" : "utility (in the background)")")
+            let job = Task.detached(priority: priority) {
                 try await RecordingProcessor.run(item.job, on: scan) { p in
                     Task { @MainActor in ProcessingQueue.shared.update(p) }
                 }
@@ -271,7 +279,7 @@ private enum log {
     private func update(_ p: RecordingProcessor.Progress) {
         guard current != nil else { return }
         if p.fraction < 0, p.note != progress?.note { log.info("note: \(p.note ?? "continuing")") }
-        if p.fraction >= 0, !p.stage.isEmpty, p.stage != progress?.stage { log.info("stage: \(p.stage)") }
+        if p.fraction >= 0, !p.stage.isEmpty, p.stage != progress?.stage { log.info("stage: \(p.stage)"); PerfLog.processing?.stage(p.stage) }
         if p.fraction < 0 { progress?.note = p.note } else { progress = .init(stage: p.stage, fraction: p.fraction, note: progress?.note) }
         report()
     }

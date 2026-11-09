@@ -16,6 +16,8 @@ final class LiveCapture {
     let ghost = LiveGhost()
     /// The raw recording of this scan (RawRecorder), when recording is on.
     var recorder: RawRecorder?
+    /// Hardware use while scanning (PerfLog).
+    var perf: PerfLog?
     /// How far below the safe area's top RoomPlan's mini-model sits: under the scan card.
     var previewTop: CGFloat = 12
     let session: ARSession
@@ -249,6 +251,7 @@ final class LiveCapture {
 
     fileprivate func tick() {
         guard !busy, let cloud, let frame = session.currentFrame, frame.timestamp != lastFrameTime else { return }
+        if lastFrameTime > 0, frame.timestamp - lastFrameTime > 0.25 { perf?.gap() }
         lastFrameTime = frame.timestamp
         recorder?.append(frame)
         busy = true
@@ -288,6 +291,7 @@ final class LiveDiscsMTKView: MTKView {
         guard let device = live.device, let cloud = live.cloud,
               let renderer = LiveDiscRenderer(device: device, cloud: cloud, mesh: live.mesh, ghost: live.ghost) else { return nil }
         self.renderer = renderer
+        renderer.perf = live.perf
         super.init(frame: .zero, device: device)
         isOpaque = false
         backgroundColor = .clear
@@ -329,6 +333,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let overview = OverviewCamera()
     private(set) var lastViewProjection: simd_float4x4?
     private let liveMesh: LiveMesh?
+    /// Hardware use while scanning: frames drawn and GPU time (PerfLog).
+    var perf: PerfLog?
     private func meshTriangles() -> Int { (liveMesh?.buffers?.triangleIndexCount ?? 0) / 3 }
     private let window: OverviewWindowRenderer?
 
@@ -461,6 +467,10 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             }
         }
         encoder.endEncoding()
+        if let perf {
+            perf.frame()
+            commands.addCompletedHandler { cb in perf.gpu(cb.gpuEndTime - cb.gpuStartTime) }
+        }
         commands.present(drawable)
         commands.commit()
     }

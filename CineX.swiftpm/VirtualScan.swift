@@ -96,14 +96,14 @@ struct VirtualScanScreen: View {
                 let f = frames[fi]
                 let drawing = t >= startAt
                 var picture: CGImage?
-                if t < 0.35 { FileHandle.standardError.write("virtual: t=\(t) reading video\n".data(using: .utf8)!) }
+                let started = Date()
                 if let frame = await video.frame(at: t), drawing || fuser.wantsPhoto(f) {
                     picture = VideoFrames.image(frame, width: LiveCloud.photoWidth)
                 }
                 // Depth frames up to now, fused as LiveCloud does; a photo when the phone has moved on (as LiveCloud).
                 var batch: [RecordingProcessor.DepthFrame] = []
                 while di < depth.count, depth[di].time <= now { batch.append(depth[di]); di += 1 }
-                if t < 0.35 { FileHandle.standardError.write("virtual: t=\(t) picture \(picture != nil), \(batch.count) depth\n".data(using: .utf8)!) }
+                let videoTime = Date().timeIntervalSince(started)
                 let shot = picture
                 await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
                     worker.async {
@@ -112,6 +112,10 @@ struct VirtualScanScreen: View {
                         if drawing { mesh.rebuildIfDue(camera: f.pose, time: now) }
                         done.resume()
                     }
+                }
+                if Int(t * 10) % 10 == 0 {
+                    FileHandle.standardError.write(String(format: "virtual: t=%.1f video %.0f ms, step %.0f ms, %d photos, %d triangles\n", t, videoTime * 1000,
+                        Date().timeIntervalSince(started) * 1000, fuser.photoCount, (mesh.buffers?.triangleIndexCount ?? 0) / 3).data(using: .utf8)!)
                 }
                 if drawing {
                     pose = f.pose; k = f.k; imageSize = CGSize(width: f.width, height: f.height)

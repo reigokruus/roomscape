@@ -103,7 +103,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private final float[] proj = new float[16], view = new float[16], mvp = new float[16];
 
-    ScanRenderer(MainActivity a) { activity = a; }
+    ScanRenderer(MainActivity a) { activity = a; perf = new PerfLog(a); }
+
+    /** Hardware use while scanning and after Done (PerfLog), kept with the scan as perf-scan.jsonl. */
+    final PerfLog perf;
+    private long lastFrameNs;
 
     // Depth modes to try in order. If tracking doesn't start within a few seconds, move to the next one.
     private final java.util.List<Config.DepthMode> modes = new java.util.ArrayList<>();
@@ -1116,6 +1120,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread: a fresh scan (not tied to a save yet). */
     void startNewScan() {
         reset();
+        perf.start(new File(activity.getCacheDir(), "perf-scan-" + System.currentTimeMillis() + ".jsonl"), "scanning");
         improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
         idle = false;
     }
@@ -1130,6 +1135,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (saving) { glTasks.add(() -> discardScan(after)); return; }
         File dir = improveDir == null ? currentDir : null;
         log(dir != null ? "scan cancelled: deleting its autosave " + dir.getName() : improveDir != null ? "continue scan cancelled: saved scan kept as it was" : "scan cancelled");
+        perf.stop(); if (perf.file() != null) { perf.file().delete(); new File(perf.file().getParent(), perf.file().getName().replace(".jsonl", ".summary.json")).delete(); }
         reset();
         improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
         idle = true;
@@ -1343,7 +1349,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (img[0] != null) latch.countDown();
                     while (!(got = latch.await(5, java.util.concurrent.TimeUnit.SECONDS)) && paused && depthRunning) { /* in the background: wait for the app to come back */ }
                     if (!got || img[0] == null) continue;
+                    long depthT0 = System.nanoTime();
                     float[] D = net.run(img[0]);
+                    perf.note("depth AI (CPU, " + DepthNet.class.getSimpleName() + ")", (System.nanoTime() - depthT0) / 1e6);
                     int iw = img[0].getWidth(), ih = img[0].getHeight();
                     int[] pix = new int[iw * ih];
                     img[0].getPixels(pix, 0, iw, 0, 0, iw, ih);
@@ -2177,6 +2185,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         viewing = true;
         sensors.active = false;
         log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
+        perf.stage("after Done");
+        new Thread(() -> { // the after-Done steps (surface, photos, splats) take well under a minute
+            try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
+            File dir = currentDir;
+            perf.stop();
+            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); }
+        }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
         dropNoise();
@@ -4067,6 +4082,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onDrawFrame(GL10 gl) {
+        long drawStartNs = System.nanoTime();
+        if (lastFrameNs > 0) perf.frame((drawStartNs - lastFrameNs) / 1e6); // frame interval
+        lastFrameNs = drawStartNs;
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
         if (idle) { for (Runnable r; (r = glTasks.poll()) != null; ) r.run(); return; }
         if (viewing) { drawViewer(); return; }

@@ -176,6 +176,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         }
         startHud()
         if RawRecorder.enabled { live.recorder = RawRecorder() }
+        // Hardware use while scanning (PerfLog): kept with the scan as perf-scan.jsonl.
+        let perf = PerfLog()
+        perf.start(FileManager.default.temporaryDirectory.appendingPathComponent("perf-scan-\(UUID().uuidString).jsonl"), stage: "scanning")
+        live.perf = perf
         live.attachDiscs(to: captureView)
         live.pinPreviewTopRight(in: captureView)
         lastMemoryWarning = nil
@@ -213,6 +217,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             live.recorder = nil
             recorder.finish { folder, _ in try? FileManager.default.removeItem(at: folder) } // Cancel discards the scan
         }
+        live.perf?.stop()
+        live.perf = nil
         if improving != nil { ImproveLog.write("cancelled while \(phase)") }
         processingTask?.cancel()
         processingTask = nil
@@ -443,6 +449,11 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                     return saved
                 }.value
                 RescanTargets.current = [] // used by the merge just now
+                if let perf = self.live.perf, let file = perf.file {
+                    self.live.perf = nil
+                    perf.stop()
+                    perf.move(file, into: saved.captureURL, as: "perf-scan")
+                }
                 try Task.checkCancellation()
                 log.info("saved \(saved.name, privacy: .public)")
                 // The raw recording goes into the scan's folder (kept; nothing deletes it automatically).

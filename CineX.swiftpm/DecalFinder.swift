@@ -64,7 +64,9 @@ enum DecalFinder {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = false
+            let visionStart = Date()
             try? VNImageRequestHandler(cvPixelBuffer: buffer, options: [:]).perform([request])
+            PerfLog.processing?.note("vision text", ms: Date().timeIntervalSince(visionStart) * 1000)
             // Real text only: what it read has at least two letters or digits, read with some confidence (patterned
             // fabric and radiators passed as "text" with the fast detector).
             let boxes = (request.results ?? []).filter { obs in
