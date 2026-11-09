@@ -22,6 +22,8 @@ final class TsdfGPU {
     private var encoder: MTLComputeCommandEncoder?
     private var pending = 0
     private var depthBuffers: [MTLBuffer] = []
+    /// A command buffer failed (e.g. GPU work isn't allowed: the app is in the background). The caller falls back.
+    private(set) var failed = false
 
     struct Params {
         var worldToCam: simd_float4x4
@@ -92,6 +94,7 @@ final class TsdfGPU {
         encoder.endEncoding()
         commands.commit()
         commands.waitUntilCompleted()
+        if commands.status == .error { failed = true }
         self.encoder = nil; self.commands = nil
         pending = 0
         depthBuffers.removeAll()

@@ -28,6 +28,31 @@ enum DecalFinder {
     struct Frame { var time: Double; var pose: simd_float4x4; var k: simd_float3x3; var width: Int; var height: Int }
     typealias Depth = (time: Double, w: Int, h: Int, mm: [UInt16])
 
+    /// Sightings of one patch (centres within 10 cm): the best so far and its straightened picture.
+    private struct Group { var centre: SIMD3<Float>; var best: Sighting; var jpeg: Data?; var ppm: Float }
+
+    /// The sighting's patch straightened: its four corners in the picture onto a rectangle, ~2 px per mm, at most
+    /// 1024 px wide; nil for patches that aren't text-sized.
+    private static func rectify(_ best: Sighting, image: CIImage, ctx: CIContext) -> (jpeg: Data, ppm: Float)? {
+        let w = simd_distance(best.corners[0], best.corners[1]), h = simd_distance(best.corners[0], best.corners[3])
+        guard w > 0.01, h > 0.005, max(w, h) < 0.8 else { return nil } // text patches, not whole walls
+        let ppm = min(2000, 1024 / max(w, h))
+        let H = CGFloat(image.extent.height)
+        func ci(_ p: CGPoint) -> CIVector { CIVector(x: p.x, y: H - p.y) } // CIImage: bottom-left origin
+        guard let filter = CIFilter(name: "CIPerspectiveCorrection") else { return nil }
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(ci(best.pixels[0]), forKey: "inputTopLeft")
+        filter.setValue(ci(best.pixels[1]), forKey: "inputTopRight")
+        filter.setValue(ci(best.pixels[2]), forKey: "inputBottomRight")
+        filter.setValue(ci(best.pixels[3]), forKey: "inputBottomLeft")
+        guard var straight = filter.outputImage else { return nil }
+        let target = CGSize(width: CGFloat(w * ppm), height: CGFloat(h * ppm))
+        straight = straight.transformed(by: CGAffineTransform(scaleX: target.width / straight.extent.width, y: target.height / straight.extent.height))
+        guard let jpeg = ctx.jpegRepresentation(of: straight, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                                options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]) else { return nil }
+        return (jpeg, ppm)
+    }
+
     private struct Sighting {
         var corners: [SIMD3<Float>]
         var normal: SIMD3<Float> = .zero
@@ -43,6 +68,16 @@ enum DecalFinder {
     static func find(recording rec: URL, frames: [Frame], depth: [Depth], out: URL,
                      pace: () async -> Void = {}, progress: (Float) -> Void = { _ in },
                      log: (String) -> Void = { _ in }) async throws -> Int {
+        try await find(recording: rec, frames: frames, depthAt: { t in
+            depth.min(by: { abs($0.time - t) < abs($1.time - t) }).flatMap { abs($0.time - t) < 0.15 ? $0 : nil }
+        }, out: out, pace: pace, progress: progress, log: log)
+    }
+
+    /// The same, with depth looked up by time (nil when there's none within 0.15 s), so a long recording's depth never
+    /// has to be in memory all at once.
+    static func find(recording rec: URL, frames: [Frame], depthAt: (Double) -> Depth?, out: URL,
+                     pace: () async -> Void = {}, progress: (Float) -> Void = { _ in },
+                     log: (String) -> Void = { _ in }) async throws -> Int {
         let asset = AVURLAsset(url: rec.appendingPathComponent("video.mov"))
         guard let track = try await asset.loadTracks(withMediaType: .video).first, !frames.isEmpty else { return 0 }
         let reader = try AVAssetReader(asset: asset)
@@ -51,7 +86,8 @@ enum DecalFinder {
         reader.startReading()
         let start = frames[0].time
         var sightings: [Sighting] = []
-        var kept: [Int: CIImage] = [:] // frame index -> picture, only for frames with text
+        var groups: [Group] = []
+        let ctx = CIContext(options: [.cacheIntermediates: false])
         var lastLook = -1.0
         var fi = 0
         while let sample = output.copyNextSampleBuffer() {
@@ -73,47 +109,37 @@ enum DecalFinder {
                 guard let top = obs.topCandidates(1).first, top.confidence >= 0.5 else { return false }
                 return top.string.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count >= 2
             }
-            guard !boxes.isEmpty, let d = depth.min(by: { abs($0.time - t) < abs($1.time - t) }), abs(d.time - t) < 0.15 else { await pace(); continue }
+            guard !boxes.isEmpty, let d = depthAt(t) else { await pace(); continue }
             let f = frames[fi]
             let image = CIImage(cvPixelBuffer: buffer)
             var any = false
+            var firstNew = sightings.count
             for box in boxes {
                 if let s = place(box.boundingBox, frame: f, frameIndex: fi, depth: d, image: image) { sightings.append(s); any = true }
             }
-            if any { kept[fi] = image.cropped(to: image.extent) }
+            // Only the straightened patch of a group's best sighting so far is kept (rk 9 Nov: keeping whole frames
+            // with text took over a GB on an 8-minute scan and iOS stopped the rebuild).
+            if any {
+                for s in sightings[firstNew...] {
+                    let g = groups.firstIndex(where: { simd_distance($0.centre, s.centre) < 0.1 }) ?? {
+                        groups.append(Group(centre: s.centre, best: s, jpeg: nil, ppm: 0)); return groups.count - 1 }()
+                    if groups[g].jpeg == nil || s.score > groups[g].best.score,
+                       let r = rectify(s, image: image, ctx: ctx) {
+                        groups[g].best = s; groups[g].jpeg = r.jpeg; groups[g].ppm = r.ppm
+                    }
+                }
+            }
+            firstNew = sightings.count
             await pace()
         }
-        // Group sightings of the same patch (centres within 10 cm), keep the best of each.
-        var groups: [[Sighting]] = []
-        for s in sightings {
-            if let i = groups.firstIndex(where: { simd_distance($0[0].centre, s.centre) < 0.1 }) { groups[i].append(s) } else { groups.append([s]) }
-        }
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-        let ctx = CIContext(options: [.cacheIntermediates: false])
         var decals: [Decal] = []
         for (n, g) in groups.enumerated() {
-            guard let best = g.max(by: { $0.score < $1.score }), let image = kept[best.frameIndex] else { continue }
-            // Straighten: the four corners in the picture onto a rectangle, ~2 px per mm, at most 1024 px wide.
-            let w = simd_distance(best.corners[0], best.corners[1]), h = simd_distance(best.corners[0], best.corners[3])
-            guard w > 0.01, h > 0.005, max(w, h) < 0.8 else { continue } // text patches, not whole walls
-            let ppm = min(2000, 1024 / max(w, h))
-            let H = CGFloat(image.extent.height)
-            func ci(_ p: CGPoint) -> CIVector { CIVector(x: p.x, y: H - p.y) } // CIImage: bottom-left origin
-            guard let filter = CIFilter(name: "CIPerspectiveCorrection") else { continue }
-            filter.setValue(image, forKey: kCIInputImageKey)
-            filter.setValue(ci(best.pixels[0]), forKey: "inputTopLeft")
-            filter.setValue(ci(best.pixels[1]), forKey: "inputTopRight")
-            filter.setValue(ci(best.pixels[2]), forKey: "inputBottomRight")
-            filter.setValue(ci(best.pixels[3]), forKey: "inputBottomLeft")
-            guard var straight = filter.outputImage else { continue }
-            let target = CGSize(width: CGFloat(w * ppm), height: CGFloat(h * ppm))
-            straight = straight.transformed(by: CGAffineTransform(scaleX: target.width / straight.extent.width, y: target.height / straight.extent.height))
+            guard let jpeg = g.jpeg else { continue }
             let file = String(format: "decal-%03d.jpg", n)
-            guard let jpeg = ctx.jpegRepresentation(of: straight, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                                    options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]) else { continue }
             try jpeg.write(to: out.appendingPathComponent(file))
-            decals.append(Decal(corners: best.corners.map { [$0.x, $0.y, $0.z] }, normal: [best.normal.x, best.normal.y, best.normal.z],
-                                file: file, pixelsPerMetre: ppm, score: best.score))
+            decals.append(Decal(corners: g.best.corners.map { [$0.x, $0.y, $0.z] }, normal: [g.best.normal.x, g.best.normal.y, g.best.normal.z],
+                                file: file, pixelsPerMetre: g.ppm, score: g.best.score))
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted]

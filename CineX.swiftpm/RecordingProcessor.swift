@@ -3,6 +3,7 @@ import CoreImage
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
+import UIKit
 import simd
 
 /// "Process later": builds a scan's surface, points and photos from its raw recording (RawRecorder), paced by the
@@ -68,8 +69,10 @@ enum RecordingProcessor {
             let out = work.appendingPathComponent("decals")
             try? FileManager.default.removeItem(at: out)
             let decalFrames = frames.map { DecalFinder.Frame(time: $0.time, pose: $0.pose, k: $0.k, width: $0.width, height: $0.height) }
-            let decalDepth = depthFrames.map { (time: $0.time, w: $0.w, h: $0.h, mm: $0.mm) }
-            _ = try await DecalFinder.find(recording: rec, frames: decalFrames, depth: decalDepth, out: out,
+            let depthAt: (Double) -> DecalFinder.Depth? = { t in
+                depthFrames.nearest(t).map { i in let d = depthFrames[i]; return (time: d.time, w: d.w, h: d.h, mm: d.mm) }
+            }
+            _ = try await DecalFinder.find(recording: rec, frames: decalFrames, depthAt: depthAt, out: out,
                                            pace: { await ThermalGovernor.pace(note: note) },
                                            progress: { if job == .text { report("text", "Finding text", $0) } })
             FileManager.default.createFile(atPath: work.appendingPathComponent("text.done").path, contents: Data())
@@ -144,54 +147,70 @@ enum RecordingProcessor {
     /// within 1%). The CPU fusion below stays as the fallback.
     static let useGPU = true
 
-    /// The surface fused on the GPU, or nil (no Metal, or a block too big for the phone: then the CPU does it).
-    static func gpuSurface(frames: [FrameRecord], depth depthFrames: [DepthFrame], clears: [[String: Any]],
+    /// The surface fused on the GPU, or nil (no Metal, the app not in the foreground, a GPU error, or a block too big for
+    /// the phone: then the CPU does it). Two passes over the depth, one frame at a time, so memory stays flat: the
+    /// room's extent first, then the fusion.
+    static func gpuSurface(frames: [FrameRecord], depth depthFrames: DepthFrames, clears: [[String: Any]],
                            progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> ScanMesh? {
+        // GPU work is only allowed while the app is in the foreground (a background continued-processing task would
+        // need the background-GPU entitlement); in the background the CPU fuses.
+        let foreground = await MainActor.run { UIApplication.shared.applicationState != .background }
+        guard foreground else { return nil }
+        func frame(_ n: Int) -> (f: FrameRecord, d: DepthFrame)? {
+            let d = depthFrames[n]
+            guard d.w > 0, let f = frames.min(by: { abs($0.time - d.time) < abs($1.time - d.time) }), f.tracking == 2 else { return nil }
+            return (f, d)
+        }
         // Each depth frame filtered as for the CPU fusion (medium+ confidence, no flying pixels, 0.2-4 m, not cleared).
-        var prepared: [(pose: simd_float4x4, fx: Float, fy: Float, cx: Float, cy: Float, w: Int, h: Int, m: [Float])] = []
-        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
-        var fi = 0
-        for (n, d) in depthFrames.enumerated() {
-            while fi + 1 < frames.count, abs(frames[fi + 1].time - d.time) <= abs(frames[fi].time - d.time) { fi += 1 }
-            let f = frames[fi]
-            guard f.tracking == 2 else { continue }
+        func filtered(_ f: FrameRecord, _ d: DepthFrame, bounds: Bool) -> (m: [Float], lo: SIMD3<Float>, hi: SIMD3<Float>, k: SIMD4<Float>) {
             let sx = Float(d.w) / Float(f.width), sy = Float(d.h) / Float(f.height)
             let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
-            var m = [Float](repeating: 0, count: d.w * d.h)
+            var m = [Float](repeating: 0, count: bounds ? 0 : d.w * d.h)
+            var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
             func depth(_ x: Int, _ y: Int) -> Float { Float(d.mm[y * d.w + x]) / 1000 }
-            for y in 1..<(d.h - 1) {
-                for x in 1..<(d.w - 1) {
+            for y in stride(from: 1, to: d.h - 1, by: bounds ? 8 : 1) {
+                for x in stride(from: 1, to: d.w - 1, by: bounds ? 8 : 1) {
                     let z = depth(x, y)
                     guard z > 0.2, z < 4, d.conf.isEmpty || d.conf[y * d.w + x] >= 1 else { continue }
                     let tol = z * 0.04 + 0.02
                     if abs(depth(x - 1, y) - z) > tol || abs(depth(x + 1, y) - z) > tol || abs(depth(x, y - 1) - z) > tol || abs(depth(x, y + 1) - z) > tol { continue }
-                    let sample = (x % 8 == 1 && y % 8 == 1) || !clears.isEmpty
-                    if sample {
+                    if bounds || !clears.isEmpty {
                         let p4 = f.pose * SIMD4((Float(x) - cx) * z / fx, -(Float(y) - cy) * z / fy, -z, 1)
                         let pw = SIMD3(p4.x, p4.y, p4.z)
                         if !clears.isEmpty, clears.contains(where: { Self.cleared(pw, at: d.time, by: $0) }) { continue }
-                        if x % 8 == 1, y % 8 == 1 { lo = simd_min(lo, pw); hi = simd_max(hi, pw) }
+                        if bounds { lo = simd_min(lo, pw); hi = simd_max(hi, pw); continue }
                     }
                     m[y * d.w + x] = z
                 }
             }
-            prepared.append((f.pose, fx, fy, cx, cy, d.w, d.h, m))
-            if n % 50 == 0 { try Task.checkCancellation(); progress(0.3 * Float(n) / Float(depthFrames.count)) }
+            return (m, lo, hi, SIMD4(fx, fy, cx, cy))
+        }
+        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        for n in depthFrames.indices where n % 2 == 0 {
+            guard let (f, d) = frame(n) else { continue }
+            let r = filtered(f, d, bounds: true)
+            lo = simd_min(lo, r.lo); hi = simd_max(hi, r.hi)
+            if n % 100 == 0 { try Task.checkCancellation(); progress(0.15 * Float(n) / Float(depthFrames.count)) }
         }
         guard lo.x.isFinite else { return nil }
         // A phone-sized block (12 M voxels, ~70 MB); bigger rooms go to the CPU.
         let size = (hi - lo + 0.4) / 0.04
         guard size.x * size.y * size.z < 12_000_000,
               let gpu = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5) else { return nil }
-        for (n, d) in prepared.enumerated() {
-            gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+        for n in depthFrames.indices {
+            guard let (f, d) = frame(n) else { continue }
+            let r = filtered(f, d, bounds: false)
+            gpu.integrate(depth: r.m, width: d.w, height: d.h, pose: f.pose, fx: r.k.x, fy: r.k.y, cx: r.k.z, cy: r.k.w, step: 2)
             if n % 32 == 31 {
                 gpu.finish()
+                if gpu.failed { return nil } // e.g. the app went to the background mid-way: the CPU starts over
                 try Task.checkCancellation()
-                progress(0.3 + 0.6 * Float(n) / Float(prepared.count))
+                progress(0.15 + 0.8 * Float(n) / Float(depthFrames.count))
                 await ThermalGovernor.pace(note: note)
             }
         }
+        gpu.finish()
+        if gpu.failed { return nil }
         let tsdf = Tsdf(capacity: max(700_000, gpu.voxelCount / 4), voxel: 0.04, truncation: 0.08, carve: 1.5)
         gpu.copy(into: tsdf)
         let scratch = Tsdf.MeshScratch()
@@ -202,7 +221,7 @@ enum RecordingProcessor {
 
     /// Fuses every depth frame into the TSDF (4 cm, as live), skipping what a later tap cleared; points are the depth
     /// samples in 2 cm cells (averaged) seen at least twice, like the live scan.
-    static func surface(frames: [FrameRecord], depth depthFrames: [DepthFrame], clears: [[String: Any]],
+    static func surface(frames: [FrameRecord], depth depthFrames: DepthFrames, clears: [[String: Any]],
                         mesh wantMesh: Bool = true, points wantPoints: Bool = true,
                         progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> (ScanMesh, [SIMD3<Float>]) {
         let tsdf = Tsdf(capacity: wantMesh ? 700_000 : 16, voxel: 0.04, truncation: 0.08, carve: 1.5)
@@ -258,28 +277,51 @@ enum RecordingProcessor {
 
     // MARK: Reading
 
+    /// depth.bin's frames, decoded one at a time when used (rk 9 Nov: an 8.7-minute scan's depth decoded all at once
+    /// was ~770 MB, and iOS stopped the rebuild). Only the compressed file and an index stay in memory.
+    struct DepthFrames: RandomAccessCollection, @unchecked Sendable {
+        let data: Data
+        let times: [Double]
+        let ranges: [Range<Int>]
+        var startIndex: Int { 0 }
+        var endIndex: Int { times.count }
+
+        subscript(i: Int) -> DepthFrame {
+            let packed = data.subdata(in: ranges[i])
+            let raw = (try? (packed as NSData).decompressed(using: .lzfse) as Data) ?? packed
+            guard raw.count >= 4 else { return (times[i], 0, 0, [], []) }
+            let w = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt16.self) })
+            let h = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 2, as: UInt16.self) })
+            guard raw.count >= 4 + w * h * 2 else { return (times[i], 0, 0, [], []) }
+            let mm = raw.subdata(in: 4..<(4 + w * h * 2)).withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
+            let conf = raw.count >= 4 + w * h * 3 ? [UInt8](raw.subdata(in: (4 + w * h * 2)..<(4 + w * h * 3))) : []
+            return (times[i], w, h, mm, conf)
+        }
+
+        /// The frame nearest in time to `t` (index), if one is within `within` seconds.
+        func nearest(_ t: Double, within: Double = 0.15) -> Int? {
+            guard !times.isEmpty else { return nil }
+            var lo = 0, hi = times.count - 1
+            while lo < hi { let mid = (lo + hi) / 2; if times[mid] < t { lo = mid + 1 } else { hi = mid } }
+            let best = lo > 0 && abs(times[lo - 1] - t) < abs(times[lo] - t) ? lo - 1 : lo
+            return abs(times[best] - t) <= within ? best : nil
+        }
+    }
+
     /// depth.bin: per frame time f64, length u32, then LZFSE (width u16, height u16, mm u16[], confidence u8[]).
-    static func readDepth(_ url: URL) throws -> [DepthFrame] {
-        let depthData = try Data(contentsOf: url)
-        var out: [DepthFrame] = []
+    static func readDepth(_ url: URL) throws -> DepthFrames {
+        let depthData = try Data(contentsOf: url, options: .mappedIfSafe)
+        var times: [Double] = [], ranges: [Range<Int>] = []
         var at = 0
         while at + 12 <= depthData.count {
             let time = depthData.subdata(in: at..<(at + 8)).withUnsafeBytes { $0.loadUnaligned(as: Double.self) }
             let len = Int(depthData.subdata(in: (at + 8)..<(at + 12)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })
             at += 12
             guard at + len <= depthData.count else { break }
-            let packed = depthData.subdata(in: at..<(at + len))
+            times.append(time); ranges.append(at..<(at + len))
             at += len
-            let raw = (try? (packed as NSData).decompressed(using: .lzfse) as Data) ?? packed
-            guard raw.count >= 4 else { continue }
-            let w = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt16.self) })
-            let h = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 2, as: UInt16.self) })
-            guard raw.count >= 4 + w * h * 2 else { continue }
-            let mm = raw.subdata(in: 4..<(4 + w * h * 2)).withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
-            let conf = raw.count >= 4 + w * h * 3 ? [UInt8](raw.subdata(in: (4 + w * h * 2)..<(4 + w * h * 3))) : []
-            out.append((time, w, h, mm, conf))
         }
-        return out
+        return DepthFrames(data: depthData, times: times, ranges: ranges)
     }
 
     /// The photos a stage wrote (keyframes.json + photos/), for colouring the points.
@@ -336,7 +378,7 @@ enum RecordingProcessor {
     }
 
     /// Photos from the video where the phone had moved 20 cm or turned 15° since the last one.
-    static func keyframes(_ url: URL, frames: [FrameRecord], depth: [DepthFrame],
+    static func keyframes(_ url: URL, frames: [FrameRecord], depth: DepthFrames,
                           progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> [Keyframe] {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else { return [] }
@@ -369,7 +411,8 @@ enum RecordingProcessor {
             var kf = Keyframe(timestamp: t, cameraToWorld: f.pose, fx: f.k[0][0] * scale, fy: f.k[1][1] * scale,
                               cx: f.k[2][0] * scale, cy: f.k[2][1] * scale, width: 1024, height: Int(Float(f.height) * scale), jpeg: jpeg, exposure: nil)
             // Its depth at half size (128 × 96), as live photos keep it.
-            if let d = depth.min(by: { abs($0.time - t) < abs($1.time - t) }), abs(d.time - t) < 0.15 {
+            if let i = depth.nearest(t) {
+                let d = depth[i]
                 let dw = d.w / 2, dh = d.h / 2
                 var small = [UInt16](repeating: 0, count: dw * dh)
                 for y in 0..<dh { for x in 0..<dw { small[y * dw + x] = d.mm[(y * 2) * d.w + x * 2] } }
