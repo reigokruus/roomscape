@@ -708,6 +708,13 @@ public class MainActivity extends Activity {
             viewerShared.setVisibility(cd != null && SyncInfo.file(cd).exists() && SyncInfo.load(this, cd).shared ? View.VISIBLE : View.GONE);
             String size = renderer.roomSizeText();
             sizeValue.setText(size != null ? size : "—");
+            updateFacts();
+            // The 3D view ends where the panel starts, so the model is framed in the part you can see (like the iPhone).
+            viewerPanel.post(() -> {
+                FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
+                int want = viewer && walkState == 0 ? viewerPanel.getHeight() : 0;
+                if (gp.bottomMargin != want) { gp.bottomMargin = want; glView.setLayoutParams(gp); }
+            });
             updateStyleSwitch();
             // The tool buttons sit just above Continue scan in the viewer.
             viewerPanel.post(() -> {
@@ -827,7 +834,12 @@ public class MainActivity extends Activity {
         sizeValue.setTextColor(Ios.SECONDARY);
         sizeValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         sizeRow.addView(sizeValue);
-        viewerBottom.addView(Ios.card(this, nameRow, sizeRow));
+        roomCard = (LinearLayout) Ios.card(this, nameRow, sizeRow);
+        viewerBottom.addView(roomCard);
+        viewerBottom.addView(Ios.header(this, "Capture"));
+        captureCard = new LinearLayout(this);
+        captureCard.setOrientation(LinearLayout.VERTICAL);
+        viewerBottom.addView(captureCard);
         // Below the 3D view, like the iPhone's list: an opaque panel that scrolls, at most ~45% of the screen.
         viewerBottom.setBackgroundColor(Ios.BACKGROUND);
         viewerPanel = new android.widget.ScrollView(this) {
@@ -853,7 +865,30 @@ public class MainActivity extends Activity {
 
     // ---------------- Enter the room (first person), as on the iPhone ----------------
 
-    private LinearLayout nameRow, sizeRow;
+    private LinearLayout nameRow, sizeRow, roomCard, captureCard;
+
+    /** The ROOM and CAPTURE rows under Name and size (walls, outlets, objects; points, photos), like the iPhone. */
+    private void updateFacts() {
+        while (roomCard.getChildCount() > 3) roomCard.removeViewAt(3); // Name, separator, size stay
+        java.util.List<View> capture = new java.util.ArrayList<>();
+        for (String[] f : renderer.roomFacts()) {
+            LinearLayout row = (LinearLayout) Ios.row(this, 0, f[1], false, false, null);
+            ((TextView) row.getChildAt(0)).setTextColor(Color.WHITE);
+            TextView v = new TextView(this);
+            v.setText(f[2]); v.setTextColor(Ios.SECONDARY); v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+            row.addView(v);
+            if (f[0].equals("Room")) {
+                View sep = new View(this);
+                sep.setBackgroundColor(Ios.SEPARATOR);
+                LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1);
+                sl.leftMargin = dp(16);
+                roomCard.addView(sep, sl);
+                roomCard.addView(row);
+            } else capture.add(row);
+        }
+        captureCard.removeAllViews();
+        if (!capture.isEmpty()) captureCard.addView(Ios.card(this, capture.toArray(new View[0])));
+    }
     private TextView nameValue, sizeValue, walkHint, heightLabel;
     private View walkControls;
     /** 0 = orbiting, 1 = picking where to stand, 2 = standing in the room. */
@@ -952,6 +987,12 @@ public class MainActivity extends Activity {
         walkControls.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
         heightLabel.setText(String.format(java.util.Locale.US, "%.2f m", renderer.eyeH));
         if (state == 2) toast("Drag to look · pinch to zoom · double-tap the floor to walk there");
+        // Standing in the room uses the whole screen; otherwise the 3D view ends above the panel.
+        viewerPanel.post(() -> {
+            FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
+            int want = state == 0 ? viewerPanel.getHeight() : 0;
+            if (gp.bottomMargin != want) { gp.bottomMargin = want; glView.setLayoutParams(gp); }
+        });
     }
 
     /** Touches while picking a spot or standing in the room. True when handled. */

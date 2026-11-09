@@ -4674,6 +4674,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } catch (Throwable e) { logError("photo thumbnail", new RuntimeException(e)); } }, "photo-thumb").start();
     }
 
+    /** The scan's summary rows for the viewer, like the iPhone's: {section, label, value}. */
+    java.util.List<String[]> roomFacts() {
+        java.util.List<String[]> f = new java.util.ArrayList<>();
+        if (roomReady && room.hasLayout && !room.layout.isEmpty()) f.add(new String[]{"Room", "Walls", String.valueOf(room.layout.size())});
+        int outletCount; synchronized (outlets) { outletCount = outlets.list.size(); }
+        if (outletCount > 0) f.add(new String[]{"Room", "Power outlets", String.valueOf(outletCount)});
+        if (!objects.list.isEmpty()) f.add(new String[]{"Room", "Objects", String.valueOf(objects.list.size())});
+        f.add(new String[]{"Capture", "Points", String.format(java.util.Locale.US, "%,d", count)});
+        f.add(new String[]{"Capture", "Photos", String.valueOf(photos.keyframes.size())});
+        return f;
+    }
+
     /** "8.2 × 5.3 m, 2.9 m high" from the scan's extent, or null before it's loaded. */
     String roomSizeText() {
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
