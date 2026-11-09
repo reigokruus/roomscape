@@ -3989,7 +3989,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     Coordinates2d.TEXTURE_NORMALIZED, quadUv);
         }
         frameNo++;
-        if (frame.getTimestamp() != 0) drawBackground();
+        // Wide overview: the camera picture becomes a window in the scene (drawn later), over a dark backdrop.
+        if (frame.getTimestamp() != 0) {
+            if (overviewBlend > 0.001f && !viewing) {
+                GLES20.glClearColor(0.05f, 0.05f, 0.06f, 1f);
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
+                if (overviewBlend < 0.999f) { drawBackground(); drawDim(overviewBlend); } // fading in: the picture dims away
+            } else drawBackground();
+        }
 
         TrackingState ts = camera.getTrackingState();
         sensors.active = !viewing;
@@ -4054,6 +4061,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             camera.getProjectionMatrix(proj, 0, 0.05f, 100f);
             camera.getViewMatrix(view, 0);
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
+            System.arraycopy(mvp, 0, realMvp, 0, 16);
+            if (OVERVIEW) overviewCamera(ts == TrackingState.TRACKING, nowMs);
             if (!LIVE_MESH) uploadNew(); // the points aren't drawn while scanning with the mesh: upload them for the viewer only
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
@@ -4067,6 +4076,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             cutouts.draw(mvp);
             drawMarks(mvp, true);
             drawRescanTarget(mvp, camera);
+            if (overviewBlend > 0.001f) drawOverviewWindow();
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             drawGuide(mvp);
             if (SHOW_OBJECTS) drawObjectHint(mvp);
@@ -4843,6 +4853,140 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         col.position(0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         uploaded = count;
+    }
+
+    // ---- Wide overview while scanning (as on the iPhone, ScanOverview.swift) ----
+    /** Turn the overview off here: the scan screen is then the camera view as before. */
+    static final boolean OVERVIEW = true;
+    /** Virtual camera: metres behind and above the phone, vertical field of view; the camera window's distance and opacity. */
+    static final float OV_PULL = 0.9f, OV_LIFT = 0.2f, OV_FOV = 100f, OV_WINDOW = 1.2f, OV_OPACITY = 0.7f;
+    /** Live mesh corners needed before easing in, and how long the easing takes. */
+    static final int OV_MIN_VERTS = 4500; static final long OV_EASE_MS = 1500;
+    private float overviewBlend, ovPull;
+    private long ovEaseStart = -1;
+    private float[] ovPos, ovBack, ovUp;
+    private final float[] realMvp = new float[16], ovFrom = new float[3];
+    private float ovFree = 99f; private int ovCheck;
+    private int ovProg, ovLineProg;
+
+    /** Each scan frame: eases in once there's mesh, then replaces mvp with the pulled-back camera's. */
+    private void overviewCamera(boolean tracking, long nowMs) {
+        if (viewing) { overviewBlend = 0; ovEaseStart = -1; ovPos = null; return; }
+        if (ovEaseStart < 0 && tracking && liveMeshTriVerts >= OV_MIN_VERTS) ovEaseStart = nowMs;
+        if (ovEaseStart < 0) return;
+        float t = Math.min(1f, (nowMs - ovEaseStart) / (float) OV_EASE_MS);
+        overviewBlend = t * t * (3 - 2 * t);
+        float[] inv = new float[16];
+        Matrix.invertM(inv, 0, view, 0); // display-oriented camera to world: x right, y up, +z behind
+        float[] p = {inv[12], inv[13], inv[14]}, b = norm(new float[]{inv[8], inv[9], inv[10]}), u = norm(new float[]{inv[4], inv[5], inv[6]});
+        // Don't pull back through scanned things behind you (checked a few times a second on a sample of the points).
+        if (++ovCheck % 8 == 0) ovFree = freeBehind(p, b);
+        float wanted = Math.max(0, Math.min(OV_PULL, ovFree - 0.25f));
+        ovPull += (wanted - ovPull) * 0.2f;
+        float[] target = {p[0] + b[0] * ovPull * overviewBlend, p[1] + b[1] * ovPull * overviewBlend + OV_LIFT * overviewBlend, p[2] + b[2] * ovPull * overviewBlend};
+        if (ovPos == null) { ovPos = target; ovBack = b; ovUp = u; }
+        else for (int i = 0; i < 3; i++) { ovPos[i] += (target[i] - ovPos[i]) * 0.35f; ovBack[i] += (b[i] - ovBack[i]) * 0.35f; ovUp[i] += (u[i] - ovUp[i]) * 0.35f; }
+        ovBack = norm(ovBack); ovUp = norm(ovUp);
+        float[] v = new float[16], pr = new float[16];
+        Matrix.setLookAtM(v, 0, ovPos[0], ovPos[1], ovPos[2], ovPos[0] - ovBack[0], ovPos[1] - ovBack[1], ovPos[2] - ovBack[2], ovUp[0], ovUp[1], ovUp[2]);
+        float realFov = (float) Math.toDegrees(2 * Math.atan(1 / proj[5]));
+        Matrix.perspectiveM(pr, 0, realFov + (OV_FOV - realFov) * overviewBlend, width / (float) Math.max(1, height), 0.05f, 100f);
+        Matrix.multiplyMM(mvp, 0, pr, 0, v, 0);
+        ovFrom[0] = p[0]; ovFrom[1] = p[1]; ovFrom[2] = p[2];
+    }
+
+    private static float[] norm(float[] a) { float l = (float) Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); return l < 1e-6f ? a : new float[]{a[0] / l, a[1] / l, a[2] / l}; }
+
+    /** How far behind the phone the space is free: the nearest scanned point within 20 cm of the backward ray. */
+    private float freeBehind(float[] p, float[] b) {
+        int n = count, step = Math.max(1, n / 20000);
+        float best = 99f;
+        for (int i = 0; i < n; i += step) {
+            float dx = pos.get(i * 3) - p[0], dy = pos.get(i * 3 + 1) - p[1], dz = pos.get(i * 3 + 2) - p[2];
+            float t = dx * b[0] + dy * b[1] + dz * b[2];
+            if (t <= 0 || t > OV_PULL + 0.4f) continue;
+            float ox = dx - b[0] * t, oy = dy - b[1] * t, oz = dz - b[2] * t;
+            if (ox * ox + oy * oy + oz * oz < 0.04f && t < best) best = t;
+        }
+        return best;
+    }
+
+    /** The live camera picture as a window on the real camera's view, OV_WINDOW ahead, see-through, with a thin frame. */
+    private void drawOverviewWindow() {
+        if (ovProg == 0) {
+            ovProg = program("attribute vec4 aPos; attribute vec2 aUv; varying vec2 vUv; void main(){ gl_Position = aPos; vUv = aUv; }",
+                    "#extension GL_OES_EGL_image_external : require\n" +
+                    "precision mediump float; varying vec2 vUv; uniform samplerExternalOES uTex; uniform float uA;" +
+                    "void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb, uA); }");
+            ovLineProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
+                    "precision mediump float; uniform float uA; void main(){ gl_FragColor = vec4(1.0, 1.0, 1.0, 0.9 * uA); }");
+        }
+        float[] inv = new float[16];
+        Matrix.invertM(inv, 0, realMvp, 0);
+        float[] fwd = new float[16]; Matrix.invertM(fwd, 0, view, 0);
+        float fx = -fwd[8], fy = -fwd[9], fz = -fwd[10];
+        float[] clip = new float[16];
+        for (int k = 0; k < 4; k++) {
+            float[] far = new float[4];
+            Matrix.multiplyMV(far, 0, inv, 0, new float[]{quad.get(k * 2), quad.get(k * 2 + 1), 1, 1}, 0);
+            float[] d = norm(new float[]{far[0] / far[3] - ovFrom[0], far[1] / far[3] - ovFrom[1], far[2] / far[3] - ovFrom[2]});
+            float s = OV_WINDOW / Math.max(0.2f, d[0] * fx + d[1] * fy + d[2] * fz);
+            float[] w = {ovFrom[0] + d[0] * s, ovFrom[1] + d[1] * s, ovFrom[2] + d[2] * s, 1};
+            Matrix.multiplyMV(clip, k * 4, mvp, 0, w, 0);
+        }
+        FloatBuffer cb = fb(clip);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        GLES20.glDepthFunc(GLES20.GL_LESS); // behind what's nearer than it, over the rest
+        GLES20.glUseProgram(ovProg);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, bgTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(ovProg, "uTex"), 0);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ovProg, "uA"), OV_OPACITY * overviewBlend);
+        int aPos = GLES20.glGetAttribLocation(ovProg, "aPos"), aUv = GLES20.glGetAttribLocation(ovProg, "aUv");
+        quadUv.position(0);
+        GLES20.glVertexAttribPointer(aPos, 4, GLES20.GL_FLOAT, false, 0, cb);
+        GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 0, quadUv);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(aUv);
+        // The frame: corners 0 1 3 2 (the strip's order), drawn over everything.
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        float[] o = new float[20]; int[] ord = {0, 1, 3, 2, 0};
+        for (int i = 0; i < 5; i++) System.arraycopy(clip, ord[i] * 4, o, i * 4, 4);
+        GLES20.glUseProgram(ovLineProg);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ovLineProg, "uA"), overviewBlend);
+        int lp = GLES20.glGetAttribLocation(ovLineProg, "aPos");
+        GLES20.glVertexAttribPointer(lp, 4, GLES20.GL_FLOAT, false, 0, fb(o));
+        GLES20.glEnableVertexAttribArray(lp);
+        GLES20.glLineWidth(2f);
+        GLES20.glDrawArrays(GLES20.GL_LINE_STRIP, 0, 5);
+        GLES20.glDisableVertexAttribArray(lp);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDepthFunc(GLES20.GL_LESS);
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    private int ovDimProg;
+
+    /** A dark full-screen veil, `a` opaque. */
+    private void drawDim(float a) {
+        if (ovDimProg == 0) ovDimProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
+                "precision mediump float; uniform float uA; void main(){ gl_FragColor = vec4(0.05, 0.05, 0.06, uA); }");
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUseProgram(ovDimProg);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ovDimProg, "uA"), a);
+        int aPos = GLES20.glGetAttribLocation(ovDimProg, "aPos");
+        quad.position(0);
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisable(GLES20.GL_BLEND);
     }
 
     private void drawBackground() {
