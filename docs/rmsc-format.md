@@ -9,7 +9,7 @@ Apple UTI: `com.roomscape.rmsc`, conforming to `public.zip-archive` and `public.
 
 - **Units:** metres.
 - **Axes:** right-handed, **+Y up** (against gravity). X and Z are whatever the scanning session used; there is no compass north.
-- **Floor:** `manifest.floorY` gives the floor height. Exporters should shift everything so the floor is at y = 0, then write `floorY: 0`.
+- **Floor:** `manifest.floorY` gives the floor height. Exporters should shift everything so the floor is at y = 0, then write `floorY: 0` (both RoomScape apps do). Readers must also accept other values (older Android packages wrote the unshifted floor height). A platform that shifted its own data records the amount in its extras (`ios/shift.json`, `android/shift.json`: `{"floorY": <metres moved>}`), so it can move its extras back into place when it reads the package again.
 - **Camera poses:** 4×4 **camera-to-world** matrices, **column-major** (16 numbers, OpenGL order). The camera frame is OpenGL style: +X is image right, +Y is image up, and the camera looks along −Z. This is what ARKit `camera.transform` and ARCore `Camera.getPose()` give for the sensor image.
 - **Intrinsics** (`fx fy cx cy`) are in pixels of the image **exactly as stored** in the package. A stored JPEG is never rotated after the pose is taken; if an app rotates a photo, it rotates the pose and intrinsics to match.
 
@@ -37,7 +37,7 @@ A reader must ignore files it doesn't know. A writer may leave out every optiona
   "name": "Living room",
   "created": "2026-11-09T09:21:58+02:00",
   "modified": "2026-11-09T10:15:02+02:00",
-  "source": { "platform": "ios", "app": "RoomScape", "appVersion": "0.4.2", "device": "iPhone16,1" },
+  "source": { "platform": "ios", "app": "RoomScape", "appVersion": "0.4.2", "appBuild": "229", "device": "iPhone16,1" },
   "floorY": 0.0,
   "ceilingY": 2.9,
   "bounds": { "min": [-4.1, 0.0, -2.6], "max": [4.1, 2.9, 2.7] },
@@ -53,6 +53,8 @@ A reader must ignore files it doesn't know. A writer may leave out every optiona
   ]
 }
 ```
+
+`room.walls` has one entry per side of the room (when the floor outline in `corners` has more sides than walls were found, each side of the outline is written as a wall, as tall as the room). `appVersion` is the version without a build number; `appBuild` is the build. An unnamed scan is called "Room <d MMM yyyy, HH:mm>", for example "Room 9 Nov 2026, 14:20", on both platforms.
 
 Only `format`, `version` and `name` are required; everything else is optional. `objects` is the simple shared form: a box per object, with yaw in radians around +Y. Richer per-platform object data goes in `ios/` or `android/`.
 
@@ -74,7 +76,7 @@ Only `format`, `version` and `name` are required; everything else is optional. `
 }
 ```
 
-`time` is seconds since the scan started (optional). `depth` is optional. The depth image uses the same camera frame and pose as the photo, with its own intrinsics for its own size.
+`time` is seconds since the scan started, that is since the first photo (optional; not the phone's uptime). `depth` is optional. The depth image uses the same camera frame and pose as the photo, with its own intrinsics for its own size.
 
 ## What each app does on import
 

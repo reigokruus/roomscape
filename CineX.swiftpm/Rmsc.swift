@@ -28,6 +28,22 @@ enum Rmsc {
 
     // MARK: Export
 
+    /// The manifest's walls, [x1, z1, x2, z2, height] each. RoomPlan sometimes finds fewer walls than its floor outline
+    /// has sides (one wall for a four-cornered floor): then every side of the outline is a wall, as tall as the room.
+    static func manifestWalls(_ shell: RoomShell) -> [[Float]] {
+        let walls = shell.walls.map { w -> [Float] in
+            let a = w.center - w.right * w.halfWidth, b = w.center + w.right * w.halfWidth
+            return [a.x, a.z, b.x, b.z, w.halfHeight * 2]
+        }
+        let outline = shell.floorOutline
+        guard outline.count >= 3, walls.count < outline.count else { return walls }
+        let height = shell.ceilingY.map { $0 - shell.floorY } ?? walls.map { $0[4] }.max() ?? 2.5
+        return outline.indices.map { i in
+            let a = outline[i], b = outline[(i + 1) % outline.count]
+            return [a.x, a.z, b.x, b.z, height]
+        }
+    }
+
     /// Writes the scan as "<name>.rmsc" in the temporary folder. Slow (reads every photo): call off the main thread.
     static func export(_ scan: SavedScan) throws -> URL {
         let folder = scan.captureURL
@@ -62,6 +78,8 @@ enum Rmsc {
         var photos: [[String: Any]] = []
         if let data = try? Data(contentsOf: folder.appendingPathComponent("keyframes.json")),
            let records = try? JSONDecoder().decode([KeyframeRecord].self, from: data) {
+            // "time": seconds since the scan started (the first photo), not the phone's uptime.
+            let start = records.map(\.timestamp).min() ?? 0
             for (i, r) in records.enumerated() where r.cameraToWorld.count == 16 {
                 guard let jpeg = try? Data(contentsOf: folder.appendingPathComponent(r.file)) else { continue }
                 let file = String(format: "photos/%03d.jpg", i)
@@ -69,7 +87,7 @@ enum Rmsc {
                 var pose = r.cameraToWorld
                 pose[13] -= floorY
                 var photo: [String: Any] = ["file": file, "width": r.width, "height": r.height,
-                                            "fx": r.fx, "fy": r.fy, "cx": r.cx, "cy": r.cy, "pose": pose, "time": r.timestamp]
+                                            "fx": r.fx, "fy": r.fy, "cx": r.cx, "cy": r.cy, "pose": pose, "time": max(0, r.timestamp - start)]
                 if let df = r.depthFile, let dw = r.depthWidth, let dh = r.depthHeight,
                    let depth = try? Data(contentsOf: folder.appendingPathComponent(df)) {
                     let dfile = String(format: "depth/%03d.bin", i)
@@ -127,6 +145,7 @@ enum Rmsc {
             "modified": iso.string(from: Date()),
             "source": ["platform": "ios", "app": "RoomScape",
                        "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+                       "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
                        "device": deviceModel()],
             "floorY": 0,
             "counts": ["points": meta.pointCount, "photos": photos.count, "triangles": triangles],
@@ -136,10 +155,7 @@ enum Rmsc {
             if let ceiling = shell.ceilingY { manifest["ceilingY"] = ceiling - floorY }
             manifest["room"] = [
                 "corners": shell.floorOutline.map { [$0.x, $0.y - floorY, $0.z] },
-                "walls": shell.walls.map { w -> [Float] in
-                    let a = w.center - w.right * w.halfWidth, b = w.center + w.right * w.halfWidth
-                    return [a.x, a.z, b.x, b.z, w.halfHeight * 2]
-                },
+                "walls": Self.manifestWalls(shell),
                 // RoomPlan's counts, so other apps show the same numbers.
                 "windows": room?.windows.count ?? 0,
                 "doors": room?.doors.count ?? 0,

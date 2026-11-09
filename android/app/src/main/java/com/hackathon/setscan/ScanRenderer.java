@@ -273,6 +273,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             int tris;
             synchronized (tsdf) { tris = tsdf.extractMesh(); }
             log("photo room surface from " + total + " depth photos: " + tris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
+            final File saveTo = currentDir;
+            if (tris > 0 && saveTo != null) glTasks.add(() -> { if (gen == surfGen) new Thread(() -> writeSurface(saveTo)).start(); });
             activity.updateProcess(null, -1);
             if (tris > 0) glTasks.add(() -> { if (gen == surfGen) { meshTris = tris; meshPosAll = null; buildPhotos(); } });
         } catch (Throwable e) { activity.updateProcess(null, -1); logError("photo room surface", new RuntimeException(e)); } }, "fuse-depth").start();
@@ -286,6 +288,58 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     String viewModeLabel() { return viewMode == 0 ? "View: photo room" : "View: scan"; }
+    /**
+     * Background: keeps this app's surface mesh (surface.ply, indexed binary PLY) and room outline (outline.json:
+     * [x0, z0, x1, z1, height] per wall, floor at 0) in the scan folder, so a .rmsc export carries them like the
+     * iPhone's (see Rmsc.write). Skipped when the scan came with another phone's mesh.
+     */
+    void writeSurface(File dir) {
+        try {
+            if (new File(dir, "rmsc-extra/mesh.ply").exists()) return;
+            FloatBuffer p = meshPosAll != null ? meshPosAll : tsdf.meshPos;
+            ByteBuffer c = meshPosAll != null ? meshColAll : tsdf.meshCol;
+            int verts = meshPosAll != null ? meshVerts : tsdf.meshVerts;
+            if (p != null && c != null && verts >= 3) {
+                int tris = verts / 3;
+                java.util.HashMap<Long, Integer> at = new java.util.HashMap<>();
+                float[] vp = new float[verts * 3]; byte[] vc = new byte[verts * 3]; int[] faces = new int[tris * 3]; int nv = 0;
+                for (int i = 0; i < tris * 3; i++) {
+                    float x = p.get(i * 3), y = p.get(i * 3 + 1), z = p.get(i * 3 + 2);
+                    long key = (Math.round(x * 1e4) & 0x1FFFFFL) | ((Math.round(y * 1e4) & 0x1FFFFFL) << 21) | ((Math.round(z * 1e4) & 0x1FFFFFL) << 42);
+                    Integer k = at.get(key);
+                    if (k == null) {
+                        k = nv++; at.put(key, k);
+                        vp[k * 3] = x; vp[k * 3 + 1] = y; vp[k * 3 + 2] = z;
+                        vc[k * 3] = c.get(i * 4); vc[k * 3 + 1] = c.get(i * 4 + 1); vc[k * 3 + 2] = c.get(i * 4 + 2);
+                    }
+                    faces[i] = k;
+                }
+                File tmp = new File(dir, "surface.ply.tmp");
+                try (java.io.BufferedOutputStream o = new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmp), 1 << 16)) {
+                    o.write(("ply\nformat binary_little_endian 1.0\ncomment RoomScape Android surface\nelement vertex " + nv
+                            + "\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue"
+                            + "\nelement face " + tris + "\nproperty list uchar int vertex_indices\nend_header\n").getBytes("US-ASCII"));
+                    ByteBuffer b = ByteBuffer.allocate(15).order(ByteOrder.LITTLE_ENDIAN);
+                    for (int i = 0; i < nv; i++) {
+                        b.clear(); b.putFloat(vp[i * 3]).putFloat(vp[i * 3 + 1]).putFloat(vp[i * 3 + 2]).put(vc[i * 3]).put(vc[i * 3 + 1]).put(vc[i * 3 + 2]);
+                        o.write(b.array(), 0, 15);
+                    }
+                    ByteBuffer f = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN);
+                    for (int t = 0; t < tris; t++) { f.clear(); f.put((byte) 3).putInt(faces[t * 3]).putInt(faces[t * 3 + 1]).putInt(faces[t * 3 + 2]); o.write(f.array(), 0, 13); }
+                }
+                if (!tmp.renameTo(new File(dir, "surface.ply"))) tmp.delete();
+                log("surface.ply: " + nv + " vertices, " + tris + " triangles");
+            }
+            RoomModel r = room;
+            if (roomReady && r != null && r.hasLayout && r.layout != null && r.layout.size() >= 3) {
+                org.json.JSONArray w = new org.json.JSONArray();
+                float h = r.ceilingY - r.floorY;
+                for (RoomModel.Wall x : r.layout) { w.put((double) x.x0); w.put((double) x.z0); w.put((double) x.x1); w.put((double) x.z1); w.put((double) h); }
+                try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "outline.json"))) { o.write(w.toString().getBytes("UTF-8")); }
+            }
+        } catch (Throwable e) { logError("surface save", new RuntimeException(e)); }
+    }
+
     /** Photo texturing (background): the simple photo room (walls + floor) or the full scan surface. */
     private void buildPhotos() {
         final RoomModel roomNow = room; final boolean ready = roomReady;
@@ -1800,8 +1854,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void autosave() {
         if (saving) { glTasks.add(() -> { if (!saving) autosave(); }); return; }
         saving = true;
-        String name = currentName != null ? currentName : "Room " + android.text.format.DateFormat.format("d MMM HH:mm", System.currentTimeMillis());
-        requestSave(name, currentDir, (out, err) -> { saving = false; activity.autoSaved(out != null ? name : null, err); });
+        String name = currentName != null ? currentName : "Room " + android.text.format.DateFormat.format("d MMM yyyy, HH:mm", System.currentTimeMillis()); // as on the iPhone
+        requestSave(name, currentDir, (out, err) -> {
+            saving = false;
+            activity.autoSaved(out != null ? name : null, err);
+            if (out != null && viewing) writeSurface(out);
+        });
     }
 
     private void autoFailed(String what) {

@@ -64,17 +64,20 @@ final class Rmsc {
             raw = new FileOutputStream(out);
         }
         try (ZipOutputStream z = new ZipOutputStream(new BufferedOutputStream(raw, 1 << 16))) {
-            String ver = "?";
-            try { ver = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0).versionName; } catch (Exception ignored) { }
-            write(z, d, dir, ver);
+            String[] v = appVersion(ctx);
+            write(z, d, dir, v[0], Integer.parseInt(v[1]));
         }
         return uri;
     }
 
-    static void write(ZipOutputStream z, ScanStore.Data d, File dir, String appVersion) throws Exception {
-        float floorY = floorY(d);
+    /**
+     * Everything shared is written with the floor at y = 0, like the iPhone's packages (floorY 0). How far it was moved
+     * goes in android/shift.json, so this app can put its own android/ extras (marks, splats, path) back in place on import.
+     */
+    static void write(ZipOutputStream z, ScanStore.Data d, File dir, String appVersion, int appBuild) throws Exception {
+        final float floorY = floorY(d);
         float[] mn = {Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE}, mx = {-Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE};
-        for (int i = 0; i < d.n; i++) for (int a = 0; a < 3; a++) { float v = d.pos[i * 3 + a]; if (v < mn[a]) mn[a] = v; if (v > mx[a]) mx[a] = v; }
+        for (int i = 0; i < d.n; i++) for (int a = 0; a < 3; a++) { float v = d.pos[i * 3 + a] - (a == 1 ? floorY : 0); if (v < mn[a]) mn[a] = v; if (v > mx[a]) mx[a] = v; }
 
         // points.ply
         ByteArrayOutputStream hdr = new ByteArrayOutputStream();
@@ -84,7 +87,7 @@ final class Rmsc {
         z.write(hdr.toByteArray());
         ByteBuffer bb = ByteBuffer.allocate(15 * 4096).order(ByteOrder.LITTLE_ENDIAN);
         for (int i = 0; i < d.n; i++) {
-            bb.putFloat(d.pos[i * 3]).putFloat(d.pos[i * 3 + 1]).putFloat(d.pos[i * 3 + 2]);
+            bb.putFloat(d.pos[i * 3]).putFloat(d.pos[i * 3 + 1] - floorY).putFloat(d.pos[i * 3 + 2]);
             bb.put(d.col[i * 3]).put(d.col[i * 3 + 1]).put(d.col[i * 3 + 2]);
             if (!bb.hasRemaining()) { z.write(bb.array(), 0, bb.position()); bb.clear(); }
         }
@@ -104,7 +107,8 @@ final class Rmsc {
             JSONObject p = new JSONObject();
             p.put("file", name); p.put("width", iw); p.put("height", ih);
             p.put("fx", k.fx * sx); p.put("fy", k.fy * sy); p.put("cx", k.cx * sx); p.put("cy", k.cy * sy);
-            p.put("pose", vec(k.pose));
+            float[] pose = k.pose.clone(); pose[13] -= floorY;
+            p.put("pose", vec(pose));
             if (k.closeUp) p.put("closeUp", true);
             if (k.depth != null && k.dw * k.dh > 0 && k.dfx > 0) {
                 String dn = String.format(Locale.US, "depth/%03d.bin", i);
@@ -131,15 +135,35 @@ final class Rmsc {
         SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US);
         m.put("created", iso.format(new Date(d.created > 0 ? d.created : System.currentTimeMillis())));
         m.put("modified", iso.format(new Date(new File(dir, "meta.json").lastModified())));
-        m.put("source", new JSONObject().put("platform", "android").put("app", "RoomScape")
-                .put("appVersion", appVersion).put("device", Build.MODEL));
-        m.put("floorY", floorY);
-        if (d.ceiling != null && d.ceiling.length >= 2) m.put("ceilingY", d.ceiling[1]);
+        JSONObject src = new JSONObject().put("platform", "android").put("app", "RoomScape").put("appVersion", appVersion);
+        if (appBuild > 0) src.put("appBuild", String.valueOf(appBuild));
+        m.put("source", src.put("device", Build.MODEL));
+        m.put("floorY", 0);
+        put(z, "android/shift.json", new JSONObject().put("floorY", floorY).toString().getBytes("UTF-8"));
+        float[] outline = null; // walls from the app's room model: [x0, z0, x1, z1, height] each, floor at 0
+        try { File of = new File(dir, "outline.json"); if (of.exists() && of.lastModified() >= new File(dir, "points.bin").lastModified()) outline = vecf(new JSONArray(text(of))); } catch (Exception ignored) { }
+        if (d.ceiling != null && d.ceiling.length >= 2) m.put("ceilingY", d.ceiling[1] - floorY);
+        else if (outline != null && outline.length >= 5) m.put("ceilingY", outline[4]);
         if (d.n > 0) m.put("bounds", new JSONObject().put("min", vec(mn)).put("max", vec(mx)));
-        m.put("counts", new JSONObject().put("points", d.n).put("photos", d.kfs.size()));
+        // The surface mesh: the sending phone's when this scan came with one, else the one this app built for Photo.
+        File mesh = new File(dir, "rmsc-extra/mesh.ply");
+        File own = new File(dir, "surface.ply");
+        if (!mesh.exists() && own.exists() && own.lastModified() >= new File(dir, "points.bin").lastModified()) mesh = own;
+        int tris = mesh.exists() ? putPlyShifted(z, mesh, "mesh.ply", -floorY) : 0;
+        JSONObject counts = new JSONObject().put("points", d.n).put("photos", d.kfs.size());
+        if (tris > 0) counts.put("triangles", tris);
+        m.put("counts", counts);
         JSONObject room = new JSONObject();
-        JSONArray cs = new JSONArray(); for (float[] c : d.corners) cs.put(vec(c));
+        JSONArray cs = new JSONArray(), ws = new JSONArray();
+        for (float[] c : d.corners) cs.put(vec(new float[]{c[0], c[1] - floorY, c[2]}));
+        if (d.corners.isEmpty() && outline != null) {
+            for (int i = 0; i + 4 < outline.length; i += 5) {
+                cs.put(vec(new float[]{outline[i], 0, outline[i + 1]}));
+                ws.put(vec(new float[]{outline[i], outline[i + 1], outline[i + 2], outline[i + 3], outline[i + 4]}));
+            }
+        }
         room.put("corners", cs);
+        if (ws.length() > 0) room.put("walls", ws);
         if (d.lux > 0) room.put("lux", d.lux);
         m.put("room", room);
         JSONArray shared = sharedOutlets(d.outlets, floorY);
@@ -151,15 +175,55 @@ final class Rmsc {
         copyIf(z, new File(dir, "meta.json"), "android/meta.json");
         copyIf(z, new File(dir, "splats.bin"), "android/splats.bin");
         copyIf(z, new File(dir, "path.bin"), "android/path.bin");
-        // Parts of the package this app doesn't use (an iPhone's ios/ folder) go back out unchanged.
+        // Parts of the package this app doesn't use (an iPhone's ios/ folder) go back out unchanged (mesh.ply is above).
         putTree(z, new File(dir, "rmsc-extra"), "");
+    }
+
+    /** Copies a binary PLY mesh into the zip with every vertex moved up by dy; returns its triangle count. */
+    static int putPlyShifted(ZipOutputStream z, File f, String name, float dy) throws Exception {
+        byte[] all = bytes(f);
+        put(z, name, shiftPly(all, dy));
+        return plyFaces(all);
+    }
+
+    static int plyFaces(byte[] all) {
+        String head = new String(all, 0, Math.min(all.length, 4096), java.nio.charset.StandardCharsets.US_ASCII);
+        for (String line : head.split("\n")) {
+            if (line.startsWith("end_header")) break;
+            String[] w = line.trim().split(" ");
+            if (w.length == 3 && w[0].equals("element") && w[1].equals("face")) return Integer.parseInt(w[2]);
+        }
+        return 0;
+    }
+
+    /** The PLY with its vertices moved up by dy (float x y z, then uchar red green blue), or unchanged for any other layout. */
+    static byte[] shiftPly(byte[] all, float dy) {
+        if (dy == 0) return all;
+        String head = new String(all, 0, Math.min(all.length, 4096), java.nio.charset.StandardCharsets.US_ASCII);
+        int end = head.indexOf("end_header\n");
+        if (end < 0 || !head.contains("binary_little_endian")) return all;
+        int nv = 0; java.util.List<String> props = new java.util.ArrayList<>(); boolean inVertex = false;
+        for (String line : head.substring(0, end).split("\n")) {
+            String[] w = line.trim().split(" ");
+            if (w[0].equals("element")) { inVertex = w.length > 1 && w[1].equals("vertex"); if (inVertex) nv = Integer.parseInt(w[2]); }
+            else if (w[0].equals("property") && inVertex) props.add(w[1] + " " + w[w.length - 1]);
+        }
+        if (!props.equals(Arrays.asList("float x", "float y", "float z", "uchar red", "uchar green", "uchar blue"))) return all;
+        byte[] out = all.clone();
+        ByteBuffer b = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN);
+        int base = end + "end_header\n".length();
+        for (int i = 0; i < nv; i++) { int at = base + i * 15 + 4; if (at + 4 > out.length) break; b.putFloat(at, b.getFloat(at) + dy); }
+        return out;
     }
 
     private static void putTree(ZipOutputStream z, File f, String path) throws Exception {
         if (!f.exists()) return;
         if (f.isDirectory()) {
             File[] kids = f.listFiles();
-            if (kids != null) for (File k : kids) putTree(z, k, path.isEmpty() ? k.getName() : path + "/" + k.getName());
+            if (kids != null) for (File k : kids) {
+                if (path.isEmpty() && k.getName().equals("mesh.ply")) continue; // written (floor-shifted) by write()
+                putTree(z, k, path.isEmpty() ? k.getName() : path + "/" + k.getName());
+            }
         } else {
             put(z, path, bytes(f));
         }
@@ -170,11 +234,21 @@ final class Rmsc {
         ScanStore.Data d = ScanStore.load(dir);
         File out = new File(ctx.getCacheDir(), "sync_" + System.currentTimeMillis() + ".rmsc");
         try (ZipOutputStream z = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(out), 1 << 16))) {
-            String ver = "?";
-            try { ver = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0).versionName; } catch (Exception ignored) { }
-            write(z, d, dir, ver);
+            String[] v = appVersion(ctx);
+            write(z, d, dir, v[0], Integer.parseInt(v[1]));
         }
         return out;
+    }
+
+    /** {"0.1", build}: the version without the build number glued on (versionName is "0.1.<build>"), and the build. */
+    static String[] appVersion(Context ctx) {
+        try {
+            android.content.pm.PackageInfo p = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0);
+            String name = p.versionName == null ? "?" : p.versionName;
+            String build = String.valueOf(p.versionCode);
+            if (name.endsWith("." + build)) name = name.substring(0, name.length() - build.length() - 1);
+            return new String[]{name, build};
+        } catch (Exception e) { return new String[]{"?", "0"}; }
     }
 
     static final int NEW = 0, UPDATED = 1, UNCHANGED = 2, CONFLICT = 3;
@@ -377,6 +451,11 @@ final class Rmsc {
             if (d.name.isEmpty()) d.name = "Imported room";
             d.created = System.currentTimeMillis();
             readPly(new File(tmp, "points.ply"), d);
+            // A package from this app: put the floor back where the android/ extras (marks, splats, path) have it.
+            float unshift = 0;
+            File sh = new File(tmp, "android/shift.json");
+            if (sh.exists()) try { unshift = (float) new JSONObject(text(sh)).optDouble("floorY", 0); } catch (Exception ignored) { }
+            if (unshift != 0) for (int i = 0; i < d.n; i++) d.pos[i * 3 + 1] += unshift;
 
             File pj = new File(tmp, "photos.json");
             if (pj.exists()) {
@@ -390,6 +469,7 @@ final class Rmsc {
                     float[] pose = vecf(p.getJSONArray("pose"));
                     if (pose.length != 16) continue;
                     System.arraycopy(pose, 0, k.pose, 0, 16);
+                    k.pose[13] += unshift;
                     Matrix.invertM(k.view, 0, k.pose, 0);
                     k.w = (float) p.getDouble("width"); k.h = (float) p.getDouble("height");
                     k.fx = (float) p.getDouble("fx"); k.fy = (float) p.getDouble("fy");
@@ -454,7 +534,10 @@ final class Rmsc {
             // The sending phone's own mesh (an iPhone's live-scan mesh): shown in Photo instead of a rebuilt one, and
             // written back out on export. Its manifest too, for the room's size, walls, windows and doors.
             File mp = new File(tmp, "mesh.ply");
-            if (mp.exists()) ScanStore.copyTree(mp, new File(out, "rmsc-extra/mesh.ply"));
+            if (mp.exists()) {
+                new File(out, "rmsc-extra").mkdirs();
+                try (FileOutputStream o = new FileOutputStream(new File(out, "rmsc-extra/mesh.ply"))) { o.write(shiftPly(bytes(mp), unshift)); }
+            }
             ScanStore.copyTree(new File(tmp, "manifest.json"), new File(out, "source-manifest.json"));
             File sp = new File(tmp, "android/splats.bin");
             if (sp.exists()) copy(sp, new File(out, "splats.bin"));
