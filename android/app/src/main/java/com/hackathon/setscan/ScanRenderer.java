@@ -4980,7 +4980,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Turn the overview off here: the scan screen is then the camera view as before. */
     static final boolean OVERVIEW = true;
     /** Virtual camera: metres behind and above the phone, vertical field of view; the camera window's distance and opacity. */
-    static final float OV_PULL = 0.9f, OV_LIFT = 0.2f, OV_FOV = 100f, OV_WINDOW = 1.2f, OV_OPACITY = 0.7f;
+    // rk 9 Nov "the pullback is a bit too much": 0.6 m and 85° (were 0.9 m, 100°) show the camera's area ~1.5x bigger.
+    static final float OV_PULL = 0.6f, OV_LIFT = 0.2f, OV_FOV = 85f, OV_WINDOW = 1.2f, OV_OPACITY = 0.7f;
     /** Live mesh corners needed before easing in, and how long the easing takes. */
     static final int OV_MIN_VERTS = 4500; static final long OV_EASE_MS = 1500;
     private float overviewBlend, ovPull;

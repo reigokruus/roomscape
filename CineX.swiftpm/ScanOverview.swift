@@ -12,8 +12,9 @@ enum ScanOverview {
     static let enabled = true
 
     /// How far behind and above the phone the virtual camera sits, its vertical field of view, and where the camera
-    /// window is drawn in front of the phone (metres, degrees).
-    static let pullBack: Float = 0.9, lift: Float = 0.2, fovDegrees: Float = 100, windowDistance: Float = 1.2
+    /// window is drawn in front of the phone (metres, degrees). rk 9 Nov: "the pullback is a bit too much": 0.6 m and
+    /// 85° (were 0.9 m and 100°) show the camera's area about 1.5× bigger, (1.2 + 0.9)·tan 50° / ((1.2 + 0.6)·tan 42.5°).
+    static let pullBack: Float = 0.6, lift: Float = 0.2, fovDegrees: Float = 85, windowDistance: Float = 1.2
     /// Mesh triangles needed before easing into the overview, and how long the easing takes (seconds).
     static let minTriangles = 1500, easeSeconds: Double = 1.5
     /// How opaque the camera window is: the mesh behind it shows through (rk 9 Nov).
