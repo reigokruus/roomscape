@@ -164,7 +164,9 @@ final class LiveCloud: @unchecked Sendable {
     private static let firstSeen = UInt32(max(1, 255 / solidFrames))
 
     /// Adds one ARKit frame's LiDAR depth. Reads the frame's buffers and returns without keeping the frame.
-    func integrate(_ frame: ARFrame) {
+    /// When `tsdf` is given, every fourth depth pixel each way (about one ray per 4 cm voxel at room distance) is also
+    /// fused into it, for the live mesh.
+    func integrate(_ frame: ARFrame, tsdf: Tsdf? = nil) {
         let time = frame.timestamp
         guard case .normal = frame.camera.trackingState else {
             trackingNormalSince = nil
@@ -241,6 +243,9 @@ final class LiveCloud: @unchecked Sendable {
                 }
                 let pc = cam(u, v, d)
                 let world = pose * SIMD4<Float>(pc, 1)
+                if let tsdf, u & 3 == 1, v & 3 == 1 {
+                    tsdf.integrate(origin: position, point: SIMD3(world.x, world.y, world.z))
+                }
                 // Surface normal from the four neighbours, turned to face the camera, then into world space.
                 var nc = simd_cross(cam(u + 1, v, dr) - cam(u - 1, v, dl), cam(u, v - 1, du) - cam(u, v + 1, dd))
                 if simd_dot(nc, pc) > 0 { nc = -nc }

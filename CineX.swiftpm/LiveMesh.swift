@@ -1,20 +1,20 @@
 import ARKit
 import Metal
-import QuartzCore
 import os
 
-/// The LiDAR mesh ARKit reconstructs inside RoomPlan's session (its `ARMeshAnchor`s), kept as GPU buffers for the live
-/// overlay: white see-through triangles with white edges, areas seen for the first time in the last moments tinted
-/// orange.
+/// The live scan mesh, built by the app itself from LiDAR depth (RoomPlan keeps ARKit's own mesh to itself: its
+/// session has no `ARMeshAnchor`s). Depth samples are fused into a `Tsdf` on `LiveCapture`'s worker queue, inside
+/// `LiveCloud.integrate`; every `interval` the surface within a few metres of the phone is extracted into GPU buffers
+/// for the overlay: white see-through triangles with white edges, orange where the surface has been seen only a few
+/// times, turning white once it's solid (seen in about 5 depth frames).
 ///
-/// Anchors are only *read* from `arSession.currentFrame` (see `LiveCapture`). Buffers are rebuilt off the main thread
-/// and only when an anchor's geometry changed, at most every `interval`, so memory stays flat while scanning: each
-/// rebuild replaces the previous buffers, which are freed once the GPU is done with them.
+/// Memory stays flat: the TSDF is allocated once, and the GPU buffers rotate through three reused sets that only
+/// grow when the mesh outgrows them.
 final class LiveMesh: @unchecked Sendable {
-    /// One vertex on the GPU: world position and when that spot was first seen (seconds since `start`).
+    /// One vertex on the GPU: world position and how solid the surface is there, 0…1.
     struct Vertex {
         var x, y, z: Float
-        var seen: Float
+        var confidence: Float
     }
 
     /// What the renderer draws: one vertex buffer, triangle indices and edge indices into it.
@@ -26,174 +26,84 @@ final class LiveMesh: @unchecked Sendable {
         let edgeIndexCount: Int
     }
 
-    /// Seconds between rebuilds (about 5 Hz; slower when the phone is hot). Main thread only.
-    private var interval: TimeInterval = 0.2
-    /// Size of the cells that remember when a spot was first seen, metres.
-    private static let freshCell: Float = 0.05
+    /// 4 cm voxels, a ±8 cm band, free space erased up to 1.5 m in front of a surface. 700k voxels (~25 MB) hold about
+    /// 170 m² of surface, a large room; past that new areas stop being added.
+    let tsdf = Tsdf(capacity: 700_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
+    /// Surface counts as solid at this many samples on its least-seen corner (about 5 depth frames at room distance).
+    static let solidWeight: Float = 20
+    /// Only the surface this close to the phone is meshed, metres.
+    static let radius: Float = 3.5
 
     private let device: MTLDevice
-    private let queue = DispatchQueue(label: "CineX.live-mesh", qos: .utility)
     private let published = OSAllocatedUnfairLock<Buffers?>(initialState: nil)
-    private let startLock = OSAllocatedUnfairLock(initialState: CACurrentMediaTime())
 
     // Worker-queue state.
-    private struct Part {
-        var vertices: [Vertex]
-        var triangles: [UInt32]
-        var edges: [UInt32]
-    }
-    private var parts: [UUID: Part] = [:]
-    /// Each anchor's geometry as last built, by identity: ARKit gives an anchor a new geometry object when it changes.
-    private var built: [UUID: ObjectIdentifier] = [:]
-    private var firstSeen: [Int64: Float] = [:]
-    private var busy = false
-    private var lastSubmit: TimeInterval = 0
-    #if DEBUG
-    private var loggedFirst = false
-    #endif
+    private let scratch = Tsdf.MeshScratch()
+    private var sets: [(vertices: MTLBuffer?, triangles: MTLBuffer?, edges: MTLBuffer?)] = Array(repeating: (nil, nil, nil), count: 3)
+    private var nextSet = 0
+    private var lastBuild: TimeInterval = 0
+    /// Seconds between mesh builds: twice a second, once a second when the phone is hot.
+    private var interval: TimeInterval = 0.5
+    /// How long the last build took. Builds share the worker queue with depth capture, so they're spaced at least five
+    /// times their own duration apart (a large room, ~150 ms per build, then rebuilds about every 0.75 s).
+    private var lastDuration: TimeInterval = 0
 
     init(device: MTLDevice) {
         self.device = device
     }
 
-    /// Seconds since the scan started, the clock `Vertex.seen` uses.
-    var now: Float { Float(CACurrentMediaTime() - startLock.withLock { $0 }) }
-
     var buffers: Buffers? { published.withLock { $0 } }
 
+    /// Worker queue.
     func reset() {
-        queue.async { [self] in
-            parts.removeAll()
-            built.removeAll()
-            firstSeen.removeAll()
-            startLock.withLock { $0 = CACurrentMediaTime() }
-            published.withLock { $0 = nil }
-        }
+        tsdf.clear()
+        lastBuild = 0
+        lastDuration = 0
+        published.withLock { $0 = nil }
     }
 
-    @MainActor
+    /// Worker queue.
     func setPowerSaving(_ on: Bool) {
-        interval = on ? 0.4 : 0.2
+        interval = on ? 1.0 : 0.5
     }
 
-    /// Called from the main thread with the frame's mesh anchors. Drops the call if a rebuild is running or the last
-    /// one was too recent; anchors are passed on, never the frame, so ARKit gets its camera buffers back right away.
-    @MainActor
-    func offer(_ anchors: [ARMeshAnchor]) {
-        let t = CACurrentMediaTime()
-        guard !busy, t - lastSubmit >= interval else { return }
-        lastSubmit = t
-        busy = true
-        queue.async { [self] in
-            update(anchors)
-            DispatchQueue.main.async { self.busy = false }
-        }
+    /// Worker queue, after a frame was fused: rebuilds the mesh around the camera if it's time.
+    func rebuildIfDue(camera: SIMD3<Float>, time: TimeInterval) {
+        guard time - lastBuild >= max(interval, lastDuration * 5), tsdf.count > 50 else { return }
+        lastBuild = time
+        let started = CACurrentMediaTime()
+        defer { lastDuration = CACurrentMediaTime() - started }
+        let triangleCount = tsdf.extractMesh(near: camera, radius: Self.radius, solidWeight: Self.solidWeight, into: scratch)
+        guard triangleCount > 0 else { return }
+        publish()
     }
 
-    private func update(_ anchors: [ARMeshAnchor]) {
-        #if DEBUG
-        if !loggedFirst, !anchors.isEmpty {
-            loggedFirst = true
-            print("LiveMesh: RoomPlan's session has \(anchors.count) mesh anchors")
-        }
-        #endif
-        let time = now
-        var changed = false
-        var present = Set<UUID>()
-        for anchor in anchors {
-            present.insert(anchor.identifier)
-            let id = ObjectIdentifier(anchor.geometry)
-            if built[anchor.identifier] == id { continue }
-            built[anchor.identifier] = id
-            parts[anchor.identifier] = part(for: anchor, time: time)
-            changed = true
-        }
-        for id in parts.keys where !present.contains(id) {
-            parts[id] = nil
-            built[id] = nil
-            changed = true
-        }
-        if changed { publish() }
-    }
-
-    private func part(for anchor: ARMeshAnchor, time: Float) -> Part {
-        let geometry = anchor.geometry
-        let source = geometry.vertices
-        let faces = geometry.faces
-        let transform = anchor.transform
-        var vertices: [Vertex] = []
-        vertices.reserveCapacity(source.count)
-        let base = source.buffer.contents().advanced(by: source.offset)
-        for i in 0..<source.count {
-            let p = base.advanced(by: i * source.stride).assumingMemoryBound(to: Float.self)
-            let w = transform * SIMD4<Float>(p[0], p[1], p[2], 1)
-            vertices.append(Vertex(x: w.x, y: w.y, z: w.z, seen: seen(w, time: time)))
-        }
-        var triangles: [UInt32] = []
-        var edges: [UInt32] = []
-        let perFace = faces.indexCountPerPrimitive
-        guard perFace == 3 else { return Part(vertices: vertices, triangles: [], edges: []) }
-        triangles.reserveCapacity(faces.count * 3)
-        edges.reserveCapacity(faces.count * 3)
-        let indexBase = faces.buffer.contents()
-        let wide = faces.bytesPerIndex == 4
-        func index(_ k: Int) -> UInt32 {
-            wide ? indexBase.load(fromByteOffset: k * 4, as: UInt32.self)
-                 : UInt32(indexBase.load(fromByteOffset: k * 2, as: UInt16.self))
-        }
-        for f in 0..<faces.count {
-            let a = index(f * 3), b = index(f * 3 + 1), c = index(f * 3 + 2)
-            triangles.append(contentsOf: [a, b, c])
-            // A shared edge appears once in each direction: keep one of them. Edges on the mesh's border are only
-            // kept when they run "upwards", which is enough to outline it.
-            for (u, v) in [(a, b), (b, c), (c, a)] where u < v {
-                edges.append(u)
-                edges.append(v)
-            }
-        }
-        return Part(vertices: vertices, triangles: triangles, edges: edges)
-    }
-
-    /// When the cell holding `p` was first seen, remembering it now if it's new.
-    private func seen(_ p: SIMD4<Float>, time: Float) -> Float {
-        let q = (SIMD3<Float>(p.x, p.y, p.z) / Self.freshCell).rounded(.down)
-        let key = (Int64(Int32(clamping: Int(q.x))) & 0x1FFFFF)
-            | ((Int64(Int32(clamping: Int(q.y))) & 0x1FFFFF) << 21)
-            | ((Int64(Int32(clamping: Int(q.z))) & 0x1FFFFF) << 42)
-        if let t = firstSeen[key] { return t }
-        firstSeen[key] = time
-        return time
+    private func buffer(_ existing: MTLBuffer?, bytes: Int) -> MTLBuffer? {
+        if let existing, existing.length >= bytes { return existing }
+        return device.makeBuffer(length: max(bytes + bytes / 2, 1024), options: .storageModeShared)
     }
 
     private func publish() {
-        var vertexCount = 0, triangleCount = 0, edgeCount = 0
-        for part in parts.values {
-            vertexCount += part.vertices.count
-            triangleCount += part.triangles.count
-            edgeCount += part.edges.count
-        }
-        guard vertexCount > 0, triangleCount > 0,
-              let vertices = device.makeBuffer(length: vertexCount * MemoryLayout<Vertex>.stride, options: .storageModeShared),
-              let triangles = device.makeBuffer(length: triangleCount * 4, options: .storageModeShared),
-              let edges = device.makeBuffer(length: max(edgeCount, 1) * 4, options: .storageModeShared) else {
-            published.withLock { $0 = nil }
-            return
-        }
+        let vertexCount = scratch.positions.count
+        // The set the renderer used two builds ago (a second or more back), long done on the GPU.
+        var set = sets[nextSet]
+        guard let vertices = buffer(set.vertices, bytes: vertexCount * MemoryLayout<Vertex>.stride),
+              let triangles = buffer(set.triangles, bytes: scratch.triangles.count * 4),
+              let edges = buffer(set.edges, bytes: max(scratch.edges.count, 1) * 4) else { return }
+        set = (vertices, triangles, edges)
+        sets[nextSet] = set
+        nextSet = (nextSet + 1) % sets.count
         let v = vertices.contents().bindMemory(to: Vertex.self, capacity: vertexCount)
-        let t = triangles.contents().bindMemory(to: UInt32.self, capacity: triangleCount)
-        let e = edges.contents().bindMemory(to: UInt32.self, capacity: max(edgeCount, 1))
-        var vo = 0, to = 0, eo = 0
-        for part in parts.values {
-            let shift = UInt32(vo)
-            part.vertices.withUnsafeBufferPointer { (v + vo).update(from: $0.baseAddress!, count: $0.count) }
-            for (i, index) in part.triangles.enumerated() { t[to + i] = index + shift }
-            for (i, index) in part.edges.enumerated() { e[eo + i] = index + shift }
-            vo += part.vertices.count
-            to += part.triangles.count
-            eo += part.edges.count
+        for i in 0..<vertexCount {
+            let p = scratch.positions[i]
+            v[i] = Vertex(x: p.x, y: p.y, z: p.z, confidence: scratch.confidence[i])
         }
-        let result = Buffers(vertices: vertices, triangles: triangles, triangleIndexCount: triangleCount,
-                             edges: edges, edgeIndexCount: edgeCount)
+        scratch.triangles.withUnsafeBytes { triangles.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        if !scratch.edges.isEmpty {
+            scratch.edges.withUnsafeBytes { edges.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        }
+        let result = Buffers(vertices: vertices, triangles: triangles, triangleIndexCount: scratch.triangles.count,
+                             edges: edges, edgeIndexCount: scratch.edges.count)
         published.withLock { $0 = result }
     }
 }
@@ -210,8 +120,6 @@ final class LiveMeshRenderer {
 
     private struct Uniforms {
         var viewProjection: simd_float4x4
-        var now: Float
-        var fresh: Float
     }
 
     init?(device: MTLDevice, mesh: LiveMesh) {
@@ -256,7 +164,7 @@ final class LiveMeshRenderer {
     /// Draws the mesh if there is one yet; false if there's nothing to draw.
     func encode(_ encoder: MTLRenderCommandEncoder, viewProjection: simd_float4x4) -> Bool {
         guard let buffers = mesh.buffers else { return false }
-        var uniforms = Uniforms(viewProjection: viewProjection, now: mesh.now, fresh: 1.5)
+        var uniforms = Uniforms(viewProjection: viewProjection)
         encoder.setCullMode(.none)
         encoder.setVertexBuffer(buffers.vertices, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
@@ -284,11 +192,11 @@ final class LiveMeshRenderer {
     #include <metal_stdlib>
     using namespace metal;
 
-    struct MeshVertex { packed_float3 position; float seen; };
-    struct Uniforms { float4x4 viewProjection; float now; float fresh; };
+    struct MeshVertex { packed_float3 position; float confidence; };
+    struct Uniforms { float4x4 viewProjection; };
     struct MeshOut {
         float4 position [[position, invariant]];
-        float fresh;
+        float solid;
     };
 
     vertex MeshOut meshVertex(uint vid [[vertex_id]],
@@ -297,21 +205,17 @@ final class LiveMeshRenderer {
         MeshVertex v = vertices[vid];
         MeshOut out;
         out.position = u.viewProjection * float4(float3(v.position), 1.0);
-        // 1 when just seen, fading to 0 over the last part of the fresh window.
-        out.fresh = 1.0 - smoothstep(u.fresh * 0.5, u.fresh, u.now - v.seen);
+        // Orange while the surface has only been seen a few times, white once it's solid (as on Android).
+        out.solid = smoothstep(0.15, 0.6, v.confidence);
         return out;
     }
 
-    constant float3 orange = float3(1.0, 0.55, 0.15);
-
     fragment float4 meshFace(MeshOut in [[stage_in]]) {
-        float f = saturate(in.fresh);
-        return float4(mix(float3(0.92, 0.94, 1.0), orange, f), mix(0.42, 0.55, f));
+        return mix(float4(1.0, 0.55, 0.15, 0.40), float4(0.92, 0.94, 1.0, 0.42), saturate(in.solid));
     }
 
     fragment float4 meshEdge(MeshOut in [[stage_in]]) {
-        float f = saturate(in.fresh);
-        return float4(mix(float3(1.0), orange, f), mix(0.75, 0.9, f));
+        return mix(float4(1.0, 0.45, 0.1, 0.85), float4(1.0, 1.0, 1.0, 0.75), saturate(in.solid));
     }
     """
 }

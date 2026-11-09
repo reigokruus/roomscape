@@ -10,7 +10,7 @@ import SwiftUI
 final class LiveCapture {
     let device: MTLDevice?
     let cloud: LiveCloud?
-    /// RoomPlan's LiDAR mesh, drawn live instead of the discs once ARKit has some.
+    /// The live mesh fused from LiDAR depth, drawn instead of the discs once it has triangles.
     let mesh: LiveMesh?
     let session: ARSession
     private var link: CADisplayLink?
@@ -33,8 +33,11 @@ final class LiveCapture {
 
     func start() {
         guard link == nil, let cloud else { return }
-        worker.async { cloud.reset() }
-        mesh?.reset()
+        let mesh = mesh
+        worker.async {
+            cloud.reset()
+            mesh?.reset()
+        }
         let link = CADisplayLink(target: WeakTarget(self), selector: #selector(WeakTarget.tick))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
         link.add(to: .main, forMode: .common)
@@ -47,8 +50,13 @@ final class LiveCapture {
         link?.preferredFrameRateRange = on ? CAFrameRateRange(minimum: 3, maximum: 5, preferred: 5)
                                            : CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
         discView?.preferredFramesPerSecond = on ? 6 : 12
-        if let cloud { worker.async { cloud.setPowerSaving(on) } }
-        mesh?.setPowerSaving(on)
+        let mesh = mesh
+        if let cloud {
+            worker.async {
+                cloud.setPowerSaving(on)
+                mesh?.setPowerSaving(on)
+            }
+        }
     }
 
     /// iOS warned about memory: let the cloud give some back.
@@ -183,18 +191,19 @@ final class LiveCapture {
     }
 
     fileprivate func tick() {
-        // Mesh anchors only: the frame itself isn't kept.
-        if let mesh, let anchors = session.currentFrame?.anchors {
-            mesh.offer(anchors.compactMap { $0 as? ARMeshAnchor })
-        }
         guard !busy, let cloud, let frame = session.currentFrame, frame.timestamp != lastFrameTime else { return }
         lastFrameTime = frame.timestamp
         busy = true
         // One frame at a time, released as soon as it's read, so ARKit never runs short of camera buffers.
+        let mesh = mesh
+        let p = frame.camera.transform.columns.3
+        let camera = SIMD3<Float>(p.x, p.y, p.z), time = frame.timestamp
         worker.async { [weak self] in
-            cloud.integrate(frame)
+            cloud.integrate(frame, tsdf: mesh?.tsdf)
             DispatchQueue.main.async { self?.busy = false }
         }
+        // A separate block, so the frame is already let go while the mesh is built.
+        if let mesh { worker.async { mesh.rebuildIfDue(camera: camera, time: time) } }
     }
 
     /// CADisplayLink keeps a strong reference to its target; this keeps it from holding on to LiveCapture.
