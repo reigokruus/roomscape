@@ -876,7 +876,94 @@ struct RoomSceneView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        // Orbit, our own instead of SceneKit's camera control (whose two-finger pan often turned into a rotation):
+        // one finger turns around the target, two fingers pan and pinch-zoom together, like the Android app.
+        var orbitTarget = SIMD3<Float>(0, 0, 0)
+        var orbitGestures: [UIGestureRecognizer] = []
+        private var spin = SIMD2<Float>(0, 0)
+        private var inertia: CADisplayLink?
+        private var lastInertia: CFTimeInterval = 0
+        /// Radians per point of drag (about the Android app's feel).
+        static let turn: Float = 0.006
+
+        /// Turns the current camera around the target; the pitch stays between just under level and straight down.
+        func orbitBy(dx: Float, dy: Float) {
+            guard let view, let pov = view.pointOfView, pov !== topCamera, standing == nil else { return }
+            var off = pov.simdWorldPosition - orbitTarget
+            off = simd_quatf(angle: -dx * Self.turn, axis: SIMD3(0, 1, 0)).act(off)
+            let right = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), off))
+            let tilted = simd_quatf(angle: dy * Self.turn, axis: right).act(off)
+            let elevation = asin(max(-1, min(1, tilted.y / simd_length(tilted))))
+            if elevation > -0.15, elevation < 1.5 { off = tilted }
+            pov.simdWorldPosition = orbitTarget + off
+            pov.simdLook(at: orbitTarget, up: SIMD3(0, 1, 0), localFront: SIMD3(0, 0, -1))
+        }
+
+        @objc func orbitPanned(_ g: UIPanGestureRecognizer) {
+            guard let view = g.view else { return }
+            switch g.state {
+            case .began:
+                inertia?.invalidate(); inertia = nil
+            case .changed:
+                let d = g.translation(in: view)
+                g.setTranslation(.zero, in: view)
+                orbitBy(dx: Float(d.x), dy: Float(d.y))
+            case .ended:
+                // A light flick keeps turning for a moment.
+                let v = g.velocity(in: view)
+                spin = SIMD2(Float(v.x), Float(v.y)) * 0.6
+                lastInertia = CACurrentMediaTime()
+                let link = CADisplayLink(target: self, selector: #selector(coast))
+                link.add(to: .main, forMode: .common)
+                inertia = link
+            default:
+                break
+            }
+        }
+
+        @objc func coast() {
+            let now = CACurrentMediaTime()
+            let dt = Float(min(0.05, now - lastInertia))
+            lastInertia = now
+            orbitBy(dx: spin.x * dt, dy: spin.y * dt)
+            spin *= pow(0.02, dt) // most of it gone within a second
+            if simd_length(spin) < 5 { inertia?.invalidate(); inertia = nil }
+        }
+
+        /// Two fingers: move the camera and its target together, along the screen.
+        @objc func orbitMoved(_ g: UIPanGestureRecognizer) {
+            guard let view = g.view as? SCNView, let pov = view.pointOfView, standing == nil else { return }
+            inertia?.invalidate(); inertia = nil
+            let d = g.translation(in: view)
+            g.setTranslation(.zero, in: view)
+            let dist = pov === topCamera ? max(1, pov.simdWorldPosition.y - orbitTarget.y) : simd_length(pov.simdWorldPosition - orbitTarget)
+            let s = dist * 0.0018
+            let delta = (-Float(d.x) * pov.simdWorldRight + Float(d.y) * pov.simdWorldUp) * s
+            pov.simdWorldPosition += delta
+            orbitTarget += delta
+        }
+
+        @objc func orbitPinched(_ g: UIPinchGestureRecognizer) {
+            guard let view = g.view as? SCNView, let pov = view.pointOfView, standing == nil, g.scale > 0 else { return }
+            _ = view
+            if pov === topCamera {
+                pov.simdWorldPosition.y = orbitTarget.y + (pov.simdWorldPosition.y - orbitTarget.y) / Float(g.scale)
+            } else {
+                let off = pov.simdWorldPosition - orbitTarget
+                let len = simd_length(off)
+                let newLen = max(0.3, min(60, len / Float(g.scale)))
+                pov.simdWorldPosition = orbitTarget + off / len * newLen
+            }
+            g.scale = 1
+        }
+
+        func gestureRecognizer(_ a: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith b: UIGestureRecognizer) -> Bool {
+            // Two-finger pan and pinch together; the one-finger turn never mixes with them.
+            let pair: Set<ObjectIdentifier> = Set(orbitGestures.dropFirst().map(ObjectIdentifier.init))
+            return pair.contains(ObjectIdentifier(a)) && pair.contains(ObjectIdentifier(b))
+        }
+
         var orbitCamera = SCNNode()
         var topCamera = SCNNode()
         var lastTop: Bool?
@@ -939,7 +1026,7 @@ struct RoomSceneView: UIViewRepresentable {
                     walkCamera.simdWorldTransform = from.simdWorldTransform
                     view.pointOfView = walkCamera
                     SCNTransaction.commit()
-                    view.allowsCameraControl = false
+                    orbitGestures.forEach { $0.isEnabled = false }
                     walkGestures.forEach { $0.isEnabled = true }
                     let link = CADisplayLink(target: self, selector: #selector(step))
                     link.add(to: .main, forMode: .common)
@@ -957,7 +1044,7 @@ struct RoomSceneView: UIViewRepresentable {
                 link?.invalidate()
                 link = nil
                 walkGestures.forEach { $0.isEnabled = false }
-                view.allowsCameraControl = true
+                orbitGestures.forEach { $0.isEnabled = true }
                 SCNTransaction.begin()
                 SCNTransaction.animationDuration = 0.7
                 view.pointOfView = savedPointOfView ?? orbitCamera
@@ -1031,7 +1118,7 @@ struct RoomSceneView: UIViewRepresentable {
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
         view.scene = scene
-        view.allowsCameraControl = true
+        view.allowsCameraControl = false // our own orbit controls (see Coordinator.orbitBy)
         view.autoenablesDefaultLighting = true
         view.backgroundColor = .black
         view.antialiasingMode = .multisampling4X
@@ -1054,7 +1141,7 @@ struct RoomSceneView: UIViewRepresentable {
 
         Self.addAmbientLight(to: scene)
 
-        view.defaultCameraController.target = center
+        context.coordinator.orbitTarget = SIMD3(center.x, center.y, center.z)
         view.pointOfView = orbit
         context.coordinator.lastTop = false
         view.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator,
@@ -1068,6 +1155,17 @@ struct RoomSceneView: UIViewRepresentable {
                           UIPinchGestureRecognizer(target: c, action: #selector(Coordinator.pinched(_:))), doubleTap]
         for g in c.walkGestures {
             g.isEnabled = false
+            view.addGestureRecognizer(g)
+        }
+        let turn = UIPanGestureRecognizer(target: c, action: #selector(Coordinator.orbitPanned(_:)))
+        turn.maximumNumberOfTouches = 1
+        let move = UIPanGestureRecognizer(target: c, action: #selector(Coordinator.orbitMoved(_:)))
+        move.minimumNumberOfTouches = 2
+        move.maximumNumberOfTouches = 2
+        let zoom = UIPinchGestureRecognizer(target: c, action: #selector(Coordinator.orbitPinched(_:)))
+        c.orbitGestures = [turn, move, zoom]
+        for g in c.orbitGestures {
+            g.delegate = c
             view.addGestureRecognizer(g)
         }
         return view
