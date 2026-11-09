@@ -1111,9 +1111,11 @@ struct RoomSceneView: UIViewRepresentable {
                 switch g.state {
                 case .began:
                     twistMode = 0; twistMoved = .zero
+                    if !otherActive(g) { twoFingerLock = 0; pinchTotal = 1 }
                 case .changed:
                     twistMoved.x += d.x; twistMoved.y += d.y
-                    if twistMode == 0, abs(twistMoved.x) > 28, abs(twistMoved.x) > 1.5 * abs(twistMoved.y) {
+                    if twistMode == 0, twoFingerLock != 2, abs(twistMoved.x) > 28, abs(twistMoved.x) > 1.5 * abs(twistMoved.y) {
+                        twoFingerLock = 1
                         twistMode = 1
                         onTwist(0, 0)
                     } else if twistMode == 1 {
@@ -1136,6 +1138,17 @@ struct RoomSceneView: UIViewRepresentable {
 
         @objc func orbitPinched(_ g: UIPinchGestureRecognizer) {
             guard let view = g.view as? SCNView, let pov = view.pointOfView, standing == nil, g.scale > 0 else { return }
+            if onTwist != nil {
+                // An object is selected: zoom only once the pinch is clearly a pinch, and never during a turn.
+                if g.state == .began, !otherActive(g) { twoFingerLock = 0; pinchTotal = 1 }
+                pinchTotal *= g.scale
+                if twoFingerLock == 1 { g.scale = 1; return }
+                if twoFingerLock == 0 {
+                    guard abs(pinchTotal - 1) > 0.08 else { g.scale = 1; return }
+                    twoFingerLock = 2
+                    g.scale = pinchTotal // the zoom so far, all at once
+                }
+            }
             _ = view
             if pov === topCamera {
                 pov.simdWorldPosition.y = orbitTarget.y + (pov.simdWorldPosition.y - orbitTarget.y) / Float(g.scale)
@@ -1174,6 +1187,13 @@ struct RoomSceneView: UIViewRepresentable {
         /// The two-finger turn: 0 deciding (dead zone), 1 turning; and how far the fingers have gone meanwhile.
         private var twistMode = 0
         private var twistMoved = CGPoint.zero
+        /// With an object selected, one two-finger gesture is either a turn (1) or a zoom (2), never both: whichever
+        /// passes its threshold first (28 pt sideways, or 8% pinch) wins until the fingers lift. 0 = not decided.
+        private var twoFingerLock = 0
+        private var pinchTotal: CGFloat = 1
+        private func otherActive(_ g: UIGestureRecognizer) -> Bool {
+            g.view?.gestureRecognizers?.contains { $0 !== g && $0.numberOfTouches >= 2 && ($0.state == .began || $0.state == .changed) } ?? false
+        }
 
         // First person ("Enter the room").
         weak var view: SCNView?
