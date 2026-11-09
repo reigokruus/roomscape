@@ -4082,7 +4082,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (overviewBlend > 0.001f && !viewing) {
                 GLES20.glClearColor(0.05f, 0.05f, 0.06f, 1f);
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
-                if (overviewBlend < 0.999f) { drawBackground(); drawDim(overviewBlend); } // fading in: the picture dims away
+                if (overviewBlend < 0.999f) drawBackground(); // fading in: the picture fades into the stripes
+                drawZebra(overviewBlend);
             } else drawBackground();
         }
 
@@ -5059,6 +5060,37 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisable(GLES20.GL_BLEND);
     }
 
+    // ---- Background: diagonal zebra stripes where nothing was scanned (rk 9 Nov), fixed on screen ----
+    /** Stripe colours (#6b6b6b, #3a3a3a) and width in dp, at 45°. */
+    static final float[] ZEBRA_LIGHT = {0x6b / 255f, 0x6b / 255f, 0x6b / 255f}, ZEBRA_DARK = {0x3a / 255f, 0x3a / 255f, 0x3a / 255f};
+    static final float ZEBRA_DP = 11;
+    private int zebraProg;
+
+    /** Full-screen stripes, `a` opaque, under everything (no depth). */
+    private void drawZebra(float a) {
+        if (zebraProg == 0) zebraProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
+                "precision mediump float; uniform float uW; uniform float uA; uniform vec3 uL; uniform vec3 uD;"
+                + "void main(){ float s = mod(floor((gl_FragCoord.x + gl_FragCoord.y) / (uW * 1.41421)), 2.0);"
+                + " gl_FragColor = vec4(mix(uD, uL, s), uA); }");
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDepthMask(false);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUseProgram(zebraProg);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zebraProg, "uW"), ZEBRA_DP * activity.getResources().getDisplayMetrics().density);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zebraProg, "uA"), a);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uL"), 1, ZEBRA_LIGHT, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uD"), 1, ZEBRA_DARK, 0);
+        int aPos = GLES20.glGetAttribLocation(zebraProg, "aPos");
+        quad.position(0);
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDepthMask(true);
+    }
+
     private int ovDimProg;
 
     /** A dark full-screen veil, `a` opaque. */
@@ -5616,6 +5648,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private void drawViewer() {
         for (Runnable r; (r = glTasks.poll()) != null; ) r.run();
+        // "Nothing here" behind the room (not in the clean thumbnail frame), so holes can't pass for black things.
+        if (!photoThumbWanted) drawZebra(1f);
         uploadNew();
         uploadSurfels();
         float aspect = (float) width / height;

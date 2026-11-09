@@ -164,7 +164,7 @@ struct ResultView: View {
             // With the room summary below, the 3D view keeps a fixed share of the screen and the summary scrolls in
             // the rest (it only had 260 pt, too little for large text). Panels (objects, lighting) keep the old split.
             .frame(maxWidth: .infinity, maxHeight: summaryShown ? UIScreen.main.bounds.height * 0.42 : .infinity)
-            .background(Color.black)
+            .background(ZebraBackground())
             // The 3D area is always black, so its controls use dark styling even when the phone is in light mode.
             .environment(\.colorScheme, .dark)
 
@@ -1586,7 +1586,9 @@ struct RoomSceneView: UIViewRepresentable {
         view.delegate = context.coordinator // sizes the outlet labels on screen each frame
         view.isPlaying = true
         view.autoenablesDefaultLighting = true
-        view.backgroundColor = .black
+        // Transparent: the zebra pattern behind it shows where nothing was scanned (ZebraBackground).
+        view.backgroundColor = .clear
+        view.isOpaque = false
         view.antialiasingMode = .multisampling4X
 
         let framing = Self.framing(of: scene)
@@ -2148,5 +2150,33 @@ enum BareMesh {
         m.writesToDepthBuffer = false
         g.materials = [m]
         wire.geometry = g
+    }
+}
+
+/// "Nothing here" behind the 3D room (rk 9 Nov): 45° grey zebra stripes, fixed on screen, so holes in the scan can't
+/// be mistaken for black things. One place to tune: colours and stripe width.
+struct ZebraBackground: View {
+    static let light = Color(red: 0x6b / 255, green: 0x6b / 255, blue: 0x6b / 255)
+    static let dark = Color(red: 0x3a / 255, green: 0x3a / 255, blue: 0x3a / 255)
+    /// Stripe width, points.
+    static let width: CGFloat = 11
+
+    var body: some View {
+        Canvas { ctx, size in
+            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Self.dark))
+            let step = Self.width * 2 * 1.41421 // across the diagonal
+            var path = Path()
+            var x = -size.height
+            while x < size.width {
+                path.move(to: CGPoint(x: x, y: size.height))
+                path.addLine(to: CGPoint(x: x + size.height, y: 0))
+                path.addLine(to: CGPoint(x: x + size.height + step / 2, y: 0))
+                path.addLine(to: CGPoint(x: x + step / 2, y: size.height))
+                path.closeSubpath()
+                x += step
+            }
+            ctx.fill(path, with: .color(Self.light))
+        }
+        .ignoresSafeArea()
     }
 }

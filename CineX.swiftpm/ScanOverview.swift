@@ -71,6 +71,7 @@ final class OverviewWindowRenderer {
     private let quadPipeline: MTLRenderPipelineState
     private let linePipeline: MTLRenderPipelineState
     private let noDepth: MTLDepthStencilState
+    private let zebraPipeline: MTLRenderPipelineState?
     /// The window: behind mesh that's nearer than it, over the rest; never writes depth.
     private let behindNearer: MTLDepthStencilState
     private var textureCache: CVMetalTextureCache?
@@ -106,10 +107,31 @@ final class OverviewWindowRenderer {
               let noDepth = device.makeDepthStencilState(descriptor: ds),
               let behindNearer = device.makeDepthStencilState(descriptor: dl) else { return nil }
         self.behindNearer = behindNearer
+        if let zv = library.makeFunction(name: "zebraVertex"), let zf = library.makeFunction(name: "zebraFragment") {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = zv; d.fragmentFunction = zf
+            d.depthAttachmentPixelFormat = .depth32Float
+            let c = d.colorAttachments[0]!
+            c.pixelFormat = .bgra8Unorm
+            c.isBlendingEnabled = true
+            c.sourceRGBBlendFactor = .sourceAlpha; c.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            c.sourceAlphaBlendFactor = .one; c.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            zebraPipeline = try? device.makeRenderPipelineState(descriptor: d)
+        } else { zebraPipeline = nil }
         quadPipeline = quad
         linePipeline = lines
         self.noDepth = noDepth
         CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
+    }
+
+    /// The zebra backdrop over the camera feed, `alpha` opaque (drawn first, no depth).
+    func encodeZebra(_ encoder: MTLRenderCommandEncoder, alpha: Float) {
+        guard alpha > 0.01, let zebraPipeline else { return }
+        var a = alpha
+        encoder.setDepthStencilState(noDepth)
+        encoder.setRenderPipelineState(zebraPipeline)
+        encoder.setFragmentBytes(&a, length: 4, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
     /// The window: the corners of what the normal scan screen shows, at `windowDistance`, textured with the frame.
@@ -179,6 +201,15 @@ final class OverviewWindowRenderer {
         float2 C = cbcr.sample(s, in.uv).rg - 0.5;
         float3 rgb = float3(Y + 1.402 * C.y, Y - 0.344136 * C.x - 0.714136 * C.y, Y + 1.772 * C.x);
         return float4(saturate(rgb), alpha);
+    }
+    // The zebra backdrop (ZebraBackground's colours, 11 pt stripes at 45°; the overlay draws at 1 px per point).
+    vertex Out zebraVertex(uint vid [[vertex_id]]) {
+        Out o; o.position = float4((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0, 0.0, 1.0); o.uv = float2(0.0); return o;
+    }
+    fragment float4 zebraFragment(Out in [[stage_in]], constant float &alpha [[buffer(0)]]) {
+        float s = fmod(floor((in.position.x + in.position.y) / (11.0 * 1.41421)), 2.0);
+        float3 c = mix(float3(0x3a, 0x3a, 0x3a) / 255.0, float3(0x6b, 0x6b, 0x6b) / 255.0, s);
+        return float4(c, alpha);
     }
     fragment float4 windowLine(Out in [[stage_in]], constant float &alpha [[buffer(0)]]) {
         return float4(1.0, 1.0, 1.0, 0.9 * alpha);

@@ -402,9 +402,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
                 let aspect = Float(view.bounds.width / view.bounds.height)
                 overviewView = (v, Self.perspective(fovY: fov, aspect: aspect, near: 0.05, far: 50))
             }
-            // A dark backdrop over the camera feed, fading in with the overview.
-            let b = Double(overview.blend)
-            view.clearColor = MTLClearColor(red: 0.05 * b, green: 0.05 * b, blue: 0.06 * b, alpha: b)
+            // The backdrop over the camera feed (zebra stripes, drawn below), fading in with the overview.
+            view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         }
         guard let pass = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
@@ -415,6 +414,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
             let realView = camera.viewMatrix(for: .portrait)
             let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
+            if overviewView != nil { window?.encodeZebra(encoder, alpha: overview.blend) }
             let viewMatrix = overviewView?.view ?? realView
             let projection = overviewView?.projection ?? realProjection
             lastViewProjection = projection * viewMatrix
