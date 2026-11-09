@@ -135,7 +135,9 @@ private enum log {
     /// Runs what's waiting, if nothing is running (also at launch and when the app comes back).
     func start() {
         guard runner == nil, items.contains(where: { !held.contains($0.scan) }) else { return }
-        if #available(iOS 26.0, *), UIApplication.shared.applicationState == .active, submitContinued() { return }
+        // Not only when .active: right after Done the app is often .inactive (the scanner closing), and then the
+        // continued task was never used (processing log 9 Nov).
+        if #available(iOS 26.0, *), UIApplication.shared.applicationState != .background, submitContinued() { return }
         runInApp()
     }
 
@@ -239,7 +241,7 @@ private enum log {
             PerfLog.processing = perf
             defer { perf.stop(); PerfLog.processing = nil }
             // Full speed (performance cores) while the app is open; background work goes to the efficiency cores.
-            let priority: TaskPriority = UIApplication.shared.applicationState == .active ? .userInitiated : .utility
+            let priority: TaskPriority = UIApplication.shared.applicationState != .background ? .userInitiated : .utility
             log.info("priority: \(priority == .userInitiated ? "userInitiated (app open)" : "utility (in the background)")")
             let job = Task.detached(priority: priority) {
                 try await RecordingProcessor.run(item.job, on: scan) { p in

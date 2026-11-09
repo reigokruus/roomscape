@@ -59,12 +59,31 @@ enum RecordingProcessor {
         let depthFrames = try readDepth(rec.appendingPathComponent("depth.bin"))
         try Task.checkCancellation()
 
+        // 3. Sharp text: patches where text was seen, straightened onto their surface (DecalFinder). It runs alongside
+        // the surface and photos: Vision works mostly on the Neural Engine and the surface on one CPU core (perf log
+        // 9 Nov: surface 5 s at one P core, text 15 s, one after the other).
+        let textDone = done("text")
+        async let textStage: Void = {
+            guard !textDone else { return }
+            let out = work.appendingPathComponent("decals")
+            try? FileManager.default.removeItem(at: out)
+            let decalFrames = frames.map { DecalFinder.Frame(time: $0.time, pose: $0.pose, k: $0.k, width: $0.width, height: $0.height) }
+            let decalDepth = depthFrames.map { (time: $0.time, w: $0.w, h: $0.h, mm: $0.mm) }
+            _ = try await DecalFinder.find(recording: rec, frames: decalFrames, depth: decalDepth, out: out,
+                                           pace: { await ThermalGovernor.pace(note: note) },
+                                           progress: { if job == .text { report("text", "Finding text", $0) } })
+            FileManager.default.createFile(atPath: work.appendingPathComponent("text.done").path, contents: Data())
+        }()
         if job == .rebuild {
             // 1. Surface and points.
             if !done("surface") {
                 let clears = (try? JSONSerialization.jsonObject(with: Data(contentsOf: rec.appendingPathComponent("clears.json")))) as? [[String: Any]] ?? []
-                let (mesh, points) = try await surface(frames: frames, depth: depthFrames, clears: clears,
-                                                       progress: { report("surface", "Building the surface", $0) }, note: note)
+                // The surface (TSDF) and the points are worked out side by side, on two cores.
+                async let meshPart = surface(frames: frames, depth: depthFrames, clears: clears, mesh: true, points: false,
+                                             progress: { report("surface", "Building the surface", $0) }, note: note)
+                async let pointPart = surface(frames: frames, depth: depthFrames, clears: clears, mesh: false, points: true,
+                                              progress: { _ in }, note: { _ in })
+                let mesh = try await meshPart.0, points = try await pointPart.1
                 try mesh.write(to: work.appendingPathComponent(ScanMesh.fileName))
                 try points.withUnsafeBytes { Data($0) }.write(to: work.appendingPathComponent("points-raw.bin"))
                 mark("surface")
@@ -79,18 +98,9 @@ enum RecordingProcessor {
                 mark("photos")
             }
         }
-        // 3. Sharp text: patches where text was seen, straightened onto their surface (DecalFinder).
-        if !done("text") {
-            report("text", "Finding text", 0)
-            let out = work.appendingPathComponent("decals")
-            try? fm.removeItem(at: out)
-            let decalFrames = frames.map { DecalFinder.Frame(time: $0.time, pose: $0.pose, k: $0.k, width: $0.width, height: $0.height) }
-            let decalDepth = depthFrames.map { (time: $0.time, w: $0.w, h: $0.h, mm: $0.mm) }
-            _ = try await DecalFinder.find(recording: rec, frames: decalFrames, depth: decalDepth, out: out,
-                                           pace: { await ThermalGovernor.pace(note: note) },
-                                           progress: { report("text", "Finding text", $0) })
-            mark("text")
-        }
+        // 3. (started above, alongside the surface and photos)
+        if job == .rebuild, !textDone { report("text", "Finding text", 0) }
+        try await textStage
         // 4. Points coloured from the photos, then swap the new files in.
         report("save", "Saving", 0)
         if job == .rebuild, !done("points") {
@@ -123,8 +133,9 @@ enum RecordingProcessor {
     /// Fuses every depth frame into the TSDF (4 cm, as live), skipping what a later tap cleared; points are the depth
     /// samples in 2 cm cells (averaged) seen at least twice, like the live scan.
     static func surface(frames: [FrameRecord], depth depthFrames: [DepthFrame], clears: [[String: Any]],
+                        mesh wantMesh: Bool = true, points wantPoints: Bool = true,
                         progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> (ScanMesh, [SIMD3<Float>]) {
-        let tsdf = Tsdf(capacity: 700_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
+        let tsdf = Tsdf(capacity: wantMesh ? 700_000 : 16, voxel: 0.04, truncation: 0.08, carve: 1.5)
         var cells: [SIMD3<Int32>: (sum: SIMD3<Float>, n: Int32)] = [:]
         cells.reserveCapacity(400_000)
         var fi = 0
@@ -153,8 +164,8 @@ enum RecordingProcessor {
                     let pw4 = f.pose * pc
                     let pw = SIMD3(pw4.x, pw4.y, pw4.z)
                     if clears.contains(where: { Self.cleared(pw, at: d.time, by: $0) }) { continue }
-                    tsdf.integrate(origin: origin, point: pw)
-                    if cells.count < 1_200_000 {
+                    if wantMesh { tsdf.integrate(origin: origin, point: pw) }
+                    if wantPoints, cells.count < 1_200_000 {
                         let k = SIMD3(Int32((pw.x / 0.02).rounded(.down)), Int32((pw.y / 0.02).rounded(.down)), Int32((pw.z / 0.02).rounded(.down)))
                         let c = cells[k] ?? (.zero, 0)
                         cells[k] = (c.sum + pw, c.n + 1)
@@ -168,7 +179,7 @@ enum RecordingProcessor {
             }
         }
         let scratch = Tsdf.MeshScratch()
-        _ = tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: 20, into: scratch)
+        if wantMesh { _ = tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: 20, into: scratch) }
         let mesh = ScanMesh(positions: scratch.positions, triangles: scratch.triangles)
         // Cells seen at least twice (a single sighting is often a stray sample).
         let points = cells.values.filter { $0.n >= 2 }.map { $0.sum / Float($0.n) }
