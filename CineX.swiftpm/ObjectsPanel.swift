@@ -253,7 +253,7 @@ struct ObjectsBar: View {
         if let i = selectedIndex {
             let o = objects[i]
             let state = o.removed ? " · removed" : (simd_length(o.offset) > 0.001 || abs(o.turn) > 0.001) ? " · moved" : ""
-            return "\(o.label) · \(o.sizeText)\(state)" + (o.removed || o.kind.isMarker ? "" : "\nTap the floor to move it there.")
+            return "\(o.label) · \(o.sizeText)\(state)" + (o.removed || o.kind.isMarker ? "" : "\nDrag it to move it. Tap empty space to let go.")
         }
         if movable.isEmpty { return "No separate objects found in this scan yet." }
         let removed = movable.filter(\.removed).count

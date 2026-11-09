@@ -100,6 +100,7 @@ struct ResultView: View {
                                   onFloorTap: floorTapped,
                                   onTapRay: objectsOn ? objectTapped : nil,
                                   onTwist: objectsOn && selectedMovable ? objectTwisted : nil,
+                                  onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
                 } else if let loadError {
@@ -570,6 +571,38 @@ struct ResultView: View {
         return !o.kind.isMarker && !o.removed
     }
 
+    /// Where a drag grabbed the selected object: its centre minus the grab point on its base plane (x, z).
+    @State private var dragGrab: SIMD2<Float>?
+
+    /// One finger on the selected object slides it along the floor, as on Android: the touch ray meets the plane of
+    /// the object's base, and the object keeps its place under the finger (no jump). One undo step per drag.
+    private func objectDragged(_ phase: Int, _ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> Bool {
+        guard let id = selectedObject, let i = objects.firstIndex(where: { $0.id == id }) else { return false }
+        let o = objects[i]
+        let baseY = o.center.y - o.halfExtents.y
+        guard abs(dir.y) > 1e-4 else { return phase != 0 }
+        let t = (baseY - origin.y) / dir.y
+        guard t > 0 else { return phase != 0 }
+        let p = origin + dir * t
+        let now = SIMD2(o.center.x + o.offset.x, o.center.z + o.offset.z)
+        switch phase {
+        case 0:
+            // Only a drag that starts on the selected object's box moves it; any other drag turns the view.
+            guard objectHit(origin, dir) == id else { return false }
+            objectHistory.append(objects)
+            dragGrab = now - SIMD2(p.x, p.z)
+            return true
+        case 1:
+            guard let grab = dragGrab else { return false }
+            let c = SIMD2(p.x, p.z) + grab
+            objects[i].offset = SIMD3(c.x - o.center.x, 0, c.y - o.center.z)
+            return true
+        default:
+            dragGrab = nil
+            return true
+        }
+    }
+
     /// Two fingers sideways on a selected object: 0 began (one undo step), 1 turn by radians, 2 ended (settles on a
     /// 15° step when within 3° of one).
     private func objectTwisted(_ phase: Int, _ radians: Float) {
@@ -586,8 +619,15 @@ struct ResultView: View {
         }
     }
 
-    /// Objects mode: a tap on an object's box selects it (the nearest one along the ray); true when one was hit.
+    /// Objects mode: a tap on an object's box selects it; a tap on empty space lets go of the selected one, as on
+    /// Android. Always takes the tap.
     private func objectTapped(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> Bool {
+        selectedObject = objectHit(origin, dir)
+        return true
+    }
+
+    /// The object whose box the ray meets first, if any (movable, not removed; 3 cm margin).
+    private func objectHit(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> UUID? {
         var best: (UUID, Float)?
         for o in objects where !o.kind.isMarker && !o.removed {
             // The ray in the box's own frame (turned by yaw + turn, moved by the offset), slab test with a 3 cm margin.
@@ -609,9 +649,7 @@ struct ResultView: View {
             }
             if hit, best == nil || t0 < best!.1 { best = (o.id, t0) }
         }
-        guard let best else { return false }
-        selectedObject = best.0
-        return true
+        return best?.0
     }
 
     private func floorTapped(_ p: SIMD3<Float>) {
@@ -968,6 +1006,9 @@ struct RoomSceneView: UIViewRepresentable {
     var onTapRay: ((SIMD3<Float>, SIMD3<Float>) -> Bool)? = nil
     /// Set while an object is selected: two fingers sideways turn it (0 began, 1 by radians, 2 ended), not the view.
     var onTwist: ((Int, Float) -> Void)? = nil
+    /// Objects mode: a one-finger drag that starts on the selected object moves it (0 began, 1 moved, 2 ended), as a
+    /// ray (origin, unit direction); the began call returns true when it took the drag (the view doesn't turn then).
+    var onObjectDrag: ((Int, SIMD3<Float>, SIMD3<Float>) -> Bool)? = nil
     /// Standing in the room (first person) at this floor point; nil = the orbit or top view.
     var standAt: SIMD3<Float>? = nil
     /// The floor, for walking to a double-tapped spot.
@@ -1013,6 +1054,22 @@ struct RoomSceneView: UIViewRepresentable {
 
         @objc func orbitPanned(_ g: UIPanGestureRecognizer) {
             guard let view = g.view else { return }
+            // Objects mode: a drag that starts on the selected object slides it along the floor instead.
+            if let scn = view as? SCNView, let onObjectDrag, standing == nil {
+                let t = g.translation(in: view), at = g.location(in: view)
+                if g.state == .began, let (o, d) = ray(CGPoint(x: at.x - t.x, y: at.y - t.y), in: scn), onObjectDrag(0, o, d) {
+                    draggingObject = true
+                    inertia?.invalidate(); inertia = nil
+                    if let (o, d) = ray(at, in: scn) { _ = onObjectDrag(1, o, d) }
+                    return
+                }
+                if draggingObject {
+                    if let (o, d) = ray(at, in: scn) { _ = onObjectDrag(g.state == .changed ? 1 : 2, o, d) }
+                    if g.state != .changed { draggingObject = false }
+                    g.setTranslation(.zero, in: view)
+                    return
+                }
+            }
             switch g.state {
             case .began:
                 inertia?.invalidate(); inertia = nil
@@ -1104,6 +1161,16 @@ struct RoomSceneView: UIViewRepresentable {
         var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
         var onTapRay: ((SIMD3<Float>, SIMD3<Float>) -> Bool)?
         var onTwist: ((Int, Float) -> Void)?
+        var onObjectDrag: ((Int, SIMD3<Float>, SIMD3<Float>) -> Bool)?
+        private var draggingObject = false
+
+        func ray(_ p: CGPoint, in view: SCNView) -> (SIMD3<Float>, SIMD3<Float>)? {
+            let near = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 0))
+            let far = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 1))
+            let a = SIMD3<Float>(near.x, near.y, near.z), b = SIMD3<Float>(far.x, far.y, far.z)
+            guard simd_length(b - a) > 1e-6 else { return nil }
+            return (a, simd_normalize(b - a))
+        }
         /// The two-finger turn: 0 deciding (dead zone), 1 turning; and how far the fingers have gone meanwhile.
         private var twistMode = 0
         private var twistMoved = CGPoint.zero
@@ -1354,6 +1421,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.onFloorTap = onFloorTap
         context.coordinator.onTapRay = onTapRay
         context.coordinator.onTwist = onTwist
+        context.coordinator.onObjectDrag = onObjectDrag
         context.coordinator.walkFloorY = walkFloorY
         context.coordinator.viewHeight = view.bounds.height
         context.coordinator.walkMove = walkMove
