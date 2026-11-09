@@ -97,8 +97,18 @@ enum LightingShader {
     /// The shell's also takes the mesh look (`clay`, see `MeshLook`): clay colour before the lighting, grid after.
     static let surfaceModifier = surface(baked: true, meshLook: true)
     static let propSurfaceModifier = surface(baked: false, meshLook: false)
+    /// The photo room and its decals (rk 9 Nov: Lighting on the photo surface instead of the splats). Scanned, so
+    /// `baked`; two-sided, as the mesh's triangles aren't reliably wound towards the room.
+    static let photoSurfaceModifier = surface(baked: true, meshLook: false, twoSided: true)
 
-    private static func surface(baked: Bool, meshLook: Bool) -> String {
+    /// Gives a scanned-surface material the lighting preview (off until `apply` turns it on). Its lighting model
+    /// stays `.constant`: the photo already shows the room's light.
+    static func makeLit(_ m: SCNMaterial) {
+        m.shaderModifiers = [.surface: photoSurfaceModifier]
+        apply(nil, to: m)
+    }
+
+    private static func surface(baked: Bool, meshLook: Bool, twoSided: Bool = false) -> String {
         """
         #pragma arguments
         \(arguments)\(meshLook ? "float clay;\n" : "")
@@ -111,7 +121,7 @@ enum LightingShader {
             float3 N = surfaceN;
             float hasN = 1.0;
             float3 lin = _surface.diffuse.rgb;
-        \(shade(twoSided: false, baked: baked))
+        \(shade(twoSided: twoSided, baked: baked))
             _surface.diffuse.rgb = v;
         }
         \(meshLook ? "if (clay > 0.5) \(MeshLook.grid(p: "surfaceP", n: "surfaceN"))" : "")
@@ -182,16 +192,20 @@ final class LightingScene {
             for m in n.geometry?.materials ?? [] {
                 guard let mods = m.shaderModifiers else { continue }
                 if mods[.geometry]?.contains("litA") == true { splatAndShell.append(m) }
-                if mods[.surface]?.contains("litA") == true { splatAndShell.append(m); shellMaterials.append(m) }
+                // Only the room shell switches lighting model (it has the mesh look, `clay`); the photo room stays constant.
+                if mods[.surface]?.contains("litA") == true {
+                    splatAndShell.append(m)
+                    if mods[.surface]?.contains("clay") == true { shellMaterials.append(m) }
+                }
             }
         }
     }
 
     /// Forgets the registered materials and collects them again (after the splat nodes were rebuilt).
-    func reregister(_ node: SCNNode) {
+    func reregister(_ nodes: [SCNNode]) {
         splatAndShell = []
         shellMaterials = []
-        register(node)
+        nodes.forEach(register)
     }
 
     /// Shows the setup (or turns the preview off with nil).

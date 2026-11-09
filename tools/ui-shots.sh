@@ -17,7 +17,7 @@ ios)
   [[ -z $SIM ]] && SIM=$(xcrun simctl create "RS iPhone 15 Pro" com.apple.CoreSimulator.SimDeviceType.iPhone-15-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-2)
   xcrun simctl boot $SIM 2>/dev/null || true
   DD=${DD:-/tmp/roomscape-sim}
-  (cd $REPO/CineX.swiftpm && xcodebuild -jobs 4 -scheme RoomScape -destination "id=$SIM" -configuration Debug -derivedDataPath $DD build 2>&1 | grep -E "error:|\*\* BUILD")
+  (cd $REPO/CineX.swiftpm && xcodebuild -jobs 4 -scheme RoomScape -destination "id=$SIM" -configuration Debug -derivedDataPath $DD build 2>&1 | grep -E "error:|\*\* BUILD") | tee /dev/stderr | grep -q "BUILD SUCCEEDED" || { echo "build failed: no shots (an old app would be shown)"; exit 1; }
   APP=$(ls -d $DD/Build/Products/Debug-iphonesimulator/*.app | head -1)
   BUNDLE=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" $APP/Info.plist)
   xcrun simctl uninstall $SIM $BUNDLE 2>/dev/null || true
@@ -31,7 +31,6 @@ ios)
   echo "iPhone simulator ($SIM), room $ROOM:"
   shot 1-home 4
   shot 2-viewer-photo 60 -importRmsc $ROOM  # the first open builds the photo room and splats
-  shot 3-viewer-splats 25 -openLatestScan -style splats
   shot 4-viewer-points 25 -openLatestScan -style points
   shot 5-viewer-mesh 25 -openLatestScan -style mesh
   shot 6-objects-selected 25 -openLatestScan -selectObject chest

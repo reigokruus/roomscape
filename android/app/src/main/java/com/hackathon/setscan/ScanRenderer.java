@@ -64,6 +64,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return false;
     }
     private final PhotoRoom photos = new PhotoRoom();
+    { photos.lightUniforms = this::setLightUniforms; }
     private final float[] prevPose = new float[16], curPose = new float[16];
     private boolean havePrevPose;
     private float frameMove = 1f, frameTurn = 90f;
@@ -561,7 +562,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread: switch the lighting preview on/off. On: a seated person and key + fill (from the shot plan if there is one). */
     String toggleLighting() {
         if (lighting.enabled) { lighting.enabled = false; return "Lighting"; }
-        if (surfCount == 0) { activity.updateStatus("The splats are still being built. Try again in a moment."); return "Lighting"; }
+        // Lit: the photo room (rk 9 Nov), or the splats when there's no photo room.
+        if (surfCount == 0 && !(photos.ready && meshTris > 0)) { activity.updateStatus("The room is still being built. Try again in a moment."); return "Lighting"; }
         synchronized (lighting) {
             float fy = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
             if (lighting.props.isEmpty()) {
@@ -5848,7 +5850,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             drawRoom(mvp, false);
         } else if (simple) {
             if (photos.ready) photos.draw(mvp, cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
-        } else if (style == 0 && photos.ready && meshTris > 0)
+        } else if ((style == 0 || lighting.enabled) && photos.ready && meshTris > 0)
             // The photo room already has its ceiling left out (see buildPhotos), like the iPhone's: no height cut, so
             // the tops of the walls stay. The Cut walls tool still cuts.
             photos.draw(mvp, cutaway && cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);

@@ -66,17 +66,26 @@ final class PhotoRoom {
                 "void main(){ vec3 c = texture2D(uTex, vUv).rgb; c = c * uGain / (1.0 + (uGain - 1.0) * c); gl_FragColor = vec4(c, 1.0); }");
         meshProg = ScanRenderer.program(
                 "uniform mat4 uMvp; attribute vec4 aPos; attribute vec2 aUv; attribute vec4 aColor;" +
-                "varying vec2 vUv; varying vec4 vColor; varying float vHide;" +
+                "varying vec2 vUv; varying vec4 vColor; varying float vHide; varying vec3 vP;" +
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
                 ScanRenderer.HIDE_DECL +
                 "void main(){ vHide = 0.0;" + ScanRenderer.HIDE_TEST.replace("HIDE", "vHide = 1.0;") +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
                 "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) vHide = 1.0; }" +
-                "  gl_Position = uMvp * aPos; vUv = aUv; vColor = aColor; }",
-                "precision mediump float; varying vec2 vUv; varying vec4 vColor; varying float vHide;" +
-                "uniform sampler2D uTex; uniform float uUseTex;" +
+                "  gl_Position = uMvp * aPos; vUv = aUv; vColor = aColor; vP = aPos.xyz; }",
+                // Lighting preview (rk 9 Nov: the photo surface is lit instead of the splats): same maths as the
+                // splats (ScanRenderer.LIGHT_GLSL), per pixel, with the face normal from screen derivatives
+                // (two-sided: the mesh's triangles aren't reliably wound towards the room). highp: positions in metres.
+                "#extension GL_OES_standard_derivatives : enable\n" +
+                "precision highp float; varying vec2 vUv; varying vec4 vColor; varying float vHide; varying vec3 vP;" +
+                "uniform sampler2D uTex; uniform float uUseTex;" + ScanRenderer.LIGHT_GLSL +
                 "void main(){ if (vHide > 0.5) discard;" +
-                "  gl_FragColor = uUseTex > 0.5 ? vec4(texture2D(uTex, vUv).rgb, 1.0) : vColor; }");
+                "  vec4 c = uUseTex > 0.5 ? vec4(texture2D(uTex, vUv).rgb, 1.0) : vColor;" +
+                "  if (uLit > 0.5) { vec3 n = normalize(cross(dFdx(vP), dFdy(vP))); vec3 lin = pow(c.rgb, vec3(2.2));" +
+                "    vec3 E = vec3(uRoom) + gear(vP, n, 1.0, 1.0);" +
+                "    if (dot(lin, vec3(0.3, 0.59, 0.11)) > 0.8) E = vec3(uRoom);" + // lamps and windows glow, aren't lit
+                "    c.rgb = tone(lin * E * uExpo); }" +
+                "  gl_FragColor = c; }");
     }
 
     void clear() {
@@ -437,6 +446,9 @@ final class PhotoRoom {
         return seen > 0 && hits * 2 >= seen;
     }
 
+    /** Sets the lighting preview's uniforms on a program (ScanRenderer.setLightUniforms); null: unlit. */
+    java.util.function.IntConsumer lightUniforms;
+
     void draw(float[] mvp, boolean cut, float[] center, float dirX, float dirZ, float cutD, float dir2X, float dir2Z, float cutD2, float floorY, float ceilY) {
         if (!ready) return;
         List<FloatBuffer> groupPos, groupUv; List<Integer> groupVerts; FloatBuffer plainPos; ByteBuffer plainCol; int plainVerts;
@@ -455,6 +467,7 @@ final class PhotoRoom {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uFloor"), floorY);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uCeil"), ceilY);
         ScanRenderer.setHideUniforms(meshProg);
+        if (lightUniforms != null) lightUniforms.accept(meshProg); else GLES20.glUniform1f(GLES20.glGetUniformLocation(meshProg, "uLit"), 0f);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(meshProg, "uTex"), 0);
         int uUse = GLES20.glGetUniformLocation(meshProg, "uUseTex");
         int aPos = GLES20.glGetAttribLocation(meshProg, "aPos");

@@ -239,12 +239,14 @@ extension DecalFinder {
             let n = d.normal.map { SIMD3<Float>($0[0], $0[1], $0[2]) } ?? simd_normalize(simd_cross(c[1] - c[0], c[3] - c[0]))
             let lifted = c.map { SCNVector3($0 + n * 0.004) }
             let uv = [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0), CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 1)]
-            let g = SCNGeometry(sources: [SCNGeometrySource(vertices: lifted), SCNGeometrySource(textureCoordinates: uv)],
+            let g = SCNGeometry(sources: [SCNGeometrySource(vertices: lifted), SCNGeometrySource(normals: Array(repeating: SCNVector3(n), count: 4)),
+                                          SCNGeometrySource(textureCoordinates: uv)],
                                 elements: [SCNGeometryElement(indices: [Int32(0), 1, 2, 0, 2, 3], primitiveType: .triangles)])
             let m = SCNMaterial()
             m.diffuse.contents = dir.appendingPathComponent(d.file)
             m.lightingModel = .constant
             m.isDoubleSided = true
+            LightingShader.makeLit(m)
             g.materials = [m]
             root.addChildNode(SCNNode(geometry: g))
         }

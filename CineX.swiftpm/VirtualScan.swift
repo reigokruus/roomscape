@@ -78,7 +78,7 @@ struct VirtualScanScreen: View {
         private var room: Float = 0
 
         func run(folder: URL, startAt: Double) async {
-            let frames: [RecordingProcessor.FrameRecord], depth: [RecordingProcessor.DepthFrame]
+            let frames: [RecordingProcessor.FrameRecord], depth: RecordingProcessor.DepthFrames
             do {
                 frames = try RecordingProcessor.readFrames(folder.appendingPathComponent("frames.bin"))
                 depth = try RecordingProcessor.readDepth(folder.appendingPathComponent("depth.bin"))

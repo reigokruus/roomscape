@@ -735,6 +735,8 @@ struct ResultView: View {
         claudeChecked = saved?.claudeChecked ?? false
         let lightingScene = LightingScene()
         lightingScene.register(splats)
+        // The photo room is what Lighting lights now (rk 9 Nov); the splats only when there's no photo room.
+        if let photoRoom { lightingScene.register(photoRoom) }
         scene.rootNode.addChildNode(lightingScene.root)
         self.lightingScene = lightingScene
         self.shell = shell
@@ -1035,7 +1037,7 @@ struct ResultView: View {
             if let splatGroup {
                 // The new splat nodes start in the mesh look.
                 SplatScene.setMeshLook(style != .photo, in: splatGroup)
-                lightingScene?.reregister(splatGroup)
+                lightingScene?.reregister([splatGroup] + (photoRoom.map { [$0] } ?? []))
             }
             if lighting != nil { refreshRoomLight() }
             if lightingOn { lightingScene?.apply(lighting) }
@@ -1057,7 +1059,7 @@ struct ResultView: View {
         if let splatGroup {
             // The new splat nodes start in the mesh look.
             SplatScene.setMeshLook(style != .photo, in: splatGroup)
-            lightingScene?.reregister(splatGroup)
+            lightingScene?.reregister([splatGroup] + (photoRoom.map { [$0] } ?? []))
         }
         if lightingOn { lightingScene?.apply(lighting) }
         claudeChecked = true
@@ -1105,11 +1107,15 @@ struct ResultView: View {
         sources += fittings.prefix(LightingSetup.maxRoomSources - sources.count)
         setup.roomSources = sources
         setup.power = objects.filter { $0.kind.isPower && !$0.removed }.map { PowerPoint(label: $0.label, position: $0.center) }
-        let step = max(1, surfels.count / 2000)
-        let samples = Swift.stride(from: 0, to: surfels.count, by: step).compactMap { i -> (p: SIMD3<Float>, n: SIMD3<Float>)? in
-            let s = surfels[i]
-            let n = SIMD3(s.nx, s.ny, s.nz)
-            return simd_length_squared(n) > 0.25 ? (SIMD3(s.x, s.y, s.z), n) : nil
+        // Calibrated on what's lit: the photo room's surface, else the splats.
+        var samples = photoRoom.map { PhotoRoom.samples($0, count: 2000) } ?? []
+        if samples.isEmpty {
+            let step = max(1, surfels.count / 2000)
+            samples = Swift.stride(from: 0, to: surfels.count, by: step).compactMap { i -> (p: SIMD3<Float>, n: SIMD3<Float>)? in
+                let s = surfels[i]
+                let n = SIMD3(s.nx, s.ny, s.nz)
+                return simd_length_squared(n) > 0.25 ? (SIMD3(s.x, s.y, s.z), n) : nil
+            }
         }
         setup.calibrate(samples)
         if setup != lighting { lighting = setup }
@@ -1140,7 +1146,8 @@ struct ResultView: View {
             lightingScene?.apply(nil)
             return
         }
-        if style == .model || style == .mesh || (style == .photo && photoRoom != nil) { style = .points }
+        // Lit: the photo room (rk 9 Nov), or the splats as points when the scan has no photo room.
+        if style == .model || style == .mesh { style = photoRoom != nil ? .photo : .points }
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.
