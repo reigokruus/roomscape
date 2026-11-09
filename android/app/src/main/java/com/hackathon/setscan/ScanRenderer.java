@@ -396,6 +396,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void buildPhotos() {
         final RoomModel roomNow = room; final boolean ready = roomReady;
         if (meshPosAll == null) { meshPosAll = tsdf.meshPos; meshColAll = tsdf.meshCol; meshVerts = tsdf.meshVerts; }
+        if (meshVerts == 0 || meshPosAll == null) { meshPosAll = null; return; } // no surface for this scan yet
         final FloatBuffer mp0 = meshPosAll; final ByteBuffer mc = meshColAll; final int mvAll = meshVerts;
         final File dirNow = currentDir;
         final boolean ownMesh = dirNow == null || !new File(dirNow, "rmsc-extra/mesh.ply").exists();

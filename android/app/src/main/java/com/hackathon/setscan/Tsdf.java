@@ -44,7 +44,9 @@ final class Tsdf {
         clear();
     }
 
-    void clear() { Arrays.fill(keys, Long.MIN_VALUE); n = 0; }
+    /** Empties the volume, and the last extracted mesh with it (rk 9 Nov: opening another scan built its photo room
+     *  from the previous scan's mesh, still held here, and saved that as its thumbnail). */
+    void clear() { Arrays.fill(keys, Long.MIN_VALUE); n = 0; meshVerts = 0; }
 
     int size() { return n; }
 
