@@ -7,7 +7,8 @@ import simd
 /// when the scan has points, or as RoomPlan's own 3D model. The splats show as a white mesh with a grid (Mesh) or in
 /// the scanned colours (Photo). Below it, a summary of what RoomPlan found.
 struct ResultView: View {
-    enum Style: Hashable { case mesh, photo, model }
+    /// The same set as the Android app, in the same order: Photo · Splats · Points · Mesh (and Model, RoomPlan's own).
+    enum Style: Hashable { case photo, splats, points, mesh, model }
 
     let scan: SavedScan
     /// Starts a second pass over this scan (Improve scan); only offered when the scan saved its world map.
@@ -27,6 +28,8 @@ struct ResultView: View {
     /// The scan's photos painted onto its fused mesh (`PhotoRoom`): what Photo shows when the scan has both; else the
     /// splats in their scanned colours.
     @State private var photoRoom: SCNNode?
+    /// Mesh: the fused surface, untextured, light grey with a faint wireframe.
+    @State private var meshNode: SCNNode?
     /// Power outlets in the room (from .rmsc: the Android app's Claude search), shown as labels in the 3D view.
     @State private var outlets: [RoomOutlet] = []
     /// The .rmsc being saved with Save to Files.
@@ -343,6 +346,11 @@ struct ResultView: View {
                 let photo = await Task.detached(priority: .userInitiated) {
                     PhotoRoom.build(scan) ?? GLBScene.node(forScan: scan.captureURL)
                 }.value
+                if let mesh = await Task.detached(priority: .utility) { BareMesh.node(scan) }.value {
+                    mesh.isHidden = style != .mesh
+                    scene.rootNode.addChildNode(mesh)
+                    meshNode = mesh
+                }
                 if let photo {
                     scene.rootNode.addChildNode(photo)
                     photoRoom = photo
@@ -562,8 +570,10 @@ struct ResultView: View {
     @ViewBuilder private var viewPickers: some View {
         if splatGroup != nil {
             Picker("Style", selection: $style) {
-                Text("Mesh").tag(Style.mesh)
                 Text("Photo").tag(Style.photo)
+                Text("Splats").tag(Style.splats)
+                Text("Points").tag(Style.points)
+                Text("Mesh").tag(Style.mesh)
                 if room != nil { Text("Model").tag(Style.model) } // RoomPlan's model: iPhone scans only
             }
             .pickerStyle(.segmented)
@@ -618,8 +628,11 @@ struct ResultView: View {
             }
         }
         // The photo room: leave out its triangles in the old spots (no custom shader: a failed one draws magenta).
-        if let photoRoom {
-            HoleFill.cutOut(photoRoom, objects: away.map { ($0.id, HoleFill.hideBox($0), $0.removed ? nil : $0.editTransform) })
+        let cuts = away.map { ($0.id, HoleFill.hideBox($0), $0.removed ? nil : $0.editTransform) }
+        if let photoRoom { HoleFill.cutOut(photoRoom, objects: cuts) }
+        if let meshNode {
+            HoleFill.cutOut(meshNode, objects: cuts)
+            BareMesh.refreshWire(meshNode)
         }
     }
 
@@ -844,10 +857,16 @@ struct ResultView: View {
     /// Shows the part of the scene for a style: RoomPlan's model, the photo room, or the splats (mesh look or colours).
     private func showStyle(_ style: Style) {
         let photos = style == .photo && photoRoom != nil
+        // Mesh: the bare fused surface; a scan without one shows the splats in grey instead (the old Mesh look).
+        let bareMesh = style == .mesh && meshNode != nil
         modelGroup?.isHidden = style != .model
         photoRoom?.isHidden = !photos
-        splatGroup?.isHidden = style == .model || photos
-        if let splatGroup { SplatScene.setMeshLook(style != .photo, in: splatGroup) }
+        meshNode?.isHidden = !bareMesh
+        splatGroup?.isHidden = style == .model || photos || bareMesh
+        if let splatGroup {
+            SplatScene.setMeshLook(style == .mesh, in: splatGroup)
+            SplatScene.setPointLook(style == .points, in: splatGroup)
+        }
     }
 
     private func toggleObjects() {
@@ -855,7 +874,7 @@ struct ResultView: View {
         objectsScene?.boxes.isHidden = !objectsOn
         if objectsOn {
             // The outlines show in every style but RoomPlan's own model (moving and removing moves the splats).
-            if style == .model { style = .mesh }
+            if style == .model { style = .splats }
             if lightingOn { toggleLighting() }
         } else {
             selectedObject = nil
@@ -1006,7 +1025,7 @@ struct ResultView: View {
             lightingScene?.apply(nil)
             return
         }
-        if style == .model || (style == .photo && photoRoom != nil) { style = .mesh }
+        if style == .model || style == .mesh || (style == .photo && photoRoom != nil) { style = .splats }
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.
@@ -1919,5 +1938,55 @@ struct HoldButton: View {
                 .onChanged { _ in if !held { held = true; onHold(true) } }
                 .onEnded { _ in held = false; onHold(false) })
             .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// The Mesh view: the scan's fused surface (mesh.bin), untextured, light grey with simple lighting and a faint
+/// wireframe like the scan screen; the ceiling left out as in Photo.
+enum BareMesh {
+    static func node(_ scan: SavedScan) -> SCNNode? {
+        guard let mesh = ScanMesh.read(from: scan.captureURL.appendingPathComponent(ScanMesh.fileName)), !mesh.triangles.isEmpty else { return nil }
+        let ceiling = PhotoLayout.ceilingTriangles(mesh)
+        var indices: [Int32] = []
+        indices.reserveCapacity(mesh.triangles.count)
+        for t in 0..<(mesh.triangles.count / 3) where !(t < ceiling.count && ceiling[t]) {
+            indices += [Int32(mesh.triangles[t * 3]), Int32(mesh.triangles[t * 3 + 1]), Int32(mesh.triangles[t * 3 + 2])]
+        }
+        // Per-corner normals, so the grey is shaded.
+        var normals = [SIMD3<Float>](repeating: .zero, count: mesh.positions.count)
+        for t in stride(from: 0, to: indices.count, by: 3) {
+            let a = Int(indices[t]), b = Int(indices[t + 1]), c = Int(indices[t + 2])
+            let n = simd_cross(mesh.positions[b] - mesh.positions[a], mesh.positions[c] - mesh.positions[a])
+            normals[a] += n; normals[b] += n; normals[c] += n
+        }
+        let geometry = SCNGeometry(sources: [SCNGeometrySource(vertices: mesh.positions.map { SCNVector3($0) }),
+                                             SCNGeometrySource(normals: normals.map { SCNVector3(simd_length($0) > 0 ? simd_normalize($0) : SIMD3(0, 1, 0)) })],
+                                   elements: [SCNGeometryElement(indices: indices, primitiveType: .triangles)])
+        let m = SCNMaterial()
+        m.diffuse.contents = UIColor(white: 0.78, alpha: 1)
+        m.lightingModel = .lambert
+        m.isDoubleSided = true
+        geometry.materials = [m]
+        let node = SCNNode(geometry: geometry)
+        node.name = "bareMesh"
+        let wire = SCNNode()
+        wire.name = "bareMeshWire"
+        node.addChildNode(wire)
+        refreshWire(node)
+        return node
+    }
+
+    /// The wireframe follows the surface (also after removed objects were cut out of it).
+    static func refreshWire(_ node: SCNNode) {
+        guard let surface = node.geometry, let wire = node.childNode(withName: "bareMeshWire", recursively: false) else { return }
+        let g = SCNGeometry(sources: surface.sources, elements: surface.elements)
+        let m = SCNMaterial()
+        m.diffuse.contents = UIColor(white: 1, alpha: 0.22)
+        m.lightingModel = .constant
+        m.fillMode = .lines
+        m.isDoubleSided = true
+        m.writesToDepthBuffer = false
+        g.materials = [m]
+        wire.geometry = g
     }
 }

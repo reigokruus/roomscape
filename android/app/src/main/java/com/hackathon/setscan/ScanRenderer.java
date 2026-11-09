@@ -5087,7 +5087,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private volatile int style = 1; // 0 = photo surface, 1 = splats (surfels), 2 = dots
 
     String cycleStyle() {
-        style = (style + 1) % 3;
+        style = (style + 1) % 4;
         splats = style != 2;
         return styleLabel();
     }
@@ -5196,10 +5196,82 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return String.format(java.util.Locale.US, "%.1f × %.1f m, %.1f m high", Math.max(w, d), Math.min(w, d), h);
     }
 
-    void setStyle(int s) { style = Math.max(0, Math.min(2, s)); }
+    void setStyle(int s) { style = Math.max(0, Math.min(3, s)); }
     int style() { return style; }
 
-    String styleLabel() { return style == 0 ? "Style: photo" : style == 1 ? "Style: splats" : "Style: dots"; }
+    String styleLabel() { return style == 0 ? "Style: photo" : style == 1 ? "Style: splats" : style == 2 ? "Style: dots" : "Style: mesh"; }
+
+    // ---- Mesh style: the fused surface, untextured, light grey with simple lighting and a faint wireframe ----
+    private FloatBuffer bareMeshSource; private int bareMeshVerts, bareMeshProg, bareLineProg;
+    private FloatBuffer bareTri, bareLines; private ByteBuffer bareShade; private int bareTriVerts, bareLineVerts;
+
+    private void drawBareMesh(float[] m) {
+        FloatBuffer mp = meshPosAll != null ? meshPosAll : tsdf.meshPos;
+        int verts = meshPosAll != null ? meshVerts : tsdf.meshVerts;
+        if (mp == null || verts < 3) return;
+        if (mp != bareMeshSource || verts != bareMeshVerts) {
+            // Built once per surface: the ceiling left out (as in Photo), a grey shade per corner from its face's
+            // direction, and the three edges of each triangle for the wireframe.
+            bareMeshSource = mp; bareMeshVerts = verts;
+            int tris = verts / 3;
+            boolean[] ceil = ceilingTriangles(mp, tris);
+            int keep = 0; for (boolean c : ceil) if (!c) keep++;
+            bareTri = ByteBuffer.allocateDirect(Math.max(1, keep * 9) * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            bareShade = ByteBuffer.allocateDirect(Math.max(1, keep * 3)).order(ByteOrder.nativeOrder());
+            bareLines = ByteBuffer.allocateDirect(Math.max(1, keep * 18) * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            for (int t = 0; t < tris; t++) {
+                if (ceil[t]) continue;
+                int b = t * 9;
+                float[] v = new float[9];
+                for (int i = 0; i < 9; i++) v[i] = mp.get(b + i);
+                float ux = v[3] - v[0], uy = v[4] - v[1], uz = v[5] - v[2], wx = v[6] - v[0], wy = v[7] - v[1], wz = v[8] - v[2];
+                float nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+                float l = (float) Math.sqrt(nx * nx + ny * ny + nz * nz) + 1e-9f;
+                float lit = 0.55f + 0.4f * Math.abs((nx * 0.35f + ny * 0.85f + nz * 0.4f) / l);
+                byte g = (byte) Math.min(255, Math.round(205 * lit));
+                bareTri.put(v);
+                bareShade.put(g).put(g).put(g);
+                bareLines.put(v, 0, 3).put(v, 3, 3).put(v, 3, 3).put(v, 6, 3).put(v, 6, 3).put(v, 0, 3);
+            }
+            bareTri.position(0); bareShade.position(0); bareLines.position(0);
+            bareTriVerts = keep * 3; bareLineVerts = keep * 6;
+        }
+        if (bareMeshProg == 0) {
+            String hide = HIDE_DECL + "void main(){ float hh = 0.0;" + HIDE_TEST.replace("HIDE", "hh = 1.0;");
+            bareMeshProg = program("uniform mat4 uMvp; attribute vec3 aPos; attribute float aShade; varying float vShade;" + hide
+                    + " gl_Position = hh > 0.5 ? vec4(2.0, 2.0, 2.0, 1.0) : uMvp * vec4(aPos, 1.0); vShade = aShade; }",
+                    "precision mediump float; varying float vShade; void main(){ gl_FragColor = vec4(vec3(vShade), 1.0); }");
+            bareLineProg = program("uniform mat4 uMvp; attribute vec3 aPos;" + hide
+                    + " gl_Position = hh > 0.5 ? vec4(2.0, 2.0, 2.0, 1.0) : uMvp * vec4(aPos, 1.0); }",
+                    "precision mediump float; void main(){ gl_FragColor = vec4(1.0, 1.0, 1.0, 0.22); }");
+        }
+        GLES20.glUseProgram(bareMeshProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(bareMeshProg, "uMvp"), 1, false, m, 0);
+        setHideUniforms(bareMeshProg); // removed and moved objects leave their spot, as in the other views
+        int aPos = GLES20.glGetAttribLocation(bareMeshProg, "aPos"), aShade = GLES20.glGetAttribLocation(bareMeshProg, "aShade");
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, bareTri);
+        GLES20.glVertexAttribPointer(aShade, 1, GLES20.GL_UNSIGNED_BYTE, true, 3, bareShade);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aShade);
+        GLES20.glEnable(GLES20.GL_POLYGON_OFFSET_FILL);
+        GLES20.glPolygonOffset(1f, 1f);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, bareTriVerts);
+        GLES20.glDisable(GLES20.GL_POLYGON_OFFSET_FILL);
+        GLES20.glDisableVertexAttribArray(aShade);
+        GLES20.glUseProgram(bareLineProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(bareLineProg, "uMvp"), 1, false, m, 0);
+        setHideUniforms(bareLineProg);
+        int lp = GLES20.glGetAttribLocation(bareLineProg, "aPos");
+        GLES20.glVertexAttribPointer(lp, 3, GLES20.GL_FLOAT, false, 0, bareLines);
+        GLES20.glEnableVertexAttribArray(lp);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        GLES20.glLineWidth(1f);
+        GLES20.glDrawArrays(GLES20.GL_LINES, 0, bareLineVerts);
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDisableVertexAttribArray(lp);
+    }
 
     private void drawPoints(float[] m, float sizeScale) {
         if (count == 0) return;
@@ -5561,6 +5633,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // The photo room already has its ceiling left out (see buildPhotos), like the iPhone's: no height cut, so
             // the tops of the walls stay. The Cut walls tool still cuts.
             photos.draw(mvp, cutaway && cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
+        else if (style == 3 && !lighting.enabled && meshTris > 0) drawBareMesh(mvp);
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         // A thumbnail frame shows just the room: no labels, markers or props.

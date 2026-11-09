@@ -197,6 +197,7 @@ enum SplatScene {
         m.blendMode = .replace
         m.shaderModifiers = [.geometry: geometryModifier, .surface: gridSurface, .fragment: discFragment]
         m.setValue(NSNumber(value: scale), forKey: "splatScale")
+        m.setValue(NSNumber(value: scale), forKey: "splatScale0")
         m.setValue(NSNumber(value: 1), forKey: "clay")
         LightingShader.apply(nil, to: m)
         return m
@@ -205,6 +206,16 @@ enum SplatScene {
     /// Switches every splat material and the shell's walls and floor under `node` between the mesh look (white
     /// clay with a grid) and the scanned colours. New splat nodes start in the mesh look. Doors and windows keep
     /// their colours in both.
+    /// Points: the splats shrunk to small dots (a quarter of their size), so moved and removed objects still work.
+    static func setPointLook(_ on: Bool, in node: SCNNode) {
+        node.enumerateHierarchy { n, _ in
+            for m in n.geometry?.materials ?? [] where m.shaderModifiers?[.geometry]?.contains("splatScale") == true {
+                let base = (m.value(forKey: "splatScale0") as? NSNumber)?.floatValue ?? 1
+                m.setValue(NSNumber(value: on ? base * 0.25 : base), forKey: "splatScale")
+            }
+        }
+    }
+
     static func setMeshLook(_ on: Bool, in node: SCNNode) {
         let value = NSNumber(value: on ? 1 : 0)
         node.enumerateHierarchy { n, _ in

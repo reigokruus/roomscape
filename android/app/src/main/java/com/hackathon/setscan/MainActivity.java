@@ -829,7 +829,7 @@ public class MainActivity extends Activity {
     private TextView viewerTitle;
     private android.widget.ImageView viewerShared;
     private final java.util.List<Button> menuActions = new java.util.ArrayList<>();
-    private final TextView[] styleTabs = new TextView[3];
+    private final TextView[] styleTabs = new TextView[4];
 
     private void buildViewerChrome(FrameLayout chrome) {
         // Top bar: ‹ Back, the scan's name, ✦ (more actions), Share.
@@ -873,8 +873,8 @@ public class MainActivity extends Activity {
         android.graphics.drawable.GradientDrawable sbg = new android.graphics.drawable.GradientDrawable();
         sbg.setColor(0xE61C1C1E); sbg.setCornerRadius(dp(9));
         styleSwitch.setBackground(sbg);
-        String[] names = {"Photo", "Splats", "Points"};
-        for (int i = 0; i < 3; i++) {
+        String[] names = {"Photo", "Splats", "Points", "Mesh"};
+        for (int i = 0; i < names.length; i++) {
             final int s = i;
             TextView t = new TextView(this);
             t.setText(names[i]);
@@ -1169,7 +1169,7 @@ public class MainActivity extends Activity {
 
     private void updateStyleSwitch() {
         int s = renderer.style();
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < styleTabs.length; i++) {
             android.graphics.drawable.GradientDrawable on = new android.graphics.drawable.GradientDrawable();
             on.setColor(0xFF636366); on.setCornerRadius(dp(7));
             styleTabs[i].setBackground(i == s ? on : null);
