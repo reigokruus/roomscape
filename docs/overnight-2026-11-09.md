@@ -50,3 +50,24 @@ flat fine areas collapse, and zone placement that follows thin things (not only 
 ## S24 room size (fixed, b7d0e68)
 - Viewer size now from the room model (5.4 × 3.8 m for 22:37, was the points' bounding box 6.8 × 5.6 m, 3.6 m);
   height "not scanned" when fewer than 20 columns reach 1.8 m above the floor.
+
+## What a scan keeps (audit, 3-minute scans 22:39 iPhone / 22:37 S24)
+| iPhone file | MB | used by | proposal |
+|---|---|---|---|
+| recording/ (video 131, depth 69, frames 0.2) | 200 (~67/min) | rebuild after Done, recovery, text patches | keep |
+| photos/ + keyframes.json | 16 | Photo view, objects, sharing | keep |
+| before-rebuild/ (photos 16, points 6, surfels 6, mesh 1) | 29 | backup of the live result when "Build scans from the recording" is on | keep for now (data is gold); offer "delete backups older than N days" |
+| surfels.bin | 8 | splat cache (Splats view, Lighting) | drop once Lighting is off splats (and its copy in before-rebuild) |
+| points.bin | 7 | Points view, objects, Continue scan | keep |
+| worldmap.arexperience | 11 | Continue scan / Scan area again | keep |
+| mesh.bin | 1.6 | Photo + Mesh views | keep |
+| perf logs | 0.1 | analysis | keep |
+Live per frame: per-point normals (LiveCloud.normalBuffer, 4.8 MB) only for the pre-mesh dots → can go.
+
+| S24 file | MB | used by | proposal |
+|---|---|---|---|
+| recording.mp4 | 193 (~64/min) | nothing yet (no S24 rebuild) | keep for a future rebuild, or offer to delete after N days |
+| kf/ + kf.bin | 5 | photos + their depth/poses | keep |
+| points.bin | 6 | Points view, room analysis | keep |
+| surface.ply | 2.7 | Photo/Mesh views | keep |
+Splat building after Done (3–7 s) → goes with the Lighting port.
