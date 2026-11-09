@@ -5,6 +5,8 @@ struct CineXApp: App {
     init() {
         // Processing after the scan: the background-resume handler must be registered before launch finishes.
         ProcessingQueue.registerBackgroundTasks()
+        // A scan killed mid-way (no scan is running at launch): keep its recording safe from temporary-file clean-up.
+        RawRecorder.keepInterrupted()
     }
 
     var body: some Scene {

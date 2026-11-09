@@ -127,6 +127,14 @@ final class Tsdf {
         SIMD3<Int32>((p / vs).rounded(.down))
     }
 
+    /// Sets one voxel (TsdfGPU copies its result in here for the mesh extraction).
+    func set(_ v: SIMD3<Int32>, sdf value: Float, weight: Int16) {
+        let i = indexOrCreate(v)
+        guard i >= 0 else { return }
+        sdf[i] = value
+        w[i] = weight
+    }
+
     // MARK: Fusion
 
     /// One depth sample: camera at `o`, surface point `p`. Updates the voxels along the ray within the band.

@@ -108,6 +108,28 @@ final class RawRecorder: @unchecked Sendable {
         }
     }
 
+    /// At launch: recordings left in the temporary folder by a scan that never finished (the app was killed) move to
+    /// Documents/interrupted/, where the system doesn't clear them, to be rebuilt (harness `recover`, or later in the
+    /// app). Returns how many.
+    @discardableResult
+    static func keepInterrupted() -> Int {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+        let target = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("interrupted")
+        var kept = 0
+        for url in (try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? [] where url.lastPathComponent.hasPrefix("recording-") {
+            guard fm.fileExists(atPath: url.appendingPathComponent("frames.bin").path) else { continue }
+            try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+            if (try? fm.moveItem(at: url, to: target.appendingPathComponent(url.lastPathComponent))) != nil { kept += 1 }
+        }
+        // Its hardware log too.
+        for url in (try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? [] where url.lastPathComponent.hasPrefix("perf-scan-") {
+            try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+            try? fm.moveItem(at: url, to: target.appendingPathComponent(url.lastPathComponent))
+        }
+        return kept
+    }
+
     /// Moves a finished recording into a scan's capture folder, as `recording`. Never replaces one that's there
     /// (Continue scan keeps the scan's first recording): then it goes next to it as `recording-continue[-n]`.
     /// True if it became the scan's `recording` (the one processing reads).
@@ -129,6 +151,9 @@ final class RawRecorder: @unchecked Sendable {
 
     private func startVideo(width: Int, height: Int, at time: TimeInterval) {
         guard let w = try? AVAssetWriter(outputURL: folder.appendingPathComponent("video.mov"), fileType: .mov) else { failed = true; return }
+        // Crash-safe (rk 9 Nov: a scan killed mid-way left a video without its index): a movie fragment every 5 s, so a
+        // killed app loses at most the last few seconds of video.
+        w.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
         let settings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
                                        AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 6_000_000]]
         let i = AVAssetWriterInput(mediaType: .video, outputSettings: settings)

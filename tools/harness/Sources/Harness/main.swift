@@ -51,6 +51,12 @@ case "debugtrack":
     }
 case "compare":
     try Replay.compare(URL(fileURLWithPath: args[1]), out: out)
+case "gpubench":
+    try GPUBench.run(URL(fileURLWithPath: args[1]))
+case "recover":
+    let sem = DispatchSemaphore(value: 0)
+    Task { do { try await Recover.run(URL(fileURLWithPath: args[1]), to: URL(fileURLWithPath: args[2]), name: args.count > 3 ? args[3] : "Recovered scan") } catch { print("recover failed: \(error)") }; sem.signal() }
+    sem.wait()
 case "decals":
     let sem = DispatchSemaphore(value: 0)
     Task { do { try await Decals.run(URL(fileURLWithPath: args[1]), out: out) } catch { print("decals failed: \(error)") }; sem.signal() }
