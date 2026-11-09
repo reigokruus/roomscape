@@ -582,6 +582,20 @@ public class MainActivity extends Activity {
             cp.bottomMargin = dp(12);
             viewerBottom.addView(panel, 0, cp);
         }
+        // While Objects or Lighting is open, the panel shows only its bar (and Enter the room), as on the iPhone: the
+        // rest (Continue scan, ROOM, CAPTURE) is hidden and comes back as it was when the bar closes.
+        viewerBottom.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            boolean on = objPanel.getVisibility() == View.VISIBLE || lightPanel.getVisibility() == View.VISIBLE;
+            for (int i = 0; i < viewerBottom.getChildCount(); i++) {
+                View c = viewerBottom.getChildAt(i);
+                if (c == objPanel || c == lightPanel || c == enterRoomButton) continue;
+                if (on) {
+                    if (c.getVisibility() != View.GONE) { panelHidden.put(c, c.getVisibility()); c.setVisibility(View.GONE); }
+                } else if (panelHidden.containsKey(c)) {
+                    c.setVisibility(panelHidden.remove(c));
+                }
+            }
+        });
         // The 3D view ends where the panel starts, also when a bar appears in it or goes.
         viewerPanel.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             if (b - t == ob - ot) return;
@@ -905,6 +919,7 @@ public class MainActivity extends Activity {
         viewerBottom.setPadding(dp(16), dp(10), dp(16), dp(18));
         viewerBottom.setBackgroundColor(0xE6000000);
         Button enter = new Button(this);
+        enterRoomButton = enter;
         enter.setText("🚶  Enter the room");
         Ios.filled(enter);
         enter.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
@@ -1648,6 +1663,8 @@ public class MainActivity extends Activity {
     /** Object mode touches: a finger on the selected object drags it; a tap selects; everything else orbits as usual. */
     /** Two fingers on a selected object: 0 deciding, 1 turning it, 2 the camera's (pan / pinch). */
     private int twistMode;
+    private Button enterRoomButton;
+    private final java.util.HashMap<View, Integer> panelHidden = new java.util.HashMap<>();
     private Button objUndoBtn;
     private float twistX0, twistY0, twistSpread0, twistLastX;
 
