@@ -94,6 +94,38 @@ final class RoomModel {
     float floorCoverage;
     String summary = "";
 
+    /**
+     * The top of the room from the points: for each 20 cm column with its own floor (its lowest points within 30 cm of
+     * floorY) the height its points reach (98th percentile, so specks don't count) above that floor; then the 90th
+     * percentile over the columns, so a small patch of phantom or drifted surface (reflections, a window, depth from
+     * motion on a slope) can't make the room taller. NaN with fewer than 20 such columns.
+     */
+    static float columnTop(FloatBuffer pos, int count, float floorY) {
+        int step = Math.max(1, count / 300000);
+        java.util.HashMap<Long, float[]> cols = new java.util.HashMap<>(); // {n, then ys...}
+        for (int i = 0; i < count; i += step) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            long key = (((long) Math.floor(x / 0.2f)) << 32) ^ (((long) Math.floor(z / 0.2f)) & 0xFFFFFFFFL);
+            float[] c = cols.get(key);
+            if (c == null) { c = new float[33]; cols.put(key, c); }
+            int n = (int) c[0];
+            if (n + 1 >= c.length) { c = java.util.Arrays.copyOf(c, c.length * 2); cols.put(key, c); }
+            c[n + 1] = y; c[0] = n + 1;
+        }
+        float[] hs = new float[cols.size()];
+        int m = 0;
+        for (float[] c : cols.values()) {
+            int n = (int) c[0];
+            if (n < 30) continue;
+            java.util.Arrays.sort(c, 1, n + 1);
+            float bottom = c[1 + (int) (n * 0.02f)], top = c[1 + Math.min(n - 1, (int) (n * 0.98f))];
+            if (Math.abs(bottom - floorY) < 0.3f) hs[m++] = top - bottom;
+        }
+        if (m < 20) return Float.NaN;
+        java.util.Arrays.sort(hs, 0, m);
+        return floorY + hs[(int) (m * 0.9f)];
+    }
+
     ShotPlanner grid; // the floor grid this model was built from
     float[] bounds;   // layout rectangle in layout axes {uMin, uMax, vMin, vMax}, or null
 
@@ -137,6 +169,11 @@ final class RoomModel {
             for (int i = 0; i < count; i += step) ys[m++] = pos.get(i * 3 + 1);
             java.util.Arrays.sort(ys, 0, m);
             maxY = ys[Math.min(m - 1, (int) (m * 0.995f))];
+            // Better: per 20 cm column, how high the scan goes above that column's own floor; the room's height is
+            // the 90th percentile of those (rk 9 Nov: a room 2.9 m at its highest came out 3.16 m, from one sloped
+            // band the S24's depth-from-motion put 0.3-0.45 m too high; this gives 2.84 m on that scan).
+            float top = columnTop(pos, count, floorY);
+            if (!Float.isNaN(top)) maxY = top;
         }
         hasCeiling = false;
         ceilingY = maxY;
