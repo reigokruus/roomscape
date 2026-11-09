@@ -136,7 +136,7 @@ final class OverviewWindowRenderer {
 
     /// The window: the corners of what the normal scan screen shows, at `windowDistance`, textured with the frame.
     func encode(_ encoder: MTLRenderCommandEncoder, frame: ARFrame, viewSize: CGSize, realView: simd_float4x4,
-                realProjection: simd_float4x4, viewProjection: simd_float4x4, alpha: Float) {
+                realProjection: simd_float4x4, viewProjection: simd_float4x4, alpha: Float, image: Bool = true) {
         guard alpha > 0.01, let cache = textureCache,
               let y = texture(frame.capturedImage, plane: 0, format: .r8Unorm, cache: cache),
               let cbcr = texture(frame.capturedImage, plane: 1, format: .rg8Unorm, cache: cache) else { return }
@@ -162,6 +162,7 @@ final class OverviewWindowRenderer {
         var quad = [Vertex(position: corner(-1, 1), uv: uv(0, 0)), Vertex(position: corner(1, 1), uv: uv(1, 0)),
                     Vertex(position: corner(-1, -1), uv: uv(0, 1)), Vertex(position: corner(1, -1), uv: uv(1, 1))]
         var a = alpha * ScanOverview.windowOpacity
+        if image {
         encoder.setDepthStencilState(behindNearer)
         encoder.setRenderPipelineState(quadPipeline)
         encoder.setVertexBytes(&quad, length: MemoryLayout<Vertex>.stride * quad.count, index: 0)
@@ -169,6 +170,7 @@ final class OverviewWindowRenderer {
         encoder.setFragmentTexture(CVMetalTextureGetTexture(cbcr), index: 1)
         encoder.setFragmentBytes(&a, length: 4, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
         // A thin white frame around it.
         var outline = [quad[0], quad[1], quad[1], quad[3], quad[3], quad[2], quad[2], quad[0]]
         a = alpha
@@ -177,6 +179,29 @@ final class OverviewWindowRenderer {
         encoder.setVertexBytes(&outline, length: MemoryLayout<Vertex>.stride * outline.count, index: 0)
         encoder.setFragmentBytes(&a, length: 4, index: 0)
         encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: outline.count)
+    }
+
+    /// The frame's camera picture (Y and CbCr) and depth as textures, for projecting onto the live mesh
+    /// (LiveMeshRenderer.LiveCamera). Keep the returned CVMetalTextures alive until the GPU is done with them.
+    func liveCamera(_ frame: ARFrame) -> (camera: LiveMeshRenderer.LiveCamera, hold: [CVMetalTexture])? {
+        guard let cache = textureCache,
+              let y = texture(frame.capturedImage, plane: 0, format: .r8Unorm, cache: cache),
+              let cbcr = texture(frame.capturedImage, plane: 1, format: .rg8Unorm, cache: cache),
+              let yt = CVMetalTextureGetTexture(y), let ct = CVMetalTextureGetTexture(cbcr) else { return nil }
+        var hold = [y, cbcr]
+        var depthTexture: MTLTexture?
+        if let depth = frame.sceneDepth?.depthMap {
+            var out: CVMetalTexture?
+            CVMetalTextureCacheCreateTextureFromImage(nil, cache, depth, nil, .r32Float, CVPixelBufferGetWidth(depth),
+                                                      CVPixelBufferGetHeight(depth), 0, &out)
+            if let out { hold.append(out); depthTexture = CVMetalTextureGetTexture(out) }
+        }
+        let k = frame.camera.intrinsics, res = frame.camera.imageResolution
+        let pose = frame.camera.transform
+        let photo = PhotoLayout.Photo(file: "", view: pose.inverse, position: SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z),
+                                      fx: k[0][0], fy: k[1][1], cx: k[2][0], cy: k[2][1],
+                                      width: Float(res.width), height: Float(res.height))
+        return (LiveMeshRenderer.LiveCamera(y: yt, cbcr: ct, depth: depthTexture, projection: LivePhotoStore.projection(photo)), hold)
     }
 
     private func texture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat, cache: CVMetalTextureCache) -> CVMetalTexture? {

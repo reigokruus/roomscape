@@ -434,13 +434,24 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             lastViewProjection = projection * viewMatrix
             // The live LiDAR mesh once ARKit has one; until then (or without it) the discs.
             // Continue scan never shows the discs: they'd cover the saved (blue) areas again.
-            if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix) != true, count > 0, !ghost.isActive {
+            // In the wide overview the camera picture is projected onto the mesh from the phone's own position, so it
+            // lines up with the scan from any viewpoint (rk 9 Nov: the flat picture showed things twice).
+            var live: LiveMeshRenderer.LiveCamera?
+            if overviewView != nil, overview.blend > 0.5, let frame = session?.currentFrame, let got = window?.liveCamera(frame) {
+                live = got.camera
+                let hold = got.hold
+                commands.addCompletedHandler { _ in _ = hold }
+            }
+            if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix, live: live) != true, count > 0, !ghost.isActive {
                 drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection)
             }
             ghostRenderer?.encode(encoder, viewProjection: projection * viewMatrix)
             if overviewView != nil, let frame = session?.currentFrame {
+                // Only the outline of what the phone sees now; the picture itself is on the mesh (above) once the
+                // overview is mostly in.
                 window?.encode(encoder, frame: frame, viewSize: view.bounds.size, realView: realView,
-                               realProjection: realProjection, viewProjection: projection * viewMatrix, alpha: overview.blend)
+                               realProjection: realProjection, viewProjection: projection * viewMatrix, alpha: overview.blend,
+                               image: live == nil)
             }
         }
         encoder.endEncoding()

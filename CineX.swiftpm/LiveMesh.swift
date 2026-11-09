@@ -35,14 +35,16 @@ final class LiveMesh: @unchecked Sendable {
     /// Share of confirmed surface already filled with its photo: ahead of the phone, and in the whole room.
     var filledShare: (inView: Float, room: Float) { filled.withLock { $0 } }
     private var cameraPose = matrix_identity_float4x4
+    private var edgeSeen = Set<UInt64>()
 
     /// 4 cm voxels, a ±8 cm band, free space erased up to 1.5 m in front of a surface. 700k voxels (~25 MB) hold about
     /// 170 m² of surface, a large room; past that new areas stop being added.
     let tsdf = Tsdf(capacity: 700_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
     /// Surface counts as solid at this many samples on its least-seen corner (about 5 depth frames at room distance).
     static let solidWeight: Float = 20
-    /// Only the surface this close to the phone is meshed, metres.
-    static let radius: Float = 3.5
+    /// Only the surface this close to the phone is meshed, metres. Was 3.5 (rk 9 Nov: stepping back made the far
+    /// parts vanish); the whole of a normal room now stays on screen.
+    static let radius: Float = 8
 
     private let device: MTLDevice
     private let published = OSAllocatedUnfairLock<Buffers?>(initialState: nil)
@@ -124,9 +126,6 @@ final class LiveMesh: @unchecked Sendable {
             v[i] = Vertex(x: p.x, y: p.y, z: p.z, confidence: scratch.confidence[i])
         }
         scratch.triangles.withUnsafeBytes { triangles.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
-        if !scratch.edges.isEmpty {
-            scratch.edges.withUnsafeBytes { edges.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
-        }
         let slotPointer = slots.contents().bindMemory(to: Int32.self, capacity: max(scratch.triangles.count / 3, 1))
         if let photos {
             assigner.assign(positions: scratch.positions, confidence: scratch.confidence, triangles: scratch.triangles,
@@ -135,8 +134,24 @@ final class LiveMesh: @unchecked Sendable {
         } else {
             for t in 0..<(scratch.triangles.count / 3) { slotPointer[t] = -1 }
         }
+        // The wireframe only on triangles not filled with their photo (the photo reads cleanly).
+        var edgeList = scratch.edges
+        if photos != nil {
+            edgeList.removeAll(keepingCapacity: true)
+            edgeSeen.removeAll(keepingCapacity: true)
+            for t in 0..<(scratch.triangles.count / 3) where slotPointer[t] < 0 {
+                for e in 0..<3 {
+                    let a = scratch.triangles[t * 3 + e], b = scratch.triangles[t * 3 + (e + 1) % 3]
+                    let key = UInt64(min(a, b)) << 32 | UInt64(max(a, b))
+                    if edgeSeen.insert(key).inserted { edgeList.append(a); edgeList.append(b) }
+                }
+            }
+        }
+        if !edgeList.isEmpty {
+            edgeList.withUnsafeBytes { edges.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        }
         let result = Buffers(vertices: vertices, triangles: triangles, triangleIndexCount: scratch.triangles.count,
-                             edges: edges, edgeIndexCount: scratch.edges.count, photoSlots: slots)
+                             edges: edges, edgeIndexCount: edgeList.count, photoSlots: slots)
         published.withLock { $0 = result }
     }
 }
@@ -219,8 +234,20 @@ final class LiveMeshRenderer {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
+    /// The phone's camera picture right now, projected onto the mesh from where the phone is (the wide overview: each
+    /// camera pixel lands on its own surface from any viewpoint, instead of a flat picture that doesn't line up).
+    struct LiveCamera {
+        var y: MTLTexture, cbcr: MTLTexture
+        /// Depth at the same view (metres), so surface hidden from the phone isn't painted with the camera picture.
+        var depth: MTLTexture?
+        /// World → (u·d, v·d, d), u and v 0…1 across the camera image (LivePhotoStore.projection).
+        var projection: simd_float4x4
+    }
+
+    private struct LiveUniform { var projection: simd_float4x4; var on: Float; var hasDepth: Float }
+
     /// Draws the mesh if there is one yet; false if there's nothing to draw.
-    func encode(_ encoder: MTLRenderCommandEncoder, viewProjection: simd_float4x4) -> Bool {
+    func encode(_ encoder: MTLRenderCommandEncoder, viewProjection: simd_float4x4, live: LiveCamera? = nil) -> Bool {
         guard let buffers = mesh.buffers else { return false }
         var uniforms = Uniforms(viewProjection: viewProjection)
         encoder.setCullMode(.none)
@@ -230,6 +257,14 @@ final class LiveMeshRenderer {
         encoder.setFragmentBuffer(buffers.photoSlots, offset: 0, index: 1)
         var colours = Colours()
         encoder.setFragmentBytes(&colours, length: MemoryLayout<Colours>.stride, index: 3)
+        var liveUniform = LiveUniform(projection: live?.projection ?? matrix_identity_float4x4, on: live == nil ? 0 : 1,
+                                      hasDepth: live?.depth == nil ? 0 : 1)
+        encoder.setFragmentBytes(&liveUniform, length: MemoryLayout<LiveUniform>.stride, index: 4)
+        if let live {
+            encoder.setFragmentTexture(live.y, index: 1)
+            encoder.setFragmentTexture(live.cbcr, index: 2)
+            encoder.setFragmentTexture(live.depth ?? live.y, index: 3)
+        }
         if let photos = mesh.photos {
             encoder.setFragmentBuffer(photos.projections, offset: 0, index: 2)
             encoder.setFragmentTexture(photos.texture, index: 0)
@@ -262,6 +297,7 @@ final class LiveMeshRenderer {
     struct MeshVertex { packed_float3 position; float confidence; };
     struct Uniforms { float4x4 viewProjection; };
     struct Colours { float4 tentative; float4 tentativeEdge; float4 solid; float4 solidEdge; float confirmed; };
+    struct LiveUniform { float4x4 projection; float on; float hasDepth; };
     struct MeshOut {
         float4 position [[position, invariant]];
         float3 world;
@@ -285,12 +321,37 @@ final class LiveMeshRenderer {
                              const device int *slots [[buffer(1)]],
                              const device float4x4 *projections [[buffer(2)]],
                              constant Colours &c [[buffer(3)]],
-                             texture2d_array<float> photos [[texture(0)]]) {
+                             constant LiveUniform &live [[buffer(4)]],
+                             texture2d_array<float> photos [[texture(0)]],
+                             texture2d<float> camY [[texture(1)]],
+                             texture2d<float> camCbCr [[texture(2)]],
+                             texture2d<float> camDepth [[texture(3)]]) {
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        // The wide overview: the camera picture right now, where the phone sees this surface (not hidden behind
+        // something nearer in its depth).
+        if (live.on > 0.5) {
+            float4 q = live.projection * float4(in.world, 1.0);
+            if (q.z > 0.05) {
+                float2 uv = q.xy / q.z;
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) {
+                    bool visible = true;
+                    if (live.hasDepth > 0.5) {
+                        float d = camDepth.sample(s, uv).r;
+                        visible = d <= 0.0 || q.z <= d + 0.1 + 0.04 * q.z;
+                    }
+                    if (visible) {
+                        float Y = camY.sample(s, uv).r;
+                        float2 C = camCbCr.sample(s, uv).rg - float2(0.5, 0.5);
+                        float3 rgb = float3(Y + 1.402 * C.y, Y - 0.344136 * C.x - 0.714136 * C.y, Y + 1.772 * C.x);
+                        return float4(saturate(rgb), 1.0);
+                    }
+                }
+            }
+        }
         int slot = slots[prim];
         if (slot >= 0) {
             float4 q = projections[slot] * float4(in.world, 1.0);
             if (q.z > 0.05) {
-                constexpr sampler s(filter::linear, address::clamp_to_edge);
                 return float4(photos.sample(s, q.xy / q.z, uint(slot)).rgb, 1.0);
             }
         }

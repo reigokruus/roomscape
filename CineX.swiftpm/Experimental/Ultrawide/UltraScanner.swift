@@ -139,6 +139,7 @@ final class UltraScanner: ObservableObject {
     /// cells so far (Room).
     nonisolated private func fuse(_ world: [SIMD3<Float>], origin: SIMD3<Float>) -> (Float, Float) {
         _frame += 1
+        mesh?.tsdf.beginFrame()
         var solidHere = 0, here = 0
         for p in world {
             mesh?.tsdf.integrate(origin: origin, point: p)

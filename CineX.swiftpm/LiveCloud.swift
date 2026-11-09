@@ -252,6 +252,7 @@ final class LiveCloud: @unchecked Sendable {
         var frameHits = 0, frameSolid = 0
         var fusedSamples = 0, newSamples = 0
 
+        tsdf?.beginFrame()
         // Every second depth pixel: about one sample per 2 cm cell at room distances.
         for v in stride(from: 1, to: dh - 1, by: 2) {
             for u in stride(from: 1, to: dw - 1, by: 2) {

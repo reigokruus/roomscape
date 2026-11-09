@@ -22,6 +22,13 @@ final class Tsdf {
     private let voxelKeys: UnsafeMutablePointer<UInt64>
     private let sdf: UnsafeMutablePointer<Float>
     private let w: UnsafeMutablePointer<Int16>
+    /// The depth frame that last carved each voxel (solid surface is carved at most once a frame).
+    private let carvedIn: UnsafeMutablePointer<UInt32>
+    private var frame: UInt32 = 0
+    /// Surface seen this often counts as solid: free space in front of it only nudges it, once per depth frame, so it
+    /// takes many frames of clear evidence to erase it (rk 9 Nov: stepping back, finished floor seen at a shallow
+    /// angle got carved away).
+    static let solidW: Int16 = 20
     private(set) var count = 0
     private static let empty = UInt64.max
 
@@ -38,6 +45,7 @@ final class Tsdf {
         voxelKeys = .allocate(capacity: capacity)
         sdf = .allocate(capacity: capacity)
         w = .allocate(capacity: capacity)
+        carvedIn = .allocate(capacity: capacity)
         clear()
     }
 
@@ -47,7 +55,11 @@ final class Tsdf {
         voxelKeys.deallocate()
         sdf.deallocate()
         w.deallocate()
+        carvedIn.deallocate()
     }
+
+    /// Call before each depth frame's samples.
+    func beginFrame() { frame &+= 1 }
 
     /// Resets every voxel whose centre passes the test (tap to clear while scanning); returns how many.
     func clearWhere(_ test: (SIMD3<Float>) -> Bool) -> Int {
@@ -106,6 +118,7 @@ final class Tsdf {
         voxelKeys[count] = k
         sdf[count] = 0
         w[count] = 0
+        carvedIn[count] = 0
         count += 1
         return count - 1
     }
@@ -124,13 +137,21 @@ final class Tsdf {
         dir /= len
         // Free space in front of the surface erases stale surfaces and mid-air noise (existing voxels only). A margin
         // that grows with distance keeps depth noise from eating the real surface.
-        let farS = min(carve, len - 0.25), nearS = trunc + 0.02 * len
+        // The margin is wider further away: rays to far surfaces pass close over nearer ones at a shallow angle.
+        let farS = min(carve, len - 0.25), nearS = trunc + 0.05 * len
         var s = farS
         while s > nearS {
             let i = index(voxel(p - dir * s))
             s -= vs
             guard i >= 0 else { continue }
             let wi = w[i]
+            if wi >= Self.solidW {
+                // Solid: a small nudge toward free space, at most once per depth frame.
+                guard carvedIn[i] != frame else { continue }
+                carvedIn[i] = frame
+                sdf[i] += (1 - sdf[i]) * 0.04
+                continue
+            }
             sdf[i] = (sdf[i] * Float(wi) + 1) / Float(wi + 1)
             if wi < Self.maxW { w[i] = wi + 1 }
         }

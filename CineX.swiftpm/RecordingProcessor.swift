@@ -136,6 +136,7 @@ enum RecordingProcessor {
             let sx = Float(d.w) / Float(f.width), sy = Float(d.h) / Float(f.height)
             let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
             let origin = SIMD3(f.pose.columns.3.x, f.pose.columns.3.y, f.pose.columns.3.z)
+            tsdf.beginFrame()
             let step = ThermalGovernor.batchScale < 0.5 ? 4 : 2 // ease back when warm
             // Medium or high confidence, no flying pixels at depth edges (they bridged the gaps between shelf boards
             // and buried them), up to 4 m: on rk's 9 Nov recording this keeps all of the live surface and adds 7%
