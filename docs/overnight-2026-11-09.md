@@ -14,6 +14,9 @@ Phones disconnected at 22:45; work from the copies in recordings/ (never committ
 - Splats view + splat training removed on both phones (1384608); Sharpen (the training) is gone with it.
 - Lighting lights the photo room on both phones (c04eee2). iPhone checked in the Simulator (tools/ui-shots/20261109-231204/7-lighting.png); S24 builds, not yet seen running.
   The splat data stays internally: Objects (moving/removing things), hole fill, the storyboard and Lighting's fallback still read it. Removing it means porting those first.
+- Scan memory (22:39: 434 MB before RoomPlan, 720 MB at start, 1.55 GB at the end): our own data grows only ~25 MB
+  (photos 16 MB, mesh 1.6 MB; points, TSDF and photo textures are fixed). Scan queues now drain autoreleased
+  objects per block (suspect), and the log records each part's size every 30 s (3ea305d). Needs one real scan to confirm.
 - Race-to-idle pacing, per-scan heat totals, memory checkpoints, rescan logs (installed 22:35 on the iPhone; S24 logger installed by rk 22:35).
 
 ## Open
