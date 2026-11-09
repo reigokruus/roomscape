@@ -1641,19 +1641,60 @@ public class MainActivity extends Activity {
 
     private void objPanelText(String t) {
         objLabel.setText(t);
-        SceneObjects.Obj o = renderer.objects.sel();
-        objRemoveBtn.setText(o == null ? "Remove" : o.removed || o.moved() ? "Put back" : "Remove");
+        objRemoveBtn.setText("Remove");
+        if (objUndoBtn != null) { boolean can = renderer.canUndoObjects(); objUndoBtn.setEnabled(can); objUndoBtn.setAlpha(can ? 1f : 0.4f); }
     }
 
     /** Object mode touches: a finger on the selected object drags it; a tap selects; everything else orbits as usual. */
+    /** Two fingers on a selected object: 0 deciding, 1 turning it, 2 the camera's (pan / pinch). */
+    private int twistMode;
+    private Button objUndoBtn;
+    private float twistX0, twistY0, twistSpread0, twistLastX;
+
+    private static float spread(MotionEvent e) { return (float) Math.hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1)); }
+
     private boolean objectTouch(MotionEvent e) {
         int act = e.getActionMasked();
+        // Two fingers left / right turn the selected object about the floor's vertical (rk 9 Nov), after a dead zone,
+        // so a pan or pinch of the view doesn't turn it by accident. Mostly-sideways = turn; anything else = camera.
+        if (e.getPointerCount() == 2 && renderer.objectSelectedMovable()) {
+            float mx = (e.getX(0) + e.getX(1)) / 2, my = (e.getY(0) + e.getY(1)) / 2;
+            if (act == MotionEvent.ACTION_POINTER_DOWN) {
+                objDragging = false; twistMode = 0; twistX0 = mx; twistY0 = my; twistSpread0 = spread(e);
+                return true;
+            }
+            if (act == MotionEvent.ACTION_MOVE) {
+                if (twistMode == 0) {
+                    float dx = mx - twistX0, dy = my - twistY0, ds = Math.abs(spread(e) - twistSpread0);
+                    // A pinch still zooms the view; sideways turns the object; the view doesn't pan meanwhile.
+                    if (ds > dp(30)) { twistMode = 2; lastPointerCount = 0; return false; }
+                    if (Math.abs(dx) > dp(28) && Math.abs(dx) > 1.5f * Math.abs(dy)) {
+                        twistMode = 1; twistLastX = mx;
+                        glView.queueEvent(() -> renderer.objectSnapshot());
+                    }
+                    return true;
+                }
+                if (twistMode == 1) {
+                    float d = mx - twistLastX; twistLastX = mx;
+                    glView.queueEvent(() -> renderer.objectRotate(-d * (float) Math.toRadians(1 / 3.0))); // 1° per 3 px
+                    return true;
+                }
+                return false;
+            }
+            if (act == MotionEvent.ACTION_POINTER_UP) {
+                boolean mine = twistMode != 2;
+                if (twistMode == 1) { glView.queueEvent(renderer::objectSnapTurn); refreshObjPanel(); }
+                twistMode = 0; lastPointerCount = 0; return mine;
+            }
+            return twistMode != 2;
+        }
         if (e.getPointerCount() > 1) { objDragging = false; return false; }
         if (act == MotionEvent.ACTION_DOWN) {
             objDownX = objLastX = e.getX(); objDownY = objLastY = e.getY(); objDownT = e.getEventTime(); objMoved = false;
             int hit = renderer.objectHit(e.getX(), e.getY());
             objDragging = hit >= 0 && hit == renderer.objects.selected;
             if (!objDragging) return false;
+            glView.queueEvent(() -> renderer.objectSnapshot());
             return true;
         }
         if (act == MotionEvent.ACTION_MOVE && objDragging) {
@@ -1697,8 +1738,18 @@ public class MainActivity extends Activity {
         p.addView(head);
         FlowRow row = new FlowRow(this, dp(4));
         objRemoveBtn = smallButton("Remove");
-        objRemoveBtn.setOnClickListener(v -> glView.queueEvent(() -> { renderer.objectRemoveToggle(); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }));
+        objRemoveBtn.setOnClickListener(v -> glView.queueEvent(() -> { renderer.objectRemove(); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }));
         row.addView(objRemoveBtn);
+        Button putBack = smallButton("Put back");
+        putBack.setOnClickListener(v -> glView.queueEvent(() -> { renderer.objectPutBackSelected(); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }));
+        row.addView(putBack);
+        Button undo = smallButton("Undo");
+        objUndoBtn = undo;
+        undo.setOnClickListener(v -> glView.queueEvent(() -> {
+            boolean did = renderer.objectUndo(); String t = renderer.objectInfo();
+            runOnUiThread(() -> { objPanelText(t); if (!did) toast("Nothing to undo"); });
+        }));
+        row.addView(undo);
         Button turn = smallButton("Turn 15°");
         turn.setOnClickListener(v -> glView.queueEvent(() -> { renderer.objectTurn(); String t = renderer.objectInfo(); runOnUiThread(() -> objPanelText(t)); }));
         row.addView(turn);

@@ -31,6 +31,8 @@ struct ResultView: View {
     @State private var outlets: [RoomOutlet] = []
     /// The .rmsc being saved with Save to Files.
     @State private var savingFile: SharedFile?
+    /// Objects mode's undo: the objects before each edit (move, turn, remove, put back), newest last.
+    @State private var objectHistory: [[RoomObject]] = []
     /// Outlet labels on or off (the ⚡ Outlets button), remembered across scans; on by default.
     @AppStorage("showOutlets") private var showOutlets = true
     /// "Enter the room": picking where to stand, then standing there (first person). See `RoomSceneView`.
@@ -97,6 +99,7 @@ struct ResultView: View {
                                   floorY: (lightingOn || objectsOn || walk == .choosing) ? walkFloorY : nil,
                                   onFloorTap: floorTapped,
                                   onTapRay: objectsOn ? objectTapped : nil,
+                                  onTwist: objectsOn && selectedMovable ? objectTwisted : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
                 } else if let loadError {
@@ -157,7 +160,7 @@ struct ResultView: View {
 
             if objectsOn, shell != nil {
                 // The same bar as the Android app's: what's selected, and Remove / Turn 15° / Removed… under it.
-                ObjectsBar(objects: $objects, selected: $selectedObject, claudeChecked: claudeChecked,
+                ObjectsBar(objects: $objects, selected: $selectedObject, history: $objectHistory, claudeChecked: claudeChecked,
                            finding: finding, error: findError, onFind: findObjects, onDone: toggleObjects)
             } else if lightingOn, lighting != nil {
                 LightingPanel(setup: Binding(get: { lighting! }, set: { lighting = $0 }),
@@ -561,6 +564,28 @@ struct ResultView: View {
         Task { shareURL = await Task.detached(priority: .utility) { ScanStore.namedModelCopy(scan) }.value }
     }
 
+    /// The selected object can be moved and turned (a movable thing, not removed).
+    private var selectedMovable: Bool {
+        guard let id = selectedObject, let o = objects.first(where: { $0.id == id }) else { return false }
+        return !o.kind.isMarker && !o.removed
+    }
+
+    /// Two fingers sideways on a selected object: 0 began (one undo step), 1 turn by radians, 2 ended (settles on a
+    /// 15° step when within 3° of one).
+    private func objectTwisted(_ phase: Int, _ radians: Float) {
+        guard let id = selectedObject, let i = objects.firstIndex(where: { $0.id == id }) else { return }
+        switch phase {
+        case 0: objectHistory.append(objects)
+        case 1:
+            var t = objects[i].turn + radians
+            if t > .pi { t -= 2 * .pi } else if t < -.pi { t += 2 * .pi }
+            objects[i].turn = t
+        default:
+            let step = Float.pi / 12, near = (objects[i].turn / step).rounded() * step
+            if abs(objects[i].turn - near) < 3 * .pi / 180 { objects[i].turn = near }
+        }
+    }
+
     /// Objects mode: a tap on an object's box selects it (the nearest one along the ray); true when one was hit.
     private func objectTapped(_ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> Bool {
         var best: (UUID, Float)?
@@ -596,6 +621,7 @@ struct ResultView: View {
             // Move the selected object so its centre stands over the tapped spot.
             guard let id = selectedObject, let i = objects.firstIndex(where: { $0.id == id }),
                   !objects[i].kind.isMarker, !objects[i].removed else { return }
+            objectHistory.append(objects)
             objects[i].offset = SIMD3(p.x - objects[i].center.x, 0, p.z - objects[i].center.z)
         } else if lightingOn {
             lighting?.subjectX = p.x
@@ -940,6 +966,8 @@ struct RoomSceneView: UIViewRepresentable {
     var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
     /// Gets every tap first, as a ray (origin, unit direction); returns true when it used it (an object was hit).
     var onTapRay: ((SIMD3<Float>, SIMD3<Float>) -> Bool)? = nil
+    /// Set while an object is selected: two fingers sideways turn it (0 began, 1 by radians, 2 ended), not the view.
+    var onTwist: ((Int, Float) -> Void)? = nil
     /// Standing in the room (first person) at this floor point; nil = the orbit or top view.
     var standAt: SIMD3<Float>? = nil
     /// The floor, for walking to a double-tapped spot.
@@ -1020,6 +1048,26 @@ struct RoomSceneView: UIViewRepresentable {
             inertia?.invalidate(); inertia = nil
             let d = g.translation(in: view)
             g.setTranslation(.zero, in: view)
+            // An object is selected: two fingers turn it about the vertical (rk 9 Nov), after a 28 pt mostly-sideways
+            // dead zone, 1° per 3 pt; the view doesn't pan meanwhile (pinch still zooms).
+            if let onTwist {
+                switch g.state {
+                case .began:
+                    twistMode = 0; twistMoved = .zero
+                case .changed:
+                    twistMoved.x += d.x; twistMoved.y += d.y
+                    if twistMode == 0, abs(twistMoved.x) > 28, abs(twistMoved.x) > 1.5 * abs(twistMoved.y) {
+                        twistMode = 1
+                        onTwist(0, 0)
+                    } else if twistMode == 1 {
+                        onTwist(1, Float(d.x) / 3 * .pi / 180)
+                    }
+                default:
+                    if twistMode == 1 { onTwist(2, 0) }
+                    twistMode = 0
+                }
+                return
+            }
             let dist = pov === topCamera ? max(1, pov.simdWorldPosition.y - orbitTarget.y) : simd_length(pov.simdWorldPosition - orbitTarget)
             // 1:1 with the fingers: what's under them at the target's distance stays under them.
             let fov = Float(pov.camera?.fieldOfView ?? 60) * .pi / 180
@@ -1055,6 +1103,10 @@ struct RoomSceneView: UIViewRepresentable {
         var floorY: Float?
         var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
         var onTapRay: ((SIMD3<Float>, SIMD3<Float>) -> Bool)?
+        var onTwist: ((Int, Float) -> Void)?
+        /// The two-finger turn: 0 deciding (dead zone), 1 turning; and how far the fingers have gone meanwhile.
+        private var twistMode = 0
+        private var twistMoved = CGPoint.zero
 
         // First person ("Enter the room").
         weak var view: SCNView?
@@ -1301,6 +1353,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.floorY = floorY
         context.coordinator.onFloorTap = onFloorTap
         context.coordinator.onTapRay = onTapRay
+        context.coordinator.onTwist = onTwist
         context.coordinator.walkFloorY = walkFloorY
         context.coordinator.viewHeight = view.bounds.height
         context.coordinator.walkMove = walkMove

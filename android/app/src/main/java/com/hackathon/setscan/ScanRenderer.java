@@ -3683,22 +3683,75 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         objects.edited = true;
     }
 
-    void objectTurn() { SceneObjects.Obj o = objects.sel(); if (o != null && !o.removed) { o.turn += (float) Math.toRadians(15); objects.edited = true; } }
+    void objectTurn() { SceneObjects.Obj o = objects.sel(); if (o != null && !o.removed) { objectSnapshot(); o.turn += (float) Math.toRadians(15); objects.edited = true; } }
 
-    /** Remove the selected object, or put it back where it was. */
-    void objectRemoveToggle() {
+    /** Turns the selected object about the vertical, by `rad` (two-finger drag left / right). */
+    void objectRotate(float rad) { SceneObjects.Obj o = objects.sel(); if (o != null && !o.removed) { o.turn += rad; objects.edited = true; } }
+
+    /** After a two-finger turn: settle on a 15° step when within 3° of one. */
+    void objectSnapTurn() {
         SceneObjects.Obj o = objects.sel();
         if (o == null) return;
-        if (o.removed || o.moved()) { o.removed = false; o.ox = o.oz = 0; o.turn = 0; }
-        else if (o.fromCatalog) { objects.list.remove(o); objects.selected = -1; }
+        float step = (float) Math.toRadians(15), near = Math.round(o.turn / step) * step;
+        if (Math.abs(o.turn - near) < Math.toRadians(3)) o.turn = near;
+    }
+
+    boolean objectSelectedMovable() { SceneObjects.Obj o = objects.sel(); return o != null && !o.removed; }
+
+    /** Remove the selected object (one brought in from the catalogue goes away completely). */
+    void objectRemove() {
+        SceneObjects.Obj o = objects.sel();
+        if (o == null || o.removed) return;
+        objectSnapshot();
+        if (o.fromCatalog) { objects.list.remove(o); objects.selected = -1; }
         else o.removed = true;
+        objects.edited = true;
+    }
+
+    /** Put the selected object back where the scan had it: not removed, not moved, not turned. */
+    void objectPutBackSelected() {
+        SceneObjects.Obj o = objects.sel();
+        if (o == null || !(o.removed || o.moved())) return;
+        objectSnapshot();
+        o.removed = false; o.ox = o.oz = 0; o.turn = 0;
         objects.edited = true;
     }
 
     void objectPutBack(int k) {
         if (k < 0 || k >= objects.list.size()) return;
+        objectSnapshot();
         SceneObjects.Obj o = objects.list.get(k);
         o.removed = false; o.ox = o.oz = 0; o.turn = 0; objects.selected = k; objects.edited = true;
+    }
+
+    // ---- Undo for object edits: the list and every object's place, before each edit ----
+    private static final class ObjState {
+        final java.util.List<SceneObjects.Obj> list; final float[] ox, oz, turn; final boolean[] removed; final int selected;
+        ObjState(java.util.List<SceneObjects.Obj> l, int sel) {
+            list = new java.util.ArrayList<>(l); selected = sel;
+            ox = new float[l.size()]; oz = new float[l.size()]; turn = new float[l.size()]; removed = new boolean[l.size()];
+            for (int i = 0; i < l.size(); i++) { SceneObjects.Obj o = l.get(i); ox[i] = o.ox; oz[i] = o.oz; turn[i] = o.turn; removed[i] = o.removed; }
+        }
+    }
+    private final java.util.ArrayDeque<ObjState> objUndo = new java.util.ArrayDeque<>();
+
+    /** Remember the objects as they are now, before an edit (up to 50 steps). */
+    void objectSnapshot() {
+        objUndo.push(new ObjState(objects.list, objects.selected));
+        while (objUndo.size() > 50) objUndo.removeLast();
+    }
+
+    boolean canUndoObjects() { return !objUndo.isEmpty(); }
+
+    /** Undo the last object edit; false when there's nothing to undo. */
+    boolean objectUndo() {
+        ObjState s = objUndo.poll();
+        if (s == null) return false;
+        objects.list.clear(); objects.list.addAll(s.list);
+        for (int i = 0; i < s.list.size(); i++) { SceneObjects.Obj o = s.list.get(i); o.ox = s.ox[i]; o.oz = s.oz[i]; o.turn = s.turn[i]; o.removed = s.removed[i]; }
+        objects.selected = s.selected < objects.list.size() ? s.selected : -1;
+        objects.edited = true;
+        return true;
     }
 
     /** GL thread: bring a catalogue item into this scan, on the floor in the middle of the view. */
@@ -3706,6 +3759,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         try {
             float fy = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
             SceneObjects.Obj o = SceneObjects.loadItem(it, target[0], fy, target[2]);
+            objectSnapshot();
             objects.list.add(o); objects.selected = objects.list.size() - 1; objects.edited = true; objects.active = true;
         } catch (Exception e) { logError("catalog place", e); }
     }

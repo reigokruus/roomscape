@@ -234,6 +234,8 @@ struct ClaudeKeySheet: View {
 struct ObjectsBar: View {
     @Binding var objects: [RoomObject]
     @Binding var selected: UUID?
+    /// The objects before each edit, newest last (Undo).
+    @Binding var history: [[RoomObject]]
     let claudeChecked: Bool
     let finding: String?
     let error: String?
@@ -276,15 +278,23 @@ struct ObjectsBar: View {
             }
             if let error { Text(error).font(.footnote).foregroundStyle(.red) }
             FlowRow(spacing: 6) {
-                if let i = selectedIndex, objects[i].removed {
-                    pill("Put back") { objects[i].removed = false }
-                } else {
-                    pill("Remove", disabled: selectedIndex == nil) {
-                        if let i = selectedIndex { objects[i].removed = true }
+                pill("Remove", disabled: selectedIndex.map { objects[$0].removed } ?? true) {
+                    if let i = selectedIndex { edit { objects[i].removed = true } }
+                }
+                pill("Put back", disabled: selectedIndex.map { !objects[$0].isEdited } ?? true) {
+                    if let i = selectedIndex {
+                        edit { objects[i].removed = false; objects[i].offset = .zero; objects[i].turn = 0 }
                     }
                 }
-                pill("Turn 15°", disabled: selectedIndex == nil || objects[selectedIndex!].kind.isMarker) {
+                pill("Undo", disabled: history.isEmpty) {
+                    if let last = history.popLast() {
+                        objects = last
+                        if let s = selected, !objects.contains(where: { $0.id == s }) { selected = nil }
+                    }
+                }
+                pill("Turn 15°", disabled: selectedIndex == nil || objects[selectedIndex!].kind.isMarker || objects[selectedIndex!].removed) {
                     if let i = selectedIndex {
+                        history.append(objects)
                         var t = objects[i].turn + .pi / 12
                         if t > .pi { t -= 2 * .pi }
                         objects[i].turn = t
@@ -306,7 +316,7 @@ struct ObjectsBar: View {
         .confirmationDialog("Put back", isPresented: $choosingRemoved, titleVisibility: .visible) {
             ForEach(objects.filter(\.removed)) { o in
                 Button("\(o.label) · \(o.sizeText)") {
-                    if let i = objects.firstIndex(where: { $0.id == o.id }) { objects[i].removed = false; selected = o.id }
+                    if let i = objects.firstIndex(where: { $0.id == o.id }) { edit { objects[i].removed = false }; selected = o.id }
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -316,6 +326,13 @@ struct ObjectsBar: View {
         .sheet(isPresented: $showingKey) {
             ClaudeKeySheet(onSaved: findAfterKey ? onFind : nil)
         }
+    }
+
+    /// An edit that Undo can take back.
+    private func edit(_ change: () -> Void) {
+        history.append(objects)
+        if history.count > 50 { history.removeFirst() }
+        change()
     }
 
     /// A dark capsule with white text, like the Android app's small buttons.
