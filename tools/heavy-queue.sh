@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Runs one heavy job at a time on this 8 GB Mac (builds, simulator, emulator, Blender, benchmarks, downloads):
 #   tools/heavy-queue.sh <command> [args…]
-# Waits for the lock and for memory to be calm, runs the job at low priority, then shuts simulators, emulators,
+# Waits for the lock and for memory to be calm, runs the job at normal priority (so it can use the performance cores;
+# HEAVY_NICE=10 to keep it on the efficiency cores instead), then shuts simulators, emulators,
 # Gradle and Blender down. Activity is logged to tools/heavy-queue.log.
 LOCK=/tmp/roomscape-heavy.lock
 LOG=${0:A:h}/heavy-queue.log
@@ -20,7 +21,7 @@ for i in {1..60}; do
 done
 
 start=$(date +%s)
-nice -n 10 "$@"
+nice -n ${HEAVY_NICE:-0} "$@"
 rc=$?
 log "  finished ($rc) in $(( $(date +%s) - start )) s: $*"
 
