@@ -6,10 +6,10 @@ import UniformTypeIdentifiers
 import simd
 
 /// "Process later": builds a scan's surface, points and photos from its raw recording (RawRecorder), paced by the
-/// phone's heat (ThermalGovernor). Used by "Rebuild from recording"; the same steps will run after Done once the
-/// recording path matches the live one.
+/// phone's heat (ThermalGovernor). Run through ProcessingQueue: after Done (the text patches; everything with
+/// "Record, then process") and by "Rebuild from recording".
 ///
-/// Never loses data: the scan's current points, photos, mesh and meta move into `before-rebuild/` first.
+/// Never loses data: the scan's files a job replaces move into a backup folder first.
 enum RecordingProcessor {
     struct Progress: Sendable { var stage: String; var fraction: Float; var note: String? }
 
@@ -19,35 +19,112 @@ enum RecordingProcessor {
         FileManager.default.fileExists(atPath: scan.captureURL.appendingPathComponent("recording/frames.bin").path)
     }
 
+    /// What a job makes: `rebuild` the whole scan (surface, points, photos, text) from the recording, `text` only
+    /// the sharp text patches (after Done while the live scan stays the main result).
+    enum Job: String, Codable, Sendable { case rebuild, text }
+
+    typealias DepthFrame = (time: Double, w: Int, h: Int, mm: [UInt16], conf: [UInt8])
+
+    /// Rebuilds the whole scan from its recording (kept for callers; same as `run(.rebuild, …)`).
     static func rebuild(_ scan: SavedScan, progress: @escaping @Sendable (Progress) -> Void) async throws {
+        try await run(.rebuild, on: scan, progress: progress)
+    }
+
+    /// Runs a job on the scan's recording, paced by the phone's heat.
+    ///
+    /// Resumable: every finished stage stays in `<capture>/processing-<job>/`, so a job that was stopped part-way
+    /// (background time ran out, the app was closed, the phone restarted) carries on from its last finished stage.
+    /// Cancelling throws CancellationError and leaves the scan as it was. Only the last step swaps the new files in,
+    /// and the files they replace move into a backup folder first (`before-rebuild`, `before-rebuild-2`, …).
+    static func run(_ job: Job, on scan: SavedScan, progress: @escaping @Sendable (Progress) -> Void) async throws {
+        let fm = FileManager.default
         let rec = scan.captureURL.appendingPathComponent("recording")
+        let work = scan.captureURL.appendingPathComponent("processing-\(job.rawValue)")
+        try fm.createDirectory(at: work, withIntermediateDirectories: true)
+        func done(_ stage: String) -> Bool { fm.fileExists(atPath: work.appendingPathComponent("\(stage).done").path) }
+        func mark(_ stage: String) { fm.createFile(atPath: work.appendingPathComponent("\(stage).done").path, contents: Data()) }
+        let note: @Sendable (String?) -> Void = { n in progress(Progress(stage: "", fraction: -1, note: n)) }
+        // Where each stage's progress bar starts and ends.
+        let span: [String: (Float, Float)] = job == .rebuild
+            ? ["surface": (0.02, 0.6), "photos": (0.6, 0.85), "text": (0.85, 0.95), "save": (0.95, 1)]
+            : ["text": (0.05, 0.95), "save": (0.95, 1)]
+        func report(_ stage: String, _ title: String, _ f: Float) {
+            let (a, b) = span[stage] ?? (0, 1)
+            progress(Progress(stage: title, fraction: a + (b - a) * max(0, min(1, f)), note: nil))
+        }
+
+        progress(Progress(stage: "Reading the recording", fraction: 0, note: nil))
         let frames = try readFrames(rec.appendingPathComponent("frames.bin"))
         guard !frames.isEmpty else { throw NSError(domain: "Rebuild", code: 1, userInfo: [NSLocalizedDescriptionKey: "the recording has no frames"]) }
-        let clears = (try? JSONSerialization.jsonObject(with: Data(contentsOf: rec.appendingPathComponent("clears.json")))) as? [[String: Any]] ?? []
-        let note: @Sendable (String?) -> Void = { n in progress(Progress(stage: "", fraction: -1, note: n)) }
+        let depthFrames = try readDepth(rec.appendingPathComponent("depth.bin"))
+        try Task.checkCancellation()
 
-        // 1. Surface: fuse every depth frame into the TSDF (4 cm, as live), skipping what a later tap cleared.
-        let tsdf = Tsdf(capacity: 700_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
-        var depthFrames: [(time: Double, w: Int, h: Int, mm: [UInt16], conf: [UInt8])] = []
-        let depthData = try Data(contentsOf: rec.appendingPathComponent("depth.bin"))
-        var at = 0
-        while at + 12 <= depthData.count {
-            let time = depthData.subdata(in: at..<(at + 8)).withUnsafeBytes { $0.loadUnaligned(as: Double.self) }
-            let len = Int(depthData.subdata(in: (at + 8)..<(at + 12)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })
-            at += 12
-            guard at + len <= depthData.count else { break }
-            let packed = depthData.subdata(in: at..<(at + len))
-            at += len
-            let raw = (try? (packed as NSData).decompressed(using: .lzfse) as Data) ?? packed
-            guard raw.count >= 4 else { continue }
-            let w = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt16.self) })
-            let h = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 2, as: UInt16.self) })
-            guard raw.count >= 4 + w * h * 2 else { continue }
-            let mm = raw.subdata(in: 4..<(4 + w * h * 2)).withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
-            let conf = raw.count >= 4 + w * h * 3 ? [UInt8](raw.subdata(in: (4 + w * h * 2)..<(4 + w * h * 3))) : []
-            depthFrames.append((time, w, h, mm, conf))
+        if job == .rebuild {
+            // 1. Surface and points.
+            if !done("surface") {
+                let clears = (try? JSONSerialization.jsonObject(with: Data(contentsOf: rec.appendingPathComponent("clears.json")))) as? [[String: Any]] ?? []
+                let (mesh, points) = try await surface(frames: frames, depth: depthFrames, clears: clears,
+                                                       progress: { report("surface", "Building the surface", $0) }, note: note)
+                try mesh.write(to: work.appendingPathComponent(ScanMesh.fileName))
+                try points.withUnsafeBytes { Data($0) }.write(to: work.appendingPathComponent("points-raw.bin"))
+                mark("surface")
+            }
+            // 2. Photos: from the video, every 20 cm or 15°, with the recorded pose and lens.
+            if !done("photos") {
+                report("photos", "Picking photos", 0)
+                let photos = try await keyframes(rec.appendingPathComponent("video.mov"), frames: frames, depth: depthFrames,
+                                                 progress: { report("photos", "Picking photos", $0) }, note: note)
+                try? fm.removeItem(at: work.appendingPathComponent("photos"))
+                try writePhotos(photos, into: work)
+                mark("photos")
+            }
         }
-        // Points: the depth samples in 2 cm cells (averaged), like the live scan, for the splats and points views.
+        // 3. Sharp text: patches where text was seen, straightened onto their surface (DecalFinder).
+        if !done("text") {
+            report("text", "Finding text", 0)
+            let out = work.appendingPathComponent("decals")
+            try? fm.removeItem(at: out)
+            let decalFrames = frames.map { DecalFinder.Frame(time: $0.time, pose: $0.pose, k: $0.k, width: $0.width, height: $0.height) }
+            let decalDepth = depthFrames.map { (time: $0.time, w: $0.w, h: $0.h, mm: $0.mm) }
+            _ = try await DecalFinder.find(recording: rec, frames: decalFrames, depth: decalDepth, out: out,
+                                           pace: { await ThermalGovernor.pace(note: note) },
+                                           progress: { report("text", "Finding text", $0) })
+            mark("text")
+        }
+        // 4. Points coloured from the photos, then swap the new files in.
+        report("save", "Saving", 0)
+        if job == .rebuild, !done("points") {
+            let raw = try Data(contentsOf: work.appendingPathComponent("points-raw.bin"))
+            let positions = raw.withUnsafeBytes { Array($0.bindMemory(to: SIMD3<Float>.self)) }
+            let photos = loadPhotos(work)
+            try writePoints(positions.isEmpty ? (ScanMesh.read(from: work.appendingPathComponent(ScanMesh.fileName))?.positions ?? []) : positions,
+                            photos: photos, into: work)
+            try? fm.removeItem(at: work.appendingPathComponent("points-raw.bin"))
+            mark("points")
+        }
+        try Task.checkCancellation()
+        if job == .rebuild {
+            try swapIn(from: work, into: scan.captureURL, backupBase: "before-rebuild",
+                       names: ["points.bin", "keyframes.json", "photos", ScanMesh.fileName, "meta.json", "decals"],
+                       aside: ["surfels.bin", "trained.bin", "thumbnail-kind"])
+            ScanStore.invalidateThumbnail(scan)
+        } else {
+            try swapIn(from: work, into: scan.captureURL, backupBase: "before-text", names: ["decals"], aside: [])
+        }
+        try? fm.removeItem(at: work)
+        progress(Progress(stage: "Done", fraction: 1, note: nil))
+    }
+
+    /// The job's progress folder, if a job was stopped part-way (it resumes from there).
+    static func hasUnfinished(_ job: Job, _ scan: SavedScan) -> Bool {
+        FileManager.default.fileExists(atPath: scan.captureURL.appendingPathComponent("processing-\(job.rawValue)").path)
+    }
+
+    /// Fuses every depth frame into the TSDF (4 cm, as live), skipping what a later tap cleared; points are the depth
+    /// samples in 2 cm cells (averaged) seen at least twice, like the live scan.
+    static func surface(frames: [FrameRecord], depth depthFrames: [DepthFrame], clears: [[String: Any]],
+                        progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> (ScanMesh, [SIMD3<Float>]) {
+        let tsdf = Tsdf(capacity: 700_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
         var cells: [SIMD3<Int32>: (sum: SIMD3<Float>, n: Int32)] = [:]
         cells.reserveCapacity(400_000)
         var fi = 0
@@ -84,41 +161,57 @@ enum RecordingProcessor {
                 }
             }
             if n % 10 == 0 {
-                progress(Progress(stage: "Building the surface", fraction: 0.6 * Float(n) / Float(depthFrames.count), note: nil))
+                try Task.checkCancellation()
+                progress(Float(n) / Float(depthFrames.count))
                 await ThermalGovernor.pace(note: note)
             }
         }
         let scratch = Tsdf.MeshScratch()
         _ = tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: 20, into: scratch)
         let mesh = ScanMesh(positions: scratch.positions, triangles: scratch.triangles)
-
-        // 2. Photos: from the video, every 20 cm or 15°, with the recorded pose and lens.
-        progress(Progress(stage: "Picking photos", fraction: 0.6, note: nil))
-        let photos = try await keyframes(rec.appendingPathComponent("video.mov"), frames: frames, depth: depthFrames, progress: progress, note: note)
-
-        // 3. Sharp text: patches where text was seen, straightened onto their surface (DecalFinder).
-        progress(Progress(stage: "Finding text", fraction: 0.9, note: nil))
-        let decalFrames = frames.map { DecalFinder.Frame(time: $0.time, pose: $0.pose, k: $0.k, width: $0.width, height: $0.height) }
-        let decalDepth = depthFrames.map { (time: $0.time, w: $0.w, h: $0.h, mm: $0.mm) }
-        _ = try? await DecalFinder.find(recording: rec, frames: decalFrames, depth: decalDepth,
-                                        out: scan.captureURL.appendingPathComponent("decals.new"),
-                                        pace: { await ThermalGovernor.pace(note: note) })
-
-        // 4. Write, keeping the old files.
-        progress(Progress(stage: "Saving", fraction: 0.95, note: nil))
         // Cells seen at least twice (a single sighting is often a stray sample).
         let points = cells.values.filter { $0.n >= 2 }.map { $0.sum / Float($0.n) }
-        try write(scan, mesh: mesh, points: points.isEmpty ? mesh.positions : points, photos: photos)
-        let fm = FileManager.default
-        let decals = scan.captureURL.appendingPathComponent("decals"), fresh = scan.captureURL.appendingPathComponent("decals.new")
-        if fm.fileExists(atPath: fresh.path) {
-            if fm.fileExists(atPath: decals.path) { try? fm.moveItem(at: decals, to: scan.captureURL.appendingPathComponent("before-rebuild/decals")) }
-            try? fm.moveItem(at: fresh, to: decals)
-        }
-        progress(Progress(stage: "Done", fraction: 1, note: nil))
+        return (mesh, points)
     }
 
     // MARK: Reading
+
+    /// depth.bin: per frame time f64, length u32, then LZFSE (width u16, height u16, mm u16[], confidence u8[]).
+    static func readDepth(_ url: URL) throws -> [DepthFrame] {
+        let depthData = try Data(contentsOf: url)
+        var out: [DepthFrame] = []
+        var at = 0
+        while at + 12 <= depthData.count {
+            let time = depthData.subdata(in: at..<(at + 8)).withUnsafeBytes { $0.loadUnaligned(as: Double.self) }
+            let len = Int(depthData.subdata(in: (at + 8)..<(at + 12)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })
+            at += 12
+            guard at + len <= depthData.count else { break }
+            let packed = depthData.subdata(in: at..<(at + len))
+            at += len
+            let raw = (try? (packed as NSData).decompressed(using: .lzfse) as Data) ?? packed
+            guard raw.count >= 4 else { continue }
+            let w = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt16.self) })
+            let h = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 2, as: UInt16.self) })
+            guard raw.count >= 4 + w * h * 2 else { continue }
+            let mm = raw.subdata(in: 4..<(4 + w * h * 2)).withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
+            let conf = raw.count >= 4 + w * h * 3 ? [UInt8](raw.subdata(in: (4 + w * h * 2)..<(4 + w * h * 3))) : []
+            out.append((time, w, h, mm, conf))
+        }
+        return out
+    }
+
+    /// The photos a stage wrote (keyframes.json + photos/), for colouring the points.
+    static func loadPhotos(_ folder: URL) -> [Keyframe] {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("keyframes.json")),
+              let records = try? JSONDecoder().decode([KeyframeRecord].self, from: data) else { return [] }
+        return records.compactMap { r in
+            guard r.cameraToWorld.count == 16, let jpeg = try? Data(contentsOf: folder.appendingPathComponent(r.file)) else { return nil }
+            let c = r.cameraToWorld
+            let m = simd_float4x4(SIMD4(c[0], c[1], c[2], c[3]), SIMD4(c[4], c[5], c[6], c[7]), SIMD4(c[8], c[9], c[10], c[11]), SIMD4(c[12], c[13], c[14], c[15]))
+            return Keyframe(timestamp: r.timestamp, cameraToWorld: m, fx: r.fx, fy: r.fy, cx: r.cx, cy: r.cy,
+                            width: r.width, height: r.height, jpeg: jpeg, exposure: nil)
+        }
+    }
 
     static func readFrames(_ url: URL) throws -> [FrameRecord] {
         let data = try Data(contentsOf: url)
@@ -161,8 +254,8 @@ enum RecordingProcessor {
     }
 
     /// Photos from the video where the phone had moved 20 cm or turned 15° since the last one.
-    static func keyframes(_ url: URL, frames: [FrameRecord], depth: [(time: Double, w: Int, h: Int, mm: [UInt16], conf: [UInt8])],
-                          progress: @escaping @Sendable (Progress) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> [Keyframe] {
+    static func keyframes(_ url: URL, frames: [FrameRecord], depth: [DepthFrame],
+                          progress: (Float) -> Void, note: @escaping @Sendable (String?) -> Void) async throws -> [Keyframe] {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else { return [] }
         let reader = try AVAssetReader(asset: asset)
@@ -202,7 +295,8 @@ enum RecordingProcessor {
             }
             out.append(kf)
             if out.count % 5 == 0 {
-                progress(Progress(stage: "Picking photos", fraction: 0.6 + 0.3 * Float(fi) / Float(frames.count), note: nil))
+                try Task.checkCancellation()
+                progress(Float(fi) / Float(frames.count))
                 await ThermalGovernor.pace(note: note)
             }
         }
@@ -211,17 +305,8 @@ enum RecordingProcessor {
 
     // MARK: Writing
 
-    static func write(_ scan: SavedScan, mesh: ScanMesh, points pointPositions: [SIMD3<Float>], photos: [Keyframe]) throws {
+    static func writePhotos(_ photos: [Keyframe], into folder: URL) throws {
         let fm = FileManager.default
-        let folder = scan.captureURL
-        // The current files move aside first (a rebuild never loses the scan it replaces).
-        let backup = folder.appendingPathComponent("before-rebuild")
-        try? fm.removeItem(at: backup)
-        try fm.createDirectory(at: backup, withIntermediateDirectories: true)
-        for name in ["points.bin", "keyframes.json", "photos", "mesh.bin", "meta.json", "surfels.bin", "trained.bin", "thumbnail-kind"] {
-            let src = folder.appendingPathComponent(name)
-            if fm.fileExists(atPath: src.path) { try fm.moveItem(at: src, to: backup.appendingPathComponent(name)) }
-        }
         try fm.createDirectory(at: folder.appendingPathComponent("photos"), withIntermediateDirectories: true)
         var records: [KeyframeRecord] = []
         for (i, k) in photos.enumerated() {
@@ -242,15 +327,47 @@ enum RecordingProcessor {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(records).write(to: folder.appendingPathComponent("keyframes.json"))
-        try mesh.write(to: folder.appendingPathComponent(ScanMesh.fileName))
-        // Points coloured from the first photo that sees each (grey where none does).
-        let colours = colour(pointPositions, photos)
-        let points = pointPositions.enumerated().map { i, p in
+    }
+
+    /// points.bin (coloured from the first photo that sees each point, grey where none does) and meta.json.
+    static func writePoints(_ positions: [SIMD3<Float>], photos: [Keyframe], into folder: URL) throws {
+        let colours = colour(positions, photos)
+        let points = positions.enumerated().map { i, p in
             LivePoint(x: p.x, y: p.y, z: p.z, rgba: UInt32(colours[i].x) | (UInt32(colours[i].y) << 8) | (UInt32(colours[i].z) << 16) | (255 << 24))
         }
         try points.withUnsafeBytes { Data($0) }.write(to: folder.appendingPathComponent("points.bin"))
-        try encoder.encode(CaptureMeta(pointCount: points.count, keyframeCount: records.count, voxelSize: 0.02))
+        let photoCount = (try? JSONDecoder().decode([KeyframeRecord].self, from: Data(contentsOf: folder.appendingPathComponent("keyframes.json"))).count) ?? photos.count
+        try JSONEncoder().encode(CaptureMeta(pointCount: points.count, keyframeCount: photoCount, voxelSize: 0.02))
             .write(to: folder.appendingPathComponent("meta.json"))
+    }
+
+    /// Moves the new files from `work` into the scan; what they replace (and the `aside` files they make stale) moves
+    /// into a backup folder first. The backup folder's name is kept in `work`, so a swap stopped part-way resumes
+    /// into the same one; an earlier backup is never overwritten.
+    static func swapIn(from work: URL, into folder: URL, backupBase: String, names: [String], aside: [String]) throws {
+        let fm = FileManager.default
+        let nameFile = work.appendingPathComponent("backup-name")
+        var backupName = ((try? String(contentsOf: nameFile, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if backupName.isEmpty {
+            backupName = backupBase
+            var n = 2
+            while fm.fileExists(atPath: folder.appendingPathComponent(backupName).path) { backupName = "\(backupBase)-\(n)"; n += 1 }
+            try backupName.write(to: nameFile, atomically: true, encoding: .utf8)
+        }
+        let backup = folder.appendingPathComponent(backupName)
+        try fm.createDirectory(at: backup, withIntermediateDirectories: true)
+        func moveAside(_ name: String) throws {
+            let current = folder.appendingPathComponent(name)
+            guard fm.fileExists(atPath: current.path) else { return }
+            try fm.moveItem(at: current, to: backup.appendingPathComponent(name))
+        }
+        for name in names {
+            let fresh = work.appendingPathComponent(name)
+            guard fm.fileExists(atPath: fresh.path) else { continue } // nothing new (or already moved in)
+            try moveAside(name)
+            try fm.moveItem(at: fresh, to: folder.appendingPathComponent(name))
+        }
+        for name in aside { try moveAside(name) }
     }
 
     static func colour(_ positions: [SIMD3<Float>], _ frames: [Keyframe]) -> [SIMD3<UInt8>] {

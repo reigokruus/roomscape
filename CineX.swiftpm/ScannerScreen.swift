@@ -442,8 +442,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 if let recorder = self.live.recorder {
                     self.live.recorder = nil
                     recorder.finish { folder, bytes in
-                        RawRecorder.move(folder, into: saved)
+                        let main = RawRecorder.move(folder, into: saved)
                         log.info("raw recording: \(recorder.frames) frames, \(bytes / 1_000_000) MB")
+                        // Process later: in the background, now that the recording is in the scan's folder.
+                        if main { Task { @MainActor in ProcessingQueue.shared.scanSaved(saved) } }
                     }
                 }
                 self.saved = saved

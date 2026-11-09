@@ -42,8 +42,6 @@ struct ResultView: View {
     @State private var pickingAreas = false
     @State private var areaTargets: [SIMD3<Float>] = []
     private let areaRoot: SCNNode = { let n = SCNNode(); n.name = "rescanTargets"; return n }()
-    /// Rebuilding from the recording: stage, progress (0…1) and a note (cooling down), or nil.
-    @State private var rebuild: RecordingProcessor.Progress?
     @State private var rebuildDone: String?
     /// Fills for the holes removed or moved objects leave (HoleFill), by object; generated, never saved.
     @State private var holeFills: [UUID: SCNNode] = [:]
@@ -247,16 +245,7 @@ struct ResultView: View {
         }
         .sheet(isPresented: $sendingNearby) { SendNearbySheet(scan: current) }
         .overlay(alignment: .center) {
-            if let rebuild {
-                VStack(spacing: 8) {
-                    Text(rebuild.stage.isEmpty ? "Rebuilding…" : rebuild.stage).font(.headline)
-                    ProgressView(value: max(0, min(1, rebuild.fraction)))
-                    if let note = rebuild.note { Text(note).font(.footnote).foregroundStyle(.secondary) }
-                }
-                .padding()
-                .frame(maxWidth: 300)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            }
+            ProcessingOverlay(scan: current.name, done: $rebuildDone)
         }
         .alert("Rebuilt from the recording", isPresented: Binding(get: { rebuildDone != nil }, set: { if !$0 { rebuildDone = nil } })) {
             Button("OK", role: .cancel) {}
@@ -874,26 +863,7 @@ struct ResultView: View {
     /// Builds this scan's surface, points and photos again from its raw recording, in the background, paced by heat.
     /// The files it replaces are kept in before-rebuild/.
     private func rebuildFromRecording() {
-        guard rebuild == nil else { return }
-        let scan = current
-        rebuild = RecordingProcessor.Progress(stage: "Starting", fraction: 0, note: nil)
-        Task {
-            do {
-                try await Task.detached(priority: .utility) {
-                    try await RecordingProcessor.rebuild(scan) { p in
-                        Task { @MainActor in
-                            if p.fraction < 0 { rebuild?.note = p.note } else { rebuild = RecordingProcessor.Progress(stage: p.stage, fraction: p.fraction, note: rebuild?.note) }
-                        }
-                    }
-                }.value
-                ScanStore.invalidateThumbnail(scan)
-                rebuild = nil
-                rebuildDone = "Go back and open the room again to see it. The previous version is kept in the scan's before-rebuild folder."
-            } catch {
-                rebuild = nil
-                rebuildDone = "Couldn't rebuild: \(error.localizedDescription)"
-            }
-        }
+        ProcessingQueue.shared.add(current, .rebuild)
     }
 
     private func exportRmsc(save: Bool) {

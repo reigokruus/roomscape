@@ -108,11 +108,21 @@ final class RawRecorder: @unchecked Sendable {
         }
     }
 
-    /// Moves a finished recording into a scan's capture folder.
-    static func move(_ folder: URL, into scan: SavedScan) {
-        let target = scan.captureURL.appendingPathComponent("recording")
-        try? FileManager.default.removeItem(at: target)
-        try? FileManager.default.moveItem(at: folder, to: target)
+    /// Moves a finished recording into a scan's capture folder, as `recording`. Never replaces one that's there
+    /// (Continue scan keeps the scan's first recording): then it goes next to it as `recording-continue[-n]`.
+    /// True if it became the scan's `recording` (the one processing reads).
+    @discardableResult
+    static func move(_ folder: URL, into scan: SavedScan) -> Bool {
+        let fm = FileManager.default
+        var target = scan.captureURL.appendingPathComponent("recording")
+        let main = !fm.fileExists(atPath: target.path)
+        var n = 1
+        while fm.fileExists(atPath: target.path) {
+            target = scan.captureURL.appendingPathComponent(n == 1 ? "recording-continue" : "recording-continue-\(n)")
+            n += 1
+        }
+        do { try fm.moveItem(at: folder, to: target) } catch { return false }
+        return main
     }
 
     // MARK: Internals

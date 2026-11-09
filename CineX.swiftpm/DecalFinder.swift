@@ -38,9 +38,11 @@ enum DecalFinder {
     }
 
     /// Finds the decals in a recording and writes them into `out` (decal images + decals.json). `pace` is called
-    /// between frames (the thermal governor). Returns how many it kept.
+    /// between frames (the thermal governor), `progress` with how far through the video it is (0…1). Stops with
+    /// CancellationError when its task is cancelled. Returns how many it kept.
     static func find(recording rec: URL, frames: [Frame], depth: [Depth], out: URL,
-                     pace: () async -> Void = {}, log: (String) -> Void = { _ in }) async throws -> Int {
+                     pace: () async -> Void = {}, progress: (Float) -> Void = { _ in },
+                     log: (String) -> Void = { _ in }) async throws -> Int {
         let asset = AVURLAsset(url: rec.appendingPathComponent("video.mov"))
         guard let track = try await asset.loadTracks(withMediaType: .video).first, !frames.isEmpty else { return 0 }
         let reader = try AVAssetReader(asset: asset)
@@ -57,6 +59,8 @@ enum DecalFinder {
             while fi + 1 < frames.count, frames[fi + 1].time <= t + 0.001 { fi += 1 }
             guard t - lastLook >= 0.5, let buffer = CMSampleBufferGetImageBuffer(sample) else { continue } // 2 looks a second
             lastLook = t
+            try Task.checkCancellation()
+            progress(Float(fi) / Float(frames.count))
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = false

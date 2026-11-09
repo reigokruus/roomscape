@@ -59,6 +59,9 @@ struct HomeView: View {
                     }
                 }
 
+                // Processing after the scan: the running job, and the record-then-process test switch.
+                ProcessingSection()
+
                 // Experimental ultrawide scanner (Experimental/Ultrawide, discardable): its only hook into the app.
                 ExperimentalUltrawideRow { scans = ScanStore.list() }
 
@@ -133,9 +136,9 @@ struct HomeView: View {
             .onOpenURL { url in
                 if url.isFileURL { importRmsc(url) }
             }
-            .onAppear { nearby.start() }
+            .onAppear { nearby.start(); ProcessingQueue.shared.start() }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { nearby.start() }
+                if phase == .active { nearby.start(); ProcessingQueue.shared.start() }
             }
             .alert("Couldn't import the scan", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
                 Button("OK", role: .cancel) {}
@@ -147,6 +150,7 @@ struct HomeView: View {
                     // Close the result first; it opens again with the merged scan when the scanner is done.
                     improving = scan
                     path = []
+                    ProcessingQueue.shared.hold(scan) // Continue scan moves its folder: no processing meanwhile
                     scanRequest = ScanRequest(improving: scan)
                 })
             }
@@ -181,6 +185,7 @@ struct HomeView: View {
             .fullScreenCover(item: $scanRequest, onDismiss: {
                 // Open the result only after the scanner has fully closed, so the two transitions don't collide.
                 scans = ScanStore.list()
+                ProcessingQueue.shared.releaseAll() // a Continue scan held its scan's processing
                 // Improve scan closed without merging (cancelled or failed): go back to the scan it was improving,
                 // not the home screen, where "New room scan" would start a separate scan.
                 let back = justSaved ?? improving

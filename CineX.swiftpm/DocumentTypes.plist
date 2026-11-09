@@ -50,6 +50,19 @@
     <array>
         <string>_roomscape._tcp</string>
     </array>
+    <!-- Processing after the scan (ProcessingQueue): continued processing (iOS 26+, ids <bundle>.process.*) and
+         the later resume (<bundle>.resume). Both bundle IDs: the local test build and the team's. -->
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>com.hackathon.roomscape.process.*</string>
+        <string>com.hackathon.roomscape.resume</string>
+        <string>com.hackathon.roomscape.process.*</string>
+        <string>com.hackathon.roomscape.resume</string>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>processing</string>
+    </array>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <false/>
 </dict>
