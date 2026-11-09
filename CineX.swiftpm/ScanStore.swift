@@ -55,13 +55,34 @@ enum ScanStore {
         return scan
     }
 
-    /// The scan's thumbnail, rendered and saved the first time it's needed. Slow: call off the main thread.
+    /// Thumbnails are rendered one at a time: each photo room holds its textures while it renders.
+    private static let thumbnailLock = NSLock()
+
+    /// The scan's thumbnail: its photo room from the 3/4 view, else RoomPlan's model. Made the first time it's needed
+    /// (and once more for scans whose old thumbnail shows the model, see `thumbnailKind`). Slow: call off the main thread.
     static func ensureThumbnail(_ scan: SavedScan) -> URL? {
-        let url = scan.thumbnailURL
-        if FileManager.default.fileExists(atPath: url.path) { return url }
+        let url = scan.thumbnailURL, fm = FileManager.default
+        let kindURL = scan.captureURL.appendingPathComponent("thumbnail-kind")
+        if fm.fileExists(atPath: url.path), fm.fileExists(atPath: kindURL.path) { return url }
+        thumbnailLock.lock()
+        defer { thumbnailLock.unlock() }
+        if fm.fileExists(atPath: url.path), fm.fileExists(atPath: kindURL.path) { return url }
+        if let jpeg = ScanThumbnail.renderPhotoRoom(scan), (try? jpeg.write(to: url, options: .atomic)) != nil {
+            try? "photo".write(to: kindURL, atomically: true, encoding: .utf8)
+            return url
+        }
+        // No photo room: keep an existing thumbnail, else render the model; either way don't try again.
+        if fm.fileExists(atPath: scan.captureURL.path) { try? "model".write(to: kindURL, atomically: true, encoding: .utf8) }
+        if fm.fileExists(atPath: url.path) { return url }
         guard let jpeg = ScanThumbnail.render(modelURL: scan.modelURL),
               (try? jpeg.write(to: url, options: .atomic)) != nil else { return nil }
         return url
+    }
+
+    /// Makes the scan's thumbnail again next time (its photo room changed, e.g. after Continue scan).
+    static func invalidateThumbnail(_ scan: SavedScan) {
+        try? FileManager.default.removeItem(at: scan.captureURL.appendingPathComponent("thumbnail-kind"))
+        try? FileManager.default.removeItem(at: scan.thumbnailURL)
     }
 
     static func list() -> [SavedScan] {

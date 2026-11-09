@@ -796,6 +796,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             loadPlanning(dir); if (done != null) done.run();
             if (meshTris == 0) fuseSavedDepth(); // saved and imported scans keep no surface: rebuild it for Photo
+            photoThumbWanted = !new File(dir, "thumbnail-kind").exists(); // old thumbnails show points: redo once
             if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
             if (AUTO_PROCESS && DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) // older scans: place the back wall once, no rescan
                 glTasks.add(() -> { if (!hallDone) { hallDone = true; estimateHall(surfGen, false); } });
@@ -4644,6 +4645,32 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** 0 = photo surface, 1 = splats, 2 = dots (the viewer's Photo | Splats | Points switch). */
+    /** The Home thumbnail should show the photo room (like the iPhone): taken once it's on screen. */
+    private volatile boolean photoThumbWanted;
+
+    /** GL thread, right after a frame: saves that frame (the photo room) as the scan's thumbnail. */
+    private void savePhotoThumb() {
+        final File dir = currentDir;
+        java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
+        GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+        final int w = width, h = height;
+        new Thread(() -> { try {
+            px.position(0);
+            android.graphics.Bitmap full = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+            full.copyPixelsFromBuffer(px);
+            // The middle of the view at 4:3 (the bars cover the top and bottom on screen), 360 px wide, upright.
+            int cw = w, ch = Math.min(h, w * 3 / 4), cy = (h - ch) / 2;
+            android.graphics.Matrix flip = new android.graphics.Matrix();
+            float sc = 360f / cw;
+            flip.postScale(sc, -sc);
+            android.graphics.Bitmap thumb = android.graphics.Bitmap.createBitmap(full, 0, cy, cw, ch, flip, true);
+            full.recycle();
+            try (java.io.FileOutputStream f = new java.io.FileOutputStream(new File(dir, "thumb.jpg"))) { thumb.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, f); }
+            try (java.io.FileOutputStream f = new java.io.FileOutputStream(new File(dir, "thumbnail-kind"))) { f.write("photo".getBytes("UTF-8")); }
+            log("thumbnail: photo room");
+        } catch (Throwable e) { logError("photo thumbnail", new RuntimeException(e)); } }, "photo-thumb").start();
+    }
+
     /** "8.2 × 5.3 m, 2.9 m high" from the scan's extent, or null before it's loaded. */
     String roomSizeText() {
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
@@ -5027,6 +5054,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (lighting.enabled) drawLightGizmos(mvp);
         else if (plan != null && overlays) drawPlan(mvp, plan);
         if (pendingSave != null) { Runnable r = pendingSave; pendingSave = null; r.run(); }
+        if (photoThumbWanted && photos.ready && style == 0 && !walking && meshTris > 0 && currentDir != null) { photoThumbWanted = false; savePhotoThumb(); }
     }
 
     private FloatBuffer scratch = ByteBuffer.allocateDirect(4096 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();

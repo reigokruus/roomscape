@@ -814,6 +814,7 @@ public class MainActivity extends Activity {
         viewerBottom.addView(Ios.card(this, nameRow, sizeRow));
         chrome.addView(viewerBottom, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
         buildWalkChrome(chrome);
+        blockTouches(viewerTop, styleSwitch, viewerBottom, toolBars, walkControls);
     }
 
     // ---------------- Enter the room (first person), as on the iPhone ----------------
@@ -944,6 +945,11 @@ public class MainActivity extends Activity {
             }
         }
         return true;
+    }
+
+    /** Panels over the 3D view keep their touches: only the 3D view itself turns the model. */
+    private static void blockTouches(View... panels) {
+        for (View v : panels) { v.setClickable(true); v.setFocusable(false); }
     }
 
     private void updateStyleSwitch() {

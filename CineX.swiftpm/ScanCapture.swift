@@ -83,6 +83,26 @@ enum CaptureStore {
 enum ScanThumbnail {
     static let size = CGSize(width: 360, height: 270)
 
+    /// The scan's photo room (photos painted on its mesh, or an imported room.glb) seen from the 3/4 orbit view, or nil
+    /// when the scan has no photo room.
+    static func renderPhotoRoom(_ scan: SavedScan) -> Data? {
+        guard let room = PhotoRoom.build(scan) ?? GLBScene.node(forScan: scan.captureURL),
+              let device = MTLCreateSystemDefaultDevice() else { return nil }
+        let scene = SCNScene()
+        scene.background.contents = UIColor.black
+        scene.rootNode.addChildNode(room)
+        let framing = RoomSceneView.framing(of: scene)
+        let camera = SCNNode()
+        camera.camera = RoomSceneView.makeCamera()
+        camera.position = RoomSceneView.orbitPosition(framing)
+        camera.look(at: framing.center)
+        scene.rootNode.addChildNode(camera)
+        let renderer = SCNRenderer(device: device, options: nil)
+        renderer.scene = scene
+        renderer.pointOfView = camera
+        return renderer.snapshot(atTime: 0, with: size, antialiasingMode: .multisampling4X).jpegData(compressionQuality: 0.8)
+    }
+
     static func render(modelURL: URL) -> Data? {
         guard let scene = try? SCNScene(url: modelURL, options: nil),
               let device = MTLCreateSystemDefaultDevice() else { return nil }
