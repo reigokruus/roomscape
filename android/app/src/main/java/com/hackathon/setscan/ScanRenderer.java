@@ -3503,6 +3503,57 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void zoom(float f) { dist = clamp(dist / f, 0.05f, 100f); }
 
+    // ---- Enter the room: standing in the scan at eye height (like the iPhone app) ----
+    volatile boolean walking;
+    /** Eye height above the floor, metres; the field of view; held walk buttons (+1 forward, -1 back). */
+    volatile float eyeH = 1.5f, walkFov = 65f;
+    volatile int walkMove;
+    private final float[] eye = new float[3];
+    private volatile float walkYaw, walkPitch;
+    private long walkLast;
+
+    float walkFloorY() { return roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY; }
+
+    /** Where a tap's ray meets the floor plane (x, z), or null. */
+    float[] floorPoint(float tx, float ty) {
+        float[] inv = new float[16];
+        if (!Matrix.invertM(inv, 0, viewMvp, 0)) return null;
+        float nx = tx / width * 2 - 1, ny = 1 - ty / height * 2;
+        float[] a = new float[4], b = new float[4];
+        Matrix.multiplyMV(a, 0, inv, 0, new float[]{nx, ny, -1, 1}, 0);
+        Matrix.multiplyMV(b, 0, inv, 0, new float[]{nx, ny, 1, 1}, 0);
+        for (int i = 0; i < 3; i++) { a[i] /= a[3]; b[i] /= b[3]; }
+        float dy = b[1] - a[1];
+        if (Math.abs(dy) < 1e-6f) return null;
+        float t = (walkFloorY() - a[1]) / dy;
+        if (t < 0) return null;
+        return new float[]{a[0] + (b[0] - a[0]) * t, a[2] + (b[2] - a[2]) * t};
+    }
+
+    /** GL thread: stand at (x, z), facing the way the view faced; when already standing, walk there. */
+    boolean enterAt(float tx, float ty) {
+        float[] p = floorPoint(tx, ty);
+        if (p == null) return false;
+        if (!walking) { walkYaw = topView ? 0 : yaw; walkPitch = -0.1f; walkFov = 65f; topView = false; }
+        eye[0] = p[0]; eye[1] = walkFloorY() + eyeH; eye[2] = p[1];
+        walking = true;
+        walkLast = 0;
+        return true;
+    }
+
+    void exitWalk() { walking = false; walkMove = 0; }
+
+    /** Drag to look around (the scene follows the finger); pitch kept short of straight up or down. */
+    void look(float dx, float dy) {
+        float s = 0.005f * walkFov / 60f;
+        walkYaw += dx * s;
+        walkPitch = clamp(walkPitch + dy * s, -1.3f, 1.3f);
+    }
+
+    void walkZoom(float f) { walkFov = clamp(walkFov / f, 30f, 90f); }
+
+    void setEyeHeight(float h) { eyeH = h; if (walking) eye[1] = walkFloorY() + h; }
+
     void pan(float dx, float dy) {
         float s = dist * 0.0015f;
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
@@ -4552,6 +4603,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** 0 = photo surface, 1 = splats, 2 = dots (the viewer's Photo | Splats | Points switch). */
+    /** "8.2 × 5.3 m, 2.9 m high" from the scan's extent, or null before it's loaded. */
+    String roomSizeText() {
+        float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
+        if (w <= 0 || d <= 0) return null;
+        return String.format(java.util.Locale.US, "%.1f × %.1f m, %.1f m high", Math.max(w, d), Math.min(w, d), h);
+    }
+
     void setStyle(int s) { style = Math.max(0, Math.min(2, s)); }
     int style() { return style; }
 
@@ -4884,13 +4942,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         uploadNew();
         uploadSurfels();
         float aspect = (float) width / height;
-        Matrix.perspectiveM(proj, 0, 60f, aspect, 0.02f, 500f);
+        Matrix.perspectiveM(proj, 0, walking ? walkFov : 60f, aspect, walking ? 0.05f : 0.02f, 500f);
         float p = topView ? 1.5697f : pitch;
         float y = topView ? 0f : yaw;
         float ex = target[0] + dist * (float) (Math.cos(p) * Math.sin(y));
         float ey = target[1] + dist * (float) Math.sin(p);
         float ez = target[2] + dist * (float) (Math.cos(p) * Math.cos(y));
-        if (topView) Matrix.setLookAtM(view, 0, target[0], target[1] + dist, target[2], target[0], target[1], target[2], 0, 0, -1);
+        if (walking) {
+            // Held ▲/▼: about 1.2 m/s, level, in the look direction.
+            long now = System.nanoTime();
+            float dt = walkLast == 0 ? 0 : Math.min(0.1f, (now - walkLast) / 1e9f);
+            walkLast = now;
+            float fx = (float) -Math.sin(walkYaw), fz = (float) -Math.cos(walkYaw);
+            eye[0] += fx * walkMove * 1.2f * dt; eye[2] += fz * walkMove * 1.2f * dt;
+            float cp = (float) Math.cos(walkPitch), sp = (float) Math.sin(walkPitch);
+            ex = eye[0]; ey = eye[1]; ez = eye[2];
+            Matrix.setLookAtM(view, 0, ex, ey, ez, ex + fx * cp, ey + sp, ez + fz * cp, 0, 1, 0);
+        } else if (topView) Matrix.setLookAtM(view, 0, target[0], target[1] + dist, target[2], target[0], target[1], target[2], 0, 0, -1);
         else Matrix.setLookAtM(view, 0, ex, ey, ez, target[0], target[1], target[2], 0, 1, 0);
         Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
         updateCutaway(ex, ez, topView);

@@ -553,7 +553,7 @@ public class MainActivity extends Activity {
         scaleDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
             public boolean onScale(ScaleGestureDetector d) {
-                renderer.zoom(d.getScaleFactor());
+                if (renderer.walking) renderer.walkZoom(d.getScaleFactor()); else renderer.zoom(d.getScaleFactor());
                 return true;
             }
         });
@@ -569,6 +569,7 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
+            if (walkTouch(e)) return true;
             if (objPanel.getVisibility() == View.VISIBLE && objectTouch(e)) return true;
             if (renderer.lighting.enabled) {
                 // a finger that lands on a light or prop selects and drags it; anywhere else it orbits as usual
@@ -616,6 +617,7 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (walkState != 0) { setWalk(0); return; }
         if (!homeShown()) { showHome(); return; }
         super.onBackPressed();
     }
@@ -695,6 +697,9 @@ public class MainActivity extends Activity {
             styleSwitch.setVisibility(viewer ? View.VISIBLE : View.GONE);
             viewerBottom.setVisibility(viewer ? View.VISIBLE : View.GONE);
             viewerTitle.setText(renderer.currentName != null ? renderer.currentName : "Scan");
+            nameValue.setText(renderer.currentName != null ? renderer.currentName : "Add a name");
+            String size = renderer.roomSizeText();
+            sizeValue.setText(size != null ? size : "—");
             updateStyleSwitch();
             // The tool buttons sit just above Continue scan in the viewer.
             viewerBottom.post(() -> {
@@ -778,11 +783,166 @@ public class MainActivity extends Activity {
         viewerBottom.setOrientation(LinearLayout.VERTICAL);
         viewerBottom.setPadding(dp(16), dp(10), dp(16), dp(18));
         viewerBottom.setBackgroundColor(0xE6000000);
+        Button enter = new Button(this);
+        enter.setText("🚶  Enter the room");
+        Ios.filled(enter);
+        enter.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        enter.setPadding(dp(14), 0, dp(14), 0);
+        enter.setOnClickListener(v -> setWalk(1));
+        LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40));
+        ep.bottomMargin = dp(10);
+        viewerBottom.addView(enter, ep);
         improveButton.setText("Continue scan");
         Ios.filled(improveButton);
         viewerBottom.addView(improveButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)));
         viewerBottom.addView(Ios.footer(this, "Add parts you missed, or that came out thin or blurry. The phone recognises the room and adds to this scan."));
+        // ROOM: the scan's name (tap to rename) and size, like the iPhone's summary.
+        viewerBottom.addView(Ios.header(this, "Room"));
+        nameRow = (LinearLayout) Ios.row(this, 0, "Name", false, false, v -> saveScan());
+        ((TextView) nameRow.getChildAt(0)).setTextColor(Color.WHITE);
+        nameValue = new TextView(this);
+        nameValue.setTextColor(Ios.ACCENT);
+        nameValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        nameRow.addView(nameValue);
+        sizeRow = (LinearLayout) Ios.row(this, 0, "Approx. size", false, false, null);
+        ((TextView) sizeRow.getChildAt(0)).setTextColor(Color.WHITE);
+        sizeValue = new TextView(this);
+        sizeValue.setTextColor(Ios.SECONDARY);
+        sizeValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        sizeRow.addView(sizeValue);
+        viewerBottom.addView(Ios.card(this, nameRow, sizeRow));
         chrome.addView(viewerBottom, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+        buildWalkChrome(chrome);
+    }
+
+    // ---------------- Enter the room (first person), as on the iPhone ----------------
+
+    private LinearLayout nameRow, sizeRow;
+    private TextView nameValue, sizeValue, walkHint, heightLabel;
+    private View walkControls;
+    /** 0 = orbiting, 1 = picking where to stand, 2 = standing in the room. */
+    private int walkState;
+    private long lastTapTime;
+
+    private void buildWalkChrome(FrameLayout chrome) {
+        walkHint = new TextView(this);
+        walkHint.setText("Tap the floor where you want to stand");
+        walkHint.setTextColor(Color.WHITE);
+        walkHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        android.graphics.drawable.GradientDrawable hb = new android.graphics.drawable.GradientDrawable();
+        hb.setColor(0xE62C2C2E); hb.setCornerRadius(dp(20));
+        walkHint.setBackground(hb);
+        walkHint.setPadding(dp(14), dp(9), dp(14), dp(9));
+        walkHint.setOnClickListener(v -> setWalk(0));
+        FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        hp.bottomMargin = dp(40);
+        walkHint.setVisibility(View.GONE);
+        chrome.addView(walkHint, hp);
+
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.HORIZONTAL);
+        c.setGravity(Gravity.BOTTOM);
+        c.setPadding(dp(16), 0, dp(16), dp(28));
+        Button exit = new Button(this);
+        exit.setText("↩  Exit");
+        Ios.filled(exit);
+        exit.setOnClickListener(v -> setWalk(0));
+        c.addView(exit, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46)));
+        c.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        // Eye height: taller / shorter, 10 cm a tap, remembered.
+        LinearLayout h = new LinearLayout(this);
+        h.setOrientation(LinearLayout.VERTICAL);
+        h.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xE62C2C2E); bg.setCornerRadius(dp(12));
+        h.setBackground(bg);
+        h.setPadding(dp(6), dp(4), dp(6), dp(4));
+        Button up = new Button(this); up.setText("︿"); Ios.textButton(up); up.setOnClickListener(v -> changeEye(0.1f));
+        heightLabel = new TextView(this); heightLabel.setTextColor(Color.WHITE); heightLabel.setTextSize(12); heightLabel.setGravity(Gravity.CENTER);
+        Button down = new Button(this); down.setText("﹀"); Ios.textButton(down); down.setOnClickListener(v -> changeEye(-0.1f));
+        h.addView(up); h.addView(heightLabel); h.addView(down);
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        hlp.rightMargin = dp(12);
+        c.addView(h, hlp);
+        LinearLayout moves = new LinearLayout(this);
+        moves.setOrientation(LinearLayout.VERTICAL);
+        moves.addView(holdButton("▲", 1));
+        View gap = new View(this); moves.addView(gap, new LinearLayout.LayoutParams(1, dp(8)));
+        moves.addView(holdButton("▼", -1));
+        c.addView(moves);
+        walkControls = c;
+        c.setVisibility(View.GONE);
+        chrome.addView(c, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+        renderer.setEyeHeight(getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("walkEyeHeight", 1.5f));
+    }
+
+    /** A round button that walks while held. */
+    private View holdButton(String label, int dir) {
+        TextView b = new TextView(this);
+        b.setText(label);
+        b.setTextColor(Color.WHITE);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        b.setGravity(Gravity.CENTER);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setShape(android.graphics.drawable.GradientDrawable.OVAL); bg.setColor(0xE62C2C2E);
+        b.setBackground(bg);
+        b.setOnTouchListener((v, e) -> {
+            int a = e.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) { renderer.walkMove = dir; v.setAlpha(0.6f); }
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) { renderer.walkMove = 0; v.setAlpha(1f); }
+            return true;
+        });
+        b.setLayoutParams(new LinearLayout.LayoutParams(dp(56), dp(56)));
+        return b;
+    }
+
+    private void changeEye(float d) {
+        float h = Math.max(0.3f, Math.min(2.2f, Math.round((renderer.eyeH + d) * 10) / 10f));
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putFloat("walkEyeHeight", h).apply();
+        glView.queueEvent(() -> renderer.setEyeHeight(h));
+        heightLabel.setText(String.format(java.util.Locale.US, "%.2f m", h));
+    }
+
+    /** 0 = back to orbiting, 1 = "tap the floor", 2 = standing in the room. */
+    private void setWalk(int state) {
+        walkState = state;
+        if (state == 0) glView.queueEvent(renderer::exitWalk);
+        if (objPanel.getVisibility() == View.VISIBLE) setObjectMode(false);
+        boolean viewerChrome = state == 0;
+        viewerBottom.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
+        toolBars.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
+        styleSwitch.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
+        walkHint.setVisibility(state == 1 ? View.VISIBLE : View.GONE);
+        walkControls.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
+        heightLabel.setText(String.format(java.util.Locale.US, "%.2f m", renderer.eyeH));
+        if (state == 2) toast("Drag to look · pinch to zoom · double-tap the floor to walk there");
+    }
+
+    /** Touches while picking a spot or standing in the room. True when handled. */
+    private boolean walkTouch(MotionEvent e) {
+        if (walkState == 0) return false;
+        int act = e.getActionMasked();
+        if (walkState == 2) scaleDetector.onTouchEvent(e);
+        int pc = e.getPointerCount();
+        if (act == MotionEvent.ACTION_DOWN) { downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false; lastX = e.getX(); lastY = e.getY(); }
+        if (pc > 1) multiTouch = true;
+        if (walkState == 2 && act == MotionEvent.ACTION_MOVE && pc == 1 && !multiTouch) {
+            renderer.look(e.getX() - lastX, e.getY() - lastY);
+            lastX = e.getX(); lastY = e.getY();
+        }
+        if (act == MotionEvent.ACTION_UP && !multiTouch && e.getEventTime() - downTime < 300
+                && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
+            float tx = e.getX(), ty = e.getY();
+            boolean doubleTap = e.getEventTime() - lastTapTime < 350;
+            lastTapTime = e.getEventTime();
+            if (walkState == 1 || doubleTap) {
+                glView.queueEvent(() -> {
+                    boolean ok = renderer.enterAt(tx, ty);
+                    runOnUiThread(() -> { if (ok && walkState == 1) setWalk(2); else if (!ok) toast("Tap the floor"); });
+                });
+            }
+        }
+        return true;
     }
 
     private void updateStyleSwitch() {
@@ -1024,6 +1184,7 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
+        if (walkState != 0) setWalk(0);
         if (session != null) session.pause();
         glView.queueEvent(() -> renderer.goHome());
         scanChrome.setVisibility(View.GONE);
