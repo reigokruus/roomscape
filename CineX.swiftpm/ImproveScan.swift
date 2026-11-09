@@ -167,17 +167,35 @@ extension ScanStore {
 
         // Mesh: the saved one, plus the pass's surfaces where the saved scan had none.
         var oldMesh = ScanMesh.read(from: folder.appendingPathComponent(ScanMesh.fileName))
+        var cutTriangles: [UInt32] = []
         if replaceAreas, let m = oldMesh {
             // The old surface inside the marked areas makes way for the new pass's (kept in mesh-before-rescan.bin).
             try? m.write(to: folder.appendingPathComponent("mesh-before-rescan.bin"))
             var tris: [UInt32] = []
             for t in stride(from: 0, to: m.triangles.count, by: 3) {
                 let c = (m.positions[Int(m.triangles[t])] + m.positions[Int(m.triangles[t + 1])] + m.positions[Int(m.triangles[t + 2])]) / 3
-                if !RescanTargets.inside(c, targets) { tris += [m.triangles[t], m.triangles[t + 1], m.triangles[t + 2]] }
+                let tri = [m.triangles[t], m.triangles[t + 1], m.triangles[t + 2]]
+                if RescanTargets.inside(c, targets) { cutTriangles += tri } else { tris += tri }
             }
             oldMesh = ScanMesh(positions: m.positions, triangles: tris)
         }
-        let mesh = ScanMesh.merge(old: oldMesh, new: capture?.mesh)
+        var mesh = ScanMesh.merge(old: oldMesh, new: capture?.mesh)
+        // Never cut without filling: if the new pass brought less than half as much surface into the marked areas as
+        // was cut there, the old surface goes back.
+        if replaceAreas, var m = mesh, !cutTriangles.isEmpty {
+            var filled = 0
+            for t in stride(from: 0, to: m.triangles.count, by: 3) {
+                let c = (m.positions[Int(m.triangles[t])] + m.positions[Int(m.triangles[t + 1])] + m.positions[Int(m.triangles[t + 2])]) / 3
+                if RescanTargets.inside(c, targets) { filled += 1 }
+            }
+            if filled * 2 < cutTriangles.count / 3 {
+                m.triangles += cutTriangles // the cut triangles' corners are still at the same places in positions
+                mesh = m
+                ImproveLog.write("scan area again: the new surface there was too thin (\(filled) of \(cutTriangles.count / 3) triangles), kept the old surface")
+            } else {
+                ImproveLog.write("scan area again: surface replaced (\(cutTriangles.count / 3) old triangles, \(filled) new)")
+            }
+        }
         let merged = CaptureSnapshot(points: points.withUnsafeBytes { Data($0) }, pointCount: points.count,
                                      keyframes: keyframes, voxelSize: voxel, mesh: mesh)
         // Everything the merge doesn't write itself stays: set the old folder aside, write the merged capture, then

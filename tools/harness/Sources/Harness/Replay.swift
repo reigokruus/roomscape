@@ -170,10 +170,10 @@ enum Replay {
 /// CPU vs GPU fusion of a raw recording (TsdfGPU): the same depth (filter C: medium+ confidence, no flying pixels,
 /// 0.2–4 m), timing and surface difference. `harness gpubench recordings/ios/<scan>`.
 enum GPUBench {
-    static func run(_ dir: URL) throws {
+    static func run(_ dir: URL, voxel: Float = 0.04, view: Int? = nil, skipCPU: Bool = false, carve: Float = 1.5, tag: String = "") throws {
         // CPU, as the phone's rebuild.
         let t0 = Date()
-        let cpu = try Replay.fuse(dir, Replay.filters[2])
+        let cpu = skipCPU ? Tsdf.MeshScratch() : try Replay.fuse(dir, Replay.filters[2])
         let cpuTime = Date().timeIntervalSince(t0)
         // GPU.
         let t1 = Date()
@@ -194,6 +194,7 @@ enum GPUBench {
         let dd = try Data(contentsOf: dir.appendingPathComponent("depth.bin"))
         var depth: [(pose: simd_float4x4, fx: Float, fy: Float, cx: Float, cy: Float, w: Int, h: Int, m: [Float])] = []
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        var depthFrameIndex: [Int] = []
         var at = 0, fi = 0
         while at + 12 <= dd.count {
             let t = dd.subdata(in: at..<(at + 8)).withUnsafeBytes { $0.loadUnaligned(as: Double.self) }
@@ -224,18 +225,51 @@ enum GPUBench {
                 } }
             }
             depth.append((f.pose, fx, fy, cx, cy, w, h, m))
+            depthFrameIndex.append(fi)
         }
         let prepTime = Date().timeIntervalSince(t1)
-        guard let gpu = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5) else { print("no GPU TSDF"); return }
+        // Fine voxels: only a box around the chosen view's camera (a detail zone), so the block fits.
+        if voxel < 0.02, let view, view < frames.count {
+            let c = SIMD3(frames[view].pose.columns.3.x, frames[view].pose.columns.3.y, frames[view].pose.columns.3.z)
+            lo = simd_max(lo, c - 1.6); hi = simd_min(hi, c + 1.6)
+        }
+        guard let gpu = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: voxel, truncation: max(0.03, voxel * 2), carve: carve) else { print("no GPU TSDF (block too big?)"); return }
         let t2 = Date()
-        for d in depth { gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2) }
+        // `only`: just the depth frames around the view (to see what a few frames give before the rest is fused).
+        let onlyNear = ProcessInfo.processInfo.environment["ONLY_NEAR"].flatMap(Int.init)
+        for (i, d) in depth.enumerated() {
+            if let k = onlyNear, let view, abs(depthFrameIndex[i] - view) > k { continue }
+            gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+        }
         gpu.finish()
         let gpuTime = Date().timeIntervalSince(t2)
+        // PROBE=x,y: the voxels along the ray through depth pixel (x, y) of the view's frame.
+        if let probe = ProcessInfo.processInfo.environment["PROBE"]?.split(separator: ",").compactMap({ Int($0) }), probe.count == 2, let view {
+            if let i = depthFrameIndex.firstIndex(where: { $0 >= view }) {
+                let d = depth[i], x = probe[0], y = probe[1], z = d.m[y * d.w + x]
+                print("probe depth \(z) m at (\(x), \(y))")
+                let dir4 = d.pose * SIMD4((Float(x) + 0.5 - d.cx) / d.fx, -(Float(y) + 0.5 - d.cy) / d.fy, -1, 0)
+                let o = SIMD3(d.pose.columns.3.x, d.pose.columns.3.y, d.pose.columns.3.z)
+                for k in stride(from: -8, through: 8, by: 1) {
+                    let p = o + SIMD3(dir4.x, dir4.y, dir4.z) * (z + Float(k) * voxel / 2)
+                    let v = SIMD3<Int32>((p / voxel).rounded(.down))
+                    if let val = gpu.value(at: v) { print(String(format: "  %+5.1f cm: sdf %+.2f  w %d", Float(k) * voxel / 2 * 100, val.sdf, val.weight)) }
+                }
+            }
+        }
         let t3 = Date()
-        let tsdf = Tsdf(capacity: 3_000_000, voxel: 0.04, truncation: 0.08, carve: 1.5)
+        let tsdf = Tsdf(capacity: 12_000_000, voxel: voxel, truncation: max(0.03, voxel * 2), carve: 1.5)
         gpu.copy(into: tsdf)
         let gpuMesh = Fusion.mesh(tsdf)
         let extractTime = Date().timeIntervalSince(t3)
+        print(String(format: "voxel %.1f cm: GPU block %d voxels (%.0f MB), %d triangles", voxel * 100, gpu.voxelCount, Double(gpu.voxelCount) * 6 / 1e6, gpuMesh.triangles.count / 3))
+        if let view, view < frames.count {
+            let f = frames[view]
+            let url = URL(fileURLWithPath: "harness-out/detail-\(dir.deletingLastPathComponent().lastPathComponent)-f\(view)-\(Int((voxel * 1000).rounded()))mm\(tag).png")
+            Images.renderFromCamera(gpuMesh.positions, gpuMesh.triangles, pose: f.pose, k: f.k, imageWidth: f.w, imageHeight: f.h, to: url)
+            print("  render: \(url.path)")
+        }
+        if skipCPU { return }
         let lost = Replay.missing(cpu.positions, from: gpuMesh.positions), added = Replay.missing(gpuMesh.positions, from: cpu.positions)
         print(String(format: "CPU fusion: %.2f s, %d triangles", cpuTime, cpu.triangles.count / 3))
         print(String(format: "GPU fusion: %.2f s on the GPU (%d frames, %d voxels block), + %.2f s depth prep, + %.2f s copy and mesh; %d triangles",

@@ -26,6 +26,49 @@ enum Images {
     }
 
     /// A flat-shaded picture of a mesh from a 3/4 view outside the room (software z-buffer), for before / after.
+    /// The mesh as the recorded camera saw it (ARKit pose and intrinsics), shaded, at a third of the image size.
+    static func renderFromCamera(_ positions: [SIMD3<Float>], _ triangles: [UInt32], pose: simd_float4x4, k: simd_float3x3,
+                                 imageWidth: Int, imageHeight: Int, to url: URL) {
+        let width = imageWidth / 3, height = imageHeight / 3, s: Float = 1.0 / 3
+        let view = pose.inverse
+        let eye = SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+        var z = [Float](repeating: .infinity, count: width * height)
+        var px = [UInt8](repeating: 20, count: width * height * 4)
+        for i in stride(from: 0, to: px.count, by: 4) { px[i + 3] = 255 }
+        func proj(_ p: SIMD3<Float>) -> SIMD3<Float> {
+            let c = view * SIMD4(p, 1)
+            let d = -c.z
+            return SIMD3((k[0][0] * c.x / d + k[2][0]) * s, (k[2][1] - k[1][1] * c.y / d) * s, d)
+        }
+        for t in stride(from: 0, to: triangles.count, by: 3) {
+            let a = positions[Int(triangles[t])], b = positions[Int(triangles[t + 1])], cc = positions[Int(triangles[t + 2])]
+            var n = simd_cross(b - a, cc - a)
+            guard simd_length(n) > 1e-9 else { continue }
+            n = simd_normalize(n)
+            let shade = UInt8(50 + 190 * abs(simd_dot(n, simd_normalize(eye - a))))
+            let p0 = proj(a), p1 = proj(b), p2 = proj(cc)
+            guard p0.z > 0.1, p1.z > 0.1, p2.z > 0.1 else { continue }
+            let minX = max(0, Int(min(p0.x, p1.x, p2.x))), maxX = min(width - 1, Int(max(p0.x, p1.x, p2.x)))
+            let minY = max(0, Int(min(p0.y, p1.y, p2.y))), maxY = min(height - 1, Int(max(p0.y, p1.y, p2.y)))
+            guard minX <= maxX, minY <= maxY else { continue }
+            let area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y)
+            guard abs(area) > 1e-6 else { continue }
+            for y in minY...maxY { for x in minX...maxX {
+                let fx = Float(x) + 0.5, fy = Float(y) + 0.5
+                let w0 = ((p1.x - fx) * (p2.y - fy) - (p2.x - fx) * (p1.y - fy)) / area
+                let w1 = ((p2.x - fx) * (p0.y - fy) - (p0.x - fx) * (p2.y - fy)) / area
+                let w2 = 1 - w0 - w1
+                guard w0 >= 0, w1 >= 0, w2 >= 0 else { continue }
+                let d = w0 * p0.z + w1 * p1.z + w2 * p2.z
+                let i = y * width + x
+                guard d < z[i] else { continue }
+                z[i] = d
+                px[i * 4] = shade; px[i * 4 + 1] = shade; px[i * 4 + 2] = shade
+            } }
+        }
+        png(px, width: width, height: height, to: url)
+    }
+
     static func renderMesh(_ positions: [SIMD3<Float>], _ triangles: [UInt32], room: Room, to url: URL, width: Int = 640, height: Int = 480) {
         let c = room.size / 2
         let eye = c + SIMD3(room.size.x * 0.9, room.size.y * 1.4, room.size.z * 1.3)

@@ -14,6 +14,8 @@ final class Tsdf {
     static let maxW: Int16 = 40
     /// Voxels seen fewer times are ignored for the mesh.
     var minW: Int16 = 2
+    /// Mesh extraction: corners never seen count as empty space (see extractMesh).
+    var unseenAsEmpty = true
 
     let capacity: Int
     private let mask: Int
@@ -240,22 +242,33 @@ final class Tsdf {
         }
 
         // 1) One vertex per cell with a sign change among its 8 well-seen corners.
+        // Corners never seen count as empty (+1) when `unseenAsEmpty`, so thin things in front of a wall (rk's 3 cm
+        // climbing bars) get their sides: the voxels beside them are never written (the camera sees the wall far
+        // behind), and requiring every corner to be seen dropped them, leaving holes. A +1 next to a -1 (the back of
+        // the truncation band) still doesn't make a surface (the 1.6 rule below).
         var ci = [Int](repeating: 0, count: 8)
+        var cs = [Float](repeating: 0, count: 8)
         for i32 in out.near {
             let i = Int(i32)
             let v = Self.coords(voxelKeys[i])
-            var ok = true, pos = false, neg = false
+            var ok = true, pos = false, neg = false, seen = 0
             for k in 0..<8 {
                 let j = k == 0 ? i : index(v &+ Self.corners[k])
-                if !good(j) { ok = false; break }
+                if !good(j) {
+                    if !unseenAsEmpty { ok = false; break }
+                    ci[k] = -1; cs[k] = 1; pos = true
+                    continue
+                }
+                seen += 1
                 ci[k] = j
+                cs[k] = sdf[j]
                 if sdf[j] >= 0 { pos = true } else { neg = true }
             }
-            guard ok, pos, neg else { continue }
+            guard ok, pos, neg, seen >= 4 else { continue }
             var sum = SIMD3<Float>.zero
             var crossings = 0
             for (e0, e1) in Self.cubeEdges {
-                let a = sdf[ci[e0]], b = sdf[ci[e1]]
+                let a = cs[e0], b = cs[e1]
                 if (a >= 0) == (b >= 0) || abs(a - b) > 1.6 { continue }  // +1 next to -1: truncation artefact
                 let t = a / (a - b)
                 let p0 = SIMD3<Float>(Self.corners[e0]), p1 = SIMD3<Float>(Self.corners[e1])
@@ -264,7 +277,7 @@ final class Tsdf {
             }
             guard crossings > 0 else { continue }
             var wmin = Self.maxW
-            for k in 0..<8 { wmin = min(wmin, w[ci[k]]) }
+            for k in 0..<8 where ci[k] >= 0 { wmin = min(wmin, w[ci[k]]) }
             let k = Self.key(v)
             let s = cellSlot(k)
             out.cellKeys[s] = k
@@ -282,8 +295,8 @@ final class Tsdf {
                 var step = SIMD3<Int32>.zero
                 step[axis] = 1
                 let j = index(v &+ step)
-                guard good(j) else { continue }
-                let a = sdf[i], b = sdf[j]
+                guard good(j) || unseenAsEmpty else { continue }
+                let a = sdf[i], b = good(j) ? sdf[j] : 1
                 if (a >= 0) == (b >= 0) || abs(a - b) > 1.6 { continue }
                 var found = true
                 for k in 0..<4 {

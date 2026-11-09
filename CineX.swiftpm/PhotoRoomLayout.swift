@@ -26,8 +26,12 @@ struct ScanMesh: Sendable {
         guard let old, !old.triangles.isEmpty else { return new }
         let cell: Float = 0.04
         func key(_ p: SIMD3<Float>) -> SIMD3<Int32> { SIMD3<Int32>((p / cell).rounded(.down)) }
+        // Only corners of triangles that are still there count (rk 9 Nov: Scan area again cut the old triangles out
+        // but left their corners, which then kept the new surface out: a hole).
+        var used = [Bool](repeating: false, count: old.positions.count)
+        for i in old.triangles { used[Int(i)] = true }
         var covered = Set<SIMD3<Int32>>()
-        for p in old.positions {
+        for (n, p) in old.positions.enumerated() where used[n] {
             let k = key(p)
             for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 { covered.insert(k &+ SIMD3(dx, dy, dz)) } } }
         }

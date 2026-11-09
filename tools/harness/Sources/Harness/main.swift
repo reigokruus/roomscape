@@ -52,7 +52,10 @@ case "debugtrack":
 case "compare":
     try Replay.compare(URL(fileURLWithPath: args[1]), out: out)
 case "gpubench":
-    try GPUBench.run(URL(fileURLWithPath: args[1]))
+    // harness gpubench <recording> [voxel metres] [frame to render from] [gpuonly]
+    try GPUBench.run(URL(fileURLWithPath: args[1]), voxel: args.count > 2 ? Float(args[2]) ?? 0.04 : 0.04,
+                     view: args.count > 3 ? Int(args[3]) : nil, skipCPU: args.contains("gpuonly"),
+                     carve: args.contains("nocarve") ? 0 : 1.5, tag: args.contains("nocarve") ? "-nocarve" : "")
 case "recover":
     let sem = DispatchSemaphore(value: 0)
     Task { do { try await Recover.run(URL(fileURLWithPath: args[1]), to: URL(fileURLWithPath: args[2]), name: args.count > 3 ? args[3] : "Recovered scan") } catch { print("recover failed: \(error)") }; sem.signal() }

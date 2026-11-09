@@ -116,6 +116,15 @@ final class TsdfGPU {
         }
     }
 
+    /// One voxel's signed distance and weight (tests).
+    func value(at v: SIMD3<Int32>) -> (sdf: Float, weight: UInt16)? {
+        finish()
+        let g = v &- origin
+        guard all(g .>= 0), all(g .< dims) else { return nil }
+        let i = (Int(g.z) * Int(dims.y) + Int(g.y)) * Int(dims.x) + Int(g.x)
+        return (sdf.contents().bindMemory(to: Float.self, capacity: voxelCount)[i], weight.contents().bindMemory(to: UInt16.self, capacity: voxelCount)[i])
+    }
+
     /// Resets every voxel whose centre passes the test (tap to clear while scanning); returns how many.
     func clearWhere(_ test: (SIMD3<Float>) -> Bool) -> Int {
         finish()
