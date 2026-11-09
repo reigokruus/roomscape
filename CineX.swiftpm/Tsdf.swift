@@ -15,7 +15,7 @@ final class Tsdf {
     /// Voxels seen fewer times are ignored for the mesh.
     var minW: Int16 = 2
     /// Mesh extraction: corners never seen count as empty space (see extractMesh).
-    var unseenAsEmpty = false // off until tested on whole rooms (thin-detail work in progress)
+    var unseenAsEmpty = true // checked on rk's 19:00 room (fewer holes, no junk) and the 3 cm bars
 
     let capacity: Int
     private let mask: Int

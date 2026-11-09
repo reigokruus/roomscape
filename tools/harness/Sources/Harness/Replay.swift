@@ -266,7 +266,7 @@ enum GPUBench {
         print(String(format: "voxel %.1f cm: GPU block %d voxels (%.0f MB), %d triangles", voxel * 100, gpu.voxelCount, Double(gpu.voxelCount) * 6 / 1e6, gpuMesh.triangles.count / 3))
         if let view, view < frames.count {
             let f = frames[view]
-            let url = URL(fileURLWithPath: "harness-out/detail-\(dir.deletingLastPathComponent().lastPathComponent)-f\(view)-\(Int((voxel * 1000).rounded()))mm\(tag).png")
+            let url = URL(fileURLWithPath: "harness-out/detail-\(dir.deletingLastPathComponent().lastPathComponent)-f\(view)-\(Int((voxel * 1000).rounded()))mm\(tag)\(ProcessInfo.processInfo.environment["UNSEEN"] == "1" ? "-unseen" : "").png")
             Images.renderFromCamera(gpuMesh.positions, gpuMesh.triangles, pose: f.pose, k: f.k, imageWidth: f.w, imageHeight: f.h, to: url)
             print("  render: \(url.path)")
         }
