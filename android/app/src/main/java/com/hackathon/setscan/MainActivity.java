@@ -494,7 +494,7 @@ public class MainActivity extends Activity {
             bt.setPadding(dp(12), dp(8), dp(12), dp(8));
             Ios.pill(bt);
             // In the viewer these live in the top bar (Back, Share) and under the 3D view (Continue scan), like iOS.
-            if (bt != homeButton && bt != exportButton && bt != improveButton) bars.addView(bt);
+            if (bt != homeButton && bt != exportButton && bt != improveButton && bt != lightButton && bt != objButton) bars.addView(bt);
         }
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
@@ -681,7 +681,7 @@ public class MainActivity extends Activity {
         renderer.overlays = debug;
         updateSpend();
         Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, undoButton, removePersonButton, interviewButton};
-        lightButton.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // lighting is parked for now (rk: just the model)
+        lightButton.setVisibility(!scanning ? View.VISIBLE : View.GONE); // in the pill row, like the iPhone's Lighting
         for (Button b : new Button[]{catalogButton, scannedItemsButton, previewButton}) b.setVisibility(debug && !scanning ? View.VISIBLE : View.GONE); // Marje's planning tools: debug until rk decides
         Button[] tools = {depthButton, cleanButton, trainButton, viewButton, splatButton, sizeBtn, liveClaudeButton, logBtn, planButton, cutButton, topButton, claudeButton};
         for (Button b : viewerMain) b.setVisibility(scanning ? (debug && b == homeButton ? View.VISIBLE : View.GONE) : View.VISIBLE);
@@ -701,7 +701,8 @@ public class MainActivity extends Activity {
         if (viewerTop != null) {
             viewerTop.setVisibility(viewer ? View.VISIBLE : View.GONE);
             styleSwitch.setVisibility(viewer ? View.VISIBLE : View.GONE);
-            viewerPanel.setVisibility(viewer ? View.VISIBLE : View.GONE);
+            viewerPanel.setVisibility(viewer && walkState == 0 ? View.VISIBLE : View.GONE);
+            pillRow.setVisibility(viewer ? View.VISIBLE : View.GONE);
             viewerTitle.setText(renderer.currentName != null ? renderer.currentName : "Scan");
             nameValue.setText(renderer.currentName != null ? renderer.currentName : "Add a name");
             File cd = renderer.currentDir;
@@ -733,7 +734,8 @@ public class MainActivity extends Activity {
 
     // ---------------- viewer chrome, matching the iPhone app ----------------
 
-    private LinearLayout viewerTop, viewerBottom, styleSwitch;
+    private LinearLayout viewerTop, viewerBottom, styleSwitch, pillRow;
+    private TextView walkTip;
     private View toolBars;
     /** The scrolling panel under the 3D view (holds viewerBottom). */
     private android.widget.ScrollView viewerPanel;
@@ -798,8 +800,22 @@ public class MainActivity extends Activity {
             styleTabs[i] = t;
             styleSwitch.addView(t);
         }
+        // Lighting and Objects as pills under the top bar, then the view switch, like the iPhone.
+        pillRow = new LinearLayout(this);
+        pillRow.setOrientation(LinearLayout.HORIZONTAL);
+        lightButton.setText("💡  Lighting");
+        objButton.setText("⬡  Objects");
+        for (Button b : new Button[]{lightButton, objButton}) {
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40));
+            pl.rightMargin = dp(8);
+            pillRow.addView(b, pl);
+        }
+        FrameLayout.LayoutParams prp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
+        prp.topMargin = dp(92); prp.leftMargin = dp(16);
+        chrome.addView(pillRow, prp);
         FrameLayout.LayoutParams swp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
-        swp.topMargin = dp(92); swp.leftMargin = dp(16);
+        swp.topMargin = dp(140); swp.leftMargin = dp(16);
         chrome.addView(styleSwitch, swp);
 
         // Under the 3D view: Continue scan, prominent, with its explanation.
@@ -860,7 +876,7 @@ public class MainActivity extends Activity {
         viewerPanel.setClipToPadding(false);
         chrome.addView(viewerPanel, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
         buildWalkChrome(chrome);
-        blockTouches(viewerTop, styleSwitch, walkControls);
+        blockTouches(viewerTop, styleSwitch, pillRow, walkControls);
     }
 
     // ---------------- Enter the room (first person), as on the iPhone ----------------
@@ -943,12 +959,27 @@ public class MainActivity extends Activity {
         c.addView(moves);
         walkControls = c;
         c.setVisibility(View.GONE);
+        walkTip = new TextView(this);
+        walkTip.setText("Drag to look · pinch to zoom · double-tap the floor to walk there");
+        walkTip.setTextColor(Color.WHITE);
+        walkTip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        android.graphics.drawable.GradientDrawable tb = new android.graphics.drawable.GradientDrawable();
+        tb.setColor(0xE62C2C2E); tb.setCornerRadius(dp(14));
+        walkTip.setBackground(tb);
+        walkTip.setPadding(dp(10), dp(5), dp(10), dp(5));
+        walkTip.setVisibility(View.GONE);
+        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        tp.bottomMargin = dp(170);
+        chrome.addView(walkTip, tp);
         // Above the system navigation bar (the app draws under it).
         c.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(dp(16), 0, dp(16), dp(28) + insets.getSystemWindowInsetBottom());
             FrameLayout.LayoutParams wl = (FrameLayout.LayoutParams) walkHint.getLayoutParams();
             wl.bottomMargin = dp(40) + insets.getSystemWindowInsetBottom();
             walkHint.setLayoutParams(wl);
+            FrameLayout.LayoutParams tl = (FrameLayout.LayoutParams) walkTip.getLayoutParams();
+            tl.bottomMargin = dp(170) + insets.getSystemWindowInsetBottom();
+            walkTip.setLayoutParams(tl);
             return insets;
         });
         chrome.addView(c, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
@@ -990,11 +1021,13 @@ public class MainActivity extends Activity {
         boolean viewerChrome = state == 0;
         viewerPanel.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
         toolBars.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
-        styleSwitch.setVisibility(viewerChrome ? View.VISIBLE : View.GONE);
+        // The top rows (Lighting, Objects, the view switch) stay while standing in the room, as on the iPhone.
+        styleSwitch.setVisibility(View.VISIBLE);
+        pillRow.setVisibility(View.VISIBLE);
         walkHint.setVisibility(state == 1 ? View.VISIBLE : View.GONE);
         walkControls.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
+        walkTip.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
         heightLabel.setText(String.format(java.util.Locale.US, "%.2f m", renderer.eyeH));
-        if (state == 2) toast("Drag to look · pinch to zoom · double-tap the floor to walk there");
         // Standing in the room uses the whole screen; otherwise the 3D view ends above the panel.
         viewerPanel.post(() -> {
             FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
