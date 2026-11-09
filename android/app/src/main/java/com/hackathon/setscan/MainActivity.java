@@ -691,7 +691,9 @@ public class MainActivity extends Activity {
             boolean scanTool = b == splatButton || b == sizeBtn || b == liveClaudeButton || b == logBtn;
             b.setVisibility(debug && (!scanning || scanTool) ? View.VISIBLE : View.GONE);
         }
-        mainButton.setVisibility(View.VISIBLE);
+        // While scanning, Cancel and Done are their own row at the bottom (as on the iPhone).
+        mainButton.setVisibility(scanning ? View.GONE : View.VISIBLE);
+        if (scanRow != null) scanRow.setVisibility(scanning ? View.VISIBLE : View.GONE);
         // the text panel is for debugging; testers see it only for the lighting readout
         status.setVisibility(debug || (!scanning && (renderer.lighting.enabled || renderer.planningPreview)) ? View.VISIBLE : View.GONE);
         if (hud != null) hud.setVisibility(scanning ? View.VISIBLE : View.GONE);
@@ -1123,22 +1125,23 @@ public class MainActivity extends Activity {
 
     private void buildHud(FrameLayout chrome) {
         android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-        bg.setColor(0xB0101418); bg.setCornerRadius(dp(14));
+        // The scan card, the same on both phones: dark translucent, white hint (red only for warnings), orange bars.
+        bg.setColor(0xD91C1C1E); bg.setCornerRadius(dp(14));
         hud = new LinearLayout(this);
         hud.setOrientation(LinearLayout.VERTICAL);
         hud.setBackground(bg);
         hud.setPadding(dp(16), dp(12), dp(16), dp(14));
         hudHint = new TextView(this);
-        hudHint.setTextColor(Color.WHITE); hudHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
-        hudHint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        hudHint.setTextColor(Color.WHITE); hudHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        hudHint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
         hudHint.setText("Point at the room and move the phone slowly");
         hud.addView(hudHint);
         hudSub = new TextView(this);
         hudSub.setTextColor(0xCCFFFFFF); hudSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         hudSub.setVisibility(View.GONE);
         hud.addView(hudSub);
-        hudDetail = bar(0xFF33D17A); hudDetailPct = new TextView(this);
-        hudRoom = bar(0xFF5BB3CF); hudRoomPct = new TextView(this);
+        hudDetail = bar(Ios.ACCENT); hudDetailPct = new TextView(this);
+        hudRoom = bar(Ios.ACCENT); hudRoomPct = new TextView(this);
         LinearLayout r1 = barRow("This spot", hudDetail, hudDetailPct), r2 = barRow("Room", hudRoom, hudRoomPct);
         LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         rp.topMargin = dp(10);
@@ -1150,6 +1153,38 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP);
         hp.topMargin = dp(40); hp.leftMargin = dp(12); hp.rightMargin = dp(12);
         chrome.addView(hud, hp);
+
+        // Cancel and Done at the bottom while scanning, as on the iPhone: same size and place, above the navigation bar.
+        scanRow = new LinearLayout(this);
+        scanRow.setOrientation(LinearLayout.HORIZONTAL);
+        scanRow.setGravity(Gravity.CENTER);
+        Button cancel = new Button(this), done = new Button(this);
+        cancel.setText("Cancel"); done.setText("Done");
+        Ios.pill(cancel); cancel.setTextColor(Ios.ACCENT);
+        Ios.filled(done);
+        for (Button b : new Button[]{cancel, done}) {
+            b.setAllCaps(false);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+            b.setMinWidth(dp(110)); b.setMinimumWidth(dp(110)); b.setMinHeight(0); b.setMinimumHeight(0);
+            b.setPadding(dp(22), 0, dp(22), 0);
+            android.graphics.drawable.Drawable d = b.getBackground();
+            if (d instanceof android.graphics.drawable.RippleDrawable) {
+                android.graphics.drawable.Drawable in = ((android.graphics.drawable.RippleDrawable) d).getDrawable(0);
+                if (in instanceof android.graphics.drawable.GradientDrawable) ((android.graphics.drawable.GradientDrawable) in).setCornerRadius(dp(25));
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(50));
+            lp.leftMargin = dp(8); lp.rightMargin = dp(8);
+            scanRow.addView(b, lp);
+        }
+        cancel.setOnClickListener(v -> showHome()); // the scan so far is autosaved, as when going back
+        done.setOnClickListener(v -> onMainButton());
+        done.setOnLongClickListener(v -> mainButton.performLongClick());
+        FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        chrome.addView(scanRow, sp);
+        scanRow.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(0, 0, 0, dp(32) + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
 
         android.graphics.drawable.GradientDrawable bg2 = new android.graphics.drawable.GradientDrawable();
         bg2.setColor(0xD0101418); bg2.setCornerRadius(dp(12));
@@ -1170,7 +1205,9 @@ public class MainActivity extends Activity {
         chrome.addView(procBox, procLp);
     }
 
-    private static final int[] HINT_COLORS = {0xFF33D17A, 0xFFF5C542, 0xFFFF6B5B};
+    private LinearLayout scanRow;
+    /** Hint colours by level: white, white, red for warnings (the same on the iPhone). */
+    private static final int[] HINT_COLORS = {Color.WHITE, Color.WHITE, 0xFFFF6B5B};
 
     void planningModeChanged() {
         runOnUiThread(() -> {
@@ -1185,11 +1222,11 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (hud == null) return;
             hudHint.setText(hint);
-            hudHint.setTextColor(level == 0 ? Color.WHITE : HINT_COLORS[Math.min(2, level)]);
+            hudHint.setTextColor(HINT_COLORS[Math.max(0, Math.min(2, level))]);
             hudSub.setText(sub == null ? "" : sub);
             hudSub.setVisibility(sub == null ? View.GONE : View.VISIBLE);
             hudDetail.setProgress(Math.round(detail * 1000));
-            hudDetail.setProgressTintList(android.content.res.ColorStateList.valueOf(detail >= ScanRenderer.SPOT_DONE ? HINT_COLORS[0] : detail >= 0.35f ? HINT_COLORS[1] : HINT_COLORS[2]));
+            hudDetail.setProgressTintList(android.content.res.ColorStateList.valueOf(detail >= ScanRenderer.SPOT_DONE ? 0xFF33D17A : Ios.ACCENT));
             hudDetailPct.setText(Math.round(detail * 100) + "%");
             hudRoom.setProgress(Math.round(room * 1000));
             hudRoomPct.setText(Math.round(room * 100) + "%");

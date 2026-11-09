@@ -14,6 +14,8 @@ final class LiveCapture {
     let mesh: LiveMesh?
     /// Continue scan: the saved scan's coarse outline in blue (see `LiveGhost`).
     let ghost = LiveGhost()
+    /// How far below the safe area's top RoomPlan's mini-model sits: under the scan card.
+    var previewTop: CGFloat = 12
     let session: ARSession
     private var link: CADisplayLink?
     private var discView: LiveDiscsMTKView?
@@ -130,7 +132,7 @@ final class LiveCapture {
                     let frame = preview.convert(preview.bounds, to: captureView)
                     let margin: CGFloat = 12
                     let target = CGPoint(x: captureView.bounds.width - margin - frame.width,
-                                         y: captureView.safeAreaInsets.top + margin)
+                                         y: captureView.safeAreaInsets.top + self.previewTop)
                     let moved = CGAffineTransform(translationX: target.x - frame.minX, y: target.y - frame.minY)
                     preview.transform = saved == moved ? saved : moved
                 }

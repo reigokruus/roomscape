@@ -121,6 +121,21 @@ final class LiveCloud: @unchecked Sendable {
     private lazy var imageContext = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
     /// Smoothed share of solid spots where the phone points, 0…1, or -1 before there is enough to say.
     private(set) var detailHere: Float = -1
+    /// Share of all spots that are solid (seen in `solidFrames` frames), sampled; for the scan card's Room bar.
+    /// Reads the points while the worker writes them, which at worst miscounts a spot.
+    func solidShare() -> Float {
+        let n = count
+        guard n > 0 else { return 0 }
+        let step = max(1, n / 100_000)
+        var solid = 0, total = 0, i = 0
+        while i < n {
+            if points[i].rgba >> 24 == 255 { solid += 1 }
+            total += 1
+            i += step
+        }
+        return Float(solid) / Float(total)
+    }
+
     /// True once the point budget is used up: new spots are no longer added.
     var isFull: Bool { count >= Self.maxPoints }
 

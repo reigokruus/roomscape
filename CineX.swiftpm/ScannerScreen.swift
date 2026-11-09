@@ -30,6 +30,9 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     @Published var endedEarlyReason: String?
     /// The phone is hot (.serious): the app's capture runs at half rate.
     @Published var powerSaving = false
+    /// The scan card: hint and the This spot / Room bars (see `updateHud`), the same as the Android app's.
+    @Published var hud = ScanHud()
+    private var hudTask: Task<Void, Never>?
     private var lastMemoryWarning: Date?
     let captureView: RoomCaptureView
     /// LiDAR points and live discs, read from RoomPlan's own ARKit session.
@@ -167,6 +170,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 }
             }
         }
+        startHud()
         live.attachDiscs(to: captureView)
         live.pinPreviewTopRight(in: captureView)
         lastMemoryWarning = nil
@@ -226,6 +230,46 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         log.warning("ending scan early: \(reason, privacy: .public)")
         endedEarlyReason = reason
         finish()
+    }
+
+    /// Twice a second while scanning: what the scan card says (the same rules and words as the Android app).
+    private func startHud() {
+        hudTask?.cancel()
+        hud = ScanHud()
+        let session = captureView.captureSession.arSession
+        hudTask = Task { [weak self] in
+            var lastPosition: SIMD3<Float>?
+            var lastTime: TimeInterval = 0
+            var speed: Float = 0
+            var tooFast = false
+            var shown: (hint: String, level: Int, at: Date)?
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, self.phase == .scanning else { return }
+                guard let frame = session.currentFrame else { continue }
+                let t = frame.camera.transform.columns.3
+                let position = SIMD3<Float>(t.x, t.y, t.z)
+                if let lastPosition, frame.timestamp > lastTime {
+                    let now = simd_distance(position, lastPosition) / Float(frame.timestamp - lastTime)
+                    speed = speed * 0.5 + now * 0.5
+                }
+                lastPosition = position
+                lastTime = frame.timestamp
+                tooFast = speed > (tooFast ? 0.45 : 0.6) // a slow walk (~0.4 m/s) is fine
+                let cloud = self.live.cloud
+                let spot = cloud?.detailHere ?? -1
+                let points = cloud?.count ?? 0
+                var (hint, level) = ScanHud.hint(tracking: frame.camera.trackingState, spot: spot, points: points, tooFast: tooFast)
+                // Keep a hint up for 1.5 s, unless a warning replaces it.
+                if let s = shown, s.hint != hint, Date().timeIntervalSince(s.at) < 1.5, !(level == 2 && s.level < 2) {
+                    (hint, level) = (s.hint, s.level)
+                } else if shown?.hint != hint {
+                    shown = (hint, level, Date())
+                }
+                let room = await Task.detached(priority: .utility) { cloud?.solidShare() ?? 0 }.value
+                self.hud = ScanHud(hint: hint, level: level, spot: max(0, spot), room: max(self.hud.room, room))
+            }
+        }
     }
 
     private func setPhase(_ newPhase: Phase) {
@@ -446,37 +490,16 @@ struct ScannerScreen: View {
                         .buttonStyle(.bordered)
                         .background(.regularMaterial, in: Capsule())
                 case .scanning:
-                    if controller.improving != nil {
-                        Label("Room recognised, keep scanning. Blue is what's already scanned; add what's missing, then tap Done.",
-                              systemImage: "checkmark.circle")
-                            .font(.footnote)
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                            .background(.regularMaterial, in: Capsule())
-                    }
-                    if controller.powerSaving {
-                        Label("The phone is warm, so the live mesh updates less often. Keep scanning.",
-                              systemImage: "thermometer.medium")
-                            .font(.footnote)
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                            .background(.regularMaterial, in: Capsule())
-                    }
-                    TimelineView(.periodic(from: controller.phaseStarted, by: 1)) { context in
-                        let elapsed = context.date.timeIntervalSince(controller.phaseStarted)
-                        if elapsed > ScanController.suggestedMaxScanSeconds {
-                            Text("Long scans heat up the phone. Tap Done once every wall has a white outline.")
-                                .font(.callout)
-                                .multilineTextAlignment(.center)
-                                .padding(10)
-                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                        }
-                    }
+                    // Cancel and Done, the same as on the Android app.
                     HStack(spacing: 16) {
-                        Button("Cancel") { close() }
+                        Button { close() } label: { Text("Cancel").frame(minWidth: 80) }
                             .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
                             // Solid backing so the label stays readable over the live mesh.
-                            .background(.regularMaterial, in: Capsule())
-                        Button("Done") { controller.finish() }
+                            .background(Color(white: 0.17).opacity(0.9), in: Capsule())
+                        Button { controller.finish() } label: { Text("Done").fontWeight(.semibold).foregroundStyle(.black).frame(minWidth: 80) }
                             .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.capsule)
                     }
                 case .processing:
                     VStack(spacing: 8) {
@@ -513,6 +536,17 @@ struct ScannerScreen: View {
             .controlSize(.large)
             .padding(.horizontal, 16)
             .padding(.bottom, 32)
+
+            // The scan card at the top: one hint and two progress bars, as on the Android app.
+            if controller.phase == .scanning {
+                TimelineView(.periodic(from: controller.phaseStarted, by: 1)) { context in
+                    ScanHudCard(hud: controller.hud, notes: scanNotes(elapsed: context.date.timeIntervalSince(controller.phaseStarted)))
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controller.live.previewTop = $0 + 16 }
+                .frame(maxHeight: .infinity, alignment: .top)
+            }
         }
         .onChange(of: controller.saved) { _, saved in
             if let saved { onFinished(saved) }
@@ -526,8 +560,111 @@ struct ScannerScreen: View {
         }
     }
 
+    /// The smaller lines under the hint: Continue scan, heat, and a long scan.
+    private func scanNotes(elapsed: TimeInterval) -> [String] {
+        var notes: [String] = []
+        if controller.improving != nil { notes.append("✓ Saved room recognised. Keep scanning, the saved part is shown in blue") }
+        if controller.powerSaving { notes.append("The phone is warm, so the live mesh updates less often. Keep scanning") }
+        if elapsed > ScanController.suggestedMaxScanSeconds { notes.append("Long scans heat up the phone. Tap Done once every wall is covered in white") }
+        return notes
+    }
+
     private func close() {
         controller.cancel()
         onCancel()
+    }
+}
+
+/// What the scan card shows. The rules and the words are the same as the Android app's (`ScanRenderer.postHud`).
+struct ScanHud: Equatable {
+    var hint = "Point at the room and move the phone slowly"
+    /// 0 fine, 1 keep going, 2 a warning (red).
+    var level = 1
+    /// This spot: share of solid surface where the phone points, 0…1.
+    var spot: Float = 0
+    /// Room: share of everything scanned that is solid, 0…1; never goes down.
+    var room: Float = 0
+
+    static let spotDone: Float = 0.85
+
+    static func hint(tracking: ARCamera.TrackingState, spot: Float, points: Int, tooFast: Bool) -> (String, Int) {
+        switch tracking {
+        case .notAvailable:
+            return ("Lost track: move slowly, pointing at the floor or furniture", 2)
+        case .limited(let reason):
+            switch reason {
+            case .initializing: return ("Point at the room and move the phone slowly", 1)
+            case .excessiveMotion: return ("Lost track: moving too fast. Slow down", 2)
+            case .insufficientFeatures: return ("Lost track: point at something with texture, not a plain wall", 2)
+            default: return ("Lost track: move slowly, pointing at the floor or furniture", 2)
+            }
+        case .normal:
+            break
+        }
+        if spot < 0 || points < 3000 {
+            return ("Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas", 1)
+        }
+        if tooFast && spot < 0.7 { return ("Too fast. Slow down and sway gently over this spot", 2) }
+        if spot < 0.35 { return ("Sway the phone slowly over this spot until the mesh covers it in white", 2) }
+        if spot < spotDone { return ("Good. Keep swaying gently here a little longer", 1) }
+        return ("This spot is done. Move on to the next orange area", 0)
+    }
+}
+
+/// The scan card: dark, the hint in white (red for warnings), smaller notes, and the This spot / Room bars in orange
+/// (This spot turns green when done). The same as the Android app's.
+struct ScanHudCard: View {
+    let hud: ScanHud
+    let notes: [String]
+
+    static let accent = Color(red: 0.93, green: 0.69, blue: 0.30)
+    static let green = Color(red: 0.20, green: 0.82, blue: 0.48)
+    static let warning = Color(red: 1, green: 0.42, blue: 0.36)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(hud.hint)
+                .font(.headline)
+                .foregroundStyle(hud.level == 2 ? Self.warning : .white)
+                .fixedSize(horizontal: false, vertical: true)
+                .animation(nil, value: hud.hint)
+            ForEach(notes, id: \.self) { note in
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            bar("This spot", hud.spot, hud.spot >= ScanHud.spotDone ? Self.green : Self.accent)
+                .padding(.top, 4)
+            bar("Room", hud.room, Self.accent)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(red: 0.11, green: 0.11, blue: 0.118).opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
+        .environment(\.colorScheme, .dark)
+    }
+
+    private func bar(_ label: String, _ value: Float, _ color: Color) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.8))
+                .frame(width: 80, alignment: .leading)
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.33))
+                    Capsule().fill(color).frame(width: g.size.width * CGFloat(min(1, max(0, value))))
+                }
+            }
+            .frame(height: 8)
+            Text("\(Int((min(1, max(0, value)) * 100).rounded()))%")
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(.white)
+                .frame(width: 44, alignment: .trailing)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) \(Int(value * 100)) percent")
     }
 }
