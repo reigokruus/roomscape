@@ -13,7 +13,7 @@ import java.util.*;
 /** Bounded, explicit factual feed. This is NOT arbitrary product-page extraction or a pricing API. */
 final class ItemCatalog {
     static final int MAX_BYTES = 256 * 1024, MAX_ITEMS = 200;
-    static final String DEFAULT_FEED = "https://raw.githubusercontent.com/reigokruus/shootlocal/testable-app/android/app/src/main/assets/equipment-catalog.json";
+    static final String DEFAULT_FEED = "https://raw.githubusercontent.com/reigokruus/roomscape/testable-app/android/app/src/main/assets/equipment-catalog.json";
     static final class Item {
         final String id, manufacturer, model, category, dimensionKind, sourceUrl, retrievedDate, sourceQuote, axisNotes;
         final Double width, height, depth; // metres, null means unknown (not a default estimate)
@@ -61,7 +61,7 @@ final class ItemCatalog {
     static String text(JSONObject j,String key,int max) throws Exception { Object v=j.get(key);require(v instanceof String,"Text required: "+key);String s=((String)v).trim();require(!s.isEmpty()&&s.length()<=max&&!s.matches("(?s).*[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f].*"),"Invalid text: "+key);return s; }
     static void validDate(String s) throws Exception { require(s.matches("\\d{4}-\\d{2}-\\d{2}"),"Date must be YYYY-MM-DD");SimpleDateFormat f=new SimpleDateFormat("yyyy-MM-dd",Locale.US);f.setLenient(false);f.setTimeZone(TimeZone.getTimeZone("UTC"));Date d=f.parse(s);require(!d.after(new Date()),"Retrieval date is in the future"); }
     static URI publicHttps(String s) throws Exception { URI u=new URI(s);String h=u.getHost();require("https".equals(u.getScheme())&&h!=null&&u.getUserInfo()==null&&u.getPort()==-1&&!h.equals("localhost")&&!h.contains(":")&&!h.matches("[0-9.]+")&&h.contains("."),"Use a public HTTPS URL without credentials or port");return u; }
-    static URI feedUri(String s) throws Exception { URI u=publicHttps(s);require("raw.githubusercontent.com".equals(u.getHost())&&u.getPath().startsWith("/reigokruus/shootlocal/")&&u.getPath().endsWith(".json")&&!u.getPath().contains("..")&&u.getRawQuery()==null&&u.getFragment()==null,"Only JSON feeds in reigokruus/shootlocal on raw.githubusercontent.com are supported"); return u; }
+    static URI feedUri(String s) throws Exception { URI u=publicHttps(s);require("raw.githubusercontent.com".equals(u.getHost())&&(u.getPath().startsWith("/reigokruus/roomscape/")||u.getPath().startsWith("/reigokruus/shootlocal/"))&&u.getPath().endsWith(".json")&&!u.getPath().contains("..")&&u.getRawQuery()==null&&u.getFragment()==null,"Only JSON feeds in reigokruus/roomscape on raw.githubusercontent.com are supported"); return u; }
     static String read(InputStream in) throws Exception { ByteArrayOutputStream b=new ByteArrayOutputStream();byte[] buf=new byte[4096];for(int n;(n=in.read(buf))!=-1;){require(b.size()+n<=MAX_BYTES,"File exceeds 256 KiB");b.write(buf,0,n);}return StandardCharsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT).onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(b.toByteArray())).toString(); }
     static JSONObject object(String s) throws Exception {
         require(s.getBytes(StandardCharsets.UTF_8).length<=MAX_BYTES,"JSON exceeds 256 KiB");

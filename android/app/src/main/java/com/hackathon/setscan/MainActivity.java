@@ -254,7 +254,7 @@ public class MainActivity extends Activity {
                         + "drop the zip into \"Attach binaries\" (not the description box) and press Save draft.")
                 .setPositiveButton("Open GitHub upload", (d, w) -> {
                     try { startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(
-                            "https://github.com/reigokruus/shootlocal/releases/new?tag=scan-upload&title=Scan%20upload&prerelease=1"))); }
+                            "https://github.com/reigokruus/roomscape/releases/new?tag=scan-upload&title=Scan%20upload&prerelease=1"))); }
                     catch (Exception e) { Toast.makeText(this, "No browser: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
                 })
                 .setNegativeButton("Share anyway", (d, w) -> shareScan(uri))

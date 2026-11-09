@@ -1,7 +1,7 @@
 name: Android build
 
 # Builds the Android app on every push that touches android/ and publishes it as a GitHub release.
-# Phone: install from https://github.com/reigokruus/shootlocal/releases/latest
+# Phone: install from https://github.com/reigokruus/roomscape/releases/latest
 # (or track the repo in Obtainium for automatic updates).
 on:
   push:
