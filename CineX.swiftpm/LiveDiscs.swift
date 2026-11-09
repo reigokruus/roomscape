@@ -273,6 +273,11 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let colorPipeline: MTLRenderPipelineState
     private let depthWrite: MTLDepthStencilState
     private let depthEqual: MTLDepthStencilState
+    /// The wide overview (ScanOverview): the pulled-back camera and the camera-image window.
+    private let overview = OverviewCamera()
+    private let liveMesh: LiveMesh?
+    private func meshTriangles() -> Int { (liveMesh?.buffers?.triangleIndexCount ?? 0) / 3 }
+    private let window: OverviewWindowRenderer?
 
     private struct Uniforms {
         var viewProjection: simd_float4x4
@@ -316,6 +321,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let depthEqual = depthState(.lessEqual, write: false) else { return nil }
         self.cloud = cloud
         meshRenderer = mesh.flatMap { LiveMeshRenderer(device: device, mesh: $0) }
+        liveMesh = mesh
         ghostRenderer = LiveGhostRenderer(device: device, ghost: ghost)
         self.ghost = ghost
         self.queue = queue
@@ -323,11 +329,42 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         self.colorPipeline = colorPipeline
         self.depthWrite = depthWrite
         self.depthEqual = depthEqual
+        window = ScanOverview.enabled ? OverviewWindowRenderer(device: device) : nil
+    }
+
+    /// A perspective projection (Metal clip space), vertical field of view in radians.
+    private static func perspective(fovY: Float, aspect: Float, near: Float, far: Float) -> simd_float4x4 {
+        let y = 1 / tan(fovY / 2), x = y / aspect, z = far / (near - far)
+        return simd_float4x4(SIMD4(x, 0, 0, 0), SIMD4(0, y, 0, 0), SIMD4(0, 0, z, -1), SIMD4(0, 0, z * near, 0))
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
+        // The wide overview: work out the camera first, since the backdrop (the clear colour) depends on it.
+        var overviewView: (view: simd_float4x4, projection: simd_float4x4)?
+        if ScanOverview.enabled, window != nil, let frame = session?.currentFrame, view.bounds.width > 0 {
+            let camera = frame.camera
+            let realView = camera.viewMatrix(for: .portrait)
+            let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
+            let triangles = (meshRenderer != nil ? (cloud.count > 0 ? meshTriangles() : 0) : 0)
+            let tracking: Bool = { if case .normal = camera.trackingState { return true }; return false }()
+            let session = self.session
+            let (v, fov) = overview.update(realView: realView, realFov: 2 * atan(1 / realProjection[1][1]),
+                                           ready: tracking && triangles >= ScanOverview.minTriangles) { origin, dir in
+                let query = ARRaycastQuery(origin: origin, direction: dir, allowing: .estimatedPlane, alignment: .any)
+                guard let hit = session?.raycast(query).first else { return nil }
+                let p = hit.worldTransform.columns.3
+                return simd_distance(origin, SIMD3(p.x, p.y, p.z))
+            }
+            if overview.blend > 0 {
+                let aspect = Float(view.bounds.width / view.bounds.height)
+                overviewView = (v, Self.perspective(fovY: fov, aspect: aspect, near: 0.05, far: 50))
+            }
+            // A dark backdrop over the camera feed, fading in with the overview.
+            let b = Double(overview.blend)
+            view.clearColor = MTLClearColor(red: 0.05 * b, green: 0.05 * b, blue: 0.06 * b, alpha: b)
+        }
         guard let pass = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer(),
@@ -335,14 +372,20 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         let count = cloud.count
         if let camera = session?.currentFrame?.camera, view.bounds.width > 0 {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
-            let viewMatrix = camera.viewMatrix(for: .portrait)
-            let projection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
+            let realView = camera.viewMatrix(for: .portrait)
+            let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
+            let viewMatrix = overviewView?.view ?? realView
+            let projection = overviewView?.projection ?? realProjection
             // The live LiDAR mesh once ARKit has one; until then (or without it) the discs.
             // Continue scan never shows the discs: they'd cover the saved (blue) areas again.
             if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix) != true, count > 0, !ghost.isActive {
                 drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection)
             }
             ghostRenderer?.encode(encoder, viewProjection: projection * viewMatrix)
+            if overviewView != nil, let frame = session?.currentFrame {
+                window?.encode(encoder, frame: frame, viewSize: view.bounds.size, realView: realView,
+                               realProjection: realProjection, viewProjection: projection * viewMatrix, alpha: overview.blend)
+            }
         }
         encoder.endEncoding()
         commands.present(drawable)
