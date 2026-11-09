@@ -68,6 +68,7 @@ final class OverviewCamera {
 final class OverviewWindowRenderer {
     private let quadPipeline: MTLRenderPipelineState
     private let linePipeline: MTLRenderPipelineState
+    private let meshPipeline: MTLRenderPipelineState?
     private let noDepth: MTLDepthStencilState
     private var textureCache: CVMetalTextureCache?
 
@@ -78,9 +79,9 @@ final class OverviewWindowRenderer {
               let vertex = library.makeFunction(name: "windowVertex"),
               let image = library.makeFunction(name: "windowImage"),
               let line = library.makeFunction(name: "windowLine") else { return nil }
-        func pipeline(_ fragment: MTLFunction, blend: Bool) -> MTLRenderPipelineState? {
+        func pipeline(_ fragment: MTLFunction, blend: Bool, vertexFunction: MTLFunction? = nil) -> MTLRenderPipelineState? {
             let d = MTLRenderPipelineDescriptor()
-            d.vertexFunction = vertex
+            d.vertexFunction = vertexFunction ?? vertex
             d.fragmentFunction = fragment
             d.depthAttachmentPixelFormat = .depth32Float
             let c = d.colorAttachments[0]!
@@ -99,6 +100,12 @@ final class OverviewWindowRenderer {
               let noDepth = device.makeDepthStencilState(descriptor: ds) else { return nil }
         quadPipeline = quad
         linePipeline = lines
+        if let meshLibrary = try? device.makeLibrary(source: Self.meshShaderSource, options: nil),
+           let mv = meshLibrary.makeFunction(name: "windowMeshVertex"), let mf = meshLibrary.makeFunction(name: "windowMeshFragment") {
+            meshPipeline = pipeline(mf, blend: true, vertexFunction: mv)
+        } else {
+            meshPipeline = nil
+        }
         self.noDepth = noDepth
         CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
     }
@@ -146,12 +153,68 @@ final class OverviewWindowRenderer {
         encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: outline.count)
     }
 
+    private struct MeshUniforms {
+        var realViewProjection: simd_float4x4
+        var viewProjection: simd_float4x4
+        var eye: SIMD4<Float>
+        var forward: SIMD4<Float>
+        var distance: Float
+        var alpha: Float
+    }
+
+    /// The live mesh over the window, lighter and sparser (about every third edge, 30% white, orange where not solid
+    /// yet): each point is placed where the real camera sees it on the window, so it lines up with the photo.
+    func encodeMesh(_ encoder: MTLRenderCommandEncoder, mesh: LiveMesh.Buffers, realView: simd_float4x4,
+                    realProjection: simd_float4x4, viewProjection: simd_float4x4, alpha: Float) {
+        guard alpha > 0.01, let meshPipeline, mesh.edgeIndexCount > 0 else { return }
+        let camToWorld = realView.inverse
+        var u = MeshUniforms(realViewProjection: realProjection * realView, viewProjection: viewProjection,
+                             eye: camToWorld.columns.3,
+                             forward: SIMD4(-simd_normalize(SIMD3(camToWorld.columns.2.x, camToWorld.columns.2.y, camToWorld.columns.2.z)), 0),
+                             distance: ScanOverview.windowDistance, alpha: alpha)
+        encoder.setDepthStencilState(noDepth)
+        encoder.setRenderPipelineState(meshPipeline)
+        encoder.setVertexBuffer(mesh.vertices, offset: 0, index: 0)
+        encoder.setVertexBytes(&u, length: MemoryLayout<MeshUniforms>.stride, index: 1)
+        encoder.setFragmentBytes(&u, length: MemoryLayout<MeshUniforms>.stride, index: 0)
+        encoder.drawIndexedPrimitives(type: .line, indexCount: mesh.edgeIndexCount, indexType: .uint32,
+                                      indexBuffer: mesh.edges, indexBufferOffset: 0)
+    }
+
     private func texture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat, cache: CVMetalTextureCache) -> CVMetalTexture? {
         var out: CVMetalTexture?
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, buffer, nil, format, CVPixelBufferGetWidthOfPlane(buffer, plane),
                                                   CVPixelBufferGetHeightOfPlane(buffer, plane), plane, &out)
         return out
     }
+
+    /// Separate, so that if it doesn't compile on a phone only the mesh over the window is missing, not the overview.
+    private static let meshShaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct MeshVertex { packed_float3 position; float confidence; };
+    struct MeshUniforms { float4x4 realViewProjection; float4x4 viewProjection; float4 eye; float4 forward; float distance; float alpha; };
+    struct MeshOut { float4 position [[position]]; float2 ndc; float solid; };
+    vertex MeshOut windowMeshVertex(uint vid [[vertex_id]], const device MeshVertex *v [[buffer(0)]],
+                                    constant MeshUniforms &u [[buffer(1)]]) {
+        float3 p = float3(v[vid].position);
+        float4 r = u.realViewProjection * float4(p, 1.0);
+        float3 dir = normalize(p - u.eye.xyz);
+        float3 w = u.eye.xyz + dir * (u.distance / max(0.2, dot(dir, u.forward.xyz)));
+        MeshOut o;
+        o.position = u.viewProjection * float4(w, 1.0);
+        o.ndc = r.w > 0.0 ? r.xy / r.w : float2(9.0);
+        o.solid = smoothstep(0.15, 0.6, v[vid].confidence);
+        return o;
+    }
+    fragment float4 windowMeshFragment(MeshOut in [[stage_in]], constant MeshUniforms &u [[buffer(0)]],
+                                       uint prim [[primitive_id]]) {
+        // Only on the window, and only every third edge: a lighter grid that leaves the photo readable.
+        if (any(abs(in.ndc) > 1.0) || prim % 3u != 0u) { discard_fragment(); }
+        float3 c = mix(float3(1.0, 0.55, 0.15), float3(1.0), saturate(in.solid));
+        return float4(c, 0.3 * u.alpha);
+    }
+    """
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -172,5 +235,6 @@ final class OverviewWindowRenderer {
     fragment float4 windowLine(Out in [[stage_in]], constant float &alpha [[buffer(0)]]) {
         return float4(1.0, 1.0, 1.0, 0.9 * alpha);
     }
+
     """
 }
