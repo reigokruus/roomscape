@@ -138,7 +138,9 @@ struct ResultView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // With the room summary below, the 3D view keeps a fixed share of the screen and the summary scrolls in
+            // the rest (it only had 260 pt, too little for large text). Panels (objects, lighting) keep the old split.
+            .frame(maxWidth: .infinity, maxHeight: summaryShown ? UIScreen.main.bounds.height * 0.42 : .infinity)
             .background(Color.black)
             // The 3D area is always black, so its controls use dark styling even when the phone is in light mode.
             .environment(\.colorScheme, .dark)
@@ -155,13 +157,13 @@ struct ResultView: View {
                                   openingStoryboard = true
                               })
                     .frame(maxHeight: 340)
-            } else if let room {
+            } else if let room, walk == .off {
                 RoomSummary(room: room, name: current.title, onRename: {
                                 newTitle = current.title ?? ""
                                 renaming = true
                             }, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
                             onImprove: WorldMapStore.exists(scan) ? onImprove : nil)
-                    .frame(maxHeight: 260)
+                    .frame(maxHeight: .infinity)
             }
         }
         // A title menu here would push Plan a Shoot and Share into an overflow menu; rooms are named on Home.
@@ -563,6 +565,9 @@ struct ResultView: View {
             if let url { glbFile = SharedFile(url: url) } else { glbError = "This scan has no saved mesh or photos to export." }
         }
     }
+
+    /// The room summary list shows under the 3D view (no objects or lighting panel, not standing in the room).
+    private var summaryShown: Bool { !objectsOn && !lightingOn && room != nil && walk == .off }
 
     /// The floor height for standing in the room: RoomPlan's floor plane.
     private var walkFloorY: Float? {
