@@ -938,7 +938,9 @@ struct RoomSceneView: UIViewRepresentable {
             let d = g.translation(in: view)
             g.setTranslation(.zero, in: view)
             let dist = pov === topCamera ? max(1, pov.simdWorldPosition.y - orbitTarget.y) : simd_length(pov.simdWorldPosition - orbitTarget)
-            let s = dist * 0.0018
+            // 1:1 with the fingers: what's under them at the target's distance stays under them.
+            let fov = Float(pov.camera?.fieldOfView ?? 60) * .pi / 180
+            let s = 2 * dist * tan(fov / 2) / Float(max(1, view.bounds.height))
             let delta = (-Float(d.x) * pov.simdWorldRight + Float(d.y) * pov.simdWorldUp) * s
             pov.simdWorldPosition += delta
             orbitTarget += delta
