@@ -24,6 +24,19 @@ struct ResultView: View {
     @State private var style: Style = .model
     @State private var modelGroup: SCNNode?
     @State private var splatGroup: SCNNode?
+    /// The scan's photos painted onto its fused mesh (`PhotoRoom`): what Photo shows when the scan has both; else the
+    /// splats in their scanned colours.
+    @State private var photoRoom: SCNNode?
+    /// "Enter the room": picking where to stand, then standing there (first person). See `RoomSceneView`.
+    @State private var walk: WalkState = .off
+    /// Held ▲ (+1) or ▼ (-1) while standing in the room.
+    @State private var walkMove = 0
+    /// Eye height above the floor when standing in the room, metres; remembered.
+    @AppStorage("walkEyeHeight") private var eyeHeight = 1.5
+    /// The photo room as a .glb (`PhotoRoomExport`), being written or ready to share (AirDrop, Save to Files).
+    @State private var exportingGLB = false
+    @State private var glbFile: SharedFile?
+    @State private var glbError: String?
     @State private var buildingSplats = false
     /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
     @State private var lightingOn = false
@@ -74,8 +87,10 @@ struct ResultView: View {
             ZStack(alignment: .top) {
                 if let scene {
                     RoomSceneView(scene: scene, topView: topView, topTurn: room.map(Self.squaringTurn) ?? 0,
-                                  floorY: (lightingOn || objectsOn) ? shell?.floorY : nil,
-                                  onFloorTap: floorTapped)
+                                  floorY: (lightingOn || objectsOn || walk == .choosing) ? walkFloorY : nil,
+                                  onFloorTap: floorTapped,
+                                  standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
+                                  eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
                 } else if let loadError {
                     Text(loadError).padding()
                 } else {
@@ -112,8 +127,11 @@ struct ResultView: View {
                 // One row or two: the large camera view starts below them.
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controlsHeight = $0 }
             }
+            .overlay(alignment: .bottomLeading) {
+                if scene != nil, walkFloorY != nil { walkControls.padding(12) }
+            }
             .overlay(alignment: .bottom) {
-                if let training {
+                if let training, walk == .off {
                     TrainingStatus(run: training)
                         .padding(10)
                         .allowsHitTesting(false)
@@ -164,7 +182,26 @@ struct ResultView: View {
                     Label("Plan a Shoot", systemImage: "sparkles")
                 }
             }
-            ShareLink(item: shareURL ?? scan.modelURL)
+            if exportingGLB {
+                ProgressView()
+            } else if photoRoom != nil {
+                Menu {
+                    ShareLink(item: shareURL ?? scan.modelURL) { Label("Room model (.usdz)", systemImage: "cube") }
+                    Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
+                } label: {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+            } else {
+                ShareLink(item: shareURL ?? scan.modelURL)
+            }
+        }
+        .sheet(item: $glbFile) { file in
+            ActivitySheet(items: [file.url]).ignoresSafeArea()
+        }
+        .alert("Couldn't export the photo room", isPresented: Binding(get: { glbError != nil }, set: { if !$0 { glbError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(glbError ?? "")
         }
         .modifier(RenameRoomAlert(isPresented: $renaming, title: $newTitle, onSave: saveName))
         .onDisappear { training?.pause() }
@@ -198,9 +235,7 @@ struct ResultView: View {
             // The preview lights the splats and objects move splats; RoomPlan's model has neither.
             if newStyle == .model, lightingOn { toggleLighting() }
             if newStyle == .model, objectsOn { toggleObjects() }
-            modelGroup?.isHidden = newStyle != .model
-            splatGroup?.isHidden = newStyle == .model
-            if let splatGroup { SplatScene.setMeshLook(newStyle != .photo, in: splatGroup) }
+            showStyle(newStyle)
         }
         .task {
             guard !loadStarted else { return }
@@ -245,6 +280,17 @@ struct ResultView: View {
                 scene.rootNode.addChildNode(WindowDetection.node(windows, room: room))
             }
 
+            // Photo room, when the scan has a mesh and photos: built in the background, shown by Photo.
+            if let scene {
+                let photo = await Task.detached(priority: .userInitiated) { PhotoRoom.build(scan) }.value
+                if let photo {
+                    scene.rootNode.addChildNode(photo)
+                    photoRoom = photo
+                    style = .photo
+                    showStyle(style)
+                }
+            }
+
             // Splats, when the scan has points: built in the background (cached after the first time), then shown
             // instead of RoomPlan's boxes. The Splats / Model switch flips between the two.
             guard let room = loaded.0, let scene, (capture?.pointCount ?? 0) > 0 else { return }
@@ -287,7 +333,8 @@ struct ResultView: View {
             scene.rootNode.addChildNode(lightingScene.root)
             self.lightingScene = lightingScene
             self.shell = shell
-            style = .mesh
+            // Photo is the default look: the photo room, or the splats in their scanned colours.
+            style = .photo
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
             #endif
@@ -455,7 +502,9 @@ struct ResultView: View {
     }
 
     private func floorTapped(_ p: SIMD3<Float>) {
-        if objectsOn {
+        if walk == .choosing {
+            walk = .inside(p)
+        } else if objectsOn {
             // Move the selected object so its centre stands over the tapped spot.
             guard let id = selectedObject, let i = objects.firstIndex(where: { $0.id == id }),
                   !objects[i].kind.isMarker, !objects[i].removed else { return }
@@ -466,10 +515,108 @@ struct ResultView: View {
         }
     }
 
+    /// Writes the photo room as RoomScape-<scan date>.glb in the temporary folder and opens the share sheet for it.
+    private func exportGLB() {
+        exportingGLB = true
+        let scan = scan
+        Task {
+            let url = await Task.detached(priority: .userInitiated) { () -> URL? in
+                guard let result = PhotoRoomExport.glb(folder: scan.captureURL) else { return nil }
+                let stamp = scan.captureURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "Scan_", with: "")
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("RoomScape-\(stamp).glb")
+                do { try result.data.write(to: url, options: .atomic) } catch { return nil }
+                print("photo room .glb: \(result.data.count) bytes, \(result.photos) photos at \(result.textureWidth) px, "
+                      + "\(result.triangles) triangles (\(result.uncovered) uncovered)")
+                return url
+            }.value
+            exportingGLB = false
+            if let url { glbFile = SharedFile(url: url) } else { glbError = "This scan has no saved mesh or photos to export." }
+        }
+    }
+
+    /// The floor height for standing in the room: RoomPlan's floor plane.
+    private var walkFloorY: Float? { shell?.floorY ?? room.map { RoomShell(room: $0).floorY } }
+
+    /// Highest eye height: 2.2 m, and 10 cm under RoomPlan's ceiling.
+    private var maxEyeHeight: Double {
+        let s = shell ?? room.map { RoomShell(room: $0) }
+        guard let s, let ceiling = s.ceilingY else { return 2.2 }
+        return max(0.3, min(2.2, Double(ceiling - s.floorY) - 0.1))
+    }
+
+    /// Enter the room / the floor hint / ▲▼ and Exit while standing in it.
+    @ViewBuilder private var walkControls: some View {
+        switch walk {
+        case .off:
+            Button {
+                if lightingOn { toggleLighting() }
+                if objectsOn { toggleObjects() }
+                walk = .choosing
+            } label: {
+                Label("Enter the room", systemImage: "figure.walk")
+            }
+            .buttonStyle(.borderedProminent)
+        case .choosing:
+            HStack(spacing: 8) {
+                Label("Tap the floor where you want to stand", systemImage: "hand.tap")
+                    .font(.callout)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                Button("Cancel") { walk = .off }
+                    .buttonStyle(.bordered)
+            }
+        case .inside:
+            HStack(alignment: .bottom, spacing: 12) {
+                Button {
+                    walkMove = 0
+                    walk = .off
+                } label: {
+                    Label("Exit", systemImage: "arrow.uturn.backward")
+                }
+                .buttonStyle(.borderedProminent)
+                Spacer()
+                // Eye height: taller / shorter, 10 cm a tap.
+                VStack(spacing: 4) {
+                    Button { eyeHeight = min(maxEyeHeight, (eyeHeight + 0.1)) } label: { Image(systemName: "chevron.up") }
+                        .accessibilityLabel("Taller")
+                    Text(String(format: "%.2f m", min(eyeHeight, maxEyeHeight)))
+                        .font(.caption.monospacedDigit())
+                    Button { eyeHeight = max(0.3, min(eyeHeight, maxEyeHeight) - 0.1) } label: { Image(systemName: "chevron.down") }
+                        .accessibilityLabel("Shorter")
+                }
+                .buttonStyle(.bordered)
+                .padding(6)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                VStack(spacing: 8) {
+                    HoldButton(systemImage: "arrowtriangle.up.fill") { walkMove = $0 ? 1 : 0 }
+                    HoldButton(systemImage: "arrowtriangle.down.fill") { walkMove = $0 ? -1 : 0 }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .overlay(alignment: .top) {
+                Text("Drag to look · pinch to zoom · double-tap the floor to walk there")
+                    .font(.caption2)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(.regularMaterial, in: Capsule())
+                    .offset(y: -36)
+            }
+        }
+    }
+
+    /// Shows the part of the scene for a style: RoomPlan's model, the photo room, or the splats (mesh look or colours).
+    private func showStyle(_ style: Style) {
+        let photos = style == .photo && photoRoom != nil
+        modelGroup?.isHidden = style != .model
+        photoRoom?.isHidden = !photos
+        splatGroup?.isHidden = style == .model || photos
+        if let splatGroup { SplatScene.setMeshLook(style != .photo, in: splatGroup) }
+    }
+
     private func toggleObjects() {
         objectsOn.toggle()
         if objectsOn {
-            if style == .model { style = .mesh }
+            // Objects move splats: not in RoomPlan's model or the photo room.
+            if style == .model || (style == .photo && photoRoom != nil) { style = .mesh }
             if lightingOn { toggleLighting() }
         } else {
             selectedObject = nil
@@ -620,7 +767,7 @@ struct ResultView: View {
             lightingScene?.apply(nil)
             return
         }
-        if style == .model { style = .mesh }
+        if style == .model || (style == .photo && photoRoom != nil) { style = .mesh }
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.
@@ -680,6 +827,14 @@ struct RoomSceneView: UIViewRepresentable {
     /// When set, a tap on the 3D view reports where it hits the floor plane at this height.
     var floorY: Float? = nil
     var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
+    /// Standing in the room (first person) at this floor point; nil = the orbit or top view.
+    var standAt: SIMD3<Float>? = nil
+    /// The floor, for walking to a double-tapped spot.
+    var walkFloorY: Float? = nil
+    /// Held ▲ (+1) / ▼ (-1): walk forward or back, level, in the look direction.
+    var walkMove = 0
+    /// Eye height above the floor while standing, metres.
+    var eyeHeight: Float = 1.5
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -690,19 +845,148 @@ struct RoomSceneView: UIViewRepresentable {
         var floorY: Float?
         var onFloorTap: (SIMD3<Float>) -> Void = { _ in }
 
-        /// Intersects the tapped ray with the floor plane. (SceneKit's hit test can't see the splats: their discs
-        /// are opened up in the shader, so on the CPU they have no area.)
-        @objc func tapped(_ gesture: UITapGestureRecognizer) {
-            guard let floorY, let view = gesture.view as? SCNView else { return }
-            let p = gesture.location(in: view)
+        // First person ("Enter the room").
+        weak var view: SCNView?
+        let walkCamera = SCNNode()
+        var savedPointOfView: SCNNode?
+        var standing: SIMD3<Float>?
+        var walkFloorY: Float?
+        var walkMove = 0
+        var yaw: Float = 0, pitch: Float = 0
+        var walkGestures: [UIGestureRecognizer] = []
+        var link: CADisplayLink?
+        var lastStep: CFTimeInterval = 0
+        var eyeHeight: Float = 1.5
+
+        /// A new eye height while standing: rise or sink there.
+        func setEyeHeight(_ h: Float) {
+            guard h != eyeHeight else { return }
+            eyeHeight = h
+            guard let standing else { return }
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0.3
+            walkCamera.simdPosition.y = standing.y + h
+            SCNTransaction.commit()
+        }
+
+        func applyLook() {
+            walkCamera.simdOrientation = simd_quatf(angle: yaw, axis: SIMD3(0, 1, 0)) * simd_quatf(angle: pitch, axis: SIMD3(1, 0, 0))
+        }
+
+        /// Steps into the room at `p` (or walks there when already inside), or back out to the previous view.
+        func setStanding(_ p: SIMD3<Float>?) {
+            guard let view, p != standing else { return }
+            let wasInside = standing != nil
+            standing = p
+            if let p {
+                let eye = SIMD3(p.x, p.y + eyeHeight, p.z)
+                marker(at: p)
+                if !wasInside {
+                    // Start from the current view, facing the same way, level-ish.
+                    let from = view.pointOfView ?? orbitCamera
+                    savedPointOfView = from
+                    let f = -SIMD3(from.simdWorldTransform.columns.2.x, from.simdWorldTransform.columns.2.y, from.simdWorldTransform.columns.2.z)
+                    yaw = atan2(-f.x, -f.z)
+                    pitch = -0.1
+                    if walkCamera.camera == nil {
+                        let cam = RoomSceneView.makeCamera()
+                        cam.zNear = 0.05
+                        walkCamera.camera = cam
+                        from.parent?.addChildNode(walkCamera)
+                        if walkCamera.parent == nil { view.scene?.rootNode.addChildNode(walkCamera) }
+                    }
+                    walkCamera.camera?.fieldOfView = from.camera?.fieldOfView ?? 60
+                    SCNTransaction.begin()
+                    SCNTransaction.disableActions = true
+                    walkCamera.simdWorldTransform = from.simdWorldTransform
+                    view.pointOfView = walkCamera
+                    SCNTransaction.commit()
+                    view.allowsCameraControl = false
+                    walkGestures.forEach { $0.isEnabled = true }
+                    let link = CADisplayLink(target: self, selector: #selector(step))
+                    link.add(to: .main, forMode: .common)
+                    self.link = link
+                    lastStep = CACurrentMediaTime()
+                }
+                SCNTransaction.begin()
+                SCNTransaction.animationDuration = wasInside ? Double(min(2, simd_distance(walkCamera.simdPosition, eye) / 1.2)) : 0.9
+                SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                walkCamera.simdPosition = eye
+                applyLook()
+                walkCamera.camera?.fieldOfView = 65
+                SCNTransaction.commit()
+            } else {
+                link?.invalidate()
+                link = nil
+                walkGestures.forEach { $0.isEnabled = false }
+                view.allowsCameraControl = true
+                SCNTransaction.begin()
+                SCNTransaction.animationDuration = 0.7
+                view.pointOfView = savedPointOfView ?? orbitCamera
+                SCNTransaction.commit()
+            }
+        }
+
+        /// A small ring where the user will stand, fading out.
+        func marker(at p: SIMD3<Float>) {
+            let ring = SCNNode(geometry: SCNTorus(ringRadius: 0.25, pipeRadius: 0.02))
+            ring.geometry?.firstMaterial?.diffuse.contents = UIColor.systemOrange
+            ring.geometry?.firstMaterial?.lightingModel = .constant
+            ring.simdPosition = p + SIMD3(0, 0.02, 0)
+            view?.scene?.rootNode.addChildNode(ring)
+            ring.runAction(.sequence([.wait(duration: 0.6), .fadeOut(duration: 0.6), .removeFromParentNode()]))
+        }
+
+        /// Held ▲/▼: about 1.2 m/s, level, in the look direction.
+        @objc func step() {
+            let now = CACurrentMediaTime()
+            let dt = Float(min(0.1, now - lastStep))
+            lastStep = now
+            guard walkMove != 0, standing != nil else { return }
+            let forward = SIMD3<Float>(-sin(yaw), 0, -cos(yaw))
+            walkCamera.simdPosition += forward * Float(walkMove) * 1.2 * dt
+        }
+
+        @objc func looked(_ g: UIPanGestureRecognizer) {
+            guard let view = g.view else { return }
+            let d = g.translation(in: view)
+            g.setTranslation(.zero, in: view)
+            // Drag the scene: turn the opposite way to the finger, like a photo sphere.
+            let scale = Float((walkCamera.camera?.fieldOfView ?? 60) / 60) * 0.005
+            yaw += Float(d.x) * scale
+            pitch = max(-1.3, min(1.3, pitch + Float(d.y) * scale))
+            applyLook()
+        }
+
+        @objc func pinched(_ g: UIPinchGestureRecognizer) {
+            guard let cam = walkCamera.camera else { return }
+            cam.fieldOfView = max(30, min(90, cam.fieldOfView / g.scale))
+            g.scale = 1
+        }
+
+        @objc func doubleTapped(_ g: UITapGestureRecognizer) {
+            guard standing != nil, let floorY = walkFloorY, let view = g.view as? SCNView,
+                  let p = floorPoint(g.location(in: view), floorY: floorY, in: view) else { return }
+            setStanding(p)
+        }
+
+        func floorPoint(_ p: CGPoint, floorY: Float, in view: SCNView) -> SIMD3<Float>? {
             let near = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 0))
             let far = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 1))
             let a = SIMD3<Float>(near.x, near.y, near.z), b = SIMD3<Float>(far.x, far.y, far.z)
             let dy = b.y - a.y
-            guard abs(dy) > 1e-5 else { return }
+            guard abs(dy) > 1e-5 else { return nil }
             let t = (floorY - a.y) / dy
-            guard t > 0, t < 1 else { return }
-            onFloorTap(a + (b - a) * t)
+            guard t > 0, t < 1 else { return nil }
+            return a + (b - a) * t
+        }
+
+        /// Intersects the tapped ray with the floor plane. (SceneKit's hit test can't see the splats: their discs
+        /// are opened up in the shader, so on the CPU they have no area.)
+        @objc func tapped(_ gesture: UITapGestureRecognizer) {
+            guard standing == nil, let floorY, let view = gesture.view as? SCNView,
+                  let p = floorPoint(gesture.location(in: view), floorY: floorY, in: view) else { return }
+            onFloorTap(p)
         }
     }
 
@@ -737,6 +1021,17 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.lastTop = false
         view.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator,
                                                          action: #selector(Coordinator.tapped(_:))))
+        // First-person gestures, only enabled while standing in the room.
+        let c = context.coordinator
+        c.view = view
+        let doubleTap = UITapGestureRecognizer(target: c, action: #selector(Coordinator.doubleTapped(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        c.walkGestures = [UIPanGestureRecognizer(target: c, action: #selector(Coordinator.looked(_:))),
+                          UIPinchGestureRecognizer(target: c, action: #selector(Coordinator.pinched(_:))), doubleTap]
+        for g in c.walkGestures {
+            g.isEnabled = false
+            view.addGestureRecognizer(g)
+        }
         return view
     }
 
@@ -774,7 +1069,11 @@ struct RoomSceneView: UIViewRepresentable {
     func updateUIView(_ view: SCNView, context: Context) {
         context.coordinator.floorY = floorY
         context.coordinator.onFloorTap = onFloorTap
-        guard context.coordinator.lastTop != topView else { return }
+        context.coordinator.walkFloorY = walkFloorY
+        context.coordinator.walkMove = walkMove
+        context.coordinator.setEyeHeight(eyeHeight)
+        context.coordinator.setStanding(standAt)
+        guard standAt == nil, context.coordinator.lastTop != topView else { return }
         context.coordinator.lastTop = topView
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0.4
@@ -800,6 +1099,22 @@ struct RoomSummary: View {
 
     var body: some View {
         List {
+            // First under the 3D view: add to this scan.
+            if capture != nil, let onImprove {
+                Section {
+                    Button(action: onImprove) {
+                        Label("Continue scan", systemImage: "plus.viewfinder")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                } footer: {
+                    Text("Add parts you missed, or that came out thin or blurry. The phone recognises the room and adds to this scan.")
+                }
+            }
             Section("Room") {
                 if let onRename {
                     Button(action: onRename) {
@@ -843,19 +1158,8 @@ struct RoomSummary: View {
                         let when = last.formatted(.dateTime.day().month(.abbreviated).hour().minute())
                         LabeledContent("Improved", value: improved.count == 1 ? when : "\(improved.count) times, last \(when)")
                     }
-                    if let onImprove {
-                        Button {
-                            onImprove()
-                        } label: {
-                            Label("Improve this scan", systemImage: "plus.viewfinder")
-                        }
-                    }
                 } header: {
                     Text("Capture")
-                } footer: {
-                    if onImprove != nil {
-                        Text("Scan again over parts that came out thin or blurry. The phone recognises the room by itself and adds the new points and photos to this scan.")
-                    }
                 }
             }
             if !objectCounts.isEmpty || removedCount > 0 {
@@ -1020,5 +1324,50 @@ private struct ImprovedSubtitle: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+
+/// A file to hand to the share sheet.
+struct SharedFile: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// UIKit's share sheet (AirDrop, Save to Files, …) for files SwiftUI's ShareLink can't wait for.
+struct ActivitySheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+
+/// "Enter the room" in the result view.
+enum WalkState: Equatable {
+    case off, choosing, inside(SIMD3<Float>)
+
+    var standingAt: SIMD3<Float>? {
+        if case .inside(let p) = self { return p }
+        return nil
+    }
+}
+
+/// A round button that reports while it's held down (walk ▲/▼).
+struct HoldButton: View {
+    let systemImage: String
+    let onHold: (Bool) -> Void
+    @State private var held = false
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.title2)
+            .frame(width: 56, height: 56)
+            .background(held ? AnyShapeStyle(Color.accentColor.opacity(0.6)) : AnyShapeStyle(.regularMaterial), in: Circle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { _ in if !held { held = true; onHold(true) } }
+                .onEnded { _ in held = false; onHold(false) })
+            .accessibilityAddTraits(.isButton)
     }
 }

@@ -49,7 +49,9 @@ extension ScanStore {
     }
 
     /// Files in the capture folder that the result screen saved and that stay valid after a merge.
-    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json"]
+    /// The world map is kept too: it's in the saved scan's coordinates, so the scan can be continued again (replaced
+    /// below by the pass's own map when that is in the same coordinates).
+    private static let keptFiles = ["objects.json", "storyboard-objects.json", "improved.json", "worldmap.arexperience"]
     /// Caches built from the points and photos: rebuilt from the merged ones the next time the scan opens.
     private static let rebuiltFiles = ["surfels.bin", "trained.bin", "windows.json"]
 
@@ -66,6 +68,7 @@ extension ScanStore {
         }
         #endif
         // Fit the pass onto the saved scan's points, starting from the hand-off guess.
+        let handoff = alignment
         var alignment = alignment
         if let capture, capture.pointCount > 0 {
             let start = Date()
@@ -130,19 +133,37 @@ extension ScanStore {
                     cameraToWorld: simd_float4x4(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
                                                  SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15])),
                     fx: r.fx, fy: r.fy, cx: r.cx, cy: r.cy, width: r.width, height: r.height, jpeg: jpeg, exposure: r.exposure))
+                // Keep the photo's depth, for the photo room's hidden-surface check.
+                if let file = r.depthFile, let w = r.depthWidth, let h = r.depthHeight,
+                   let raw = try? Data(contentsOf: folder.appendingPathComponent(file)), raw.count == w * h * 2 {
+                    keyframes[keyframes.count - 1].depth = raw.withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
+                    keyframes[keyframes.count - 1].depthWidth = w
+                    keyframes[keyframes.count - 1].depthHeight = h
+                }
             }
         }
         let oldPhotos = keyframes.count
         keyframes += capture?.keyframes ?? []
 
+        // Mesh: the saved one, plus the pass's surfaces where the saved scan had none.
+        let oldMesh = ScanMesh.read(from: folder.appendingPathComponent(ScanMesh.fileName))
+        let mesh = ScanMesh.merge(old: oldMesh, new: capture?.mesh)
         let merged = CaptureSnapshot(points: points.withUnsafeBytes { Data($0) }, pointCount: points.count,
-                                     keyframes: keyframes, voxelSize: voxel)
+                                     keyframes: keyframes, voxelSize: voxel, mesh: mesh)
         try CaptureStore.write(merged, to: folder)
         for (name, data) in kept { try? data.write(to: folder.appendingPathComponent(name), options: .atomic) }
         for name in rebuiltFiles { try? fm.removeItem(at: folder.appendingPathComponent(name)) }
         ImproveHistory.record(Date(), for: scan)
         // The pass's own map is only in the saved scan's coordinates when nothing had to be mapped back.
-        if let worldMap, alignment == matrix_identity_float4x4 { WorldMapStore.save(worldMap, for: scan) }
+        // The pass's map was moved onto the saved scan by the hand-off guess (see `ScanController.finish`): it replaces
+        // the saved map (and so covers the new areas too) when the fit agrees with that guess within 10 cm and 3°.
+        // Otherwise the saved map stays (kept above), so the scan can always be continued again.
+        if let worldMap, ImproveAlignment.close(alignment, handoff) {
+            WorldMapStore.save(worldMap, for: scan)
+            ImproveLog.write("saved the pass's world map")
+        } else if worldMap != nil {
+            ImproveLog.write("kept the saved world map (the fit moved the pass more than the hand-off guess)")
+        }
         ImproveLog.write("merged: \(added) points added, \(replaced) made more solid (\(points.count) now); "
                          + "\(keyframes.count - oldPhotos) photos added (\(keyframes.count) now)")
         return scan
@@ -224,6 +245,14 @@ enum ImproveAlignment {
     }
 
     /// The pass's points and photo poses in the saved scan's coordinates.
+    /// Within 10 cm and 3° of each other.
+    static func close(_ a: simd_float4x4, _ b: simd_float4x4) -> Bool {
+        let d = a.inverse * b
+        let shift = simd_length(SIMD3(d.columns.3.x, d.columns.3.y, d.columns.3.z))
+        let cosAngle = (d.columns.0.x + d.columns.1.y + d.columns.2.z - 1) / 2
+        return shift < 0.1 && cosAngle > cos(3 * Float.pi / 180)
+    }
+
     static func apply(_ m: simd_float4x4, to capture: CaptureSnapshot) -> CaptureSnapshot {
         guard m != matrix_identity_float4x4 else { return capture }
         var out = capture
@@ -239,6 +268,11 @@ enum ImproveAlignment {
         }
         out.points = points
         out.keyframes = capture.keyframes.map { var k = $0; k.cameraToWorld = m * k.cameraToWorld; return k }
+        out.mesh = capture.mesh.map { mesh in
+            var mesh = mesh
+            mesh.positions = mesh.positions.map { simd_make_float3(m * SIMD4($0, 1)) }
+            return mesh
+        }
         return out
     }
 }

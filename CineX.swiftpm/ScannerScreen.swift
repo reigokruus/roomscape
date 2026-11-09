@@ -139,6 +139,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 guard let self, self.phase == .scanning else { return }
                 guard let camera = session.currentFrame?.camera, case .normal = camera.trackingState else { continue }
                 self.alignment = ImproveAlignment.yawAndShift(from: camera.transform, to: before)
+                // The saved scan's outline, from its coordinates into this pass's.
+                self.live.ghost.setTransform(self.alignment.inverse)
                 ImproveLog.write(String(format: "RoomPlan tracking after %.1f s: ", Date().timeIntervalSince(recognisedAt))
                                  + "\(ImproveLog.pose(camera.transform)) <- saved room \(ImproveLog.pose(before))")
                 return
@@ -155,6 +157,16 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         configuration.isCoachingEnabled = false
         captureView.captureSession.run(configuration: configuration)
         live.start()
+        // Continue scan: show what the saved scan already covers, in blue, once it's lined up.
+        if let improving, let device = live.device {
+            let ghost = live.ghost
+            ghost.activate()
+            Task.detached(priority: .utility) {
+                if let mesh = ScanMesh.read(from: improving.captureURL.appendingPathComponent(ScanMesh.fileName)) {
+                    ghost.load(mesh, device: device)
+                }
+            }
+        }
         live.attachDiscs(to: captureView)
         live.pinPreviewTopRight(in: captureView)
         lastMemoryWarning = nil
@@ -172,6 +184,12 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         live.stop()
         let session = captureView.captureSession.arSession
         captureView.captureSession.stop(pauseARSession: false)
+        // Continue scan: move this pass's map onto the saved scan's coordinates (by the hand-off guess), so it can
+        // replace the saved map and the next Continue scan recognises the new areas too. The points and photos
+        // were already copied out, in the pass's own coordinates.
+        if improving != nil, alignment != matrix_identity_float4x4 {
+            session.setWorldOrigin(relativeTransform: alignment.inverse)
+        }
         worldMapTask = Task {
             let map = await WorldMapStore.capture(from: session)
             session.pause()
@@ -408,7 +426,7 @@ struct ScannerScreen: View {
                 case .relocalizing:
                     VStack(spacing: 8) {
                         ProgressView()
-                        Text("Finding the saved room")
+                        Text("Looking for the room…")
                             .font(.headline)
                         Text("Slowly point the phone at the walls and furniture you scanned before. When it recognises them, hold the phone still for a second while scanning starts.")
                             .font(.callout)
@@ -429,7 +447,7 @@ struct ScannerScreen: View {
                         .background(.regularMaterial, in: Capsule())
                 case .scanning:
                     if controller.improving != nil {
-                        Label("Lined up with the saved scan. Scan the parts you want sharper, then tap Done.",
+                        Label("Room recognised, keep scanning. Blue is what's already scanned; add what's missing, then tap Done.",
                               systemImage: "checkmark.circle")
                             .font(.footnote)
                             .padding(.horizontal, 12).padding(.vertical, 8)

@@ -1,0 +1,425 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>RoomScape Viewer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: full-bleed 3D stage; slim top bar, floating tool dock bottom-left, readout panel top-right. Single dark look, like a darkened set. */
+:root {
+  --stage: #1b1a17;
+  --panel: rgba(37, 36, 31, 0.92);
+  --line: #3a3832;
+  --fg: #ece8df;
+  --muted: #9c978b;
+  --accent: #f2a33a;
+  --accent-ink: #1b1a17;
+  --display: "Figtree", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--stage); color: var(--fg); font-family: var(--display); overflow: hidden; }
+#stage { position: fixed; inset: 0; }
+#stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 5;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding-top: calc(10px + env(safe-area-inset-top, 0px)); padding-bottom: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: linear-gradient(var(--stage), rgba(27,26,23,0));
+  pointer-events: none;
+}
+.bar > * { pointer-events: auto; }
+.brand { font-weight: 700; letter-spacing: 0.02em; font-size: 16px; }
+.brand span { color: var(--accent); }
+.file { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 120px; }
+button, .btn {
+  font: 600 13px var(--display); color: var(--fg); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; cursor: pointer;
+}
+button:hover, .btn:hover { border-color: var(--muted); }
+button:focus-visible, .btn:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.primary:hover { border-color: var(--fg); }
+button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.dock {
+  position: fixed; z-index: 5;
+  left: max(16px, env(safe-area-inset-left, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center; pointer-events: none;
+}
+.dock > * { pointer-events: auto; }
+.seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 3px; gap: 2px; }
+.seg button { border: 0; background: transparent; padding: 6px 11px; border-radius: 6px; }
+.cut { display: inline-flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 6px 12px; font-size: 13px; }
+.cut input { width: 140px; accent-color: var(--accent); }
+.cut output { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 52px; font-variant-numeric: tabular-nums; }
+.readout {
+  position: fixed; z-index: 4; right: max(16px, env(safe-area-inset-right, 0px)); top: calc(64px + env(safe-area-inset-top, 0px));
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  display: grid; grid-template-columns: auto auto; gap: 4px 16px; font-size: 13px; max-width: calc(100% - 32px);
+}
+.readout dt { color: var(--muted); }
+.readout dd { margin: 0; font-family: var(--mono); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.readout .tag { grid-column: 1 / -1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); }
+.help {
+  position: fixed; z-index: 4; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  font-size: 12px; color: var(--muted); line-height: 1.6; text-align: right; max-width: 300px;
+}
+.help kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--fg); }
+.measure-label {
+  position: fixed; z-index: 6; transform: translate(-50%, -140%); pointer-events: none;
+  background: var(--accent); color: var(--accent-ink); font: 500 13px var(--mono); padding: 3px 8px; border-radius: 6px;
+}
+.drop {
+  position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
+  background: rgba(27,26,23,0.85); border: 3px dashed var(--accent); font-size: 22px; font-weight: 600;
+}
+.toast {
+  position: fixed; z-index: 21; left: 50%; top: calc(70px + env(safe-area-inset-top, 0px)); transform: translateX(-50%);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; font-size: 13px; max-width: calc(100% - 32px);
+}
+@media (max-width: 720px) {
+  .help { display: none; }
+  .readout { top: auto; bottom: calc(118px + env(safe-area-inset-bottom, 0px)); }
+  .cut input { width: 100px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div id="stage"></div>
+
+<header class="bar">
+  <div class="brand">Room<span>Scape</span> Viewer</div>
+  <div class="file" id="fileName">Sample room</div>
+  <label class="btn primary" for="fileInput">Open scan…</label>
+  <input id="fileInput" type="file" accept=".glb,.gltf,.ply,.obj" hidden>
+</header>
+
+<dl class="readout" id="readout">
+  <dt class="tag" id="readTag">Sample, not a real scan</dt>
+  <dt>Size</dt><dd id="rSize">–</dd>
+  <dt>Height</dt><dd id="rHeight">–</dd>
+  <dt>Triangles</dt><dd id="rTris">–</dd>
+  <dt>Photos</dt><dd id="rPhotos">–</dd>
+</dl>
+
+<div class="dock">
+  <div class="seg" role="group" aria-label="Camera mode">
+    <button id="mOrbit" aria-pressed="true">Orbit</button>
+    <button id="mWalk" aria-pressed="false">Walk</button>
+  </div>
+  <button id="bTop">Top view</button>
+  <button id="bReset">Reset</button>
+  <button id="bMeasure" aria-pressed="false">Measure</button>
+  <label class="cut" for="cutRange">Cut ceiling <input id="cutRange" type="range" min="0" max="1000" value="1000"><output id="cutOut">off</output></label>
+</div>
+
+<div class="help" id="help"></div>
+<div class="measure-label" id="mLabel" hidden></div>
+<div class="drop" id="drop" hidden>Drop the .glb from your phone</div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/PLYLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/OBJLoader.js"></script>
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const stage = $('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.localClippingEnabled = true;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b1a17);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444033, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6); sun.position.set(3, 6, 2); scene.add(sun);
+
+const camera = new THREE.PerspectiveCamera(60, 1, 0.02, 500);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.12;
+controls.screenSpacePanning = true; controls.zoomSpeed = 1.2;
+
+const cutPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6);
+let model = null, box = new THREE.Box3(), mode = 'orbit', measuring = false;
+
+function toast(msg, ms = 3500) {
+  const t = $('toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, ms);
+}
+
+function prepare(obj) {
+  let tris = 0; const photos = new Set();
+  obj.traverse(o => {
+    if (!o.isMesh && !o.isPoints) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(m => {
+      m.clippingPlanes = [cutPlane];
+      if (o.isMesh) m.side = THREE.DoubleSide;
+      if (m.map) { photos.add(m.map.uuid); m.map.anisotropy = renderer.capabilities.getMaxAnisotropy(); }
+    });
+    if (o.isMesh) {
+      const g = o.geometry;
+      tris += g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+    }
+  });
+  return { tris, photos: photos.size };
+}
+
+function setModel(obj, name, isSample) {
+  if (model) { scene.remove(model); model.traverse(o => { o.geometry && o.geometry.dispose(); }); }
+  model = obj; scene.add(model);
+  model.updateMatrixWorld(true);
+  box.setFromObject(model);
+  const info = prepare(model);
+  const s = box.getSize(new THREE.Vector3());
+  $('fileName').textContent = name;
+  $('readTag').hidden = !isSample;
+  $('rSize').textContent = `${s.x.toFixed(1)} × ${s.z.toFixed(1)} m`;
+  $('rHeight').textContent = `${s.y.toFixed(1)} m`;
+  $('rTris').textContent = info.tris ? Math.round(info.tris).toLocaleString() : 'points';
+  $('rPhotos').textContent = info.photos || '–';
+  $('cutRange').value = 1000; applyCut();
+  clearMeasure(); setMode('orbit'); resetView();
+}
+
+function resetView() {
+  const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+  const r = Math.max(s.x, s.y, s.z, 1);
+  controls.target.copy(c);
+  camera.position.set(c.x + r * 0.9, c.y + r * 0.8, c.z + r * 1.0);
+  camera.near = r / 2000; camera.far = r * 50; camera.updateProjectionMatrix();
+  controls.update();
+}
+function topView() {
+  setMode('orbit');
+  const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+  if ($('cutRange').value == 1000) { $('cutRange').value = 1000 * Math.max(0, (s.y - 0.3) / s.y); applyCut(); }
+  controls.target.copy(c);
+  camera.position.set(c.x, c.y + Math.max(s.x, s.z) * 1.3, c.z + 0.001);
+  controls.update();
+}
+
+function applyCut() {
+  const v = +$('cutRange').value / 1000;
+  if (v >= 0.999) { cutPlane.constant = 1e6; $('cutOut').textContent = 'off'; return; }
+  const h = box.min.y + v * (box.max.y - box.min.y);
+  cutPlane.constant = h;
+  $('cutOut').textContent = `${(h - box.min.y).toFixed(2)} m`;
+}
+$('cutRange').addEventListener('input', applyCut);
+
+// ---------- walk mode ----------
+const keys = new Set(); let yaw = 0, pitch = 0;
+function setMode(m) {
+  const wasWalk = mode === 'walk';
+  mode = m;
+  if (wasWalk && m === 'orbit') {
+    const d = new THREE.Vector3(); camera.getWorldDirection(d); controls.target.copy(camera.position).addScaledVector(d, 1.5);
+  }
+  $('mOrbit').setAttribute('aria-pressed', m === 'orbit');
+  $('mWalk').setAttribute('aria-pressed', m === 'walk');
+  controls.enabled = m === 'orbit';
+  if (m === 'walk') {
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+    yaw = Math.atan2(-dir.x, -dir.z); pitch = 0;
+    const p = controls.target.clone();
+    p.y = box.min.y + Math.min(1.6, (box.max.y - box.min.y) * 0.6);
+    camera.position.copy(p);
+    camera.near = 0.02; camera.updateProjectionMatrix();
+    applyLook();
+    $('help').innerHTML = 'Drag to look · <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · <kbd>Q</kbd>/<kbd>E</kbd> down/up · <kbd>Shift</kbd> faster · scroll to step';
+  } else {
+    if (m === 'orbit' && camera.position.distanceTo(controls.target) < 0.05) {
+      const d = new THREE.Vector3(); camera.getWorldDirection(d); controls.target.copy(camera.position).addScaledVector(d, 1.5);
+    }
+    controls.update();
+    $('help').innerHTML = 'Drag to orbit · right-drag to pan · scroll to zoom<br><b>Double-click</b> a spot to fly in close';
+  }
+}
+function applyLook() { camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ')); }
+$('mOrbit').onclick = () => setMode('orbit');
+$('mWalk').onclick = () => setMode('walk');
+$('bTop').onclick = topView;
+$('bReset').onclick = () => { setMode('orbit'); resetView(); };
+
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  keys.add(e.key.toLowerCase());
+  if (e.key === 'Escape') { clearMeasure(); setMeasuring(false); }
+});
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+addEventListener('blur', () => keys.clear());
+
+let drag = null;
+renderer.domElement.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX, y: e.clientY, moved: false };
+  if (mode === 'walk') renderer.domElement.setPointerCapture(e.pointerId);
+});
+renderer.domElement.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+  if (mode === 'walk') {
+    yaw -= dx * 0.004; pitch = Math.max(-1.5, Math.min(1.5, pitch - dy * 0.004));
+    applyLook(); drag.x = e.clientX; drag.y = e.clientY;
+  }
+});
+renderer.domElement.addEventListener('pointerup', e => {
+  if (drag && !drag.moved && measuring) measureClick(e);
+  drag = null;
+});
+renderer.domElement.addEventListener('wheel', e => {
+  if (mode !== 'walk') return;
+  e.preventDefault();
+  const d = new THREE.Vector3(); camera.getWorldDirection(d);
+  camera.position.addScaledVector(d, -Math.sign(e.deltaY) * 0.25);
+}, { passive: false });
+
+// ---------- picking ----------
+const ray = new THREE.Raycaster(); ray.params.Points.threshold = 0.03;
+function pick(e) {
+  if (!model) return null;
+  const r = renderer.domElement.getBoundingClientRect();
+  ray.setFromCamera({ x: ((e.clientX - r.left) / r.width) * 2 - 1, y: -((e.clientY - r.top) / r.height) * 2 + 1 }, camera);
+  const hits = ray.intersectObject(model, true).filter(h => h.point.y <= cutPlane.constant + 1e-4);
+  return hits[0] ? hits[0].point : null;
+}
+let fly = null;
+renderer.domElement.addEventListener('dblclick', e => {
+  if (mode !== 'orbit' || measuring) return;
+  const p = pick(e); if (!p) return;
+  const dist = Math.max(0.6, camera.position.distanceTo(p) * 0.4);
+  const dir = camera.position.clone().sub(p).normalize();
+  fly = { t: 0, fromT: controls.target.clone(), toT: p.clone(), fromC: camera.position.clone(), toC: p.clone().addScaledVector(dir, dist) };
+});
+
+// ---------- measure ----------
+const mPts = []; let mLine = null; const dots = [];
+const dotMat = new THREE.MeshBasicMaterial({ color: 0xf2a33a, depthTest: false });
+function setMeasuring(on) {
+  measuring = on; $('bMeasure').setAttribute('aria-pressed', on);
+  renderer.domElement.style.cursor = on ? 'crosshair' : '';
+  if (on) toast('Click two points to measure the distance between them.');
+}
+$('bMeasure').onclick = () => { clearMeasure(); setMeasuring(!measuring); };
+function clearMeasure() {
+  mPts.length = 0; dots.forEach(d => scene.remove(d)); dots.length = 0;
+  if (mLine) { scene.remove(mLine); mLine = null; } $('mLabel').hidden = true;
+}
+function measureClick(e) {
+  const p = pick(e); if (!p) { toast('Nothing there. Click on a surface.'); return; }
+  if (mPts.length === 2) clearMeasure();
+  mPts.push(p);
+  const s = Math.max(box.getSize(new THREE.Vector3()).length() * 0.004, 0.01);
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(s, 12, 8), dotMat); dot.position.copy(p); dot.renderOrder = 10;
+  scene.add(dot); dots.push(dot);
+  if (mPts.length === 2) {
+    const g = new THREE.BufferGeometry().setFromPoints(mPts);
+    mLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xf2a33a, depthTest: false })); mLine.renderOrder = 10;
+    scene.add(mLine);
+    $('mLabel').textContent = `${mPts[0].distanceTo(mPts[1]).toFixed(2)} m`; $('mLabel').hidden = false;
+  }
+}
+
+// ---------- loading ----------
+function loadFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const rd = new FileReader();
+  toast(`Opening ${file.name}…`, 60000);
+  rd.onload = () => {
+    try {
+      if (ext === 'glb' || ext === 'gltf') {
+        new THREE.GLTFLoader().parse(rd.result, '', g => { setModel(g.scene, file.name, false); toast('Loaded. Double-click a spot to fly in, or switch to Walk.'); },
+          err => toast(`Couldn't read this glTF file: ${err.message || err}`, 8000));
+      } else if (ext === 'ply') {
+        const geo = new THREE.PLYLoader().parse(rd.result);
+        const hasCol = !!geo.attributes.color;
+        let obj;
+        if (geo.index) { geo.computeVertexNormals(); obj = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: hasCol, color: hasCol ? 0xffffff : 0xbbbbbb })); }
+        else obj = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.02, vertexColors: hasCol, color: hasCol ? 0xffffff : 0xbbbbbb }));
+        setModel(obj, file.name, false); toast('Loaded.');
+      } else if (ext === 'obj') {
+        setModel(new THREE.OBJLoader().parse(new TextDecoder().decode(rd.result)), file.name, false); toast('Loaded.');
+      } else toast('Open a .glb, .ply or .obj file exported from RoomScape.', 6000);
+    } catch (err) { toast(`Couldn't open this file: ${err.message}`, 8000); }
+  };
+  rd.readAsArrayBuffer(file);
+}
+$('fileInput').addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); e.target.value = ''; });
+let dragDepth = 0;
+addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; $('drop').hidden = false; });
+addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop').hidden = true; } });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; $('drop').hidden = true; const f = e.dataTransfer.files[0]; if (f) loadFile(f); });
+
+// ---------- sample room (shown until a scan is opened) ----------
+function sampleRoom() {
+  const g = new THREE.Group();
+  const mat = c => new THREE.MeshLambertMaterial({ color: c });
+  const boxM = (w, h, d, x, y, z, c) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(c)); m.position.set(x, y, z); g.add(m); return m; };
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 512; const cx = cv.getContext('2d');
+  for (let i = 0; i < 16; i++) { cx.fillStyle = `hsl(30, 35%, ${38 + (i * 37 % 11)}%)`; cx.fillRect(0, i * 32, 512, 31); }
+  const tex = new THREE.CanvasTexture(cv); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(3, 3); tex.encoding = THREE.sRGBEncoding;
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(6, 4.5), new THREE.MeshLambertMaterial({ map: tex })); floor.rotation.x = -Math.PI / 2; g.add(floor);
+  const W = 0xd9d4c8;
+  boxM(6, 2.8, 0.1, 0, 1.4, -2.25, W); boxM(0.1, 2.8, 4.5, -3, 1.4, 0, W); boxM(0.1, 2.8, 4.5, 3, 1.4, 0, W);
+  boxM(2.2, 0.06, 4.5, -1.9, 2.8, 0, 0xeeeae2); boxM(2.2, 0.06, 4.5, 1.9, 2.8, 0, 0xeeeae2);
+  boxM(1.6, 1.2, 0.04, 0.8, 1.5, -2.19, 0x9cc4dd);
+  boxM(1.6, 0.05, 0.9, -0.6, 0.75, 0.1, 0x6b4a2f);
+  [[-1.3, 0.1], [0.1, 0.1]].forEach(([x, z]) => boxM(0.05, 0.75, 0.8, x, 0.375, z, 0x4a3320));
+  [[-1.1, 0.8], [-0.1, 0.8], [-1.1, -0.6], [-0.1, -0.6]].forEach(([x, z]) => { boxM(0.45, 0.06, 0.45, x, 0.46, z, 0x2f4858); boxM(0.45, 0.5, 0.05, x, 0.7, z + (z > 0 ? 0.2 : -0.2), 0x2f4858); });
+  boxM(2.0, 0.45, 0.9, 1.8, 0.225, 1.6, 0x8a5a44); boxM(2.0, 0.5, 0.2, 1.8, 0.65, 1.95, 0x8a5a44);
+  boxM(0.04, 1.6, 0.04, -2.6, 0.8, -1.8, 0x333333); boxM(0.35, 0.3, 0.35, -2.6, 1.7, -1.8, 0xf3e3b5);
+  return g;
+}
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+const clock = new THREE.Clock(), tmp = new THREE.Vector3();
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (fly) {
+    fly.t = Math.min(1, fly.t + dt * 1.6); const k = 1 - Math.pow(1 - fly.t, 3);
+    controls.target.lerpVectors(fly.fromT, fly.toT, k); camera.position.lerpVectors(fly.fromC, fly.toC, k);
+    if (fly.t >= 1) fly = null;
+  }
+  if (mode === 'walk') {
+    const sp = (keys.has('shift') ? 4 : 1.4) * dt;
+    const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)), r = new THREE.Vector3(-f.z, 0, f.x);
+    if (keys.has('w') || keys.has('arrowup')) camera.position.addScaledVector(f, sp);
+    if (keys.has('s') || keys.has('arrowdown')) camera.position.addScaledVector(f, -sp);
+    if (keys.has('d') || keys.has('arrowright')) camera.position.addScaledVector(r, sp);
+    if (keys.has('a') || keys.has('arrowleft')) camera.position.addScaledVector(r, -sp);
+    if (keys.has('e')) camera.position.y += sp;
+    if (keys.has('q')) camera.position.y -= sp;
+  } else controls.update();
+  if (mPts.length === 2) {
+    tmp.addVectors(mPts[0], mPts[1]).multiplyScalar(0.5).project(camera);
+    const l = $('mLabel'); l.hidden = tmp.z > 1;
+    l.style.left = `${(tmp.x * 0.5 + 0.5) * innerWidth}px`; l.style.top = `${(-tmp.y * 0.5 + 0.5) * innerHeight}px`;
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+setModel(sampleRoom(), 'Sample room', true);
+// Hosted with a scan: a room.glb next to this page opens by itself (else the built-in sample stays).
+fetch('room.glb').then(r => r.ok ? r.arrayBuffer() : Promise.reject()).then(buf =>
+  new THREE.GLTFLoader().parse(buf, '', g => { setModel(g.scene, 'Room', false); toast('Double-click a spot to fly in, or switch to Walk.'); }, () => {})
+).catch(() => {});
+toast('Showing a sample room. Open a .glb exported from RoomScape to see your scan.', 6000);
+frame();
+})();
+</script>
+
+</body></html>

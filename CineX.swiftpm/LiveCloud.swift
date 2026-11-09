@@ -24,6 +24,10 @@ struct Keyframe: Sendable {
     /// How the camera exposed this photo, so pixel values can be turned back into how bright the scene really was
     /// (a daylit window is many times brighter than an LED-lit white wall, which auto-exposure hides).
     var exposure: PhotoExposure?
+    /// LiDAR depth when the photo was taken, millimetres (0 = unknown), `depthWidth` × `depthHeight`, row 0 at the top,
+    /// covering the same view as the photo. Lets the photo room tell whether a surface was hidden in this photo.
+    var depth: [UInt16]? = nil
+    var depthWidth = 0, depthHeight = 0
 }
 
 /// ARKit's exposure and light estimate for one photo.
@@ -46,6 +50,8 @@ struct CaptureSnapshot: Sendable {
     var keyframes: [Keyframe]
     /// Cell size the points ended up at (2 cm, or coarser after a large room filled the budget).
     var voxelSize: Float
+    /// The surface mesh fused from LiDAR depth while scanning (see `LiveMesh`), for the photo room.
+    var mesh: ScanMesh? = nil
 }
 
 /// The live point cloud built from LiDAR depth while RoomPlan scans (handoff section 2: live capture + seen counter).
@@ -164,7 +170,10 @@ final class LiveCloud: @unchecked Sendable {
     private static let firstSeen = UInt32(max(1, 255 / solidFrames))
 
     /// Adds one ARKit frame's LiDAR depth. Reads the frame's buffers and returns without keeping the frame.
-    func integrate(_ frame: ARFrame) {
+    /// When `tsdf` is given, every fourth depth pixel each way (about one ray per 4 cm voxel at room distance) is also
+    /// fused into it, for the live mesh.
+    /// `covered` (Continue scan) says which spots the saved scan already has: those aren't fused into `tsdf`.
+    func integrate(_ frame: ARFrame, tsdf: Tsdf? = nil, covered: ((SIMD3<Float>) -> Bool)? = nil) {
         let time = frame.timestamp
         guard case .normal = frame.camera.trackingState else {
             trackingNormalSince = nil
@@ -220,6 +229,7 @@ final class LiveCloud: @unchecked Sendable {
 
         var n = count
         var frameHits = 0, frameSolid = 0
+        var fusedSamples = 0, newSamples = 0
 
         // Every second depth pixel: about one sample per 2 cm cell at room distances.
         for v in stride(from: 1, to: dh - 1, by: 2) {
@@ -241,6 +251,14 @@ final class LiveCloud: @unchecked Sendable {
                 }
                 let pc = cam(u, v, d)
                 let world = pose * SIMD4<Float>(pc, 1)
+                if let tsdf, u & 3 == 1, v & 3 == 1 {
+                    let point = SIMD3(world.x, world.y, world.z)
+                    fusedSamples += 1
+                    if covered?(point) != true {
+                        newSamples += 1
+                        tsdf.integrate(origin: position, point: point)
+                    }
+                }
                 // Surface normal from the four neighbours, turned to face the camera, then into world space.
                 var nc = simd_cross(cam(u + 1, v, dr) - cam(u - 1, v, dl), cam(u, v - 1, du) - cam(u, v + 1, dd))
                 if simd_dot(nc, pc) > 0 { nc = -nc }
@@ -311,6 +329,8 @@ final class LiveCloud: @unchecked Sendable {
             let share = Float(frameSolid) / Float(frameHits)
             detailHere = detailHere < 0 ? share : detailHere * 0.8 + share * 0.2
         }
+        // Continue scan: a photo only when at least a quarter of the view is new (not the saved scan's blue areas).
+        if covered != nil, fusedSamples > 0, newSamples * 4 < fusedSamples { return }
         captureKeyframeIfMoved(frame, pose: pose)
     }
 
@@ -333,6 +353,7 @@ final class LiveCloud: @unchecked Sendable {
             guard moved >= photoMove * photoSpacing || turnedDegrees >= photoTurn * photoSpacing else { return }
         }
         guard let pixels = Self.copy(frame.capturedImage) else { return }
+        let depth = frame.sceneDepth.flatMap(Self.smallDepth)
         pendingPhotos.withLock { $0 += 1 }
         keyframesTaken += 1
         lastKeyframePose = pose
@@ -356,12 +377,43 @@ final class LiveCloud: @unchecked Sendable {
             let keyframe = Keyframe(timestamp: timestamp, cameraToWorld: pose,
                                     fx: k[0][0] * scale, fy: k[1][1] * scale, cx: k[2][0] * scale, cy: k[2][1] * scale,
                                     width: Int((Float(iw) * scale).rounded()), height: Int((Float(ih) * scale).rounded()),
-                                    jpeg: jpeg, exposure: exposure)
+                                    jpeg: jpeg, exposure: exposure,
+                                    depth: depth?.values, depthWidth: depth?.width ?? 0, depthHeight: depth?.height ?? 0)
             keyframes.withLock { $0.append(keyframe) }
         }
     }
 
     /// A copy of a camera image in a buffer we own, so ARKit gets its own buffer back straight away.
+    /// The depth map at half size (128 × 96 from ARKit's 256 × 192), in millimetres; pixels ARKit isn't at least
+    /// medium-confident about are 0.
+    private static func smallDepth(_ sceneDepth: ARDepthData) -> (values: [UInt16], width: Int, height: Int)? {
+        let depth = sceneDepth.depthMap
+        guard let confidence = sceneDepth.confidenceMap else { return nil }
+        CVPixelBufferLockBaseAddress(depth, .readOnly)
+        CVPixelBufferLockBaseAddress(confidence, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(confidence, .readOnly)
+            CVPixelBufferUnlockBaseAddress(depth, .readOnly)
+        }
+        guard let dBase = CVPixelBufferGetBaseAddress(depth), let cBase = CVPixelBufferGetBaseAddress(confidence) else { return nil }
+        let dw = CVPixelBufferGetWidth(depth), dh = CVPixelBufferGetHeight(depth)
+        let dRow = CVPixelBufferGetBytesPerRow(depth) / MemoryLayout<Float32>.stride
+        let cRow = CVPixelBufferGetBytesPerRow(confidence)
+        let d = dBase.assumingMemoryBound(to: Float32.self), c = cBase.assumingMemoryBound(to: UInt8.self)
+        let w = dw / 2, h = dh / 2
+        let medium = UInt8(ARConfidenceLevel.medium.rawValue)
+        var values = [UInt16](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let u = x * 2, v = y * 2
+                guard c[v * cRow + u] >= medium else { continue }
+                let m = d[v * dRow + u] * 1000
+                if m > 0, m < 65000 { values[y * w + x] = UInt16(m) }
+            }
+        }
+        return (values, w, h)
+    }
+
     private static func copy(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         var copy: CVPixelBuffer?
         let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [String: Any]()] as CFDictionary
