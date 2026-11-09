@@ -1097,6 +1097,22 @@ struct RoomSummary: View {
 
     var body: some View {
         List {
+            // First under the 3D view: add to this scan.
+            if capture != nil, let onImprove {
+                Section {
+                    Button(action: onImprove) {
+                        Label("Continue scan", systemImage: "plus.viewfinder")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                } footer: {
+                    Text("Add parts you missed, or that came out thin or blurry. The phone recognises the room and adds to this scan.")
+                }
+            }
             Section("Room") {
                 if let onRename {
                     Button(action: onRename) {
@@ -1140,19 +1156,8 @@ struct RoomSummary: View {
                         let when = last.formatted(.dateTime.day().month(.abbreviated).hour().minute())
                         LabeledContent("Improved", value: improved.count == 1 ? when : "\(improved.count) times, last \(when)")
                     }
-                    if let onImprove {
-                        Button {
-                            onImprove()
-                        } label: {
-                            Label("Continue scan", systemImage: "plus.viewfinder")
-                        }
-                    }
                 } header: {
                     Text("Capture")
-                } footer: {
-                    if onImprove != nil {
-                        Text("Add to this scan: parts you missed, or that came out thin or blurry. The phone recognises the room by itself and adds the new surfaces, points and photos to this scan.")
-                    }
                 }
             }
             if !objectCounts.isEmpty || removedCount > 0 {
