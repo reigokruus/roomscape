@@ -173,6 +173,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             }
         }
         startHud()
+        if RawRecorder.enabled { live.recorder = RawRecorder() }
         live.attachDiscs(to: captureView)
         live.pinPreviewTopRight(in: captureView)
         lastMemoryWarning = nil
@@ -205,6 +206,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
 
     func cancel() {
         log.info("cancel")
+        if let recorder = live.recorder {
+            live.recorder = nil
+            recorder.finish { folder, _ in try? FileManager.default.removeItem(at: folder) } // Cancel discards the scan
+        }
         if improving != nil { ImproveLog.write("cancelled while \(phase)") }
         processingTask?.cancel()
         processingTask = nil
@@ -400,6 +405,14 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 }.value
                 try Task.checkCancellation()
                 log.info("saved \(saved.name, privacy: .public)")
+                // The raw recording goes into the scan's folder (kept; nothing deletes it automatically).
+                if let recorder = self.live.recorder {
+                    self.live.recorder = nil
+                    recorder.finish { folder, bytes in
+                        RawRecorder.move(folder, into: saved)
+                        log.info("raw recording: \(recorder.frames) frames, \(bytes / 1_000_000) MB")
+                    }
+                }
                 self.saved = saved
             } catch is CancellationError {
                 // User closed the scanner.

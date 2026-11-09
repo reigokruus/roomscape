@@ -36,6 +36,8 @@ struct ResultView: View {
     @State private var savingFile: SharedFile?
     /// Objects mode's undo: the objects before each edit (move, turn, remove, put back), newest last.
     @State private var objectHistory: [[RoomObject]] = []
+    /// Size of the scan's raw recording (RawRecorder), shown in the room panel; nil without one.
+    @State private var recordingBytes: Int64?
     /// Fills for the holes removed or moved objects leave (HoleFill), by object; generated, never saved.
     @State private var holeFills: [UUID: SCNNode] = [:]
     @State private var holeFillsPending: Set<UUID> = []
@@ -183,7 +185,8 @@ struct ResultView: View {
                                 newTitle = current.title ?? ""
                                 renaming = true
                             }, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
-                            onImprove: WorldMapStore.exists(scan) ? onImprove : nil, outletCount: outlets.count)
+                            onImprove: WorldMapStore.exists(scan) ? onImprove : nil, outletCount: outlets.count,
+                            recordingBytes: recordingBytes)
                     .frame(maxHeight: .infinity)
             } else if walk == .off, let capture {
                 // A room from the Android app (no RoomPlan model): the same panel from its own data.
@@ -326,6 +329,13 @@ struct ResultView: View {
                 foundWindows = windows
                 scene.rootNode.addChildNode(WindowDetection.node(windows, room: room))
             }
+
+            recordingBytes = await Task.detached(priority: .utility) { () -> Int64? in
+                let folder = scan.captureURL.appendingPathComponent("recording")
+                guard FileManager.default.fileExists(atPath: folder.path) else { return nil }
+                let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL] ?? []
+                return files.reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+            }.value
 
             // Power outlets, as orange labels in every view (like the Android app).
             if let scene {
@@ -1665,6 +1675,8 @@ struct RoomSummary: View {
     var onImprove: (() -> Void)?
     /// Power outlets found in the room (synced from the Android app's search).
     var outletCount = 0
+    /// The scan's raw recording, bytes (kept for rebuilding later), or nil.
+    var recordingBytes: Int64?
 
     private var missedWindows: [WindowFinder.Found] { foundWindows.filter { !$0.matchesRoomPlan } }
 
@@ -1728,6 +1740,9 @@ struct RoomSummary: View {
                 Section {
                     LabeledContent("Points", value: capture.pointCount.formatted())
                     LabeledContent("Photos", value: capture.keyframeCount.formatted())
+                    if let recordingBytes {
+                        LabeledContent("Raw recording", value: ByteCountFormatter.string(fromByteCount: recordingBytes, countStyle: .file))
+                    }
                     if let last = improved.last {
                         let when = last.formatted(.dateTime.day().month(.abbreviated).hour().minute())
                         LabeledContent("Improved", value: improved.count == 1 ? when : "\(improved.count) times, last \(when)")

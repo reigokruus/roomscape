@@ -14,6 +14,8 @@ final class LiveCapture {
     let mesh: LiveMesh?
     /// Continue scan: the saved scan's coarse outline in blue (see `LiveGhost`).
     let ghost = LiveGhost()
+    /// The raw recording of this scan (RawRecorder), when recording is on.
+    var recorder: RawRecorder?
     /// How far below the safe area's top RoomPlan's mini-model sits: under the scan card.
     var previewTop: CGFloat = 12
     let session: ARSession
@@ -69,7 +71,8 @@ final class LiveCapture {
     /// the points and the live mesh's surface. Calls back on the main queue with how much went.
     func clear(at point: CGPoint, radius: CGFloat, done: @escaping (Int) -> Void) {
         guard let cloud, let view = discView, let vp = view.lastViewProjection, view.bounds.width > 0 else { done(0); return }
-        let size = view.bounds.size, mesh = mesh
+        let size = view.bounds.size, mesh = mesh, recorder = recorder
+        let clearTime = session.currentFrame?.timestamp
         worker.async {
             func screen(_ p: SIMD3<Float>) -> (SIMD2<Float>, Float)? {
                 let c = vp * SIMD4(p, 1)
@@ -92,6 +95,7 @@ final class LiveCapture {
                 return simd_distance(s, tap) < r
             }
             let removed = cloud.removeWhere(inCone)
+            if let t = clearTime { recorder?.cleared(time: t, viewProjection: vp, center: point, radius: radius, viewSize: size, limit: limit) }
             _ = mesh?.tsdf.clearWhere(inCone)
             DispatchQueue.main.async { done(removed) }
         }
@@ -235,6 +239,7 @@ final class LiveCapture {
     fileprivate func tick() {
         guard !busy, let cloud, let frame = session.currentFrame, frame.timestamp != lastFrameTime else { return }
         lastFrameTime = frame.timestamp
+        recorder?.append(frame)
         busy = true
         // One frame at a time, released as soon as it's read, so ARKit never runs short of camera buffers.
         let mesh = mesh
