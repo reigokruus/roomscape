@@ -839,6 +839,13 @@ public class MainActivity extends Activity {
         viewerPanel.setBackgroundColor(Ios.BACKGROUND);
         viewerPanel.setFillViewport(false);
         viewerPanel.addView(viewerBottom);
+        // The app draws under the system navigation bar: pad the end of the list by its height, so the ROOM card can
+        // be scrolled fully into view instead of sitting hidden under the bar.
+        viewerPanel.setOnApplyWindowInsetsListener((v, insets) -> {
+            viewerBottom.setPadding(dp(16), dp(10), dp(16), dp(18) + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
+        viewerPanel.setClipToPadding(false);
         chrome.addView(viewerPanel, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
         buildWalkChrome(chrome);
         blockTouches(viewerTop, styleSwitch, walkControls);
