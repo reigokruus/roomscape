@@ -29,6 +29,8 @@ struct ResultView: View {
     @State private var photoRoom: SCNNode?
     /// Power outlets in the room (from .rmsc: the Android app's Claude search), shown as labels in the 3D view.
     @State private var outlets: [RoomOutlet] = []
+    /// The .rmsc being saved with Save to Files.
+    @State private var savingFile: SharedFile?
     /// Outlet labels on or off (the ⚡ Outlets button), remembered across scans; on by default.
     @AppStorage("showOutlets") private var showOutlets = true
     /// "Enter the room": picking where to stand, then standing there (first person). See `RoomSceneView`.
@@ -202,7 +204,8 @@ struct ResultView: View {
             } else if photoRoom != nil || capture != nil {
                 Menu {
                     Button { sendingNearby = true } label: { Label("Send to nearby phone", systemImage: "iphone.radiowaves.left.and.right") }
-                    Button(action: exportRmsc) { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }
+                    Button { exportRmsc(save: true) } label: { Label("Save to Files…", systemImage: "folder") }
+                    Button { exportRmsc(save: false) } label: { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }
                     if photoRoom != nil {
                         Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
                     }
@@ -217,6 +220,9 @@ struct ResultView: View {
         .sheet(isPresented: $sendingNearby) { SendNearbySheet(scan: current) }
         .sheet(item: $glbFile) { file in
             ActivitySheet(items: [file.url]).ignoresSafeArea()
+        }
+        .sheet(item: $savingFile) { file in
+            SaveToFilesSheet(url: file.url).ignoresSafeArea()
         }
         .alert("Couldn't export the scan", isPresented: Binding(get: { glbError != nil }, set: { if !$0 { glbError = nil } })) {
             Button("OK", role: .cancel) {}
@@ -568,7 +574,7 @@ struct ResultView: View {
 
     /// Writes the photo room as RoomScape-<scan date>.glb in the temporary folder and opens the share sheet for it.
     /// Writes the whole scan as a .rmsc package (see `Rmsc`) and opens the share sheet for it.
-    private func exportRmsc() {
+    private func exportRmsc(save: Bool) {
         exportingGLB = true
         let scan = current
         Task {
@@ -577,7 +583,7 @@ struct ResultView: View {
             }.value
             exportingGLB = false
             switch result {
-            case .success(let url): glbFile = SharedFile(url: url)
+            case .success(let url): if save { savingFile = SharedFile(url: url) } else { glbFile = SharedFile(url: url) }
             case .failure(let error): glbError = error.localizedDescription
             }
         }
@@ -1524,6 +1530,15 @@ struct SharedFile: Identifiable {
 }
 
 /// UIKit's share sheet (AirDrop, Save to Files, …) for files SwiftUI's ShareLink can't wait for.
+/// Save to Files: the system's folder picker, saving a copy of the file where the user picks.
+struct SaveToFilesSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+    }
+    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
+}
+
 struct ActivitySheet: UIViewControllerRepresentable {
     let items: [Any]
     func makeUIViewController(context: Context) -> UIActivityViewController {

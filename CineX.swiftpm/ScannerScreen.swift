@@ -448,6 +448,7 @@ struct ScannerScreen: View {
     let onCancel: () -> Void
     @StateObject private var controller: ScanController
     @Environment(\.scenePhase) private var scenePhase
+    @State private var confirmCancel = false
 
     /// `improving`: a saved scan to add a second pass to (Improve scan), instead of making a new one.
     init(improving: SavedScan? = nil, onFinished: @escaping (SavedScan) -> Void, onCancel: @escaping () -> Void) {
@@ -492,7 +493,11 @@ struct ScannerScreen: View {
                 case .scanning:
                     // Cancel and Done, the same as on the Android app.
                     HStack(spacing: 16) {
-                        Button { close() } label: { Text("Cancel").frame(minWidth: 80) }
+                        // Cancel throws the scan away (a Continue scan pass only; the saved room is kept). After a
+                        // minute of scanning it asks first, the same as on Android.
+                        Button {
+                            if Date().timeIntervalSince(controller.phaseStarted) < 60 { close() } else { confirmCancel = true }
+                        } label: { Text("Cancel").frame(minWidth: 80) }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.capsule)
                             // Solid backing so the label stays readable over the live mesh.
@@ -547,6 +552,13 @@ struct ScannerScreen: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controller.live.previewTop = $0 + 16 }
                 .frame(maxHeight: .infinity, alignment: .top)
             }
+        }
+        .alert("Discard this scan?", isPresented: $confirmCancel) {
+            Button("Discard", role: .destructive) { close() }
+            Button("Keep scanning", role: .cancel) {}
+        } message: {
+            Text(controller.improving != nil ? "The new pass is thrown away. The saved room stays as it was."
+                                             : "Everything scanned so far is thrown away.")
         }
         .onChange(of: controller.saved) { _, saved in
             if let saved { onFinished(saved) }

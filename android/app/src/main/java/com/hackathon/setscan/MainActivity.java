@@ -179,9 +179,60 @@ public class MainActivity extends Activity {
         File dir = renderer.currentDir;
         if (dir == null) { toast("The scan saves itself a moment after Done. Try Share again in a few seconds."); return; }
         new android.app.AlertDialog.Builder(this).setTitle("Share room")
-                .setItems(new String[]{"Send to nearby phone", "Share file (.rmsc)"}, (d, which) -> {
-                    if (which == 0) nearby.showSendDialog(dir); else shareRmsc();
+                .setItems(new String[]{"Send to nearby phone", "Save to device…", "Share file (.rmsc)"}, (d, which) -> {
+                    if (which == 0) nearby.showSendDialog(dir); else if (which == 1) saveRmsc(); else shareRmsc();
                 }).show();
+    }
+
+    static final int SAVE_RMSC = 7302;
+    private File saveRmscDir;
+
+    /** Save to device: the system's save dialog, then the .rmsc is written where the user picked. */
+    private void saveRmsc() {
+        File dir = renderer.currentDir;
+        if (dir == null) { toast("The scan saves itself a moment after Done. Try again in a few seconds."); return; }
+        saveRmscDir = dir;
+        String name = renderer.currentName != null ? renderer.currentName : dir.getName();
+        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+        i.setType(Rmsc.MIME);
+        i.putExtra(android.content.Intent.EXTRA_TITLE, name.replaceAll("[\\\\/:*?\"<>|]", "_") + ".rmsc");
+        try { startActivityForResult(i, SAVE_RMSC); } catch (Exception e) { toast("No save dialog on this phone: " + e.getMessage()); }
+    }
+
+    private void saveRmscTo(android.net.Uri uri) {
+        File dir = saveRmscDir;
+        if (uri == null || dir == null) return;
+        toast("Saving the room...");
+        new Thread(() -> {
+            File tmp = null;
+            try {
+                tmp = Rmsc.exportToFile(this, dir);
+                try (java.io.InputStream in = new java.io.FileInputStream(tmp);
+                     java.io.OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (out == null) throw new Exception("couldn't open the file");
+                    byte[] buf = new byte[1 << 16];
+                    for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                }
+                String where = savedPlace(uri);
+                runOnUiThread(() -> toast("Saved: " + where));
+            } catch (Throwable e) {
+                runOnUiThread(() -> toast("Couldn't save: " + e.getMessage()));
+            } finally { if (tmp != null) tmp.delete(); }
+        }).start();
+    }
+
+    /** "Download/workroom.rmsc" where the provider says so, else just the file name. */
+    private String savedPlace(android.net.Uri uri) {
+        try {
+            String id = android.provider.DocumentsContract.getDocumentId(uri);
+            int c = id.indexOf(':');
+            if (c >= 0 && id.substring(c + 1).contains("/")) return id.substring(c + 1);
+        } catch (Exception ignored) { }
+        try (android.database.Cursor cur = getContentResolver().query(uri, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cur != null && cur.moveToFirst()) return cur.getString(0);
+        } catch (Exception ignored) { }
+        return "the folder you picked";
     }
 
     /** Share: the saved scan as a .rmsc package (opens on the iPhone app, the web viewer, or another Android). */
@@ -200,7 +251,11 @@ public class MainActivity extends Activity {
                     send.putExtra(android.content.Intent.EXTRA_STREAM, uri);
                     send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     toast("Saved to Downloads/RoomScape. Pick where to send it.");
-                    try { startActivity(android.content.Intent.createChooser(send, "Share room (.rmsc)")); }
+                    android.content.Intent chooser = android.content.Intent.createChooser(send, "Share room (.rmsc)");
+                    // Not RoomScape itself: it would only import the room again.
+                    chooser.putExtra(android.content.Intent.EXTRA_EXCLUDE_COMPONENTS,
+                            new android.content.ComponentName[]{new android.content.ComponentName(this, MainActivity.class)});
+                    try { startActivity(chooser); }
                     catch (Exception e) { toast("Saved, but sharing failed: " + e.getMessage()); }
                 });
             } catch (Throwable e) {
@@ -648,6 +703,7 @@ public class MainActivity extends Activity {
     /** Buttons for scanning. */
     private void scanUi() {
         scanning = true;
+        scanStartedMs = System.currentTimeMillis();
         mainButton.setText("Done");
         applyUi();
         renderer.lighting.enabled = false;
@@ -1176,7 +1232,7 @@ public class MainActivity extends Activity {
             lp.leftMargin = dp(8); lp.rightMargin = dp(8);
             scanRow.addView(b, lp);
         }
-        cancel.setOnClickListener(v -> showHome()); // the scan so far is autosaved, as when going back
+        cancel.setOnClickListener(v -> cancelScan());
         done.setOnClickListener(v -> onMainButton());
         done.setOnLongClickListener(v -> mainButton.performLongClick());
         FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
@@ -1368,6 +1424,27 @@ public class MainActivity extends Activity {
         scanChrome.setVisibility(View.GONE);
         home.setVisibility(View.VISIBLE);
         refreshHome();
+    }
+
+    private long scanStartedMs;
+
+    /** Cancel while scanning: throw the scan away, as on the iPhone (asks first after a minute of scanning). */
+    private void cancelScan() {
+        Runnable discard = () -> {
+            if (session != null) session.pause();
+            glView.queueEvent(() -> renderer.discardScan(() -> {
+                scanChrome.setVisibility(View.GONE);
+                home.setVisibility(View.VISIBLE);
+                refreshHome();
+            }));
+        };
+        if (System.currentTimeMillis() - scanStartedMs < 60_000) { discard.run(); return; }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Discard this scan?")
+                .setMessage(renderer.isImproving() ? "The new pass is thrown away. The saved room stays as it was." : "Everything scanned so far is thrown away.")
+                .setPositiveButton("Discard", (d, w) -> discard.run())
+                .setNegativeButton("Keep scanning", null)
+                .show();
     }
 
     private boolean homeShown() { return home != null && home.getVisibility() == View.VISIBLE; }
@@ -1949,6 +2026,7 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if(requestCode == IMPORT_RMSC && resultCode == RESULT_OK && data != null) importRmsc(data.getData());
+        if(requestCode == SAVE_RMSC && resultCode == RESULT_OK && data != null) saveRmscTo(data.getData());
         if(requestCode == NativePlanningUi.IMPORT_CATALOG && resultCode == RESULT_OK && data != null && data.getData() != null) nativePlanning.importUri(data.getData());
         if(requestCode == PilotIntakeUi.EXPORT_PILOT) pilotIntake.exportResult(resultCode == RESULT_OK, data == null ? null : data.getData());
     }

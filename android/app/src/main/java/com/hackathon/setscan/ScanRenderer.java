@@ -188,6 +188,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     boolean isViewing() { return viewing; }
+    boolean isImproving() { return improveDir != null; }
 
     // ---- called on GL thread via queueEvent ----
     final RoomModel room = new RoomModel();
@@ -989,6 +990,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         reset();
         improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
         idle = false;
+    }
+
+    /**
+     * GL thread: Cancel on the scan screen (rk 9 Nov: discard, as on the iPhone). A new scan is thrown away, including
+     * the folder its autosave made. A Continue scan pass is only dropped: the saved scan it was adding to is never
+     * touched (passes aren't autosaved into it; see maybeAutosaveWhileScanning).
+     */
+    void discardScan(Runnable after) {
+        idle = true; // no more autosaves
+        if (saving) { glTasks.add(() -> discardScan(after)); return; }
+        File dir = improveDir == null ? currentDir : null;
+        log(dir != null ? "scan cancelled: deleting its autosave " + dir.getName() : improveDir != null ? "continue scan cancelled: saved scan kept as it was" : "scan cancelled");
+        reset();
+        improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
+        idle = true;
+        if (dir != null) ScanStore.delete(dir);
+        if (after != null) activity.runOnUiThread(after);
     }
 
     /** GL thread: back to the home screen. */
