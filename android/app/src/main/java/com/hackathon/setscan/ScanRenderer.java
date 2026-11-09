@@ -2539,12 +2539,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- Tap to clear while scanning (rk 9 Nov): a mistake can be wiped and scanned again ----
     /** Share of the screen's short side the cleared circle reaches from the tap. */
-    static final float CLEAR_RADIUS = 0.22f;
+    static final float CLEAR_RADIUS = 0.11f;
     /** How far behind the tapped surface the clearing reaches, metres. */
     static final float CLEAR_BEHIND = 0.15f;
     volatile long clearedAtMs;
 
-    void requestClear(float x, float y) { glTasks.add(() -> clearAt(x, y)); }
+    /** Handled in the next scan frame (glTasks only run in the viewer). */
+    private volatile float[] pendingClear;
+    void requestClear(float x, float y) { pendingClear = new float[]{x, y}; }
 
     /**
      * GL thread: everything in the cone through a circle around the tap (as seen on screen now: the overview's camera
@@ -2567,7 +2569,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float dx = px - tx, dy = py - ty;
             if (dx * dx + dy * dy < r2 * 0.12f && nn < near.length) near[nn++] = cw;
         }
-        if (nn < 5) { activity.toast("Nothing scanned there yet"); return; }
+        if (nn < 5) { log("tap to clear: nothing scanned under the tap (" + nn + " points)"); activity.toast("Nothing scanned there yet"); return; }
         java.util.Arrays.sort(near, 0, nn);
         final float limit = near[nn / 5] + CLEAR_BEHIND;
         Tsdf.Where inCone = (x, y, z) -> {
@@ -4147,6 +4149,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             drawMarks(mvp, true);
             drawRescanTarget(mvp, camera);
             if (overviewBlend > 0.001f) drawOverviewWindow();
+            float[] clearTap = pendingClear;
+            if (clearTap != null) { pendingClear = null; clearAt(clearTap[0], clearTap[1]); }
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             drawGuide(mvp);
             if (SHOW_OBJECTS) drawObjectHint(mvp);

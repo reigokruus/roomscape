@@ -484,13 +484,13 @@ struct ScannerScreen: View {
                 RelocalizeCamera(view: view).ignoresSafeArea()
             }
             // Tap to clear: a quick single-finger tap on the camera view wipes the scan in a circle around it
-            // (22% of the screen's short side) so it can be scanned again. The card and buttons above take their own taps.
+            // (11% of the screen's short side) so it can be scanned again. The card and buttons above take their own taps.
             if controller.phase == .scanning {
                 GeometryReader { g in
                     Color.clear
                         .contentShape(Rectangle())
                         .gesture(SpatialTapGesture(count: 1).onEnded { e in
-                            let r = min(g.size.width, g.size.height) * 0.22
+                            let r = min(g.size.width, g.size.height) * 0.11
                             controller.clearTapped(at: e.location, radius: r)
                             flash = ClearFlash(center: e.location, radius: r)
                             withAnimation(.easeOut(duration: 0.7)) { flash?.visible = false }

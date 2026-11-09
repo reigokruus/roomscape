@@ -647,11 +647,13 @@ public class MainActivity extends Activity {
                 // While scanning, a quick tap on a thing cuts it out of the photo and stands it in the room.
                 if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false; }
                 if (e.getPointerCount() > 1) multiTouch = true;
-                if (e.getActionMasked() == MotionEvent.ACTION_UP && !multiTouch && e.getEventTime() - downTime < 300
-                        && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
-                    float tx = e.getX(), ty = e.getY();
+                if (e.getActionMasked() == MotionEvent.ACTION_UP) {
+                    long held = e.getEventTime() - downTime;
+                    double moved = Math.hypot(e.getX() - downX, e.getY() - downY);
                     // A tap clears the scan there so it can be redone (rk 9 Nov); only a quick single-finger tap.
-                    glView.queueEvent(() -> renderer.requestClear(tx, ty));
+                    String why = multiTouch ? "more than one finger" : held >= 300 ? "held " + held + " ms" : moved >= dp(12) ? "moved " + Math.round(moved) + " px" : null;
+                    android.util.Log.i("RoomScape", "scan tap " + (why == null ? "accepted" : "rejected: " + why) + " at " + Math.round(e.getX()) + "," + Math.round(e.getY()));
+                    if (why == null) renderer.requestClear(e.getX(), e.getY());
                 }
                 return true;
             }
