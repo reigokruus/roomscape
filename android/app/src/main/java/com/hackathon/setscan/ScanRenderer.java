@@ -1736,9 +1736,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private static final float[] OUTLET_COL = {1f, 0.62f, 0.1f, 1f};
+    /** Outlet labels on or off (the ⚡ Outlets button; remembered across scans, on by default). */
+    volatile boolean showOutlets = true;
+    private int reportedOutlets = -1;
     private void drawOutlets(float[] m) {
         java.util.List<Outlets.Outlet> ls = outlets.snapshot();
-        if (ls.isEmpty()) return;
+        // Tell the button how many there are (it hides itself when there are none).
+        if (ls.size() != reportedOutlets) { reportedOutlets = ls.size(); activity.outletCount(ls.size()); }
+        if (ls.isEmpty() || !showOutlets) return;
         float fy = lighting.floorY, dens = activity.getResources().getDisplayMetrics().density;
         for (Outlets.Outlet o : ls) {
             // A 12 dp orange dot with a thin dark ring, as on the iPhone.

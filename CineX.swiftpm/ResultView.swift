@@ -29,6 +29,8 @@ struct ResultView: View {
     @State private var photoRoom: SCNNode?
     /// Power outlets in the room (from .rmsc: the Android app's Claude search), shown as labels in the 3D view.
     @State private var outlets: [RoomOutlet] = []
+    /// Outlet labels on or off (the ⚡ Outlets button), remembered across scans; on by default.
+    @AppStorage("showOutlets") private var showOutlets = true
     /// "Enter the room": picking where to stand, then standing there (first person). See `RoomSceneView`.
     @State private var walk: WalkState = .off
     /// Held ▲ (+1) or ▼ (-1) while standing in the room.
@@ -132,6 +134,9 @@ struct ResultView: View {
             }
             .overlay(alignment: .bottomLeading) {
                 if scene != nil, walkFloorY != nil { walkControls.padding(12) }
+            }
+            .onChange(of: showOutlets) { _, on in
+                scene?.rootNode.childNode(withName: "outlets", recursively: false)?.isHidden = !on
             }
             .overlay(alignment: .bottom) {
                 if let training, walk == .off {
@@ -302,7 +307,9 @@ struct ResultView: View {
                 if !found.isEmpty {
                     // RoomPlan's floor; scans imported without one were moved so their floor is at 0.
                     let floor = room.map { RoomShell(room: $0).floorY } ?? 0
-                    scene.rootNode.addChildNode(OutletStore.node(found, floorY: floor))
+                    let node = OutletStore.node(found, floorY: floor)
+                    node.isHidden = !showOutlets
+                    scene.rootNode.addChildNode(node)
                 }
             }
 
@@ -477,6 +484,7 @@ struct ResultView: View {
 
     /// Lighting and objects toggles (only once the splats are ready), or the "building" note.
     @ViewBuilder private func modeButtons(labeled: Bool) -> some View {
+        if !outlets.isEmpty { outletsButton(labeled: labeled) }
         if splatGroup != nil {
             Button {
                 toggleLighting()
@@ -502,6 +510,20 @@ struct ResultView: View {
                 .font(.caption.weight(.medium))
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(.regularMaterial, in: Capsule())
+        }
+    }
+
+    /// ⚡ Outlets n: shows or hides the outlet labels. Filled orange while they show.
+    @ViewBuilder private func outletsButton(labeled: Bool) -> some View {
+        let face = ModeLabel(title: "Outlets \(outlets.count)", icon: "bolt.fill", labeled: labeled)
+        if showOutlets {
+            Button { showOutlets = false } label: { face.foregroundStyle(.black) }
+                .buttonStyle(.borderedProminent)
+                .accessibilityLabel("Hide the \(outlets.count) power outlets")
+        } else {
+            Button { showOutlets = true } label: { face }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Show the \(outlets.count) power outlets")
         }
     }
 

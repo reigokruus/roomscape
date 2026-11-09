@@ -37,6 +37,7 @@ public class MainActivity extends Activity {
     private TextView status;
     private Button refineButton;
     private Button undoButton, removePersonButton, interviewButton;
+    private Button outletButton;
     private Button lightButton, saveButton, homeButton, improveButton, cleanButton, depthButton, trainButton, mainButton, topButton, splatButton, planButton, cutButton, viewButton, exportButton, claudeButton, liveClaudeButton;
     private long downTime;
     private float downX, downY;
@@ -805,7 +806,19 @@ public class MainActivity extends Activity {
         pillRow.setOrientation(LinearLayout.HORIZONTAL);
         lightButton.setText("💡  Lighting");
         objButton.setText("⬡  Objects");
-        for (Button b : new Button[]{lightButton, objButton}) {
+        // ⚡ Outlets n: shows or hides the outlet labels, filled orange while they show (hidden when there are none).
+        outletButton = new Button(this);
+        outletButton.setAllCaps(false);
+        outletButton.setMinHeight(0); outletButton.setMinimumHeight(0); outletButton.setMinWidth(0); outletButton.setMinimumWidth(0);
+        outletButton.setPadding(dp(12), dp(8), dp(12), dp(8));
+        outletButton.setVisibility(View.GONE);
+        renderer.showOutlets = getSharedPreferences("viewer", MODE_PRIVATE).getBoolean("showOutlets", true);
+        outletButton.setOnClickListener(v -> {
+            renderer.showOutlets = !renderer.showOutlets;
+            getSharedPreferences("viewer", MODE_PRIVATE).edit().putBoolean("showOutlets", renderer.showOutlets).apply();
+            styleOutletButton();
+        });
+        for (Button b : new Button[]{outletButton, lightButton, objButton}) {
             b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
             LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40));
             pl.rightMargin = dp(8);
@@ -1797,6 +1810,30 @@ public class MainActivity extends Activity {
     /** Depth AI finished: reset its button and the training button (the splats are rebuilt). */
     void depthDone() {
         runOnUiThread(() -> { depthButton.setText("Depth AI"); trainButton.setText("Train splats"); });
+    }
+
+    private int outletTotal;
+
+    /** From the renderer: the open scan has `n` outlets. */
+    void outletCount(int n) {
+        runOnUiThread(() -> {
+            outletTotal = n;
+            outletButton.setVisibility(n > 0 ? View.VISIBLE : View.GONE);
+            styleOutletButton();
+        });
+    }
+
+    private void styleOutletButton() {
+        outletButton.setText("⚡ Outlets " + outletTotal);
+        if (renderer.showOutlets) {
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(Ios.ACCENT);
+            bg.setCornerRadius(dp(18));
+            outletButton.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33000000), bg, null));
+            outletButton.setTextColor(android.graphics.Color.BLACK);
+            outletButton.setStateListAnimator(null);
+        } else Ios.pill(outletButton);
+        outletButton.setContentDescription(renderer.showOutlets ? "Hide the power outlets" : "Show the power outlets");
     }
 
     void updateStatus(String s) {
