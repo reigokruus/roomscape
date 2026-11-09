@@ -4,7 +4,10 @@ import RoomPlan
 struct HomeView: View {
     @State private var scans: [SavedScan] = []
     @State private var path: [SavedScan] = []
-    @State private var scanning = false
+    /// The scanner, when open, and the saved scan it continues (nil = a new scan). One value, so the scanner always
+    /// gets the scan to continue: with a separate flag, SwiftUI built the scanner from the state before `improving`
+    /// was set, and Continue scan started a new scan instead.
+    @State private var scanRequest: ScanRequest?
     @State private var justSaved: SavedScan?
     /// The scan being renamed, and the name being typed.
     @State private var renaming: SavedScan?
@@ -32,7 +35,7 @@ struct HomeView: View {
                 Section {
                     if RoomCaptureSession.isSupported {
                         Button {
-                            scanning = true
+                            scanRequest = ScanRequest(improving: nil)
                         } label: {
                             Label("New room scan", systemImage: "camera.viewfinder")
                                 .font(.headline)
@@ -102,7 +105,7 @@ struct HomeView: View {
                     // Close the result first; it opens again with the merged scan when the scanner is done.
                     improving = scan
                     path = []
-                    scanning = true
+                    scanRequest = ScanRequest(improving: scan)
                 })
             }
             .navigationDestination(isPresented: $debugGear) { GearInventoryView() }
@@ -125,7 +128,7 @@ struct HomeView: View {
                 if args.contains("-openPlanning") { debugPlanning = true }
                 #endif
             }
-            .fullScreenCover(isPresented: $scanning, onDismiss: {
+            .fullScreenCover(item: $scanRequest, onDismiss: {
                 // Open the result only after the scanner has fully closed, so the two transitions don't collide.
                 scans = ScanStore.list()
                 // Improve scan closed without merging (cancelled or failed): go back to the scan it was improving,
@@ -134,14 +137,14 @@ struct HomeView: View {
                 improving = nil
                 justSaved = nil
                 if let back { path = [back] }
-            }) {
+            }) { request in
                 ScannerScreen(
-                    improving: improving,
+                    improving: request.improving,
                     onFinished: { saved in
                         justSaved = saved
-                        scanning = false
+                        scanRequest = nil
                     },
-                    onCancel: { scanning = false }
+                    onCancel: { scanRequest = nil }
                 )
             }
         }
@@ -196,4 +199,10 @@ struct RenameRoomAlert: ViewModifier {
             Text("Leave it empty to go back to the scan's date.")
         }
     }
+}
+
+/// Opening the scanner: a new scan, or continuing a saved one.
+struct ScanRequest: Identifiable {
+    let id = UUID()
+    let improving: SavedScan?
 }
