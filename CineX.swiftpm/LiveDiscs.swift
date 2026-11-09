@@ -28,7 +28,7 @@ final class LiveCapture {
     #if DEBUG
     private var loggedPreview = false
     #endif
-    private let worker = DispatchQueue(label: "CineX.live-cloud", qos: .utility)
+    private let worker = DispatchQueue(label: "CineX.live-cloud", qos: .utility, autoreleaseFrequency: .workItem)
     private var busy = false
     private var lastFrameTime: TimeInterval = 0
 

@@ -127,7 +127,7 @@ final class LiveCloud: @unchecked Sendable {
     /// Scaling and JPEG encoding happen here, at low priority, so they never compete with ARKit's tracking.
     /// Utility, not background: when the phone gets warm iOS throttles background work first, and every photo
     /// waiting here holds a 4 MB copy of the camera image.
-    private let photoQueue = DispatchQueue(label: "CineX.keyframe-photos", qos: .utility)
+    private let photoQueue = DispatchQueue(label: "CineX.keyframe-photos", qos: .utility, autoreleaseFrequency: .workItem)
     /// Photos copied but not yet encoded. New photos are skipped while two are waiting.
     private let pendingPhotos = OSAllocatedUnfairLock(initialState: 0)
     /// 1 normally, 2 in power saving: photos are taken twice as far apart (worker only).

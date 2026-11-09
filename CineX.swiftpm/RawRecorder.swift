@@ -20,7 +20,7 @@ final class RawRecorder: @unchecked Sendable {
     static let formatVersion = 1
 
     let folder: URL
-    private let queue = DispatchQueue(label: "CineX.raw-recorder", qos: .utility)
+    private let queue = DispatchQueue(label: "CineX.raw-recorder", qos: .utility, autoreleaseFrequency: .workItem)
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
