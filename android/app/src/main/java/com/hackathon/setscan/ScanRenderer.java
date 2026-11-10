@@ -5175,6 +5175,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     boolean fine = !zones.isEmpty() && inZone(wx, wy, wz);
                     long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
                     int hit = voxels.get(vk);
+                    if (hit > 0) viewKnown++; else viewNew++;   // the view on surface already in the scan vs new (once-a-second log)
                     sampleColorJ(j, xc / d * ifx + icx, icy - yc / d * ify, rgb);
                     // The surface (TSDF) part goes to the GPU (GpuTsdf) or the fusion thread (below), the points stay here.
                     if (gpuOn) {
@@ -5939,7 +5940,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean haveHeldView, heldRotOk, holding, wasHolding;
     private final float[] lastShownView = new float[16], prevShown = new float[16], rawView = new float[16], relRaw = new float[16], relShown = new float[16]; private long holdEndMs;
     private boolean relAnchored; private volatile int heldMode;   // 0 live, 1 held by the rotation sensor, 2 held + ARCore's movement
-    private long lastNewDepthMs, stateLogAt, trackingBackMs; private int newDepthSince, staleSince0, notYetSince0;
+    private long lastNewDepthMs, stateLogAt, trackingBackMs;
+    private volatile int viewKnown, viewNew; private int newDepthSince, staleSince0, notYetSince0;
     final float[] scanRot = new float[9]; volatile boolean scanRotOk;
     private volatile float accelJitter; volatile boolean walkingWhileLost;
     /** The rotation sensor while scanning (MainActivity registers it): the device's rotation, and whether it's shaking
@@ -5981,9 +5983,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         fusionState = fusion;
         if (nowMs - stateLogAt < 1000) return;
         stateLogAt = nowMs;
-        log(String.format(java.util.Locale.US, "state: %s, view %s, fusion %s, depth new %d stale %d not ready %d%s", ts,
+        int vk0 = viewKnown, vn0 = viewNew; viewKnown = 0; viewNew = 0;
+        log(String.format(java.util.Locale.US, "state: %s, view %s, fusion %s, depth new %d stale %d not ready %d, looking at %s%s", ts,
                 heldMode == 0 ? "live" : heldMode == 1 ? "held (rotation sensor)" : "held (ARCore movement)", fusion,
-                newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0, walkingWhileLost ? ", walking" : ""));
+                newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0,
+                vk0 + vn0 > 0 ? Math.round(100f * vk0 / (vk0 + vn0)) + "% scanned surface" : "-", walkingWhileLost ? ", walking" : ""));
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
     }
 
@@ -6233,6 +6237,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             final boolean restarted = sessionRestarted; final Realign rl = realign; final int attempt = ++realignAttempts;
             new Thread(() -> {
                 RealignResult r = new RealignResult();
+                long ra0 = System.currentTimeMillis();
                 try {
                     // 1) ARCore's pose with the correction so far; 2) the phone where it was lost; 3) the whole search.
                     Realign.Fit f = rl.solve(all, tryFix); r.source = "as before";
@@ -6250,6 +6255,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     r.fit = f;
                     r.good = f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN;
                     r.quick = !restarted && r.good && Realign.away(f.fix, oldFix) < 0.05f;
+                    r.detail += (r.detail.isEmpty() ? "" : "; ") + (System.currentTimeMillis() - ra0) + " ms, " + all.size() + " samples";
                     realignResult = r;
                 } catch (Throwable e) { logError("re-align", new RuntimeException(e)); }
                 realignRunning = false;
@@ -6799,6 +6805,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Live doorway outlines while scanning (rk 10 Nov): on/off, and when the last search ran. */
     static boolean LIVE_DOORS = true;
+    /** The floor in a mesh: the fullest 2 cm height band in the lowest 0.7 m (above the lowest 1% of corners, which
+     *  are noise), refined to the middle of the corners within 3 cm of it. */
+    static float meshFloor(float[] vv, int nv) {
+        float[] ys = new float[nv]; for (int i = 0; i < nv; i++) ys[i] = vv[i * 3 + 1];
+        float[] srt = ys.clone(); java.util.Arrays.sort(srt);
+        float lo = srt[Math.min(nv - 1, nv / 100)] - 0.1f;
+        int[] h = new int[40];
+        for (float y : ys) { int b = (int) ((y - lo) / 0.02f); if (b >= 0 && b < h.length) h[b]++; }
+        int best = 0; for (int b = 1; b < h.length; b++) if (h[b] > h[best]) best = b;
+        float c = lo + (best + 0.5f) * 0.02f; double sum = 0; int k = 0;
+        for (float y : ys) if (Math.abs(y - c) < 0.03f) { sum += y; k++; }
+        return k > 0 ? (float) (sum / k) : c;
+    }
+
     private long liveDoorAt, liveDoorMs;
     private volatile float[] lastLiveMesh; private volatile float lastLiveFloor;   // the search runs at most a third of the time (14:01: 1-2.4 s each, frame dips)
     /** Doorways being tracked during the scan: each with how many searches in a row found it and missed it. */
@@ -6821,7 +6841,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         float[][] views = new float[phs.size()][];
         for (int i = 0; i < phs.size(); i++) views[i] = OutlineFill.invert(phs.get(i).pose);
-        float floor = planner.isReady() ? planner.floorY : walkFloorY();
+        // The floor: during a scan neither the planner nor the room model is ready, and walkFloorY() was 0, 1.6 m above
+        // the real floor, so every opening's height was wrong and nothing was found (14:58 scan; with the right floor the
+        // saved live mesh gives the same 0.88 x 2.06 m doorway as the search at Done).
+        float floor = roomReady ? room.floorY : planner.isReady() ? planner.floorY : meshFloor(vv, nv);
         StringBuilder why = new StringBuilder();
         java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, nv, walls, floor,
                 (x, y, z) -> tsdf.seenThrough(x, y, z) || OutlineFill.judge(phs, views, new float[]{x, y, z}, null) == 1, why);   // the same evidence as at Done
@@ -7157,6 +7180,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
             level = 2;
             hint = walkingWhileLost ? "Lost position. Stand still and turn the phone back to the scanned area" : "Lost position. Turn the phone back to the scanned area";
+        }
+        else if (needRealign && everTracked) {
+            // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed
+            // for 24 s while nothing was being scanned)
+            level = 2;
+            hint = "Finding your place: point at an area you already scanned";
         }
         else if (ts != TrackingState.TRACKING) {
             level = 2;

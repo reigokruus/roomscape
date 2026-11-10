@@ -62,6 +62,12 @@ public class DoorwayTest {
         int n = pin.readInt(); float[] xyz = new float[n * 3];
         for (int i = 0; i < n; i++) { xyz[i * 3] = pin.readFloat(); xyz[i * 3 + 1] = pin.readFloat(); xyz[i * 3 + 2] = pin.readFloat(); pin.readByte(); pin.readByte(); pin.readByte(); }
         pin.close();
+        if (System.getenv("DOOR_LIVE") != null) {   // the mesh the app's last live search saw (live-mesh.bin)
+            DataInputStream lm = new DataInputStream(new BufferedInputStream(new FileInputStream(new File(dir, "live-mesh.bin"))));
+            int lv = lm.readInt(); float lf = lm.readFloat(); float[] lvv = new float[lv * 3]; for (int i = 0; i < lvv.length; i++) lvv[i] = lm.readFloat(); lm.close();
+            xyz = lvv; n = lv; walls = DoorwayFinder.wallsFromSurface(lvv, lv); nw = walls.length / 4; floorY = lf;
+            System.out.printf(Locale.US, "  live mesh: %d corners, floor %.3f%n", lv, lf);
+        } else
         if (System.getenv("DOOR_APP") != null) {   // as the app does at Done: the surface's triangle corners, walls from planes on them
             xyz = soup; n = soup.length / 3;
             float[] pw = DoorwayFinder.wallsFromSurface(soup, n);
