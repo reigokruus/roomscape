@@ -375,6 +375,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Flat colour = plane on (see Planes). */
     static boolean FLAT_WALLS = true;
+    private volatile java.util.List<Planes.Plane> fillPlanes; private volatile float[] lastPlanePts; private volatile int lastPlaneN;
 
     /**
      * Background: finds the plain flat surfaces in the scan's points (Planes, settings for camera depth) and returns
@@ -395,6 +396,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float[] v = new float[verts * 3];
         for (int i = 0; i < v.length; i++) v[i] = mesh.get(i);
         int moved = Planes.snap(v, verts, planes, cells);
+        fillPlanes = planes; lastPlanePts = xyz; lastPlaneN = n;
         log("flat walls: " + planes.size() + " planes, " + moved + " of " + verts + " mesh corners pressed flat (" + (System.currentTimeMillis() - t0) + " ms)");
         if (dir != null) try {
             float floor = roomReady ? room.floorY : boxMinY;
@@ -426,11 +428,32 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // Flat colour = plane (rk 9 Nov): this phone's camera depth makes plain walls lumpy; press the parts that
             // are clearly one flat, single-coloured surface onto that plane (Planes). Not an iPhone's LiDAR mesh.
             FloatBuffer mp = mp0;
-            if (!simple && FLAT_WALLS && ownMesh && mvAll > 0) mp = flattenWalls(mp0, mvAll, dirNow);
+            ByteBuffer mcUse = mc; int mvUse = mvAll;
+            if (!simple && FLAT_WALLS && ownMesh && mvAll > 0) {
+                fillPlanes = null;
+                mp = flattenWalls(mp0, mvAll, dirNow);
+                // Plain walls and floors: enclosed gaps nothing was seen through get a flat patch (PlaneFill).
+                java.util.List<Planes.Plane> pl = fillPlanes;
+                if (PlaneFill.ENABLED && pl != null && !pl.isEmpty()) {
+                    long tf = System.currentTimeMillis();
+                    float[] mv = new float[mvAll * 3];
+                    for (int i = 0; i < mv.length; i++) mv[i] = mp.get(i);
+                    PlaneFill.Out f = PlaneFill.fill(pl, mv, mvAll, lastPlanePts, lastPlaneN, (x, y, z) -> tsdf.seenThrough(x, y, z));
+                    log(String.format(java.util.Locale.US, "plane fill: %d gaps closed, %.2f m², %d triangles (%d ms)", f.holes, f.area, f.verts / 3, System.currentTimeMillis() - tf));
+                    if (f.verts > 0) {
+                        FloatBuffer np = ByteBuffer.allocateDirect((mvAll + f.verts) * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+                        np.put(mv).put(f.pos).position(0);
+                        ByteBuffer nc = ByteBuffer.allocateDirect((mvAll + f.verts) * 4).order(ByteOrder.nativeOrder());
+                        for (int i = 0; i < mvAll * 4; i++) nc.put(mc.get(i));
+                        nc.put(f.col).position(0);
+                        mp = np; mcUse = nc; mvUse = mvAll + f.verts;
+                    }
+                }
+            }
             RoomProxies rp = simple ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
             float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
             int pv = proxy.length / 3;
-            boolean[] ceil = simple ? new boolean[0] : ceilingTriangles(mp, mvAll / 3);
+            boolean[] ceil = simple ? new boolean[0] : ceilingTriangles(mp, mvUse / 3);
             int keepTris = 0;
             for (boolean c : ceil) if (!c) keepTris++;
             int mv = simple ? 0 : keepTris * 3;
@@ -439,7 +462,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int t = 0; t < ceil.length; t++) {
                 if (ceil[t]) continue;
                 for (int i = t * 9; i < t * 9 + 9; i++) all.put(mp.get(i));
-                for (int i = t * 12; i < t * 12 + 12; i++) allCol.put(mc.get(i));
+                for (int i = t * 12; i < t * 12 + 12; i++) allCol.put(mcUse.get(i));
             }
             all.put(proxy).position(0);
             allCol.put(proxyCol).position(0);
