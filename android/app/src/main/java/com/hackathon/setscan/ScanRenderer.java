@@ -4542,9 +4542,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // view should merge").
             if (hasFix) { float[] fi = new float[16], v2 = new float[16]; if (Matrix.invertM(fi, 0, poseFix, 0)) { Matrix.multiplyMM(v2, 0, view, 0, fi, 0); System.arraycopy(v2, 0, view, 0, 16); } }
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
-            System.arraycopy(mvp, 0, viewMvp, 0, 16);   // the overlay (live doorway outlines) draws with it
             System.arraycopy(mvp, 0, realMvp, 0, 16);
             if (OVERVIEW) overviewCamera(ts == TrackingState.TRACKING, nowMs);
+            // the overlay (live doorway outlines) draws with the matrix the scan is drawn with: after the overview's
+            // pulled-back camera (13:35: the outlines were projected with the phone's own camera and never showed)
+            System.arraycopy(mvp, 0, viewMvp, 0, 16);
             if (!LIVE_MESH) uploadNew(); // the points aren't drawn while scanning with the mesh: upload them for the viewer only
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
