@@ -48,7 +48,10 @@ while true; do
     esac
     # remember which scan is being saved; its logs and screen video are in place once "perf log kept" is written
     if [[ $line == *"saved '"*"/files/scans/"* ]]; then last=${line##*/files/scans/}; last=${last%%[[:space:]]*}; fi
-    if [[ $line == *"perf log kept with the scan"* ]]; then sleep 3; pull_scan "$last"; fi
+    # (newer builds name the folder in that line; older ones: the last one saved)
+    if [[ $line == *"perf log kept with the scan"* ]]; then
+      s=$(print -r -- "$line" | grep -o 'scan_[0-9]*' | head -1); sleep 3; pull_scan "${s:-$last}"
+    fi
   done
   echo "$(date +%H:%M:%S) link dropped, waiting for the phone" | tee -a $LOG
   sleep 2

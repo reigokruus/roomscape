@@ -1108,6 +1108,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** GL thread: open a saved scan in the viewer. Photos stream in one by one. */
     void loadScan(File dir, Runnable done) {
+        runAfterDone();   // the last scan's logs into its own folder, not the one being opened
         reset();
         loadFeatureHeights(dir);
         improveDir = null; improveT = null; contAuto = false; contBase = null;
@@ -1274,7 +1275,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** GL thread: a fresh scan (not tied to a save yet). */
+    private final Object afterDoneLock = new Object();
+    private Runnable afterDoneWork;
+
+    /** The last scan's after-Done saving (logs, video, diagnostics into its folder), if it hasn't run yet. */
+    void runAfterDone() {
+        Runnable r;
+        synchronized (afterDoneLock) { r = afterDoneWork; afterDoneWork = null; }
+        if (r != null) try { r.run(); } catch (Exception e) { logError("after Done", e); }
+    }
+
     void startNewScan() {
+        runAfterDone();   // before reset(): it saves the last scan's buffers
         reset();
         perf.start(new File(activity.getCacheDir(), "perf-scan-" + System.currentTimeMillis() + ".jsonl"), "scanning");
         improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
@@ -2351,11 +2363,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     MainActivity.recordWanted ? "on" : "off", FIXED_FOCUS ? "fixed" : "auto", fpsCap30 ? "30 fps" : "60 fps"));
             log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
         perf.stage("after Done");
-        new Thread(() -> { // the after-Done steps (surface, photos, splats) take well under a minute
+        // The logs, video and diagnostics go into THIS scan's folder: a minute after Done (the after-Done steps take well
+        // under a minute), or at once when another scan is started or opened first (rk 10 Nov 15:04-15:06: three quick
+        // scans; the first one's logs went into the second's folder and the second's were lost).
+        final File dirAtDone = currentDir;
+        synchronized (afterDoneLock) {
+            afterDoneWork = () -> {
+                File dir = dirAtDone != null ? dirAtDone : currentDir;
+                perf.stop();
+                if (dir != null) { saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
+            };
+        }
+        new Thread(() -> {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
-            File dir = currentDir;
-            perf.stop();
-            if (dir != null) { saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
+            runAfterDone();
         }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
