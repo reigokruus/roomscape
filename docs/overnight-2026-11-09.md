@@ -94,6 +94,18 @@ Hole fill from the iPhone's low-confidence depth (LowConfidenceFill, in the app'
 App check (Simulator, 20:33 recording through the real rebuild): 4.3k voxels filled (harness: 4.4k), surface 11 s, memory
 peak 293 MB (was ~300). Pictures: recordings/overnight-pictures/hole-fill/ (view*-before/after/s24, bars-*).
 
+## Live scan: GPU → mesh sync, and where the build time goes (05:10–05:40)
+Virtual scan of the 22:39 recording in the Simulator (Debug build), per live mesh build:
+| | sync from GPU | extract | photo choice | upload | recording covered in 3 min |
+|---|---|---|---|---|---|
+| before | 1010 ms | 77 ms | 24 ms | 3.5 ms | 31 s |
+| incremental sync (only changed 8³ bricks) | 61 ms | 101 ms | 42 ms | 4.6 ms | 57 s |
+(extract and photos grow with the mesh: the second run got further into the room.) Harness SYNCTEST on 22:39: incremental
+vs full copy give identical meshes (104,216 triangles), 1.0 ms vs 8 ms per sync (Mac, optimised). The phone runs a
+Release build, so its saving is smaller (tens of ms per build, twice a second). Extraction and photo choice would be
+~10–15 ms each on the phone: not worth a risky GPU port before the phone's own stage timings (now logged: depth frame,
+live mesh stages) say otherwise.
+
 ## S24 room size (fixed, b7d0e68)
 - Viewer size now from the room model (5.4 × 3.8 m for 22:37, was the points' bounding box 6.8 × 5.6 m, 3.6 m);
   height "not scanned" when fewer than 20 columns reach 1.8 m above the floor.

@@ -88,6 +88,7 @@ final class LiveMesh: @unchecked Sendable {
     func reset() {
         tsdf.clear()
         gpu = nil
+        gpuSynced = false
         gpuFailed = false
         assigner.reset()
         filled.withLock { $0 = (0, 0) }
@@ -118,9 +119,18 @@ final class LiveMesh: @unchecked Sendable {
     /// Worker queue: the GPU block into the CPU Tsdf, for extraction.
     private func syncFromGPU() {
         guard let gpu else { return }
-        tsdf.clear()
-        gpu.copy(into: tsdf)
+        // The first time the whole block, then only the bricks the GPU changed since (incremental: the CPU Tsdf is
+        // only ever written from here while the GPU fuses).
+        if gpuSynced {
+            gpu.copyDirty(into: tsdf)
+        } else {
+            tsdf.clear()
+            gpu.copy(into: tsdf)
+            gpu.clearDirty()
+            gpuSynced = true
+        }
     }
+    private var gpuSynced = false
 
     /// Worker queue: tap to clear, the photo choices there are worked out again.
     func forgetPhotos(near points: [SIMD3<Float>], radius: Float) { assigner.forget(near: points, radius: radius) }
@@ -131,17 +141,32 @@ final class LiveMesh: @unchecked Sendable {
     }
 
     /// Worker queue, after a frame was fused: rebuilds the mesh around the camera if it's time.
+    /// The hardware log (set by LiveCapture while scanning): each build's stages, in ms.
+    var perf: PerfLog?
+    /// Worker queue: the last build's stage times in ms (sync from the GPU, mesh extraction, photo choice, upload).
+    private(set) var lastTimes = (sync: 0.0, extract: 0.0, photos: 0.0, upload: 0.0, triangles: 0)
+
     func rebuildIfDue(camera pose: simd_float4x4, time: TimeInterval) {
         guard time - lastBuild >= max(interval, lastDuration * 5), gpu != nil || tsdf.count > 50 else { return }
         cameraPose = pose
         let camera = SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+        let t0 = CACurrentMediaTime()
         syncFromGPU()
         lastBuild = time
         let started = CACurrentMediaTime()
         defer { lastDuration = CACurrentMediaTime() - started }
         let triangleCount = tsdf.extractMesh(near: camera, radius: Self.radius, solidWeight: Self.solidWeight, into: scratch)
+        let t1 = CACurrentMediaTime()
+        lastTimes = ((started - t0) * 1000, (t1 - started) * 1000, 0, 0, triangleCount)
         guard triangleCount > 0 else { return }
         publish()
+        lastTimes.upload = (CACurrentMediaTime() - t1) * 1000 - lastTimes.photos
+        if let perf {
+            perf.note("live mesh: sync from GPU", ms: lastTimes.sync)
+            perf.note("live mesh: extract", ms: lastTimes.extract)
+            perf.note("live mesh: photo choice", ms: lastTimes.photos)
+            perf.note("live mesh: upload + wireframe", ms: lastTimes.upload)
+        }
     }
 
     /// Worker queue: the whole room's surface, for saving with the scan (the photo room is painted onto it).
@@ -176,6 +201,8 @@ final class LiveMesh: @unchecked Sendable {
         scratch.triangles.withUnsafeBytes { triangles.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
         let slotPointer = slots.contents().bindMemory(to: Int32.self, capacity: max(scratch.triangles.count / 3, 1))
         if let photos {
+            let ta = CACurrentMediaTime()
+            defer { lastTimes.photos = (CACurrentMediaTime() - ta) * 1000 }
             assigner.assign(positions: scratch.positions, confidence: scratch.confidence, triangles: scratch.triangles,
                             store: photos, camera: cameraPose, into: slotPointer)
             filled.withLock { $0 = (assigner.filledInView, assigner.filledRoom) }

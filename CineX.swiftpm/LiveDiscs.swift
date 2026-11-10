@@ -271,8 +271,11 @@ final class LiveCapture {
         let p = frame.camera.transform.columns.3
         _ = p
         let camera = frame.camera.transform, time = frame.timestamp
+        let perfLog = perf
         worker.async { [weak self] in
+            let t0 = CACurrentMediaTime()
             cloud.integrate(frame, tsdf: mesh?.tsdf, covered: covered, mesh: mesh)
+            perfLog?.note("depth frame (points, fusion, photo)", ms: (CACurrentMediaTime() - t0) * 1000)
             DispatchQueue.main.async { self?.busy = false }
         }
         // A separate block, so the frame is already let go while the mesh is built.

@@ -115,8 +115,10 @@ struct VirtualScanScreen: View {
                     }
                 }
                 if Int(t * 10) % 10 == 0 {
-                    FileHandle.standardError.write(String(format: "virtual: t=%.1f video %.0f ms, step %.0f ms, %d photos, %d triangles\n", t, videoTime * 1000,
-                        Date().timeIntervalSince(started) * 1000, fuser.photoCount, (mesh.buffers?.triangleIndexCount ?? 0) / 3).data(using: .utf8)!)
+                    let lt = mesh.lastTimes
+                    FileHandle.standardError.write(String(format: "virtual: t=%.1f video %.0f ms, step %.0f ms, %d photos, %d triangles; last mesh build: sync %.1f, extract %.1f, photos %.1f, upload %.1f ms\n", t, videoTime * 1000,
+                        Date().timeIntervalSince(started) * 1000, fuser.photoCount, (mesh.buffers?.triangleIndexCount ?? 0) / 3,
+                        lt.sync, lt.extract, lt.photos, lt.upload).data(using: .utf8)!)
                 }
                 if drawing {
                     pose = f.pose; k = f.k; imageSize = CGSize(width: f.width, height: f.height)

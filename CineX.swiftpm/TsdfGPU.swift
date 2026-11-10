@@ -18,6 +18,10 @@ final class TsdfGPU {
     private let queue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private let sdf: MTLBuffer, weight: MTLBuffer
+    /// One byte per 8×8×8 brick, set by the kernel when it changes a voxel there: the live scan copies only those
+    /// (copying the whole block every mesh build took ~0.8 s in the virtual scan; rk 10 Nov).
+    private let dirty: MTLBuffer
+    let bricks: SIMD3<Int32>
     private var commands: MTLCommandBuffer?
     private var encoder: MTLComputeCommandEncoder?
     private var pending = 0
@@ -49,8 +53,12 @@ final class TsdfGPU {
               let pipeline = try? device.makeComputePipelineState(function: function),
               let sdf = device.makeBuffer(length: count * 4, options: .storageModeShared),
               let weight = device.makeBuffer(length: count * 2, options: .storageModeShared) else { return nil }
+        let bricks = (dims &+ 7) / 8
+        guard let dirty = device.makeBuffer(length: Swift.max(1, Int(bricks.x) * Int(bricks.y) * Int(bricks.z)), options: .storageModeShared) else { return nil }
         memset(sdf.contents(), 0, count * 4)
         memset(weight.contents(), 0, count * 2)
+        memset(dirty.contents(), 0, dirty.length)
+        self.dirty = dirty; self.bricks = bricks
         self.device = device; self.queue = queue; self.pipeline = pipeline
         self.sdf = sdf; self.weight = weight
         self.vs = voxel; self.trunc = truncation; self.carve = carve
@@ -81,6 +89,7 @@ final class TsdfGPU {
         encoder.setBuffer(weight, offset: 0, index: 1)
         encoder.setBuffer(buffer, offset: 0, index: 2)
         encoder.setBytes(&p, length: MemoryLayout<Params>.stride, index: 3)
+        encoder.setBuffer(dirty, offset: 0, index: 4)
         let size = MTLSize(width: Int(dims.x), height: Int(dims.y), depth: Int(dims.z))
         let w = pipeline.threadExecutionWidth
         encoder.dispatchThreads(size, threadsPerThreadgroup: MTLSize(width: w, height: max(1, pipeline.maxTotalThreadsPerThreadgroup / w / 4), depth: 4))
@@ -136,6 +145,43 @@ final class TsdfGPU {
         return (sdf.contents().bindMemory(to: Float.self, capacity: voxelCount)[i], weight.contents().bindMemory(to: UInt16.self, capacity: voxelCount)[i])
     }
 
+    private func markDirty(_ g: SIMD3<Int32>) {
+        let b = g / 8
+        dirty.contents().storeBytes(of: 1, toByteOffset: Int((b.z * bricks.y + b.y) * bricks.x + b.x), as: UInt8.self)
+    }
+
+    /// Forgets which bricks changed (after a full `copy(into:)`).
+    func clearDirty() { finish(); memset(dirty.contents(), 0, dirty.length) }
+
+    /// Copies only the bricks changed since the last call into `tsdf`, which must hold everything from before (a full
+    /// `copy(into:)` then `clearDirty()` to start). Voxels reset to unseen there (tap to clear) are reset in `tsdf`
+    /// too. Returns how many bricks were copied.
+    @discardableResult
+    func copyDirty(into tsdf: Tsdf) -> Int {
+        finish()
+        let s = sdf.contents().bindMemory(to: Float.self, capacity: voxelCount)
+        let w = weight.contents().bindMemory(to: UInt16.self, capacity: voxelCount)
+        let d = dirty.contents().bindMemory(to: UInt8.self, capacity: dirty.length)
+        let nx = Int(dims.x), ny = Int(dims.y), nz = Int(dims.z)
+        let bx = Int(bricks.x), by = Int(bricks.y), bz = Int(bricks.z)
+        var copied = 0
+        for b in 0..<(bx * by * bz) where d[b] != 0 {
+            d[b] = 0
+            copied += 1
+            let x0 = (b % bx) * 8, y0 = ((b / bx) % by) * 8, z0 = (b / (bx * by)) * 8
+            for z in z0..<min(z0 + 8, nz) { for y in y0..<min(y0 + 8, ny) {
+                var i = (z * ny + y) * nx + x0
+                for x in x0..<min(x0 + 8, nx) {
+                    let v = origin &+ SIMD3(Int32(x), Int32(y), Int32(z))
+                    if w[i] > 0 { tsdf.set(v, sdf: s[i], weight: Int16(clamping: Int(w[i]))) }
+                    else if tsdf.index(v) >= 0 { tsdf.set(v, sdf: 0, weight: 0) }
+                    i += 1
+                }
+            } }
+        }
+        return copied
+    }
+
     /// Resets every voxel whose centre passes the test (tap to clear while scanning); returns how many.
     func clearWhere(_ test: (SIMD3<Float>) -> Bool) -> Int {
         finish()
@@ -145,7 +191,7 @@ final class TsdfGPU {
         var cleared = 0
         for i in 0..<voxelCount where w[i] > 0 {
             let v = origin &+ SIMD3(Int32(i % nx), Int32((i / nx) % ny), Int32(i / (nx * ny)))
-            if test((SIMD3<Float>(v) + 0.5) * vs) { w[i] = 0; s[i] = 0; cleared += 1 }
+            if test((SIMD3<Float>(v) + 0.5) * vs) { w[i] = 0; s[i] = 0; cleared += 1; markDirty(v &- origin) }
         }
         return cleared
     }
@@ -167,7 +213,7 @@ final class TsdfGPU {
 
     kernel void integrate(device float *sdf [[buffer(0)]], device ushort *wgt [[buffer(1)]],
                           const device float *depth [[buffer(2)]], constant Params &p [[buffer(3)]],
-                          uint3 g [[thread_position_in_grid]]) {
+                          device uchar *dirty [[buffer(4)]], uint3 g [[thread_position_in_grid]]) {
         int3 dims = p.dims;
         if (g.x >= uint(dims.x) || g.y >= uint(dims.y) || g.z >= uint(dims.z)) return;
         float3 c = (float3(p.origin + int3(g)) + 0.5) * p.vs;
@@ -183,6 +229,8 @@ final class TsdfGPU {
         float L = d * r / z;
         float s = L - r;                       // + = in front of the surface
         uint i = (uint(g.z) * uint(dims.y) + uint(g.y)) * uint(dims.x) + uint(g.x);
+        uint3 b = g / 8; uint3 nb = (uint3(dims) + 7) / 8;
+        uint bi = (b.z * nb.y + b.y) * nb.x + b.x;
         ushort w = wgt[i];
         // How many CPU samples (every `step`th pixel) would pass through this voxel: its size over a pixel's footprint.
         float footprint = z / p.fx * p.step;
@@ -191,17 +239,19 @@ final class TsdfGPU {
             // Free space: only voxels already seen, between the margin and `carve` in front of the surface.
             float nearS = p.trunc + 0.05 * L, farS = min(p.carve, L - 0.25);
             if (w == 0 || s <= nearS || s > farS) return;
-            if (w >= solidW) { sdf[i] += (1.0 - sdf[i]) * 0.04; return; }
+            if (w >= solidW) { sdf[i] += (1.0 - sdf[i]) * 0.04; dirty[bi] = 1; return; }
             float sum = sdf[i] * float(w) + float(add);
             ushort nw = min(ushort(w + add), maxW);
             sdf[i] = sum / float(w + add);
             wgt[i] = nw;
+            dirty[bi] = 1;
             return;
         }
         if (s < -p.trunc) return;              // behind the surface: unknown
         float dn = clamp(s / p.trunc, -1.0, 1.0);
         sdf[i] = (sdf[i] * float(w) + dn * float(add)) / float(w + add);
         wgt[i] = min(ushort(w + add), maxW);
+        dirty[bi] = 1;
     }
     """
 }

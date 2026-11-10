@@ -252,6 +252,29 @@ enum GPUBench {
         }
         gpu.finish()
         let gpuTime = Date().timeIntervalSince(t2)
+        // SYNCTEST=1: the live scan's incremental copy (copyDirty every 5 frames, as the mesh builds) against one full
+        // copy at the end: the two meshes must be the same.
+        if ProcessInfo.processInfo.environment["SYNCTEST"] == "1",
+           let g2 = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: voxel, truncation: max(0.03, voxel * 2), carve: carve) {
+            let a = Tsdf(capacity: 3_000_000, voxel: voxel, truncation: max(0.03, voxel * 2), carve: carve)
+            var syncTime = 0.0, syncs = 0, bricks = 0
+            for (i, d) in depth.enumerated() {
+                g2.integrate(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+                if i % 5 == 4 {
+                    // Tap to clear now and then, as in a scan.
+                    if i % 400 == 399 { let c = SIMD3(d.pose.columns.3.x, d.pose.columns.3.y, d.pose.columns.3.z); _ = g2.clearWhere { simd_distance($0, c) < 0.6 } }
+                    let ts = Date(); bricks += g2.copyDirty(into: a); syncTime += Date().timeIntervalSince(ts); syncs += 1
+                }
+            }
+            bricks += g2.copyDirty(into: a)
+            let b = Tsdf(capacity: 3_000_000, voxel: voxel, truncation: max(0.03, voxel * 2), carve: carve)
+            let tf = Date(); g2.copy(into: b); let fullTime = Date().timeIntervalSince(tf)
+            let ma = Fusion.mesh(a), mb = Fusion.mesh(b)
+            func key(_ m: Tsdf.MeshScratch) -> [SIMD3<Int32>] { m.positions.map { SIMD3<Int32>(($0 * 10000).rounded(.toNearestOrEven)) }.sorted { ($0.x, $0.y, $0.z) < ($1.x, $1.y, $1.z) } }
+            let same = key(ma) == key(mb) && ma.triangles.count == mb.triangles.count
+            print(String(format: "synctest: incremental %d syncs, mean %.1f ms (%.0f bricks each) vs one full copy %.0f ms; meshes %@ (%d vs %d triangles)",
+                         syncs, syncTime / Double(max(1, syncs)) * 1000, Double(bricks) / Double(max(1, syncs)), fullTime * 1000, same ? "identical" : "DIFFERENT", ma.triangles.count / 3, mb.triangles.count / 3))
+        }
         // PROBE=x,y: the voxels along the ray through depth pixel (x, y) of the view's frame.
         if let probe = ProcessInfo.processInfo.environment["PROBE"]?.split(separator: ",").compactMap({ Int($0) }), probe.count == 2, let view {
             if let i = depthFrameIndex.firstIndex(where: { $0 >= view }) {

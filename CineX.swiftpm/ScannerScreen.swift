@@ -183,6 +183,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         startHud()
         if RawRecorder.enabled { live.recorder = RawRecorder() }
         live.perf = perf
+        live.mesh?.perf = perf
         live.attachDiscs(to: captureView)
         live.pinPreviewTopRight(in: captureView)
         lastMemoryWarning = nil
