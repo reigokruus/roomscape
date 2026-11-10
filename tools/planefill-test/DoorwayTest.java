@@ -16,7 +16,7 @@ public class DoorwayTest {
         String[] v = ol.split(",");
         int nw = v.length / 5; float[] walls = new float[nw * 4]; float h = 2.5f;
         for (int i = 0; i < nw; i++) { for (int k = 0; k < 4; k++) walls[i * 4 + k] = Float.parseFloat(v[i * 5 + k]); h = Float.parseFloat(v[i * 5 + 4]); }
-        String pj = new String(java.nio.file.Files.readAllBytes(new File(dir, "planes.json").toPath()));
+        String pj = new File(dir, "planes.json").exists() ? new String(java.nio.file.Files.readAllBytes(new File(dir, "planes.json").toPath())) : "";
         // floor: the floor plane's min y (planes.json has heights above the floor? it stores min/max with floorY taken off: use the outline's own floor via meta-free guess)
         float floorY = Float.NaN;
         java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"kind\":\"floor\",\"normal\":\\[[^\\]]*\\],\"d\":(-?[0-9.]+)").matcher(pj);

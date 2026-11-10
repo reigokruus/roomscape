@@ -477,8 +477,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float[] vv = new float[mvAll * 3];
                 for (int i = 0; i < vv.length; i++) vv[i] = mp0.get(i);
                 float[] walls = DoorwayFinder.wallsFromSurface(vv, mvAll);
-                java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, mvAll, walls, walkFloorY(), (x, y, z) -> tsdf.seenThrough(x, y, z), null);
-                log("doorways: " + ds.size() + " from " + walls.length / 4 + " wall planes (" + (System.currentTimeMillis() - td) + " ms)");
+                // See-through from the photos' own depth (beyond the wall there) or the surface's record of rays passing:
+                // with the surface on the GPU the CPU record is thin (rk 10 Nov 12:03: the 80 cm door, found at
+                // 0.82 x 2.00 m from the photos' depth, was rejected on the phone as "not seen through").
+                java.util.ArrayList<OutlineFill.Photo> phs = new java.util.ArrayList<>();
+                for (PhotoRoom.Keyframe k : new java.util.ArrayList<>(photos.keyframes)) {
+                    if (k.depth == null) continue;
+                    OutlineFill.Photo ph = new OutlineFill.Photo();
+                    ph.pose = k.pose; ph.fx = k.fx; ph.fy = k.fy; ph.cx = k.cx; ph.cy = k.cy; ph.w = (int) k.w; ph.h = (int) k.h;
+                    ph.depth = k.depth; ph.dw = k.dw; ph.dh = k.dh; ph.dfx = k.dfx; ph.dfy = k.dfy; ph.dcx = k.dcx; ph.dcy = k.dcy;
+                    phs.add(ph);
+                }
+                float[][] views = new float[phs.size()][];
+                for (int i = 0; i < phs.size(); i++) views[i] = OutlineFill.invert(phs.get(i).pose);
+                StringBuilder why = new StringBuilder();
+                java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, mvAll, walls, walkFloorY(),
+                        (x, y, z) -> tsdf.seenThrough(x, y, z) || OutlineFill.judge(phs, views, new float[]{x, y, z}, null) == 1, why);
+                log("doorways: " + ds.size() + " from " + walls.length / 4 + " wall planes, " + phs.size() + " photos with depth (" + (System.currentTimeMillis() - td) + " ms)");
+                if (why.length() > 0) log("doorways, left out:" + why);
                 for (DoorwayFinder.Doorway d : ds) log("  " + d);
                 doorways = ds;
                 activity.setDoorways(ds);
