@@ -3705,7 +3705,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
-        screenFile = null;   // the next scan records its own screen video
+        screenFile = null; screenTargetDir = null;   // the next scan records its own screen video
         roomEdits.clear(); planningPreview = false; planningLoadError = null; planningScanKey = null;
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
@@ -4491,6 +4491,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     volatile Runnable replayDone;
     private ScreenVideo screenVideo;
     private File screenFile, screenPending;
+    private volatile File screenTargetDir;
     private volatile String fusionState = "";
 
     private void screenVideoFrame() {
@@ -4520,7 +4521,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         new Thread(() -> {
             boolean ok = v.finish();
             log(String.format(java.util.Locale.US, "screen video: %s, %d frames, %.1f ms on the draw thread per frame", ok ? "kept" : "failed", v.frames, v.frames > 0 ? v.glMsTotal / v.frames : 0));
-            if (ok) screenPending = file; else if (file != null) file.delete();
+            if (ok) { screenPending = file; File d = screenTargetDir; if (d != null) keepScreenVideo(d); }   // the save may already be done
+            else if (file != null) file.delete();
         }, "screen-video-close").start();
         // (screenFile stays set: one video per scan; reset() clears it for the next scan)
     }
@@ -4573,6 +4575,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** After the save: screen.mp4 into the scan folder. */
     void keepScreenVideo(File dir) {
+        // (20:25 scan: the video was still being finished when the scan was saved, and stayed in files/: remember
+        // the folder, the closing thread moves it there when it's done)
+        screenTargetDir = dir;
         File f = screenPending;
         if (f == null || dir == null || !f.exists()) return;
         File to = new File(dir, "screen.mp4");
@@ -7718,9 +7723,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         boolean stalled = everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000;
         if ((lostNow || stalled) != notAdding) {
             notAdding = lostNow || stalled;
+            long nowMs = System.currentTimeMillis();
             if (notAdding && !lostNow) notAddingSince = lastNewDepthMs + 3000;   // a depth stall: the change is when 3 s ran out
+            // a stale change time (20:25 scan logged "101435 ms": the time of an earlier pose jump, kept since then)
+            boolean known = nowMs - notAddingSince < 5000;
             activity.haptic(notAdding);
-            log(notAdding ? String.format(java.util.Locale.US, "lost-track notice shown %d ms after the change", System.currentTimeMillis() - notAddingSince) : "scanning again: notice off");
+            log(notAdding ? (known ? String.format(java.util.Locale.US, "lost-track notice shown %d ms after the change", nowMs - notAddingSince)
+                    : "lost-track notice shown (" + (lostNow ? "re-aligning" : "no new depth") + "; when it changed isn't known)") : "scanning again: notice off");
+            notAddingSince = nowMs;   // used once
         }
         activity.updateHud(hint, sub, level, lostNow ? -1f : Math.max(0f, d), roomShown, count, (int) (scanMs / 1000));
     }

@@ -37,7 +37,7 @@ final class FloorArea {
 
     static final class Room {
         float area, w, l;    // m², and the size along its own walls (the smallest rectangle around it), metres
-        float hull;          // m² inside its convex outline (unscanned edges filled; more than the floor in an L-shaped room)
+        float hull;          // m² inside its outline along its own walls (unseen floor by straight walls filled; an L stays an L)
         int cells;
         /** The floor to show: within its convex outline when the seen floor fills most of it (the floor along the walls
          *  is often not seen: 20:25 scan, 8.7 m² seen of 10.8, outline 9.9), else what was seen. */
@@ -129,7 +129,7 @@ final class FloorArea {
         for (int i = 0; i < order.size(); i++) {
             Room room = new Room(); room.cells = count2[order.get(i)]; room.area = room.cells * CELL * CELL;
             float[] wl = minRect(r.roomOf, i + 1, nx, nz); room.w = Math.max(wl[0], wl[1]); room.l = Math.min(wl[0], wl[1]);
-            room.hull = hullArea(r.roomOf, i + 1, nx, nz);
+            room.hull = orthoHullArea(r.roomOf, i + 1, nx, nz, wl[2]);
             r.rooms.add(room);
         }
         boolean[] main = new boolean[n];
@@ -155,6 +155,31 @@ final class FloorArea {
         return r;
     }
 
+    /** Area inside the room's outline along its own wall directions (orthogonally convex hull: a cell counts when
+     *  room cells lie on both sides of it in its row and in its column). Fills the unseen floor along straight walls and
+     *  in corners, but an L-shaped room stays an L (a convex hull would fill its missing corner). m². */
+    private static float orthoHullArea(int[] roomOf, int id, int nx, int nz, float deg) {
+        double a = Math.toRadians(deg); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+        int m = (int) Math.ceil(Math.hypot(nx, nz)) + 2, half = m / 2;
+        boolean[] g = new boolean[m * m];
+        float cx = nx / 2f, cz = nz / 2f;
+        for (int c = 0; c < roomOf.length; c++) {
+            if (roomOf[c] != id) continue;
+            float x = (c % nx) - cx, z = (c / nx) - cz;
+            int u = Math.round(x * ca + z * sa) + half, v = Math.round(-x * sa + z * ca) + half;
+            if (u >= 0 && v >= 0 && u < m && v < m) g[v * m + u] = true;
+        }
+        int[] u0 = new int[m], u1 = new int[m], v0 = new int[m], v1 = new int[m];
+        java.util.Arrays.fill(u0, Integer.MAX_VALUE); java.util.Arrays.fill(u1, -1); java.util.Arrays.fill(v0, Integer.MAX_VALUE); java.util.Arrays.fill(v1, -1);
+        for (int v = 0; v < m; v++) for (int u = 0; u < m; u++) if (g[v * m + u]) {
+            u0[v] = Math.min(u0[v], u); u1[v] = Math.max(u1[v], u); v0[u] = Math.min(v0[u], v); v1[u] = Math.max(v1[u], v);
+        }
+        int cells = 0;
+        for (int v = 0; v < m; v++) for (int u = 0; u < m; u++)
+            if (u >= u0[v] && u <= u1[v] && v >= v0[u] && v <= v1[u]) cells++;
+        return cells * CELL * CELL;
+    }
+
     /** Area inside the convex outline of a room's cells (their corners), m². */
     private static float hullArea(int[] roomOf, int id, int nx, int nz) {
         java.util.ArrayList<long[]> pts = new java.util.ArrayList<>();
@@ -176,7 +201,7 @@ final class FloorArea {
 
     /** The smallest rectangle (turned in 2° steps) around a room's cells: its width and length along its own walls. */
     private static float[] minRect(int[] roomOf, int id, int nx, int nz) {
-        float best = Float.MAX_VALUE; float[] out = {0, 0};
+        float best = Float.MAX_VALUE; float[] out = {0, 0, 0};
         for (int deg = 0; deg < 90; deg += 2) {
             double a = Math.toRadians(deg); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
             float u0 = Float.MAX_VALUE, u1 = -Float.MAX_VALUE, v0 = Float.MAX_VALUE, v1 = -Float.MAX_VALUE;
@@ -186,7 +211,7 @@ final class FloorArea {
                 u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
             }
             float w = u1 - u0 + CELL, l = v1 - v0 + CELL;
-            if (w * l < best) { best = w * l; out[0] = w; out[1] = l; }
+            if (w * l < best) { best = w * l; out[0] = w; out[1] = l; out[2] = deg; }
         }
         return out;
     }
@@ -236,7 +261,7 @@ final class FloorArea {
         Result r = compute(p, n, floorY);
         System.out.printf(java.util.Locale.US, "%s: floor y %.2f; %s (main %.1f m², other %.1f m², outline %.0f%% walls) in %d ms%n",
                 dir.getName(), floorY, r.text(), r.area, r.other, r.enclosed * 100, System.currentTimeMillis() - t0);
-        for (int i = 0; i < r.rooms.size(); i++) System.out.println("  " + r.rooms.get(i).text(i) + String.format(java.util.Locale.US, " (convex outline %.1f m², rectangle %.1f m²)", r.rooms.get(i).hull, r.rooms.get(i).w * r.rooms.get(i).l));
+        for (int i = 0; i < r.rooms.size(); i++) System.out.println("  " + r.rooms.get(i).text(i) + String.format(java.util.Locale.US, " (wall-aligned outline %.1f m², rectangle %.1f m²)", r.rooms.get(i).hull, r.rooms.get(i).w * r.rooms.get(i).l));
         if (args.length > 2) {
             // a top-down picture as PPM (no java.awt on Android): sips -s format png out.ppm --out out.png
             int S = 4, W = r.nx * S, H = r.nz * S; byte[] rgb = new byte[W * H * 3];
