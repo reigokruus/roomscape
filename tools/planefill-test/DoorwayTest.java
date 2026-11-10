@@ -62,6 +62,15 @@ public class DoorwayTest {
         int n = pin.readInt(); float[] xyz = new float[n * 3];
         for (int i = 0; i < n; i++) { xyz[i * 3] = pin.readFloat(); xyz[i * 3 + 1] = pin.readFloat(); xyz[i * 3 + 2] = pin.readFloat(); pin.readByte(); pin.readByte(); pin.readByte(); }
         pin.close();
+        if (System.getenv("DOOR_APP") != null) {   // as the app does at Done: the surface's triangle corners, walls from planes on them
+            xyz = soup; n = soup.length / 3;
+            float[] pw = DoorwayFinder.wallsFromSurface(soup, n);
+            if (System.getenv("DOOR_PLUS_OUTLINE") != null) {   // the room outline's walls too
+                float[] all = new float[pw.length + walls.length]; System.arraycopy(pw, 0, all, 0, pw.length); System.arraycopy(walls, 0, all, pw.length, walls.length); pw = all;
+            }
+            walls = pw; nw = walls.length / 4;
+            if (System.getenv("DOOR_WALLS_PRINT") != null) for (int i = 0; i < nw; i++) System.out.printf(Locale.US, "  wall %d: (%.2f, %.2f)-(%.2f, %.2f)%n", i, walls[i*4], walls[i*4+1], walls[i*4+2], walls[i*4+3]);
+        } else
         if ("mesh".equals(System.getenv("DOOR_SRC"))) {   // the surface's corners instead of the points
             n = vp.length / 3; xyz = vp;
         }
