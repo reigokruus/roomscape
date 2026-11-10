@@ -853,6 +853,18 @@ struct ResultView: View {
             if !objectsOn { toggleObjects() }
             let name = args[i + 1]
             selectedObject = objects.first { $0.label.localizedCaseInsensitiveContains(name) }?.id
+            // -objectEdit remove | move | putback: what the buttons / a drag do, for UI checks in the Simulator.
+            if let j = args.firstIndex(of: "-objectEdit"), j + 1 < args.count,
+               let k = objects.firstIndex(where: { $0.id == selectedObject }) {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                objectHistory.append(objects)
+                switch args[j + 1] {
+                case "remove": objects[k].removed = true
+                case "move": objects[k].removed = false; objects[k].offset = SIMD3(-0.8, 0, 0.6)
+                default: objects[k].removed = false; objects[k].offset = .zero
+                }
+                print("debug: object \(objects[k].label) \(args[j + 1])")
+            }
         }
     }
     #endif

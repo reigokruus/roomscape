@@ -131,6 +131,15 @@ Live per frame: per-point normals (LiveCloud.normalBuffer, 4.8 MB) only for the 
 | surface.ply | 2.7 | Photo/Mesh views | keep |
 Splat building after Done (3–7 s): still needed for Points and Objects (see surfels.bin above).
 
+### Splats removed (rk 10 Nov, 06:45)
+iPhone: the viewer's dots come straight from points.bin (Surfels.dots: no fitting, nothing written; snapped onto RoomPlan's
+walls/floor as before); old surfels.bin / trained.bin stay on disk, unread. Points, Objects, the patch under a removed
+object and the storyboard size keep working on the dots. Checked in the Simulator (recordings/overnight-pictures/
+objects-0435, objects-0440): remove (Photo + Points, patch filled), move (copy at the new spot, patch at the old),
+put back. S24: no splat build after Done (BUILD_SPLATS = false; the automatic processing finishes without it), old
+splat files unread; Lighting needs the photo room (else it says so; the view stays Points). Note: an old S24 scan with
+trained splats is saved without them if it's saved again.
+
 ### Splat data: what still reads it (05:45)
 Lighting is off it (c04eee2). Still on it: the Points tab (the dots are the splats drawn as points), Objects (ObjectsScene
 builds each object's part from them; Claude's object finding feeds it), the patch under a removed object (colours of

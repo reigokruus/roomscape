@@ -37,6 +37,17 @@ enum Surfels {
 
     /// - Parameter voxel: the capture's cell size (`CaptureMeta.voxelSize`): neighbourhoods and disc sizes scale
     ///   with it, so a large room captured at coarser cells still closes up.
+    /// The points as plain dots (rk 10 Nov: no splats any more, points kept): one record per point, no normal (the
+    /// viewer draws them facing the camera), at most `maxSurfels`. Nothing is fitted or saved: milliseconds, not seconds.
+    static func dots(_ input: [LivePoint], voxel: Float = 0.02) -> [SurfelRecord] {
+        let thin = max(1, (input.count + maxSurfels - 1) / maxSurfels)
+        let rad = Self.radius * max(1, voxel / 0.02) * 0.5
+        return Swift.stride(from: 0, to: input.count, by: thin).map { i in
+            let p = input[i]
+            return SurfelRecord(x: p.x, y: p.y, z: p.z, nx: 0, ny: 0, nz: 0, radius: rad, rgba: (p.rgba & 0x00FF_FFFF) | 0xFF00_0000)
+        }
+    }
+
     static func build(_ input: [LivePoint], voxel: Float = 0.02) -> (surfels: [SurfelRecord], stats: Stats) {
         let scale = max(1, voxel / 0.02)
         let radius = Self.radius * scale, cell = Self.cell * scale

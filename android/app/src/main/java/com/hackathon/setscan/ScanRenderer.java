@@ -466,8 +466,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return out;
     }
 
+    /** No splats any more (rk 10 Nov: Lighting is on the photo room, Points draw the points themselves): the step that
+     *  built them (a few seconds after Done) only finishes the automatic processing now. Old splat files stay unread. */
+    private static final boolean BUILD_SPLATS = false;
+
     /** Turn the current points into surfel splats in the background (a few seconds on the phone). */
     private void buildSurfels() {
+        if (!BUILD_SPLATS) {
+            ++surfGen; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null;
+            if (autoStage == 3) glTasks.add(() -> { if (autoStage != 3) return; autoStage = 5; autoProgress("Done", 1f); autosave(); });
+            return;
+        }
         final int n = count, gen = ++surfGen;
         if (n == 0) return;
         final java.nio.FloatBuffer snap = java.nio.FloatBuffer.allocate(n * 3);
@@ -563,7 +572,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     String toggleLighting() {
         if (lighting.enabled) { lighting.enabled = false; return "Lighting"; }
         // Lit: the photo room (rk 9 Nov), or the splats when there's no photo room.
-        if (surfCount == 0 && !(photos.ready && meshTris > 0)) { activity.updateStatus("The room is still being built. Try again in a moment."); return "Lighting"; }
+        if (!(photos.ready && meshTris > 0)) { activity.updateStatus("Lighting needs the photo room: it shows once the scan's photos are painted on."); return "Lighting"; }
         synchronized (lighting) {
             float fy = roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY;
             if (lighting.props.isEmpty()) {
@@ -966,8 +975,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         appendSaved(dir, true, () -> {
             enterViewer();
             if (loadedSplats != null) { // show the improved model it was saved with, not a fresh rebuild from the raw points
-                surfGen++; surfDone = loadedSplats; surfBase = loadedSplats; surfPending = loadedSplats; loadedSplats = null;
-                log("opened with " + surfDone.n + " trained splats");
+                if (BUILD_SPLATS) { surfGen++; surfDone = loadedSplats; surfBase = loadedSplats; surfPending = loadedSplats; log("opened with " + loadedSplats.n + " trained splats"); }
+                loadedSplats = null;
             }
             loadPlanning(dir); if (done != null) done.run();
             if (meshTris == 0) fuseSavedDepth(); // saved and imported scans keep no surface: rebuild it for Photo
