@@ -38,7 +38,7 @@ final class FlatTiles {
     static final String MASK_TEST =
             "  for (int i = 0; i < 16; i++) { if (float(i) >= uTN) break;" +
             "    float dd = dot(uTP[i].xyz, aPos.xyz) + uTP[i].w;" +
-            "    if (dd < 0.20 && dd > -0.15) { float a = floor(dot(uTU[i].xyz, aPos.xyz) / 0.30) + 128.0, b = floor(dot(uTV[i].xyz, aPos.xyz) / 0.30) + 128.0;" +
+            "    if (dd < 0.20 && dd > -uTU[i].w) { float a = floor(dot(uTU[i].xyz, aPos.xyz) / 0.30) + 128.0, b = floor(dot(uTV[i].xyz, aPos.xyz) / 0.30) + 128.0;" +
             "      if (a >= 0.0 && a < 256.0 && b >= 0.0 && b < 256.0 && texture2DLod(uTMask, vec2((a + 0.5) / 256.0, (b + 256.0 * float(i) + 0.5) / 4096.0), 0.0).r > 0.5) hh = 1.0; } }";
     private int maskTex; private final byte[] mask = new byte[MG * MG * MP]; private boolean maskDirty = true; private int maskN; private final int[] maskPlane = new int[MP];
 
@@ -65,7 +65,8 @@ final class FlatTiles {
         float[] tp = new float[64], tu = new float[64], tv = new float[64];
         for (int i = 0; i < np; i++) { Plane p = planes.get(maskPlane[i]);
             tp[i * 4] = p.nx; tp[i * 4 + 1] = p.ny; tp[i * 4 + 2] = p.nz; tp[i * 4 + 3] = p.d;
-            tu[i * 4] = p.ux; tu[i * 4 + 1] = p.uy; tu[i * 4 + 2] = p.uz; tv[i * 4] = p.vx; tv[i * 4 + 1] = p.vy; tv[i * 4 + 2] = p.vz; }
+            tu[i * 4] = p.ux; tu[i * 4 + 1] = p.uy; tu[i * 4 + 2] = p.uz; tu[i * 4 + 3] = maskPlane[i] == floorIdx ? 3.0f : 0.15f;   // under the floor: reflections, all hidden
+            tv[i * 4] = p.vx; tv[i * 4 + 1] = p.vy; tv[i * 4 + 2] = p.vz; }
         GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTP"), 16, tp, 0);
         GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTU"), 16, tu, 0);
         GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTV"), 16, tv, 0);
@@ -128,9 +129,19 @@ final class FlatTiles {
         }
         if (bestIn * 3 < n * 0.25f) { noPlane++; return null; }   // under 25% of the view on one plane: nothing flat enough here
         if (bnx * camx + bny * camy + bnz * camz + bd < 0) { bnx = -bnx; bny = -bny; bnz = -bnz; bd = -bd; }   // normal towards the camera
+        // 2b) The floor (rk 10 Nov 16:34: "let it assume floors are flat"): a horizontal plane facing up, 0.8 m or more
+        // below the camera, is snapped exactly level (gravity is known) and becomes the one floor, unless it's more than
+        // 5 cm from the floor already known (another level).
+        boolean isFloor = false;
+        if (bny > 0.95f && camy - (-bd) > 0.8f) {
+            double sy = 0; int k = 0;
+            for (int i = 0; i < n; i++) if (Math.abs(bnx * wp[i * 3] + bny * wp[i * 3 + 1] + bnz * wp[i * 3 + 2] + bd) < INLIER) { sy += wp[i * 3 + 1]; k++; }
+            float fy = (float) (sy / Math.max(1, k));
+            if (floorIdx < 0 || Math.abs(planes.get(floorIdx).d + fy) < 0.05f) { bnx = 0; bny = 1; bnz = 0; bd = floorIdx >= 0 ? planes.get(floorIdx).d : -fy; isFloor = true; }
+        }
         // 3) the same plane as before (within 8 deg and 4 cm), so tiles stay put; else a new one
-        int pi = -1;
-        for (int i = 0; i < planes.size(); i++) {
+        int pi = isFloor && floorIdx >= 0 ? floorIdx : -1;
+        for (int i = 0; i < planes.size() && pi < 0; i++) {
             Plane p = planes.get(i);
             if (p.nx * bnx + p.ny * bny + p.nz * bnz > 0.985f && Math.abs(p.d - bd) < 0.06f) { pi = i; break; }   // (noise: was 8 deg / 4 cm, a new plane nearly every time)
         }
@@ -143,6 +154,7 @@ final class FlatTiles {
             float l = (float) Math.sqrt(p.ux * p.ux + p.uy * p.uy + p.uz * p.uz); p.ux /= l; p.uy /= l; p.uz /= l;
             p.vx = p.ny * p.uz - p.nz * p.uy; p.vy = p.nz * p.ux - p.nx * p.uz; p.vz = p.nx * p.uy - p.ny * p.ux;
             planes.add(p); pi = planes.size() - 1;
+            if (isFloor) floorIdx = pi;
         }
         Plane p = planes.get(pi);
         // 4) per tile: samples on the plane, in front of it (something stands there), behind it (an opening)
@@ -208,6 +220,7 @@ final class FlatTiles {
                 tiles.put(k, t); toPaint.add(t); grown++;
             }
         }
+        if (floorIdx >= 0) floorPass(wp, n, camx, camy, camz, pose, toPaint);
         if (toPaint.isEmpty()) return null;
         Job j = new Job(); j.plane = pi; j.paint = toPaint; j.pose = pose; return j;
     }
@@ -219,9 +232,64 @@ final class FlatTiles {
         paint(j.paint, planes.get(j.plane), j.pose, ti, cameraTex, texToNorm);
     }
 
+    int floorIdx = -1, floorPainted;
+
+    /** Floor tiles wherever the camera sees the floor and nothing stands on it: depth on the floor or below it
+     *  (glossy floors reflect: depth reads below) counts as floor, depth more than 7 cm above it is an object. Oblique
+     *  views are normal on a floor; within 3 m of the phone only (far floor texture is smeared). Grows from painted floor
+     *  tiles like the walls, without needing depth. */
+    private void floorPass(float[] wp, int n, float camx, float camy, float camz, float[] pose, ArrayList<Tile> toPaint) {
+        Plane p = planes.get(floorIdx);
+        HashMap<Long, int[]> cnt = new HashMap<>();
+        for (int i = 0; i < n; i++) {
+            float x = wp[i * 3], y = wp[i * 3 + 1], z = wp[i * 3 + 2];
+            float s = y + p.d;   // height above the floor
+            if (s > 0.5f) continue;   // walls, furniture tops: not the floor's business
+            float rx = x - camx, ry = y - camy, rz = z - camz;
+            if (ry > -1e-3f) continue;
+            float t = -(camy + p.d) / ry;   // where the ray meets the floor
+            float qx = camx + rx * t, qz = camz + rz * t;
+            int iu = (int) Math.floor((qx * p.ux + qz * p.uz) / TILE), iv = (int) Math.floor((qx * p.vx + qz * p.vz) / TILE);
+            long key = key(floorIdx, iu, iv);
+            int[] c = cnt.get(key); if (c == null) cnt.put(key, c = new int[2]);
+            if (s > 0.07f) c[1]++; else c[0]++;   // something on the floor / floor (or its reflection)
+        }
+        float h = camy + p.d;
+        float fx = -pose[8], fy = -pose[9], fz = -pose[10];
+        float head = Math.max(0.3f, -fy);   // looking down
+        java.util.HashSet<Long> cand = new java.util.HashSet<>(cnt.keySet());
+        for (Tile t : tiles.values()) if (t.plane == floorIdx && t.score > 0 && t.ring < GROW)
+            for (int[] dd : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) cand.add(key(floorIdx, t.iu + dd[0], t.iv + dd[1]));
+        for (long k : cand) {
+            int iu = (int) (k >>> 20 & 0xFFFFF) - (1 << 19), iv = (int) (k & 0xFFFFF) - (1 << 19);
+            float cu = (iu + 0.5f) * TILE, cv = (iv + 0.5f) * TILE;
+            float cx = p.ux * cu + p.vx * cv, cz = p.uz * cu + p.vz * cv;
+            float dist = (float) Math.sqrt((cx - camx) * (cx - camx) + h * h + (cz - camz) * (cz - camz));
+            if (dist > 3.0f) continue;
+            int[] c = cnt.get(k); Tile t = tiles.get(k);
+            if (c != null && c[1] > Math.max(2, 0.1f * (c[0] + c[1]))) {   // something stands there
+                if (t != null && t.score > 0 && c[1] > 0.5f * (c[0] + c[1]) && ++t.contra >= 2) { tiles.remove(k); removed++; dirty = true; }
+                continue;
+            }
+            boolean nearPainted = false;
+            if (c == null) {
+                for (int[] dd : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) { Tile nb = tiles.get(key(floorIdx, iu + dd[0], iv + dd[1])); if (nb != null && nb.score > 0 && nb.ring < GROW) nearPainted = true; }
+                if (!nearPainted) continue;
+            }
+            float score = head / Math.max(0.3f, dist);
+            if (t == null) {
+                if (slots >= MAX_TILES) continue;
+                t = new Tile(); t.plane = floorIdx; t.iu = iu; t.iv = iv; t.slot = slots++; t.score = -1; t.inferred = c == null;
+                if (c == null) { int r = 99; for (int[] dd : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) { Tile nb = tiles.get(key(floorIdx, iu + dd[0], iv + dd[1])); if (nb != null) r = Math.min(r, nb.ring + 1); } t.ring = r; }
+                tiles.put(k, t);
+            }
+            if (score > t.score * 1.25f && !toPaint.contains(t)) { t.pending = score; toPaint.add(t); floorPainted++; }
+        }
+    }
+
     String stats() {
-        return String.format(java.util.Locale.US, "flat tiles: %d shown on %d planes; %d attempts (%d no flat surface), %d tiles looked at: %d painted, %d too little depth, %d something in front, %d opening, %d too slanted, %d not a better view; %d taken back; %d grown from neighbours",
-                countShown(), planes.size(), attempts, noPlane, looked, painted, lowCover, blocked, opening, tooSlanted, notBetter, removed, grown);
+        return String.format(java.util.Locale.US, "flat tiles: %d shown on %d planes; %d attempts (%d no flat surface), %d tiles looked at: %d painted, %d too little depth, %d something in front, %d opening, %d too slanted, %d not a better view; %d taken back; %d grown from neighbours; %d floor tiles",
+                countShown(), planes.size(), attempts, noPlane, looked, painted, lowCover, blocked, opening, tooSlanted, notBetter, removed, grown, floorPainted);
     }
 
     int countShown() { int c = 0; for (Tile t : tiles.values()) if (t.score > 0) c++; return c; }
@@ -250,7 +318,7 @@ final class FlatTiles {
         int done = 0;
         for (Tile t : list) {
             if (done >= 40) break;   // a bounded amount per update
-            boolean ok = true;
+            boolean ok = true; p = planes.get(t.plane);
             for (int c = 0; c < 4; c++) {
                 float a = (t.iu + ((c & 1) == 0 ? 0 : 1)) * TILE, b = (t.iv + ((c & 2) == 0 ? 0 : 1)) * TILE;
                 float x = p.ux * a + p.vx * b - p.nx * p.d, y = p.uy * a + p.vy * b - p.ny * p.d, z = p.uz * a + p.vz * b - p.nz * p.d;
@@ -447,5 +515,5 @@ final class FlatTiles {
         } catch (Exception e) { return false; }
     }
 
-    synchronized void clear() { maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
+    synchronized void clear() { floorIdx = -1; floorPainted = 0; maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
 }
