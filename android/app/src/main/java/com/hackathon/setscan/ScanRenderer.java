@@ -1087,6 +1087,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread: open a saved scan in the viewer. Photos stream in one by one. */
     void loadScan(File dir, Runnable done) {
         reset();
+        loadFeatureHeights(dir);
         improveDir = null; improveT = null; contAuto = false; contBase = null;
         idle = false; viewing = true; sensors.active = false;
         lastPlanes = new java.util.ArrayList<>();
@@ -2332,7 +2333,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             File dir = currentDir;
             perf.stop();
-            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); }
+            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); }
         }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
@@ -3337,7 +3338,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         activity.setRoomSize(null);
         if (planner.isReady()) {
             try {
+                synchronized (featLock) { room.featureYs = java.util.Arrays.copyOf(featY, featN); room.featureN = featN; }
                 room.build(planes, planner, pos, col, count);
+                log(String.format(java.util.Locale.US, "ceiling: depth %.3f, ARCore features %s (%d feature heights), used %.3f %s; floor %.3f; height %.2f m",
+                        room.depthCeilingY, Float.isNaN(room.featureCeilingY) ? "none" : String.format(java.util.Locale.US, "%.3f", room.featureCeilingY), featN,
+                        room.ceilingY, room.ceilingTrusted ? "(trusted)" : "(depth only)", room.floorY, room.ceilingY - room.floorY));
                 applyLabels(room.boxes);
                 claudeObjs.mergeInto(room.boxes, room.floorY);
                 roomReady = true;
@@ -3589,7 +3594,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        drainDepth(); gpuReady.clear(); healthLosses = 0; healthMinFeatures = Integer.MAX_VALUE; healthMaxExposureNs = 0; doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
+        drainDepth(); gpuReady.clear(); synchronized (featLock) { featN = 0; featAt = 0; } ceilingHinted = false; healthLosses = 0; healthMinFeatures = Integer.MAX_VALUE; healthMaxExposureNs = 0; doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
@@ -4406,6 +4411,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             notTrackingSince = 0;
             lostSince = 0;
             if (!viewing && count > 2000 && frameNo % 10 == 0) plainWallHint(frame, nowMs);
+            if (!viewing && !ceilingHinted && scanMs > 45000 && planner.isReady() && frameNo % 60 == 0) ceilingHint();
         } else if (everTracked) {
             // Lost tracking after it worked. ARCore usually recovers by itself once it sees something textured again;
             // restarting only helps the S24's "paused for no reason" case, and a restart can shift the whole map.
@@ -5612,6 +5618,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  scale muddy the test), so first the phone's own fits are logged against the iPhone's sizes. */
     static final boolean DEPTH_FIX_APPLY = false;
     private volatile float depthK = 1f, depthC = 0f;
+    private final Object featLock = new Object();
+    private final float[] featY = new float[60000]; private int featN, featAt;
     private final float[] dfTrue = new float[6000], dfRaw = new float[6000];
     private int dfN, dfAt;
     private long dfLastFit;
@@ -5629,6 +5637,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int i = 0; i < nf; i++) {
                 float x = pts.get(i * 4), y = pts.get(i * 4 + 1), z = pts.get(i * 4 + 2), conf = pts.get(i * 4 + 3);
                 if (conf < 0.3f) continue;
+                // every sure feature's height (world, with the re-alignment correction), for the ceiling (RoomModel)
+                float wy = hasFix ? poseFix[1] * x + poseFix[5] * y + poseFix[9] * z + poseFix[13] : y;
+                synchronized (featLock) { featY[featAt] = wy; featAt = (featAt + 1) % featY.length; if (featN < featY.length) featN++; }
                 float xc = view[0] * x + view[4] * y + view[8] * z + view[12], yc = view[1] * x + view[5] * y + view[9] * z + view[13];
                 float zc = view[2] * x + view[6] * y + view[10] * z + view[14];
                 float dz = -zc;
@@ -5735,6 +5746,35 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private long fewFeaturesSince, plainHintAt;
+    private boolean ceilingHinted;
+
+    /** feature-heights.bin: ARCore's feature point heights from the scan (for the ceiling when it's opened again). */
+    private void saveFeatureHeights(File dir) {
+        float[] ys; synchronized (featLock) { ys = java.util.Arrays.copyOf(featY, featN); }
+        if (ys.length == 0) return;
+        try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "feature-heights.bin"))))) {
+            o.writeInt(ys.length); for (float y : ys) o.writeFloat(y);
+        } catch (Exception e) { logError("feature heights", e); }
+    }
+
+    private void loadFeatureHeights(File dir) {
+        File f = new File(dir, "feature-heights.bin");
+        if (!f.exists()) return;
+        try (java.io.DataInputStream in = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(f)))) {
+            int n = Math.min(in.readInt(), featY.length);
+            synchronized (featLock) { for (int i = 0; i < n; i++) featY[i] = in.readFloat(); featN = n; featAt = n % featY.length; }
+        } catch (Exception e) { logError("feature heights", e); }
+    }
+
+    /** Once per scan: no ARCore features near the ceiling yet, so the height would come from depth only. */
+    private void ceilingHint() {
+        float floor = planner.floorY; int near = 0;
+        synchronized (featLock) { for (int i = 0; i < featN; i++) if (featY[i] - floor > 2.25f) near++; }
+        if (near >= 30) { ceilingHinted = true; return; }
+        ceilingHinted = true;
+        log("ceiling hint: only " + near + " feature points up there");
+        activity.toast("Tilt up to the ceiling once so the room height can be measured.");
+    }
     private long scanMs, lastTickMs;
 
     /** Early warning before a loss (rk 10 Nov 10:44: lost on a plain wall): ARCore tracks few features for a second. */
@@ -6226,7 +6266,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // what it is (rk 10 Nov 11:49: a door-area scan showed 2.76 × 1.48 m in the title and 3.7 × 3.3 m below).
             String size = (room.floorCoverage > 0 && room.floorCoverage < 0.5f ? "scanned area " : "")
                     + String.format(java.util.Locale.US, "%.2f × %.2f m", Math.max(room.sizeX, room.sizeZ), Math.min(room.sizeX, room.sizeZ));
-            if (room.hasCeiling) return size + String.format(java.util.Locale.US, " · %.2f m high", room.ceilingY - room.floorY);
+            if (room.hasCeiling) return size + String.format(java.util.Locale.US, room.ceilingTrusted ? " · %.2f m high" : " · ~%.2f m high", room.ceilingY - room.floorY);
             return size + (room.ceilingUnknown ? " · height not scanned" : "");
         }
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;

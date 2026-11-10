@@ -136,6 +136,29 @@ final class RoomModel {
     ShotPlanner grid; // the floor grid this model was built from
     float[] bounds;   // layout rectangle in layout axes {uMin, uMax, vMin, vMax}, or null
 
+    /** Heights of ARCore's feature points (world), for the ceiling; set before build(). */
+    float[] featureYs; int featureN;
+    /** The height comes from ARCore (a ceiling plane or its feature points), not only this phone's depth. */
+    boolean ceilingTrusted;
+    float featureCeilingY = Float.NaN, depthCeilingY = Float.NaN;
+
+    private float featureCeiling(float floorY) {
+        featureCeilingY = Float.NaN;
+        if (featureYs == null || featureN < 50) return Float.NaN;
+        // from 2.25 m up (door tops and picture rails at ~2.0-2.1 m have features too), 4 cm bins
+        int bins = 55; int[] h = new int[bins];
+        for (int i = 0; i < featureN; i++) { int b = (int) ((featureYs[i] - floorY - 2.25f) / 0.04f); if (b >= 0 && b < bins) h[b]++; }
+        int best = -1; for (int b = 0; b < bins; b++) if (best < 0 || h[b] > h[best]) best = b;
+        if (best < 0 || h[best] < 15) return Float.NaN;
+        // the median of the features in and next to that band
+        float lo = floorY + 2.25f + (best - 1) * 0.04f, hi = floorY + 2.25f + (best + 2) * 0.04f;
+        float[] v = new float[featureN]; int k = 0;
+        for (int i = 0; i < featureN; i++) if (featureYs[i] >= lo && featureYs[i] < hi) v[k++] = featureYs[i];
+        java.util.Arrays.sort(v, 0, k);
+        featureCeilingY = v[k / 2];
+        return featureCeilingY;
+    }
+
     void build(List<PlaneData> planes, ShotPlanner grid, FloatBuffer pos, ByteBuffer col, int count) {
         this.grid = grid;
         ceilingUnknown = false;
@@ -186,7 +209,13 @@ final class RoomModel {
         }
         hasCeiling = false;
         ceilingY = maxY;
-        for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING) { ceilingY = s.cy; hasCeiling = true; }
+        depthCeilingY = maxY;
+        ceilingTrusted = false;
+        // ARCore's tracked feature points on the ceiling (triangulated from the motion, metric like its floor plane):
+        // this phone's depth put a 2.88 m ceiling at 2.76-2.79 m (rk 10 Nov). The busiest 4 cm band above 2 m.
+        float fc = featureCeiling(floorY);
+        if (!Float.isNaN(fc)) { ceilingY = fc; hasCeiling = true; ceilingTrusted = true; }
+        for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING) { ceilingY = s.cy; hasCeiling = true; ceilingTrusted = true; }
         if (!hasCeiling && maxY - floorY > 2.0f && maxY - floorY < 4f) hasCeiling = true;
 
         if (!Float.isNaN(userCeilingY) && userCeilingY > floorY + 1.2f) { ceilingY = userCeilingY; hasCeiling = true; }
