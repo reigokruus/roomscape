@@ -6164,6 +6164,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // after a jump: a fit that keeps the old frame (within 15 cm / ~2°) is the jump undone, accepted at once
             float[] jg = jumpGuess;
             if (ok && jg != null && Realign.away(F, jg) < 0.2f) strong = true;
+            // After a loss (not a jump): one decent fit is enough when it keeps the correction we already had, i.e.
+            // ARCore came back in its old frame. Today's scans: the good returns were 0.00-0.05 away (m + deg/30), the
+            // doubtful ones 0.17 and more (13:52's wrong-angle 65.8 s resume: 0.58), so 0.10.
+            if (ok && jg == null && res.fit.inliers >= 0.55f && res.fit.median < 0.02f && Realign.away(F, poseFix) < 0.10f) { strong = true; log(String.format(java.util.Locale.US, "one match is enough: it keeps the old correction (%.2f away)", Realign.away(F, poseFix))); }
             if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
                 hasFix = true; needRealign = false; realign = null; recentPts.clear(); jumpGuess = null;
