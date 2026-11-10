@@ -2012,7 +2012,7 @@ struct RoomSummary: View {
             height = max(height, wall.dimensions.y)
         }
         let (long, short) = (max(maxA - minA, maxB - minB), min(maxA - minA, maxB - minB))
-        return String(format: "%.1f × %.1f m, %.1f m high", long, short, height)
+        return String(format: "%.2f × %.2f m, %.2f m high", long, short, height)
     }
 }
 

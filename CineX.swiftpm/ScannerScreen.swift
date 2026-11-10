@@ -540,6 +540,8 @@ struct ScannerScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var confirmCancel = false
     @State private var flash: ClearFlash?
+    /// Clearing a spot while scanning (press and hold): off for now, rk 10 Nov 11:20 (the same on Android).
+    static let clearWhileScanning = false
     /// Press and hold to clear: where the finger is down and since when (nil = no hold).
     @State private var hold: (at: CGPoint, since: Date, id: UUID)?
 
@@ -561,7 +563,7 @@ struct ScannerScreen: View {
             // Press and hold to clear (0.9 s, a ring fills under the finger; a tap did it until 10 Nov, and a first-time
             // user taps by instinct): wipes the scan in a circle around it (11% of the screen's short side) so it can
             // be scanned again. The card and buttons above take their own taps. The same gesture as the Android app.
-            if controller.phase == .scanning {
+            if controller.phase == .scanning, Self.clearWhileScanning {
                 GeometryReader { g in
                     Color.clear
                         .contentShape(Rectangle())

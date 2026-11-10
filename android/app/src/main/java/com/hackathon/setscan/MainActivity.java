@@ -837,6 +837,7 @@ public class MainActivity extends Activity {
                 // Press and hold (0.9 s, a ring fills under the finger) clears the scan there so it can be redone
                 // (rk 9 Nov; hold instead of tap since 10 Nov: a first-time user taps by instinct).
                 int act = e.getActionMasked();
+                if (!CLEAR_WHILE_SCANNING) return true;   // off for now (rk 10 Nov 11:20); "Scan area again" after the scan stays
                 if (act == MotionEvent.ACTION_DOWN) {
                     downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false;
                     startHoldRing(e.getX(), e.getY());
@@ -994,7 +995,7 @@ public class MainActivity extends Activity {
             styleSwitch.setVisibility(viewer ? View.VISIBLE : View.GONE);
             viewerPanel.setVisibility(viewer && walkState == 0 ? View.VISIBLE : View.GONE);
             pillRow.setVisibility(viewer ? View.VISIBLE : View.GONE);
-            viewerTitle.setText(renderer.currentName != null ? renderer.currentName : "Scan");
+            setViewerTitle();
             nameValue.setText(renderer.currentName != null ? renderer.currentName : "Add a name");
             File cd = renderer.currentDir;
             viewerShared.setVisibility(cd != null && SyncInfo.file(cd).exists() && SyncInfo.load(this, cd).shared ? View.VISIBLE : View.GONE);
@@ -1032,6 +1033,20 @@ public class MainActivity extends Activity {
     private android.widget.ScrollView viewerPanel;
     private FrameLayout.LayoutParams toolBarsLp;
     private TextView viewerTitle;
+    /** The room's size under the title in the 3D view ("5.12 × 6.70 m · 2.48 m high"), or null. */
+    private volatile String roomSizeText;
+
+    void setRoomSize(String s) { roomSizeText = s; runOnUiThread(this::setViewerTitle); }
+
+    private void setViewerTitle() {
+        if (viewerTitle == null) return;
+        String name = renderer.currentName != null ? renderer.currentName : "Scan", size = roomSizeText;
+        if (size == null) { viewerTitle.setText(name); return; }
+        android.text.SpannableString t = new android.text.SpannableString(name + "\n" + size);
+        t.setSpan(new android.text.style.RelativeSizeSpan(0.8f), name.length() + 1, t.length(), 0);
+        t.setSpan(new android.text.style.ForegroundColorSpan(0xFFFFD60A), name.length() + 1, t.length(), 0);
+        viewerTitle.setText(t);
+    }
     private android.widget.ImageView viewerShared;
     private final java.util.List<Button> menuActions = new java.util.ArrayList<>();
     private final TextView[] styleTabs = new TextView[3];
@@ -1054,7 +1069,7 @@ public class MainActivity extends Activity {
         viewerTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         viewerTitle.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
         viewerTitle.setGravity(Gravity.CENTER);
-        viewerTitle.setSingleLine(true);
+        viewerTitle.setMaxLines(2);
         viewerTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
         viewerTop.addView(viewerTitle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         viewerShared = new android.widget.ImageView(this);
@@ -1698,6 +1713,8 @@ public class MainActivity extends Activity {
         measureClear.setVisibility(measureOverlay != null && measureOverlay.count() > 0 ? View.VISIBLE : View.GONE);
     }
 
+    /** Clearing a spot while scanning (press and hold): off for now, rk 10 Nov 11:20. */
+    static final boolean CLEAR_WHILE_SCANNING = false;
     private HoldRing holdRing;
     private final Runnable holdFire = () -> {
         if (holdRing == null || holdRing.getVisibility() != View.VISIBLE) return;
@@ -1839,6 +1856,7 @@ public class MainActivity extends Activity {
         col.addView(Ios.footer(this, "Touch and hold a scan to rename or delete it."));
 
         TextView pilot = new TextView(this);
+        pilot.setVisibility(View.GONE);   // removed from the home screen (rk 10 Nov 11:20); the form stays in the code
         pilot.setText("Interested in a paid pilot?");
         pilot.setTextColor(Ios.SECONDARY);
         pilot.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);

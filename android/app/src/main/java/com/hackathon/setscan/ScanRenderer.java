@@ -3247,6 +3247,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log(planner.summary());
         log("ARCore planes: " + planes.size());
         roomReady = false;
+        activity.setRoomSize(null);
         if (planner.isReady()) {
             try {
                 room.build(planes, planner, pos, col, count);
@@ -3255,6 +3256,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 roomReady = true;
                 buildFloorMesh();
                 log(room.logLine());
+                activity.setRoomSize(room.sizeLine());
             } catch (Exception e) { logError("room", e); }
         }
         buildPhotos();

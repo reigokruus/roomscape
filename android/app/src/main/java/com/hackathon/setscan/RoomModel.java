@@ -502,4 +502,15 @@ final class RoomModel {
                 hasLayout ? String.format(Locale.US, "%.1fx%.1f@%.1fdeg seen=%s", roomW, roomD, layoutAngle, seenMask()) : "none",
                 surfaces.size(), boxes.size(), lights.size());
     }
+
+    /** The room's size for the 3D view's title: length × width (along the outline's walls) and height; null if unknown. */
+    String sizeLine() {
+        float a, b;
+        if (hasLayout) { a = Math.max(roomW, roomD); b = Math.min(roomW, roomD); }
+        else if (sizeX > 0) { a = Math.max(sizeX, sizeZ); b = Math.min(sizeX, sizeZ); }
+        else return null;
+        String s = String.format(Locale.US, "%.2f × %.2f m", a, b);
+        if (hasCeiling) s += String.format(Locale.US, " · %.2f m high", ceilingY - floorY);
+        return s;
+    }
 }
