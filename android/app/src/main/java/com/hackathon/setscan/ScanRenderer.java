@@ -5901,7 +5901,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final Object featLock = new Object();
     /** depth-pairs.bin: (feature distance, raw depth, u, v, feature height) for the offline depth-correction fit. */
     private final float[] pairBuf = new float[5 * 200000]; private int pairN;
-    private final float[] featY = new float[60000]; private int featN, featAt;
+    // 400k (was 60k): a long scan filled the ring and the ceiling's features from early on were overwritten (15:09 scan:
+    // 60000 heights, the ceiling read 2.35 m in a 2.88 m room)
+    private final float[] featY = new float[400000]; private int featN, featAt;
     private final float[] dfTrue = new float[6000], dfRaw = new float[6000];
     private int dfN, dfAt;
     private long dfLastFit;
