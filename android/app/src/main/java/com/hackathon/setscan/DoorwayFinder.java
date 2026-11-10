@@ -18,6 +18,8 @@ final class DoorwayFinder {
      *  the floor is several cm off), not from the depth's floor right in front of the opening. */
     static boolean TRUST_FLOOR = true;
     static float LINTEL_SHARE = 0.34f;
+    /** How far the scanned surface reaches into an opening at each edge (about half the 4 cm voxel). */
+    static float EDGE_GROWTH = 0.02f;
     static final float CELL = 0.02f, NEAR = 0.06f, MIN_W = 0.6f, MAX_W = 1.3f, MIN_H = 1.75f, MAX_H = 2.4f;
 
     static final class Doorway {
@@ -117,7 +119,12 @@ final class DoorwayFinder {
                     tested++; if (seen.test(x, floorHere + y, z)) through++;
                 }
                 Doorway dw = new Doorway();
-                dw.wall = w / 4; dw.width = width; dw.height = height; dw.floorY = floorHere; dw.nx = nx; dw.nz = nz;
+                // The clear opening: the surface grows into the opening by about half a 4 cm voxel at each jamb, and the
+                // 3-column smoothing takes another 2 cm cell each side (rk's 80 cm door read 0.70 m in two scans).
+                float grow = (EDGE_GROWTH + CELL);
+                width += 2 * grow;
+                dw.wall = w / 4; dw.width = width; dw.height = height;
+                s -= Math.round(grow / CELL); e += Math.round(grow / CELL); dw.floorY = floorHere; dw.nx = nx; dw.nz = nz;
                 dw.x0 = ax + ux * s * CELL + nx * off; dw.z0 = az + uz * s * CELL + nz * off;
                 dw.x1 = ax + ux * e * CELL + nx * off; dw.z1 = az + uz * e * CELL + nz * off;
                 dw.seenShare = tested > 0 ? (float) through / tested : 0;
