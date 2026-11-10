@@ -4218,7 +4218,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (lostSince == 0) {
                 lostSince = nowMs;
                 if (count > 2000 && !needRealign) {
-                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs;
+                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0;
                     snapshotForRealign();
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
                     activity.toast("Lost track. Point at a part you already scanned.");
@@ -4229,6 +4229,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 recoveries++;
                 lostSince = 0;
                 log("tracking lost for 3s, restarting AR session (attempt " + recoveries + ")");
+                sessionRestarted = true;   // a restart can come back in a shifted frame: re-align before fusing
                 activity.restartSession();
             }
         } else if (!everTracked) {
@@ -5305,6 +5306,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** The scan so far as point centroids (taken when tracking is lost), for the re-alignment (Realign). */
     private Realign realign;
+    private boolean sessionRestarted;
+    private int realignTick;
 
     private void snapshotForRealign() {
         long t0 = System.currentTimeMillis();
@@ -5320,6 +5323,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  frames in a row agree with a small residual. Until then nothing is fused. */
     private boolean realigned(ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m, long nowMs) {
         if (realign == null) { needRealign = false; return true; }
+        // ARCore recovered by itself (no session restart): its own relocalisation keeps the frame; go on at once
+        // (rk 10 Nov 10:15: a 1.5 s loss then a whole minute paused because the noisy depth never passed the check).
+        // After a restart: wait for the re-alignment, but at most 5 s; then go on anyway as a new segment, so nothing
+        // is lost and the layer can be told apart later.
+        if (!sessionRestarted || nowMs - realignSince > 5000) {
+            needRealign = false; realign = null; segment++;
+            log(String.format(java.util.Locale.US, "fusing again after %.1f s (%s); segment %d",
+                    (nowMs - realignSince) / 1000f, sessionRestarted ? "re-alignment didn't settle, ARCore's pose" : "ARCore recovered by itself", segment));
+            activity.toast("Back on track, scanning again.");
+            return true;
+        }
+        if (realignTick++ % 3 != 0) return false;   // the ICP every 3rd depth frame (it's heavy for the drawing thread)
         java.util.ArrayList<float[]> pts = new java.util.ArrayList<>();
         for (int v = 3; v < dh - 3; v += 5) for (int u = 3; u < dw - 3; u += 5) {
             int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
