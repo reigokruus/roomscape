@@ -479,6 +479,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             RoomProxies rp = simple ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
             float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
             int pv = proxy.length / 3;
+            // The drawn floor onto the trusted floor (ARCore's plane): near-level triangles within 12 cm of it. The points
+            // are not changed.
+            if (!simple && mvUse > 0) {
+                float fy = walkFloorY(); int flat = 0;
+                if (mp == mp0) { FloatBuffer cp = ByteBuffer.allocateDirect(mvUse * 12).order(ByteOrder.nativeOrder()).asFloatBuffer(); for (int i = 0; i < mvUse * 3; i++) cp.put(i, mp0.get(i)); mp = cp; }
+                for (int t = 0; t < mvUse / 3; t++) {
+                    int o = t * 9;
+                    float y0 = mp.get(o + 1), y1 = mp.get(o + 4), y2 = mp.get(o + 7);
+                    if (Math.abs(y0 - fy) > 0.12f || Math.abs(y1 - fy) > 0.12f || Math.abs(y2 - fy) > 0.12f) continue;
+                    float ux = mp.get(o + 3) - mp.get(o), uy = y1 - y0, uz = mp.get(o + 5) - mp.get(o + 2);
+                    float vx = mp.get(o + 6) - mp.get(o), vy = y2 - y0, vz = mp.get(o + 8) - mp.get(o + 2);
+                    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                    float nl = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+                    if (nl < 1e-9f || Math.abs(ny) / nl < 0.9f) continue;
+                    mp.put(o + 1, fy); mp.put(o + 4, fy); mp.put(o + 7, fy); flat++;
+                }
+                if (flat > 0) log(String.format(java.util.Locale.US, "floor: %d triangles laid on ARCore's floor (y %.3f)", flat, fy));
+            }
             boolean[] ceil = simple ? new boolean[0] : ceilingTriangles(mp, mvUse / 3);
             // Ragged bits inside an open doorway (see-through noise fused into the opening): left out of the photo room.
             java.util.List<DoorwayFinder.Doorway> dws = doorways;

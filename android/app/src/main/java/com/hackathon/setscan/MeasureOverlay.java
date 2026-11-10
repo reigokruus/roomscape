@@ -42,6 +42,8 @@ final class MeasureOverlay extends View {
 
     void add(float[] p, float floor) {
         floorY = floor;
+        // A tap on the floor lands on the trusted floor (ARCore's plane): the depth's floor mesh is several cm off.
+        if (!Float.isNaN(floor) && Math.abs(p[1] - floor) < 0.12f) p = new float[]{p[0], floor, p[2]};
         if (pending == null) pending = p;
         else { lines.add(new float[]{pending[0], pending[1], pending[2], p[0], p[1], p[2]}); pending = null; }
         invalidate();

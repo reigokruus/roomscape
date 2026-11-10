@@ -82,6 +82,9 @@ public class DoorwayTest {
             }
             walls = new float[ws.size()]; for (int i = 0; i < walls.length; i++) walls[i] = ws.get(i); nw = walls.length / 4;
         }
+        File sl = new File(dir, "scan-log.txt");   // the app's own room floor (ARCore's plane), when the log is there
+        if (sl.exists()) { java.util.regex.Matcher fm = java.util.regex.Pattern.compile("room: floorY=(-?[0-9.]+)").matcher(new String(java.nio.file.Files.readAllBytes(sl.toPath()))); while (fm.find()) floorY = Float.parseFloat(fm.group(1)); }
+        if (System.getenv("DOOR_FLOOR") != null) floorY = Float.parseFloat(System.getenv("DOOR_FLOOR"));
         float[][] views = new float[photos.size()][];
         for (int i = 0; i < photos.size(); i++) views[i] = OutlineFill.invert(photos.get(i).pose);
         final List<OutlineFill.Photo> ph = photos;

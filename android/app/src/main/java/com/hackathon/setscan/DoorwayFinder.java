@@ -14,6 +14,10 @@ import java.util.List;
  */
 final class DoorwayFinder {
     static int DUMP = -1;
+    /** Heights from the given floor (ARCore's floor plane: its tracked features are metric; this phone's depth near
+     *  the floor is several cm off), not from the depth's floor right in front of the opening. */
+    static boolean TRUST_FLOOR = true;
+    static float LINTEL_SHARE = 0.34f;
     static final float CELL = 0.02f, NEAR = 0.06f, MIN_W = 0.6f, MAX_W = 1.3f, MIN_H = 1.75f, MAX_H = 2.4f;
 
     static final class Doorway {
@@ -85,9 +89,11 @@ final class DoorwayFinder {
                 if (!left && !right || oneSided && (seen == null || width > 1.05f)) { if (why != null) why.append(String.format(java.util.Locale.US, " wall %d: gap %.2f m without wall on both sides", w / 4, width)); continue; }
                 // lintel: the first row from 1.6 m up where most of the gap's columns have points
                 int lintelRow = -1;
+                // (the middle 60% of the opening, a third of it with surface: the lintel's underside is thinly scanned)
+                int ms = s + (e - s) / 5, me = e - (e - s) / 5;
                 for (int r = (int) ((0.2f + 1.6f) / CELL); r < gh; r++) {
-                    int k = 0; for (int j = s; j < e; j++) if (occ[r * gw + j] > 0) k++;
-                    if (k >= 0.5f * (e - s)) { lintelRow = r; break; }
+                    int k = 0; for (int j = ms; j < me; j++) if (occ[r * gw + j] > 0) k++;
+                    if (k >= LINTEL_SHARE * (me - ms)) { lintelRow = r; break; }
                 }
                 if (lintelRow < 0) { if (why != null) why.append(String.format(java.util.Locale.US, " wall %d: gap %.2f m with no wall above it", w / 4, width)); continue; }
                 // the floor in front of the opening: points within 60 cm of it, within 15 cm of the floor estimate
@@ -99,7 +105,7 @@ final class DoorwayFinder {
                     if (dx * dx + dz * dz < 0.6f * 0.6f) fy[fn++] = y;
                 }
                 float floorHere = floorY;
-                if (fn > 30) { Arrays.sort(fy, 0, fn); floorHere = fy[fn / 2]; }
+                if (fn > 30 && !TRUST_FLOOR) { Arrays.sort(fy, 0, fn); floorHere = fy[fn / 2]; }
                 float lintelY = floorY - 0.2f + lintelRow * CELL;
                 float height = lintelY - floorHere;
                 if (height < MIN_H || height > MAX_H) { if (why != null) why.append(String.format(java.util.Locale.US, " wall %d: gap %.2f m wide but %.2f m high", w / 4, width, height)); continue; }
