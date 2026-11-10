@@ -333,6 +333,17 @@ struct ProcessingCard: View {
     }
 }
 
+/// When this app was built (the executable's date), so it's clear which build a phone has (rk 10 Nov: two builds
+/// minutes apart looked the same). Shown under the test switches and written into every scan's hardware log.
+enum BuildStamp {
+    static let text: String = {
+        let url = Bundle.main.executableURL
+        let date = (url.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.modificationDate] as? Date }) ?? Date.distantPast
+        let f = DateFormatter(); f.dateFormat = "d MMM HH:mm:ss"; f.locale = Locale(identifier: "en_GB")
+        return "Build " + f.string(from: date)
+    }()
+}
+
 /// Home: the running job, and the "Build scans from the recording" test switch.
 struct ProcessingSection: View {
     @ObservedObject private var queue = ProcessingQueue.shared
@@ -356,7 +367,7 @@ struct ProcessingSection: View {
             Toggle("Screen video (test)", isOn: $screenVideo)
                 .onChange(of: screenVideo) { _, on in ScreenVideo.enabled = on }
         } footer: {
-            Text((fromRecording
+            Text(BuildStamp.text + "\n" + (fromRecording
                   ? "After Done, the scan is built again from its recording, in the background. The live scan is kept in the scan's before-rebuild folder."
                   : "After Done, sharp text patches are made from the scan's recording, in the background. The live scan stays as it is.")
                  + (fine ? " Rebuilds from the recording use a finer surface (bars and edges sharper, slower, about twice the triangles)." : ""))

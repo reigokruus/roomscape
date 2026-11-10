@@ -533,6 +533,10 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             encoder.setVertexBuffer(cloud.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(cloud.normalBuffer, offset: 0, index: 1)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
+            if let tilesRenderer { tilesRenderer.bindMask(encoder) } else {
+                var none = [SIMD4<Float>](repeating: .zero, count: 49)
+                encoder.setVertexBytes(&none, length: none.count * MemoryLayout<SIMD4<Float>>.stride, index: 3)
+            }
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
             encoder.setRenderPipelineState(depthPipeline)
             encoder.setDepthStencilState(depthWrite)
@@ -550,6 +554,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     using namespace metal;
 
     struct LivePoint { packed_float3 position; uchar4 color; };
+    struct TileMask { float4 p[16]; float4 u[16]; float4 v[16]; float4 n; };
     struct Uniforms {
         float4x4 viewProjection;
         float4 cameraPosition;
@@ -567,9 +572,25 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     vertex TileOut tileVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                               const device LivePoint *points [[buffer(0)]],
                               const device char4 *normals [[buffer(1)]],
-                              constant Uniforms &u [[buffer(2)]]) {
+                              constant Uniforms &u [[buffer(2)]],
+                              constant TileMask &tm [[buffer(3)]],
+                              texture2d<float> mask [[texture(0)]]) {
         LivePoint p = points[iid];
         float3 c = float3(p.position);
+        // Flat tiles: no dots on, in front of (20 cm; 35 cm for a well-confirmed tile) or behind a painted tile
+        bool hidden = false;
+        for (int i = 0; i < 16; i++) {
+            if (float(i) >= tm.n.x) break;
+            float dd = dot(tm.p[i].xyz, c) + tm.p[i].w;
+            if (dd < 0.35 && dd > -tm.u[i].w) {
+                float a = floor(dot(tm.u[i].xyz, c) / 0.30) + 128.0, b = floor(dot(tm.v[i].xyz, c) / 0.30) + 128.0;
+                if (a >= 0.0 && a < 256.0 && b >= 0.0 && b < 256.0) {
+                    constexpr sampler s(filter::nearest);
+                    float m = mask.sample(s, float2((a + 0.5) / 256.0, (b + 256.0 * float(i) + 0.5) / 4096.0), level(0)).r;
+                    if (m > (dd > 0.20 ? 0.75 : 0.25)) hidden = true;
+                }
+            }
+        }
         float3 n = float3(normals[iid].xyz) / 127.0;
         // No normal yet: a tile facing the camera.
         n = dot(n, n) > 0.25 ? normalize(n) : normalize(u.cameraPosition.xyz - c);
@@ -579,7 +600,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
         float3 world = c + (t1 * corner.x + t2 * corner.y) * u.halfSize;
         TileOut out;
-        out.position = u.viewProjection * float4(world, 1.0);
+        out.position = hidden ? float4(0.0, 0.0, -2.0, 1.0) : u.viewProjection * float4(world, 1.0);   // hidden: outside the view
         out.world = world;
         out.normal = n;
         out.solid = float(p.color.a) / 255.0;

@@ -66,7 +66,9 @@ final class PerfLog: @unchecked Sendable {
             s.lastTicks = Self.ticks(); s.lastCPU = Self.processCPU(); s.lastSample = Date()
         }
         UIDevice.current.isBatteryMonitoringEnabled = true
-        write(["event": "start", "stage": stage, "pCores": Self.cores.p, "eCores": Self.cores.e,
+        write(["event": "start", "stage": stage, "pCores": Self.cores.p, "eCores": Self.cores.e, "build": BuildStamp.text,
+               "switches": ["livePoints": LivePreview.livePoints, "flatTiles": FlatTiles.enabled, "screenVideo": ScreenVideo.enabled,
+                            "recordThenProcess": UserDefaults.standard.bool(forKey: "recordThenProcess"), "fineSurface": ProcessingQueue.fineSurface],
                "coreOrder": "assumed: efficiency cores first in the processor list",
                "neuralEngine": "not observable; Vision/Core ML calls are timed (compute units: all)"])
         if timer == nil {
@@ -110,7 +112,7 @@ final class PerfLog: @unchecked Sendable {
         guard let file else { return }
         lastFile = file
         let summary = file.deletingPathExtension().appendingPathExtension("summary.json")
-        var out: [String: Any] = ["pCores": Self.cores.p, "eCores": Self.cores.e]
+        var out: [String: Any] = ["pCores": Self.cores.p, "eCores": Self.cores.e, "build": BuildStamp.text]
         // Per-scan totals, to compare heat before/after changes.
         let minutes = max(0.001, totals.elapsed / 60)
         out["total"] = [

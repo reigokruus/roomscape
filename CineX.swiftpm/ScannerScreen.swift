@@ -774,13 +774,16 @@ struct ScanHud: Equatable {
         case .normal:
             break
         }
+        // Points-only (as on Android): the hints talk about points, not a mesh turning white
+        let pointsOnly = LivePreview.livePoints
         if spot < 0 || points < 3000 {
-            return ("Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas", 1)
+            return (pointsOnly ? "Walk slowly and sway the phone over the room: points appear as it's captured"
+                    : "Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas", 1)
         }
         if tooFast && spot < 0.7 { return ("Too fast. Slow down and sway gently over this spot", 2) }
-        if spot < 0.35 { return ("Sway the phone slowly over this spot until the mesh covers it in white", 2) }
+        if spot < 0.35 { return (pointsOnly ? "Sway the phone slowly over this spot" : "Sway the phone slowly over this spot until the mesh covers it in white", pointsOnly ? 1 : 2) }
         if spot < spotDone { return ("Good. Keep swaying gently here a little longer", 1) }
-        return ("This spot is done. Move on to the next orange area", 0)
+        return (pointsOnly ? "This spot is done. Move on" : "This spot is done. Move on to the next orange area", 0)
     }
 }
 

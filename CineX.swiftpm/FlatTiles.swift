@@ -351,6 +351,34 @@ final class FlatTiles {
     }
     var usedRows: Int { lock.lock(); defer { lock.unlock() }; return (slots + Self.perRow - 1) / Self.perRow }
 
+    /// Hiding the dots around painted tiles (as on Android): up to 16 planes with the most tiles, each a 256 × 256
+    /// grid of tiles (±38 m) in one byte each: 0 none, 128 a tile, 255 a tile the depth confirmed 4+ times (it also hides
+    /// dots further in front: a stale copy of the wall after a jump). The shader hides a dot from 20 cm (35 cm) in
+    /// front of a tile to `behind` metres behind it (15 cm, the floor 3 m: reflections).
+    struct Mask { var planes: [SIMD4<Float>] = [], us: [SIMD4<Float>] = [], vs: [SIMD4<Float>] = []; var bytes = [UInt8](); var version = -1 }
+    static let maskPlanes = 16, maskGrid = 256
+    func mask() -> Mask {
+        lock.lock(); defer { lock.unlock() }
+        var per: [Int: Int] = [:]
+        for t in tiles.values where t.score > 0 { per[t.plane, default: 0] += 1 }
+        let order = per.keys.sorted { per[$0]! > per[$1]! }.prefix(Self.maskPlanes)
+        var m = Mask(); m.version = version
+        m.bytes = [UInt8](repeating: 0, count: Self.maskGrid * Self.maskGrid * Self.maskPlanes)
+        var layer: [Int: Int] = [:]
+        for (i, pi) in order.enumerated() {
+            layer[pi] = i
+            let p = planes[pi]
+            m.planes.append(SIMD4(p.n, p.d)); m.us.append(SIMD4(p.u, pi == floorIdx ? 3.0 : 0.15)); m.vs.append(SIMD4(p.v, 0))
+        }
+        for t in tiles.values where t.score > 0 {
+            guard let l = layer[t.plane] else { continue }
+            let a = t.iu + 128, b = t.iv + 128
+            guard a >= 0, a < Self.maskGrid, b >= 0, b < Self.maskGrid else { continue }
+            m.bytes[(l * Self.maskGrid + b) * Self.maskGrid + a] = t.seen >= 4 ? 255 : 128
+        }
+        return m
+    }
+
     /// The shared tiles.json of a .rmsc (docs/rmsc-format.md "Flat tiles"): each tile's corners in metres, floor moved
     /// to y = 0 by `floorY`, and its pixels in tiles.png (the atlas rows in use). Nil when no tile is painted.
     func sharedJSON(floorY: Float) -> Data? {
@@ -425,6 +453,38 @@ final class FlatTilesRenderer {
     private let depthState: MTLDepthStencilState
     private let sampler: MTLSamplerState
     private var buffer: MTLBuffer?, count = 0, builtVersion = -1
+    private var maskTexture: MTLTexture?, maskVersion = -1
+    /// For the dots' shader (LiveDiscRenderer): the planes, and how many are in use.
+    struct MaskUniforms { var p = [SIMD4<Float>](repeating: .zero, count: 16), u = [SIMD4<Float>](repeating: .zero, count: 16), v = [SIMD4<Float>](repeating: .zero, count: 16), n: Float = 0 }
+    private var maskUniforms = MaskUniforms()
+
+    /// Before drawing the dots: the tile mask at vertex texture 0 and its planes at vertex buffer 3 (none when off).
+    func bindMask(_ encoder: MTLRenderCommandEncoder) {
+        if maskTexture == nil {   // always bound (the shader declares it), empty until there are tiles
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: FlatTiles.maskGrid, height: FlatTiles.maskGrid * FlatTiles.maskPlanes, mipmapped: false)
+            d.usage = .shaderRead; d.storageMode = .shared
+            maskTexture = device.makeTexture(descriptor: d)
+        }
+        if FlatTiles.enabled, maskVersion != tiles.version {
+            let m = tiles.mask()
+            maskVersion = m.version
+            if maskTexture == nil {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: FlatTiles.maskGrid, height: FlatTiles.maskGrid * FlatTiles.maskPlanes, mipmapped: false)
+                d.usage = .shaderRead; d.storageMode = .shared
+                maskTexture = device.makeTexture(descriptor: d)
+            }
+            m.bytes.withUnsafeBytes { maskTexture?.replace(region: MTLRegionMake2D(0, 0, FlatTiles.maskGrid, FlatTiles.maskGrid * FlatTiles.maskPlanes), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: FlatTiles.maskGrid) }
+            var u = MaskUniforms()
+            for i in 0..<m.planes.count { u.p[i] = m.planes[i]; u.u[i] = m.us[i]; u.v[i] = m.vs[i] }
+            u.n = Float(m.planes.count)
+            maskUniforms = u
+        }
+        var flat = [SIMD4<Float>](); flat.reserveCapacity(49)
+        flat += maskUniforms.p; flat += maskUniforms.u; flat += maskUniforms.v
+        flat.append(SIMD4(FlatTiles.enabled ? maskUniforms.n : 0, 0, 0, 0))
+        encoder.setVertexBytes(flat, length: flat.count * MemoryLayout<SIMD4<Float>>.stride, index: 3)
+        if let maskTexture { encoder.setVertexTexture(maskTexture, index: 0) }
+    }
 
     private struct Uniforms { var viewProjection: simd_float4x4; var now: Float; var pad: SIMD3<Float> = .zero }
 
