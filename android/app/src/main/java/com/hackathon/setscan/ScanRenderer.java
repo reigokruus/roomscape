@@ -4047,6 +4047,53 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void exitWalk() { walking = false; walkMove = 0; }
 
+    // ---- Measure (rk 10 Nov): tap two spots on the scanned surface in Enter the room, see the distance ----
+    /** The view matrix of the last drawn frame, for the measure overlay (copied each frame). */
+    final float[] shownMvp = new float[16];
+    volatile int shownW, shownH;
+
+    /** GL thread: the scanned surface under a screen spot (ray against the surface mesh; else the nearest scan point
+     *  close to the ray), or null. */
+    float[] measurePick(float tx, float ty) {
+        float[] inv = new float[16];
+        if (!Matrix.invertM(inv, 0, viewMvp, 0)) return null;
+        float nx = tx / width * 2 - 1, ny = 1 - ty / height * 2;
+        float[] a = new float[4], b = new float[4];
+        Matrix.multiplyMV(a, 0, inv, 0, new float[]{nx, ny, -1, 1}, 0);
+        Matrix.multiplyMV(b, 0, inv, 0, new float[]{nx, ny, 1, 1}, 0);
+        for (int i = 0; i < 3; i++) { a[i] /= a[3]; b[i] /= b[3]; }
+        float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+        float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz); if (len < 1e-6f) return null;
+        dx /= len; dy /= len; dz /= len;
+        float best = Float.MAX_VALUE;
+        FloatBuffer mp = meshPosAll != null ? meshPosAll : tsdf.meshPos; int mv = meshPosAll != null ? meshVerts : tsdf.meshVerts;
+        if (mp != null) for (int t = 0; t + 2 < mv; t += 3) {
+            int o = t * 3;
+            float x0 = mp.get(o), y0 = mp.get(o + 1), z0 = mp.get(o + 2);
+            float e1x = mp.get(o + 3) - x0, e1y = mp.get(o + 4) - y0, e1z = mp.get(o + 5) - z0;
+            float e2x = mp.get(o + 6) - x0, e2y = mp.get(o + 7) - y0, e2z = mp.get(o + 8) - z0;
+            float px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
+            float det = e1x * px + e1y * py + e1z * pz;
+            if (Math.abs(det) < 1e-9f) continue;
+            float f = 1 / det, sx = a[0] - x0, sy = a[1] - y0, sz = a[2] - z0;
+            float u = (sx * px + sy * py + sz * pz) * f; if (u < 0 || u > 1) continue;
+            float qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
+            float v = (dx * qx + dy * qy + dz * qz) * f; if (v < 0 || u + v > 1) continue;
+            float tt = (e2x * qx + e2y * qy + e2z * qz) * f;
+            if (tt > 0.05f && tt < best) best = tt;
+        }
+        if (best < Float.MAX_VALUE) return new float[]{a[0] + dx * best, a[1] + dy * best, a[2] + dz * best};
+        // No surface there: the nearest scan point within 3 cm of the ray.
+        float bt = Float.MAX_VALUE; int bi = -1;
+        for (int i = 0; i < count; i++) {
+            float px = pos.get(i * 3) - a[0], py = pos.get(i * 3 + 1) - a[1], pz = pos.get(i * 3 + 2) - a[2];
+            float t = px * dx + py * dy + pz * dz; if (t < 0.05f || t >= bt) continue;
+            float d2 = px * px + py * py + pz * pz - t * t;
+            if (d2 < 0.03f * 0.03f) { bt = t; bi = i; }
+        }
+        return bi < 0 ? null : new float[]{pos.get(bi * 3), pos.get(bi * 3 + 1), pos.get(bi * 3 + 2)};
+    }
+
     /** Drag to look around (the scene follows the finger); pitch kept short of straight up or down. */
     void look(float dx, float dy) {
         float s = 0.002f * walkFov / 60f;
@@ -4195,6 +4242,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onDrawFrame(GL10 gl) {
+        try { onDrawFrameInner(gl); } finally { System.arraycopy(viewMvp, 0, shownMvp, 0, 16); shownW = width; shownH = height; }
+    }
+
+    private void onDrawFrameInner(GL10 gl) {
         long drawStartNs = System.nanoTime();
         if (lastFrameNs > 0) perf.frame((drawStartNs - lastFrameNs) / 1e6); // frame interval
         lastFrameNs = drawStartNs;

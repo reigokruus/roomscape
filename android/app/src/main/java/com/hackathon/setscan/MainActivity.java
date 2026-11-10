@@ -1258,6 +1258,20 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
         glp.leftMargin = dp(8);
         c.addView(gyro, glp);
+        // Measure (rk 10 Nov): tap two spots on the scan for the distance between them.
+        measureButton = new Button(this);
+        measureButton.setText("Measure");
+        Ios.textButton(measureButton);
+        measureButton.setOnClickListener(v -> setMeasuring(!measuring));
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
+        mlp.leftMargin = dp(8);
+        c.addView(measureButton, mlp);
+        measureClear = new Button(this);
+        measureClear.setText("Clear");
+        Ios.textButton(measureClear);
+        measureClear.setOnClickListener(v -> { measureOverlay.clearAll(); updateMeasureButtons(); });
+        measureClear.setVisibility(View.GONE);
+        c.addView(measureClear, mlp);
         c.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
         // Eye height: taller / shorter, 10 cm a tap, remembered.
         LinearLayout h = new LinearLayout(this);
@@ -1365,6 +1379,8 @@ public class MainActivity extends Activity {
         pillRow.setVisibility(View.VISIBLE);
         walkHint.setVisibility(state == 1 ? View.VISIBLE : View.GONE);
         walkControls.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
+        if (state != 2 && measuring) setMeasuring(false);
+        if (measureOverlay != null) measureOverlay.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
         walkTip.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
         heightLabel.setText(String.format(java.util.Locale.US, "%.2f m", renderer.eyeH));
         // Standing in the room uses the whole screen; otherwise the 3D view ends above the panel.
@@ -1386,6 +1402,22 @@ public class MainActivity extends Activity {
         if (walkState == 2 && act == MotionEvent.ACTION_MOVE && pc == 1 && !multiTouch) {
             renderer.look(e.getX() - lastX, e.getY() - lastY);
             lastX = e.getX(); lastY = e.getY();
+        }
+        if (walkState == 2 && measuring && act == MotionEvent.ACTION_UP && !multiTouch && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
+            float tx = e.getX(), ty = e.getY();
+            long held = e.getEventTime() - downTime;
+            if (held >= 500) { if (measureOverlay.removeAt(tx, ty)) { toast("Measurement removed"); updateMeasureButtons(); } return true; }
+            if (held < 300) {
+                glView.queueEvent(() -> {
+                    float[] p = renderer.measurePick(tx, ty);
+                    runOnUiThread(() -> {
+                        if (p == null) { toast("Nothing scanned there"); return; }
+                        measureOverlay.add(p, renderer.walkFloorY());
+                        updateMeasureButtons();
+                    });
+                });
+            }
+            return true;
         }
         if (act == MotionEvent.ACTION_UP && !multiTouch && e.getEventTime() - downTime < 300
                 && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
@@ -1641,6 +1673,29 @@ public class MainActivity extends Activity {
     String claudeKey() {
         String k = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
         return k == null || k.trim().isEmpty() ? null : k.trim();
+    }
+
+    private Button measureButton, measureClear;
+    private boolean measuring;
+    private MeasureOverlay measureOverlay;
+
+    private void setMeasuring(boolean on) {
+        measuring = on;
+        if (measureOverlay == null) {
+            measureOverlay = new MeasureOverlay(this, renderer);
+            ((android.view.ViewGroup) glView.getParent()).addView(measureOverlay, ((android.view.ViewGroup) glView.getParent()).indexOfChild(glView) + 1,
+                    new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        }
+        measureOverlay.setVisibility(walkState == 2 ? View.VISIBLE : View.GONE);
+        if (!on) measureOverlay.cancelPending();
+        if (on) toast("Tap two spots on the scan. Hold a label to remove it.");
+        updateMeasureButtons();
+    }
+
+    private void updateMeasureButtons() {
+        if (measureButton == null) return;
+        measureButton.setText(measuring ? "Measure: on" : "Measure");
+        measureClear.setVisibility(measureOverlay != null && measureOverlay.count() > 0 ? View.VISIBLE : View.GONE);
     }
 
     private HoldRing holdRing;
