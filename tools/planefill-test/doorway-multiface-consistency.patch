@@ -1,0 +1,87 @@
+diff --git a/android/app/src/main/java/com/hackathon/setscan/DoorwayFinder.java b/android/app/src/main/java/com/hackathon/setscan/DoorwayFinder.java
+index 0502189..ed9ec2e 100644
+--- a/android/app/src/main/java/com/hackathon/setscan/DoorwayFinder.java
++++ b/android/app/src/main/java/com/hackathon/setscan/DoorwayFinder.java
+@@ -20,6 +20,8 @@ final class DoorwayFinder {
+     static float LINTEL_SHARE = 0.34f;
+     /** How far the scanned surface reaches into an opening at each edge (about half the 4 cm voxel). */
+     static float EDGE_GROWTH = 0.02f;
++    /** A face along a wall's normal is tried when it holds at least this share of the fullest one's points. */
++    static float OFFSET_PEAK = 0.25f, MIN_FACE = 0.6f;
+     static final float CELL = 0.02f, NEAR = 0.06f, MIN_W = 0.6f, MAX_W = 1.3f, MIN_H = 1.75f, MAX_H = 2.4f;
+ 
+     static final class Doorway {
+@@ -60,18 +62,33 @@ final class DoorwayFinder {
+             float ax = walls[w], az = walls[w + 1], bx = walls[w + 2], bz = walls[w + 3];
+             float len = (float) Math.hypot(bx - ax, bz - az); if (len < MIN_W + 0.2f) continue;
+             float ux = (bx - ax) / len, uz = (bz - az) / len, nx = -uz, nz = ux;
+-            // The wall's real offset: the median distance of points near it (the outline can be a few cm off).
+-            float[] ds = new float[n]; int dn = 0;
++            // Where along the wall's normal the surface really is. A door frame has several parallel faces close
++            // together (the wall, the frame's reveal, an open door leaf): the plane given can be any of them, and the
++            // opening only shows on the wall's own face (14:09 replays: the same door found 82 or 92 cm wide, or not at
++            // all, as the plane fitted the wall, the reveal or the leaf). So every well-filled face within 30 cm is tried.
++            int nb = 31; int[] hist = new int[nb]; int dn = 0;   // 2 cm bins over -0.3..0.3 m
+             for (int i = 0; i < n; i++) {
+                 float px = xyz[i * 3] - ax, py = xyz[i * 3 + 1] - floorY, pz = xyz[i * 3 + 2] - az;
+                 if (py < 0.3f || py > 1.8f) continue;
+                 float u = px * ux + pz * uz, d = px * nx + pz * nz;
+-                if (u < 0 || u > len || Math.abs(d) > 0.15f) continue;
+-                ds[dn++] = d;
++                if (u < 0 || u > len || Math.abs(d) >= 0.31f) continue;
++                hist[Math.min(nb - 1, Math.max(0, Math.round(d / 0.02f) + 15))]++; dn++;
+             }
+             if (dn < 200) continue;
+-            Arrays.sort(ds, 0, dn);
+-            float off = ds[dn / 2];
++            int hmax = 0; for (int h : hist) hmax = Math.max(hmax, h);
++            ArrayList<Float> offs = new ArrayList<>();
++            for (int b = 0; b < nb; b++) {
++                int sm3 = hist[b] + (b > 0 ? hist[b - 1] : 0) + (b + 1 < nb ? hist[b + 1] : 0);
++                boolean peak = (b == 0 || hist[b] >= hist[b - 1]) && (b == nb - 1 || hist[b] > hist[b + 1]);
++                if (!peak || hist[b] < Math.max(60, OFFSET_PEAK * hmax)) continue;
++                // the weighted middle of the peak's three bins
++                float wsum = 0, dsum = 0; for (int k = Math.max(0, b - 1); k <= Math.min(nb - 1, b + 1); k++) { wsum += hist[k]; dsum += hist[k] * (k - 15) * 0.02f; }
++                float o = dsum / Math.max(1, wsum);
++                boolean near = false; for (float q : offs) if (Math.abs(q - o) < 0.05f) near = true;
++                if (!near) offs.add(o);
++            }
++            if (offs.isEmpty()) continue;
++            for (float off : offs) {
+             int gw = (int) (len / CELL) + 1, gh = (int) (MAX_H + 0.3f) / 1 * 50;
+             gh = (int) ((MAX_H + 0.3f) / CELL);
+             int[] occ = new int[gw * gh];
+@@ -95,6 +112,9 @@ final class DoorwayFinder {
+             // smooth over 3 columns
+             float[] sm = new float[gw];
+             for (int c = 0; c < gw; c++) { float s = 0; int k = 0; for (int j = c - 1; j <= c + 1; j++) if (j >= 0 && j < gw) { s += solid[j]; k++; } sm[c] = s / k; }
++            // a face with less than 1.1 m of solid surface along it is a door leaf or a frame's side, not a wall
++            int solidCols = 0; for (int c2 = 0; c2 < gw; c2++) if (sm[c2] >= 0.15f) solidCols++;
++            if (solidCols * CELL < MIN_FACE) { if (why != null) why.append(String.format(java.util.Locale.US, " wall %d face %+.2f: only %.2f m of surface", w / 4, off, solidCols * CELL)); continue; }
+             int c = 0;
+             while (c < gw) {
+                 if (sm[c] >= 0.15f) { c++; continue; }
+@@ -172,6 +192,7 @@ final class DoorwayFinder {
+                 if (seen != null && !dw.open) { if (why != null) why.append(" " + dw + " -> not taken (no see-through)"); continue; }
+                 out.add(dw);
+             }
++            }
+         }
+         // The same opening found from two overlapping wall planes: keep the better seen one.
+         List<Doorway> kept = new ArrayList<>();
+@@ -181,7 +202,14 @@ final class DoorwayFinder {
+             for (int i = 0; i < kept.size(); i++) {
+                 Doorway k = kept.get(i);
+                 float dx = (d.x0 + d.x1 - k.x0 - k.x1) / 2, dz = (d.z0 + d.z1 - k.z0 - k.z1) / 2;
+-                if (dx * dx + dz * dz < 0.4f * 0.4f) { dup = true; if (d.seenShare > k.seenShare) kept.set(i, d); break; }
++                if (dx * dx + dz * dz < 0.4f * 0.4f) {
++                    // the same opening on several parallel faces (wall, reveal): the clear opening is the narrowest one
++                    // the depth clearly saw through
++                    dup = true;
++                    boolean dClear = d.seenShare >= 0.5f, kClear = k.seenShare >= 0.5f;
++                    if (dClear && (!kClear || d.width < k.width) || !dClear && !kClear && d.seenShare > k.seenShare) kept.set(i, d);
++                    break;
++                }
+             }
+             // an unsure opening right next to another one (a frame's reveal or the door leaf at an angle) is not a doorway
+             if (!dup && !d.sure) for (Doorway k : kept) {
