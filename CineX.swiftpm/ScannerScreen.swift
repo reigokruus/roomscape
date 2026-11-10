@@ -44,6 +44,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     /// LiDAR points and live discs, read from RoomPlan's own ARKit session.
     let live: LiveCapture
     private var running = false
+    /// RoomPlan stopped at its size limit (about 9 × 9 m; rk 10 Nov 20:09) but the scan carries on with ARKit alone:
+    /// points, tiles, photos and the recording keep going; RoomPlan's room (walls, doors) is what it had up to then.
+    private var roomPlanData: CapturedRoomData?
+    @Published private(set) var beyondRoomPlan = false
     private var processingTask: Task<Void, Never>?
     /// The saved scan this pass improves (see `ImproveScan.swift`), and its world map.
     let improving: SavedScan?
@@ -160,6 +164,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
 
     private func beginCapture() {
         setPhase(.scanning)
+        beyondRoomPlan = false
+        roomPlanData = nil
         // No coaching overlay (the animated phone over a grid, "Move device to start" and the other prompts): the
         // live mesh already shows where the scan has been.
         // Hardware use while scanning (PerfLog): kept with the scan as perf-scan.jsonl (perf-continue for a pass).
@@ -203,6 +209,16 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         running = false
         live.stop()
         let session = captureView.captureSession.arSession
+        if beyondRoomPlan, let data = roomPlanData {
+            // RoomPlan already ended (size limit): build its room from what it had, with all the points
+            worldMapTask = Task {
+                let map = await WorldMapStore.capture(from: session)
+                session.pause()
+                return map
+            }
+            process(data, sessionError: nil)
+            return
+        }
         captureView.captureSession.stop(pauseARSession: false)
         // Continue scan: move this pass's map onto the saved scan's coordinates (by the hand-off guess), so it can
         // replace the saved map and the next Continue scan recognises the new areas too. The points and photos
@@ -237,6 +253,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             running = false
             if phase == .relocalizing {
                 relocalizeView?.session.pause()
+            } else if beyondRoomPlan {
+                captureView.captureSession.arSession.pause()   // RoomPlan already ended at its size limit
             } else {
                 captureView.captureSession.stop()
             }
@@ -410,6 +428,20 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
 
     private func process(_ data: CapturedRoomData, sessionError: Error?) {
         log.info("session ended, error: \(String(describing: sessionError), privacy: .public)")
+        // Too big for RoomPlan: keep scanning without it (a new scan only; Continue scan keeps the old behaviour).
+        if let error = sessionError as? RoomCaptureSession.CaptureError, case .exceedSceneSizeLimit = error,
+           phase == .scanning, running, improving == nil, !beyondRoomPlan {
+            roomPlanData = data
+            beyondRoomPlan = true
+            let session = captureView.captureSession.arSession
+            let configuration = ARWorldTrackingConfiguration()
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) { configuration.frameSemantics = [.sceneDepth] }
+            configuration.worldAlignment = .gravity
+            session.run(configuration)   // no reset options: the same coordinates, the scan carries on
+            log.info("RoomPlan reached its size limit: scanning on with ARKit only")
+            live.perf?.mark("RoomPlan size limit: scanning on without it")
+            return
+        }
         running = false
         live.stop()
         // The session ended with an error and the user didn't ask to finish. Some of RoomPlan's own stops (area too
@@ -739,6 +771,7 @@ struct ScannerScreen: View {
         var notes: [String] = []
         if let area = controller.areaNote { notes.append(area) }
         if controller.improving != nil { notes.append("✓ Saved room recognised. Keep scanning, the saved part is shown in blue") }
+        if controller.beyondRoomPlan { notes.append("Large space: points and tiles keep going; walls and doors come from the first 9 × 9 m") }
         if controller.powerSaving { notes.append("The phone is warm, so the live mesh updates less often. Keep scanning") }
         if elapsed > ScanController.suggestedMaxScanSeconds { notes.append("Long scans heat up the phone. Tap Done once every wall is covered in white") }
         return notes
