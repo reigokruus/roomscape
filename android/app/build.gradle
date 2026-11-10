@@ -65,3 +65,9 @@ tasks.register('verifyCatalogFeed', JavaExec) {
     if (project.hasProperty('catalogSmokeLocal')) args '--local', file('src/main/assets/equipment-catalog.json').absolutePath
     doFirst { classpath = tasks.named('testDebugUnitTest').get().classpath }
 }
+
+// RmscTilesTest on a real scan: ./gradlew testDebugUnitTest -PtilesScan=<scan folder> -PtilesOut=<folder>
+tasks.withType(Test).configureEach {
+    if (project.hasProperty('tilesScan')) systemProperty 'tiles.scan', project.property('tilesScan')
+    if (project.hasProperty('tilesOut')) systemProperty 'tiles.out', project.property('tilesOut')
+}

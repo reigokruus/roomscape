@@ -24,6 +24,8 @@ Apple UTI: `com.roomscape.rmsc`, conforming to `public.zip-archive` and `public.
 | `room.glb` | no | The photo-textured mesh, the same file as "Export .glb". glTF 2.0 binary, unlit materials, one per photo |
 | `mesh.ply` | no | The untextured scan mesh: binary_little_endian, `float x y z`, `uchar red green blue`, faces as `list uchar int vertex_indices` |
 | `thumb.jpg` | no | A preview picture, about 512 px wide |
+| `tiles.json` + `tiles.png` | no | Flat tiles: 30 cm squares of camera picture laid on flat walls and the floor (Android, from 10 Nov 2026). See "Flat tiles" below |
+| `android/tiles.json` | no | Android's own form of the same tiles (its planes and grid, the scan's world before the floor shift), for a lossless re-import on Android |
 | `ios/…`, `android/…` | no | Platform extras, such as the ARKit world map (`ios/worldmap.arexperience`) or Android splats. Other platforms ignore them, and a reader must keep working without them |
 | `android/doorways.json` | no | Doorways the Android app found (open wall openings): `[{"x0", "z0", "x1", "z1", "floorY", "width", "height", "open"}]`, the opening's bottom corners in the scan's world (before the floor shift), metres. A first version; a shared `structure` list (with iPhone RoomPlan doors) is proposed, not yet in the manifest |
 | `android/measurements.json` | no | Measurements the user kept (Measure in Enter the room): `[[x0, y0, z0, x1, y1, z1], …]`, the two ends in the scan's world (before the floor shift), metres. A shared `measurements` list in the manifest (with an optional name) is proposed, not yet in the manifest |
@@ -32,6 +34,17 @@ Apple UTI: `com.roomscape.rmsc`, conforming to `public.zip-archive` and `public.
 Diagnostics that stay in the Android scan folder only (never in a `.rmsc`): `events-depth.bin` (depth frames ~3/s from 5 s before to 20 s after every map jump, tracking loss and resume, with ARCore's pose and the correction; at most 400 frames), `pose-track.bin` (ARCore's pose 10 times a second with time, tracking state and correction), `live-mesh.bin` (the last live doorway search's mesh). Videos are never in a `.rmsc`. On Android they stay in the scan folder and are shared separately from the Share menu: `recording.mp4` (the camera, ARCore recording; "Share scan video") and `screen.mp4` (what the screen showed while scanning: the scan view at ~480 px wide and 8 fps with the hint, tracking state, view mode, fusion state and the event log's time burnt in at the top; "Share screen video"; debug switch "Screen video", on by default).
 
 A reader must ignore files it doesn't know. A writer may leave out every optional file.
+
+### Flat tiles (`tiles.json` + `tiles.png`, optional)
+
+```json
+{"version": 1, "tileSize": 0.3, "image": "tiles.png", "imageWidth": 4096, "imageHeight": 2976,
+ "tiles": [{"corners": [[x, y, z], [x, y, z], [x, y, z], [x, y, z]],
+            "pixels": [[px, py], [px, py], [px, py], [px, py]],
+            "normal": [nx, ny, nz]}]}
+```
+
+Each tile is a flat square (`tileSize` metres a side). `corners` are its four corners in the package's frame (metres, +Y up, floor at y = 0 like `points.ply`), in order around the square: draw it as the triangles (0, 1, 2) and (0, 2, 3). `pixels` are the matching corners in `tiles.png`, in pixels from its top-left (x right, y down); each tile has its own 96 x 96 px square of the image. `normal` is the side the camera saw it from (the wall's or floor's outward side). The points under a tile (within a few cm of it) may still be in `points.ply`; a viewer that draws the tiles can hide points within about 7 cm in front of and 10 cm behind a tile. Android writes and reads this from 10 Nov 2026; the iPhone app and the web viewer ignore it for now (reading it there is a follow-up).
 
 ### manifest.json
 

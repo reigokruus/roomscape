@@ -74,6 +74,35 @@ final class Rmsc {
      * Everything shared is written with the floor at y = 0, like the iPhone's packages (floorY 0). How far it was moved
      * goes in android/shift.json, so this app can put its own android/ extras (marks, splats, path) back in place on import.
      */
+    /** The shared tiles.json from Android's own one (FlatTiles.snapshot): every tile as a quad, corners in metres in
+     *  the package's frame (+Y up, floor moved to y = 0 by floorY), in order (0,0) (1,0) (1,1) (0,1) of the tile's own
+     *  grid, each with its pixel in tiles.png (x right, y down from the top). Null when there are no tiles. */
+    static String sharedTiles(String raw, float floorY) throws org.json.JSONException {
+        JSONObject o = new JSONObject(raw);
+        float tile = (float) o.getDouble("tile"); int px = o.getInt("px"), atlas = o.getInt("atlas"), rows = o.getInt("rows"), perRow = atlas / px;
+        JSONArray pa = o.getJSONArray("planes"), ta = o.getJSONArray("tiles"), out = new JSONArray();
+        int[][] k = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+        for (int i = 0; i < ta.length(); i++) {
+            JSONArray t = ta.getJSONArray(i);
+            JSONArray p = pa.getJSONArray(t.getInt(0));
+            double nx = p.getDouble(0), ny = p.getDouble(1), nz = p.getDouble(2), d = p.getDouble(3);
+            int iu = t.getInt(1), iv = t.getInt(2), slot = t.getInt(3);
+            int x0 = (slot % perRow) * px, y0 = (slot / perRow) * px;
+            JSONArray corners = new JSONArray(), pix = new JSONArray();
+            for (int[] c : k) {
+                double a = (iu + c[0]) * tile, b = (iv + c[1]) * tile;
+                double x = p.getDouble(4) * a + p.getDouble(7) * b - nx * d, y = p.getDouble(5) * a + p.getDouble(8) * b - ny * d, z = p.getDouble(6) * a + p.getDouble(9) * b - nz * d;
+                corners.put(new JSONArray().put(r4(x)).put(r4(y - floorY)).put(r4(z)));
+                pix.put(new JSONArray().put(x0 + c[0] * px).put(y0 + c[1] * px));
+            }
+            out.put(new JSONObject().put("corners", corners).put("pixels", pix).put("normal", new JSONArray().put(r4(nx)).put(r4(ny)).put(r4(nz))));
+        }
+        if (out.length() == 0) return null;
+        return new JSONObject().put("version", 1).put("tileSize", tile).put("image", "tiles.png").put("imageWidth", atlas).put("imageHeight", rows * px)
+                .put("tiles", out).toString();
+    }
+    private static double r4(double v) { return Math.round(v * 10000) / 10000.0; }
+
     /** Debug switch "Points under tiles: hidden": the points under the scan's tiles are left out of what's shared
      *  (this in-memory copy only; the saved points.bin is never changed). */
     static void dropUnderTiles(ScanStore.Data d, File dir) {
@@ -213,6 +242,18 @@ final class Rmsc {
         copyIf(z, new File(dir, "path.bin"), "android/path.bin");
         copyIf(z, new File(dir, "doorways.json"), "android/doorways.json");
         copyIf(z, new File(dir, "measurements.json"), "android/measurements.json");
+        // Flat tiles (optional, docs/rmsc-format.md "tiles.json"): the shared form with each tile's corners in the
+        // package's frame (floor at 0) and its square in tiles.png; Android's own form (its planes and grid, scan world)
+        // in android/tiles.json for a lossless re-import.
+        File tj = new File(dir, "tiles.json"), tp = new File(dir, "tiles.png");
+        if (tj.exists() && tp.exists()) try {
+            String raw = text(tj), tilesShared = sharedTiles(raw, floorY);
+            if (tilesShared != null) {
+                put(z, "tiles.json", tilesShared.getBytes("UTF-8"));
+                copyIf(z, tp, "tiles.png");
+                put(z, "android/tiles.json", raw.getBytes("UTF-8"));
+            }
+        } catch (Exception ignored) { }
         // Parts of the package this app doesn't use (an iPhone's ios/ folder) go back out unchanged (mesh.ply is above).
         putTree(z, new File(dir, "rmsc-extra"), "");
         putDiagnostics(z, dir);
@@ -753,6 +794,9 @@ final class Rmsc {
             ScanStore.copyTree(new File(tmp, "manifest.json"), new File(out, "source-manifest.json"));
             File sp = new File(tmp, "android/splats.bin");
             if (sp.exists()) copy(sp, new File(out, "splats.bin"));
+            // flat tiles from this app: its own form, in the scan world the points were put back into (above)
+            File atj = new File(tmp, "android/tiles.json"), atp = new File(tmp, "tiles.png");
+            if (atj.exists() && atp.exists()) { copy(atj, new File(out, "tiles.json")); copy(atp, new File(out, "tiles.png")); }
             if (d.thumb != null) d.thumb.recycle();
             return out;
         } finally {
