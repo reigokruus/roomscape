@@ -137,6 +137,35 @@ final class FloorArea {
         while (!q.isEmpty()) { int d = q.poll(); int x = d % nx, z = d / nx;
             for (int e : new int[]{x > 0 ? d - 1 : -1, x < nx - 1 ? d + 1 : -1, z > 0 ? d - nx : -1, z < nz - 1 ? d + nx : -1})
                 if (e >= 0 && in[e] && allowed[e] && owner[e] == 0) { owner[e] = owner[d]; q.add(e); } }
+        // Open-plan (rk 10 Nov 23:02: living room, kitchen and hall as one 36 m² room): a big room splits again where
+        // it narrows to under ~1.5 m (a 75 cm disc), when that leaves two or more parts of 1 m² core or more
+        int k0 = k;
+        for (int id = 1; id <= k0; id++) {
+            int size = 0; for (int c = 0; c < n; c++) if (owner[c] == id) size++;
+            if (size * CELL * CELL < 20f) continue;
+            boolean[] mine = new boolean[n]; for (int c = 0; c < n; c++) mine[c] = owner[c] == id;
+            boolean[] core2 = erode(mine, nx, nz, 15);
+            int[] lab2 = new int[n]; java.util.ArrayList<Integer> parts = new java.util.ArrayList<>(); int kk = 0;
+            for (int c = 0; c < n; c++) if (core2[c] && lab2[c] == 0) {
+                kk++; int sz = 0; q.add(c); lab2[c] = kk;
+                while (!q.isEmpty()) { int d = q.poll(); sz++; int x = d % nx, z = d / nx;
+                    for (int e : new int[]{x > 0 ? d - 1 : -1, x < nx - 1 ? d + 1 : -1, z > 0 ? d - nx : -1, z < nz - 1 ? d + nx : -1})
+                        if (e >= 0 && core2[e] && lab2[e] == 0) { lab2[e] = kk; q.add(e); } }
+                parts.add(sz);
+            }
+            int big = 0; for (int sz : parts) if (sz * CELL * CELL >= 1f) big++;
+            if (big < 2) continue;
+            // each big part becomes a room; the rest of the room's floor goes to the nearest part
+            int[] newId = new int[kk + 1];
+            boolean first = true;
+            for (int j = 1; j <= kk; j++) if (parts.get(j - 1) * CELL * CELL >= 1f) { newId[j] = first ? id : ++k; first = false; }
+            int[] own2 = new int[n];
+            for (int c = 0; c < n; c++) if (lab2[c] > 0 && newId[lab2[c]] > 0) { own2[c] = newId[lab2[c]]; q.add(c); }
+            while (!q.isEmpty()) { int d = q.poll(); int x = d % nx, z = d / nx;
+                for (int e : new int[]{x > 0 ? d - 1 : -1, x < nx - 1 ? d + 1 : -1, z > 0 ? d - nx : -1, z < nz - 1 ? d + nx : -1})
+                    if (e >= 0 && mine[e] && own2[e] == 0) { own2[e] = own2[d]; q.add(e); } }
+            for (int c = 0; c < n; c++) if (mine[c]) owner[c] = own2[c];
+        }
         int[] count2 = new int[k + 1];
         for (int c = 0; c < n; c++) count2[owner[c]]++;
         // rooms of 2 m² or more, biggest first; smaller bits stay with nobody
@@ -152,6 +181,9 @@ final class FloorArea {
             float[] wl = minRect(r.roomOf, i + 1, nx, nz); room.w = Math.max(wl[0], wl[1]); room.l = Math.min(wl[0], wl[1]);
             room.hull = orthoHullArea(r.roomOf, i + 1, nx, nz, wl[2]);
             wallRoom(room, r.roomOf, i + 1, g, nx, nz, wl[2]);
+            // no wall rectangle (open plan, walls not scanned): the smallest rectangle around its floor, so its sides
+            // still show and can be dragged (the area stays the seen floor until a side is moved)
+            if (room.rect == null) { room.rect = new float[]{wl[3], wl[3] + wl[0], wl[4], wl[4] + wl[1]}; room.deg = wl[2]; }
             r.rooms.add(room);
         }
         boolean[] main = new boolean[n];
@@ -306,7 +338,7 @@ final class FloorArea {
 
     /** The smallest rectangle (turned in 2° steps) around a room's cells: its width and length along its own walls. */
     private static float[] minRect(int[] roomOf, int id, int nx, int nz) {
-        float best = Float.MAX_VALUE; float[] out = {0, 0, 0};
+        float best = Float.MAX_VALUE; float[] out = {0, 0, 0, 0, 0};
         for (int deg = 0; deg < 90; deg += 2) {
             double a = Math.toRadians(deg); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
             float u0 = Float.MAX_VALUE, u1 = -Float.MAX_VALUE, v0 = Float.MAX_VALUE, v1 = -Float.MAX_VALUE;
@@ -316,7 +348,7 @@ final class FloorArea {
                 u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
             }
             float w = u1 - u0 + CELL, l = v1 - v0 + CELL;
-            if (w * l < best) { best = w * l; out[0] = w; out[1] = l; out[2] = deg; }
+            if (w * l < best) { best = w * l; out[0] = w; out[1] = l; out[2] = deg; out[3] = u0; out[4] = v0; }
         }
         return out;
     }
