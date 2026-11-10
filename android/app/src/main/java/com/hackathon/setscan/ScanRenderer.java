@@ -7586,14 +7586,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     : lastFail == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_LIGHT ? "Lost track: too dark. Turn on a light"
                     : "Lost track: move slowly, pointing at the floor or furniture";
         }
-        else if (d < 0 || count < 3000) { level = 1; hint = LIVE_MESH ? "Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas" : "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
+        else if (d < 0 || count < 3000) { level = 1; hint = LIVE_POINTS ? "Walk slowly and sway the phone over the room: points appear as it's captured" : LIVE_MESH ? "Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas" : "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
         else if (photoWanted && d >= 0.35f) { level = 1; hint = "Hold still a moment… taking a photo"; }
         else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
         else if (tooFast) { level = 2; hint = "Too fast: slow down, or the phone loses its place"; }
         else if (System.currentTimeMillis() < plainHintUntil) { level = 1; hint = "Plain wall: keep an edge or some detail in view"; }   // (was only on unfinished spots; rk 10 Nov 15:39: lost track after a fast scan)
-        else if (d < 0.35f) { level = 2; hint = LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
+        else if (d < 0.35f) { level = 1; hint = LIVE_POINTS ? "Sway the phone slowly over this spot" : LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
         else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
-        else { level = 0; hint = LIVE_MESH ? "This spot is done. Move on to the next orange area" : "This spot is done. Move on to the next red area"; }
+        else { level = 0; hint = LIVE_POINTS ? "This spot is done. Move on" : LIVE_MESH ? "This spot is done. Move on to the next orange area" : "This spot is done. Move on to the next red area"; }
         if (System.currentTimeMillis() - clearedAtMs < 3000) { hint = "Cleared, scan that spot again"; level = 1; }
         if (improveDir != null && contAuto) sub = improveT != null ? "✓ Saved room recognised. Keep scanning, the saved part is shown in blue"
                 : contBase == null ? "Loading the saved scan…" : "Point at a part you scanned before so it can find its place" + (contScore > 0 ? String.format(java.util.Locale.US, " (best match %.0f%%)", contScore * 100) : "");

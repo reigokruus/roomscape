@@ -31,13 +31,15 @@ final class FlatTiles {
     // tiles"): a mask of painted tiles per plane (first 8 planes, 256 x 256 tiles each, +-38 m), read in the points'
     // vertex shader; a point within 7 cm in front of or 15 cm behind a painted tile isn't drawn. Measured wall scatter
     // is ~6-7 cm (90%); things further in front (a drying rack) and further behind (the next room) stay. ----
-    static final int MP = 8, MG = 256;
-    static final String MASK_DECL = "uniform vec4 uTP[8]; uniform vec4 uTU[8]; uniform vec4 uTV[8]; uniform float uTN; uniform sampler2D uTMask;";
+    // (16:26 scan: dots stayed in front of a tile: flying pixels by the door frame sit 10-20 cm out; the band in front
+    // is 20 cm now, a real object like the drying rack stands further out; 16 planes instead of 8)
+    static final int MP = 16, MG = 256;
+    static final String MASK_DECL = "uniform vec4 uTP[16]; uniform vec4 uTU[16]; uniform vec4 uTV[16]; uniform float uTN; uniform sampler2D uTMask;";
     static final String MASK_TEST =
-            "  for (int i = 0; i < 8; i++) { if (float(i) >= uTN) break;" +
+            "  for (int i = 0; i < 16; i++) { if (float(i) >= uTN) break;" +
             "    float dd = dot(uTP[i].xyz, aPos.xyz) + uTP[i].w;" +
-            "    if (dd < 0.07 && dd > -0.15) { float a = floor(dot(uTU[i].xyz, aPos.xyz) / 0.30) + 128.0, b = floor(dot(uTV[i].xyz, aPos.xyz) / 0.30) + 128.0;" +
-            "      if (a >= 0.0 && a < 256.0 && b >= 0.0 && b < 256.0 && texture2DLod(uTMask, vec2((a + 0.5) / 256.0, (b + 256.0 * float(i) + 0.5) / 2048.0), 0.0).r > 0.5) hh = 1.0; } }";
+            "    if (dd < 0.20 && dd > -0.15) { float a = floor(dot(uTU[i].xyz, aPos.xyz) / 0.30) + 128.0, b = floor(dot(uTV[i].xyz, aPos.xyz) / 0.30) + 128.0;" +
+            "      if (a >= 0.0 && a < 256.0 && b >= 0.0 && b < 256.0 && texture2DLod(uTMask, vec2((a + 0.5) / 256.0, (b + 256.0 * float(i) + 0.5) / 4096.0), 0.0).r > 0.5) hh = 1.0; } }";
     private int maskTex; private final byte[] mask = new byte[MG * MG * MP]; private boolean maskDirty = true; private int maskN; private final int[] maskPlane = new int[MP];
 
     /** Before drawing points: the mask and planes for the shader (off: nothing hidden). Texture unit 3. */
@@ -60,19 +62,21 @@ final class FlatTiles {
         }
         GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTN"), np);
         if (np == 0) return;
-        float[] tp = new float[32], tu = new float[32], tv = new float[32];
+        float[] tp = new float[64], tu = new float[64], tv = new float[64];
         for (int i = 0; i < np; i++) { Plane p = planes.get(maskPlane[i]);
             tp[i * 4] = p.nx; tp[i * 4 + 1] = p.ny; tp[i * 4 + 2] = p.nz; tp[i * 4 + 3] = p.d;
             tu[i * 4] = p.ux; tu[i * 4 + 1] = p.uy; tu[i * 4 + 2] = p.uz; tv[i * 4] = p.vx; tv[i * 4 + 1] = p.vy; tv[i * 4 + 2] = p.vz; }
-        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTP"), 8, tp, 0);
-        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTU"), 8, tu, 0);
-        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTV"), 8, tv, 0);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTP"), 16, tp, 0);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTU"), 16, tu, 0);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTV"), 16, tv, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTMask"), 3);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
     }
-    static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; float born = -1, repainted = -1; }
+    static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; float born = -1, repainted = -1; int ring; boolean inferred; }
+    static final int GROW = 2;   // inferred tiles at most this many tiles from a depth-confirmed one
+    int grown;
     private final long base = System.currentTimeMillis();
     private float now() { return (System.currentTimeMillis() - base) / 1000f; }
 
@@ -185,6 +189,25 @@ final class FlatTiles {
             if (head <= 0.5f) { tooSlanted++; continue; }
             if (score > t.score * 1.25f) { t.pending = score; toPaint.add(t); } else notBetter++;
         }
+        // 6) Growth (rk 10 Nov 16:28: "treat it as an anchor"): next to painted tiles on this plane, a tile needs no depth
+        // coverage (plain walls give little), only no depth against it (nothing in front, not seen through), a fair
+        // view, and at most GROW tiles from a depth-confirmed one, so a wall can't run away through a doorway. Marked
+        // inferred; later depth still takes it back.
+        if (head > 0.5f) {
+            ArrayList<Tile> seeds = new ArrayList<>();
+            for (Tile t : tiles.values()) if (t.plane == pi && (t.score > 0 || toPaint.contains(t)) && t.ring < GROW) seeds.add(t);
+            float score = head / Math.max(0.3f, vdist);
+            for (Tile s0 : seeds) for (int[] dd : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+                long k = key(pi, s0.iu + dd[0], s0.iv + dd[1]);
+                if (tiles.containsKey(k)) continue;
+                int[] c = cnt.get(k);
+                if (c != null) { int tot = c[0] + c[1] + c[2]; if (c[1] > Math.max(3, 0.08f * tot) || c[2] > 0.2f * tot) continue; }
+                if (slots >= MAX_TILES) break;
+                Tile t = new Tile(); t.plane = pi; t.iu = s0.iu + dd[0]; t.iv = s0.iv + dd[1]; t.slot = slots++; t.score = -1;
+                t.ring = s0.ring + 1; t.inferred = true; t.pending = score * 0.9f;
+                tiles.put(k, t); toPaint.add(t); grown++;
+            }
+        }
         if (toPaint.isEmpty()) return null;
         Job j = new Job(); j.plane = pi; j.paint = toPaint; j.pose = pose; return j;
     }
@@ -197,8 +220,8 @@ final class FlatTiles {
     }
 
     String stats() {
-        return String.format(java.util.Locale.US, "flat tiles: %d shown on %d planes; %d attempts (%d no flat surface), %d tiles looked at: %d painted, %d too little depth, %d something in front, %d opening, %d too slanted, %d not a better view; %d taken back",
-                countShown(), planes.size(), attempts, noPlane, looked, painted, lowCover, blocked, opening, tooSlanted, notBetter, removed);
+        return String.format(java.util.Locale.US, "flat tiles: %d shown on %d planes; %d attempts (%d no flat surface), %d tiles looked at: %d painted, %d too little depth, %d something in front, %d opening, %d too slanted, %d not a better view; %d taken back; %d grown from neighbours",
+                countShown(), planes.size(), attempts, noPlane, looked, painted, lowCover, blocked, opening, tooSlanted, notBetter, removed, grown);
     }
 
     int countShown() { int c = 0; for (Tile t : tiles.values()) if (t.score > 0) c++; return c; }
@@ -346,7 +369,7 @@ final class FlatTiles {
         for (int pi = 0; pi < planes.size(); pi++) {
             Plane p = planes.get(pi);
             float dd = p.nx * x + p.ny * y + p.nz * z + p.d;
-            if (dd > 0.07f || dd < -0.15f) continue;
+            if (dd > 0.20f || dd < -0.15f) continue;
             int iu = (int) Math.floor((p.ux * x + p.uy * y + p.uz * z) / TILE), iv = (int) Math.floor((p.vx * x + p.vy * y + p.vz * z) / TILE);
             Tile t = tiles.get(key(pi, iu, iv));
             if (t != null && t.score > 0) return true;
