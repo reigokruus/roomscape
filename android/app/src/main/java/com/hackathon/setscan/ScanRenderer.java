@@ -4478,7 +4478,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 try { applyMode(); } catch (Exception e) { logError("configure", e); }
             }
         }
-        if (ts == TrackingState.TRACKING && lastTrackState != TrackingState.TRACKING) settleUntil = nowMs + 1500;
+        if (ts == TrackingState.TRACKING && lastTrackState != TrackingState.TRACKING) { settleUntil = nowMs + 1500; if (lastNewDepthMs > 0) lastNewDepthMs = nowMs; }   // depth gets 4 s after tracking returns
         lastTrackState = ts;
         if (ts == TrackingState.TRACKING) {
             camera.getPose().toMatrix(curPose, 0);
@@ -4535,8 +4535,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             updateGuide(camera, nowMs);
             recordPath(camera.getPose());
+        }
+        // Drawing: also while lost (rk 10 Nov 13:56: the room still vanished; everything below used to sit inside
+        // "only while tracking", so the held view never ran).
+        final boolean trackingNow = ts == TrackingState.TRACKING;
+        if (trackingNow || (everTracked && haveHeldView && !viewing)) {
             camera.getProjectionMatrix(proj, 0, 0.05f, 100f);
             camera.getViewMatrix(view, 0);
+            System.arraycopy(view, 0, rawView, 0, 16);
             // The scan lives in the corrected world (after a re-alignment): draw it from the corrected camera too, so it
             // sits on the camera picture (rk 10 Nov 11:17: "the view seemed off from where the scanned world and real
             // view should merge").
@@ -4546,8 +4552,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // whole room ... use the gyro to keep the position"), so the scan stays put and the user can aim back at
             // it. Back on track: 0.3 s from the held view to the real one.
             holding = everTracked && haveHeldView && (ts != TrackingState.TRACKING || needRealign);
-            if (holding) { heldView(view); System.arraycopy(view, 0, lastShownView, 0, 16); holdEndMs = 0; }
-            else {
+            if (holding && !trackingNow) { heldView(view); relAnchored = false; }
+            else if (holding) {
+                // ARCore tracks again but isn't lined up with the scan yet: from where the view was shown when it came
+                // back, follow ARCore's own movement since then (13:52 scan: tracking was back at 41 s, lined up at
+                // 66 s, and the view stayed pinned to where it was lost, "couldn't walk away from some fixed area").
+                if (!relAnchored) { System.arraycopy(rawView, 0, relRaw, 0, 16); System.arraycopy(lastShownView, 0, relShown, 0, 16); relAnchored = true; }
+                float[] ri = new float[16], t = new float[16];
+                if (Matrix.invertM(ri, 0, relRaw, 0)) { Matrix.multiplyMM(t, 0, rawView, 0, ri, 0); Matrix.multiplyMM(view, 0, t, 0, relShown, 0); }
+            }
+            heldMode = !holding ? 0 : trackingNow ? 2 : 1;
+            if (holding) {
+                System.arraycopy(view, 0, lastShownView, 0, 16); holdEndMs = 0;
+                // following ARCore's movement: if it's lost again, the rotation sensor carries on from here
+                if (trackingNow) { System.arraycopy(view, 0, heldView, 0, 16); synchronized (scanRot) { System.arraycopy(scanRot, 0, heldRot, 0, 9); heldRotOk = scanRotOk; } }
+            } else {
+                relAnchored = false;
                 if (wasHolding) holdEndMs = nowMs;
                 if (holdEndMs > 0 && nowMs - holdEndMs < 300) {
                     float t = (nowMs - holdEndMs) / 300f;
@@ -4569,16 +4589,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 frame.transformCoordinates2d(com.google.ar.core.Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
                         new float[]{-1, -1, 1, -1, -1, 1}, com.google.ar.core.Coordinates2d.TEXTURE_NORMALIZED, ovCamUv);
             }
-            if (LIVE_MESH) { long lmT0 = System.nanoTime(); maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); perf.note("ms: live mesh draw", (System.nanoTime() - lmT0) / 1e6); }
+            if (LIVE_MESH) { long lmT0 = System.nanoTime(); if (trackingNow) maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); perf.note("ms: live mesh draw", (System.nanoTime() - lmT0) / 1e6); }
             else if (LIVE_DISCS) drawLiveDiscs(mvp);
-            if (contAuto && improveDir != null) { maybeContinueAlign(nowMs); drawContinueGhost(mvp); }
+            if (contAuto && improveDir != null && trackingNow) { maybeContinueAlign(nowMs); drawContinueGhost(mvp); }
             float[] tap = pendingTap;
-            if (tap != null) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
-            maybeStartLiveRoom(nowMs);
+            if (tap != null && trackingNow) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
+            if (trackingNow) maybeStartLiveRoom(nowMs);
             drawLiveRoom(mvp);
             cutouts.draw(mvp);
             drawMarks(mvp, true);
-            drawRescanTarget(mvp, camera);
+            if (trackingNow) drawRescanTarget(mvp, camera);
             if (holding) drawDim(0.18f);   // held view: slightly darker, so it reads as "not live"
             if (overviewBlend > 0.001f) drawOverviewWindow();
             float[] clearTap = pendingClear;
@@ -4586,8 +4606,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             // (no arrow to the unscanned area: rk 10 Nov 10:59 asked to remove it; the text hint stays)
             if (SHOW_OBJECTS) drawObjectHint(mvp);
-            maybeAskClaudeLive(nowMs);
+            if (trackingNow) maybeAskClaudeLive(nowMs);
         }
+        logState(ts, nowMs);
         if (frameNo % 15 == 0) {
             String s;
             if (ts != TrackingState.TRACKING) {
@@ -4829,7 +4850,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // 73.4, 73.7, 74.0, 74.3 s, again and again) while the camera kept moving, and fusing them at the new
             // poses threw chunks of points into mid-air. So: skip anything not newer than the last one, or stale.
             if (depth.getTimestamp() <= lastDepthTs) { if (depth.getTimestamp() < lastDepthTs && depthStale++ == 0) log("stale depth: ARCore repeated an older depth image, skipping"); return; }
-            lastDepthTs = depth.getTimestamp();
+            lastDepthTs = depth.getTimestamp(); lastNewDepthMs = nowMsFrame; newDepthSince++;
             if (rawDepth) conf = frame.acquireRawDepthConfidenceImage();
             try { cpuImage = frame.acquireCameraImage(); } catch (NotYetAvailableException e) { cpuImage = null; }
             measureExposure();
@@ -5821,7 +5842,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- the held view while lost ----
     private final float[] heldView = new float[16], heldRot = new float[9];
     private boolean haveHeldView, heldRotOk, holding, wasHolding;
-    private final float[] lastShownView = new float[16]; private long holdEndMs;
+    private final float[] lastShownView = new float[16], rawView = new float[16], relRaw = new float[16], relShown = new float[16]; private long holdEndMs;
+    private boolean relAnchored; private volatile int heldMode;   // 0 live, 1 held by the rotation sensor, 2 held + ARCore's movement
+    private long lastNewDepthMs, stateLogAt; private int newDepthSince, staleSince0, notYetSince0;
     final float[] scanRot = new float[9]; volatile boolean scanRotOk;
     private volatile float accelJitter; volatile boolean walkingWhileLost;
     /** The rotation sensor while scanning (MainActivity registers it): the device's rotation, and whether it's shaking
@@ -5841,6 +5864,31 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         @Override public void onAccuracyChanged(android.hardware.Sensor s, int a) { }
     };
+
+    /** Once a second: tracking, what the view shows, whether depth is fused, new/stale/missing depth images. And: ARCore
+     *  handing out only old depth images for 4 s while tracking (13:52 scan: 86-122 s, 354 stale images, nothing more
+     *  was fused and the re-align never ran) restarts the AR session, then re-aligns like after a loss. */
+    private void logState(TrackingState ts, long nowMs) {
+        if (viewing || !everTracked) return;
+        if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > 4000 && depthSupported && recoveries < 10 && count > 2000) {
+            recoveries++;
+            log(String.format(java.util.Locale.US, "no new depth for %.1f s while tracking (%d old images repeated): restarting AR session (attempt %d)", (nowMs - lastNewDepthMs) / 1000f, depthStale - staleSince0, recoveries));
+            lastNewDepthMs = nowMs;
+            if (!needRealign) {
+                needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null; jumpGuess = null;
+                snapshotForRealign();
+            }
+            sessionRestarted = true; recentPts.clear();
+            activity.restartSession();
+        }
+        if (nowMs - stateLogAt < 1000) return;
+        stateLogAt = nowMs;
+        String fusion = ts != TrackingState.TRACKING ? "off (lost)" : needRealign ? "off (lining up)" : nowMs < settleUntil ? "off (settling)" : "on";
+        log(String.format(java.util.Locale.US, "state: %s, view %s, fusion %s, depth new %d stale %d not ready %d%s", ts,
+                heldMode == 0 ? "live" : heldMode == 1 ? "held (rotation sensor)" : "held (ARCore movement)", fusion,
+                newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0, walkingWhileLost ? ", walking" : ""));
+        newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
+    }
 
     /** view = (the turn since the last good frame, in the camera's axes)^T · the last good view. */
     private void heldView(float[] out) {
@@ -6056,13 +6104,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // 16 s, 63-90% on the scan, each a few cm different from the last, so it never resumed).
             boolean strong = ok && res.fit.inliers >= 0.8f && res.fit.median < 0.015f;
             // ARCore came back on its own (no restart): one decent match is enough
-            if (ok && !sessionRestarted && res.fit.inliers >= 0.55f && res.fit.median < 0.02f) strong = true;
+            // (13:52 scan: one attempt at 66% was taken at once while two earlier ones said +16° instead of -9°: a
+            // wrong turn is worse than staying lost, so 55-80% now needs a second agreeing attempt)
             // after a jump: a fit that keeps the old frame (within 15 cm / ~2°) is the jump undone, accepted at once
             float[] jg = jumpGuess;
             if (ok && jg != null && Realign.away(F, jg) < 0.2f) strong = true;
             if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
                 hasFix = true; needRealign = false; realign = null; recentPts.clear(); jumpGuess = null;
+                havePrevPose = false;   // the new correction moves the pose: not a jump (13:52: "pose jump 0.20 m" right after resuming)
                 segment++;
                 log(String.format(java.util.Locale.US, "back on track after %.1f s: correction %.3f, %.3f, %.3f m, %.1f deg; %d%% of the view on the scan, median %.1f cm; segment %d",
                         (nowMs - realignSince) / 1000f, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])), Math.round(res.fit.inliers * 100), res.fit.median * 100, segment));
