@@ -112,17 +112,33 @@ final class ScreenVideo {
         long t0 = now;
         EGLSurface draw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW), read = EGL14.eglGetCurrentSurface(EGL14.EGL_READ);
         try {
+            // 1. in the window's own surface: the frame copied into a texture (14:09 scan: blitting it onto the encoder's
+            //    surface on the S24 put a 0.44x copy in one corner; a plain copy avoids the blit)
+            if (frameTex == 0 || texW != srcW || texH != srcH) {
+                int[] t = new int[1];
+                if (frameTex == 0) { GLES20.glGenTextures(1, t, 0); frameTex = t[0]; }
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, frameTex);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, srcW, srcH, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                texW = srcW; texH = srcH;
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, frameTex);
+            GLES20.glCopyTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, 0, 0, srcW, srcH);
+            // 2. on the encoder's surface: that texture full-frame, then the text
             if (!EGL14.eglMakeCurrent(dpy, encSurf, draw, ctx)) {
                 // some drivers want the surface in the context's own config: once, try that
                 if (triedOwnConfig || !useOwnConfig()) { failed = true; return; }
                 if (!EGL14.eglMakeCurrent(dpy, encSurf, draw, ctx)) { failed = true; return; }
             }
-            // read = the window's back buffer (the frame just drawn), draw = the encoder
-            GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, 0);
-            GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, 0);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             GLES20.glViewport(0, 0, w, h);
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-            GLES30.glBlitFramebuffer(0, 0, srcW, srcH, 0, 0, w, h, GLES20.GL_COLOR_BUFFER_BIT, GLES20.GL_LINEAR);
+            drawFrameTex();
             drawText(text, now);
             if (firstNs < 0) firstNs = now;
             EGLExt.eglPresentationTimeANDROID(dpy, encSurf, now);
@@ -137,10 +153,38 @@ final class ScreenVideo {
         glMsTotal += (System.nanoTime() - t0) / 1e6;
     }
 
+    private int frameTex, texW, texH;
+
+    private void drawFrameTex() {
+        ensureProg();
+        quad.clear();
+        quad.put(new float[]{-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1}).position(0);   // GL texture: row 0 at the bottom
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, frameTex);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        drawQuad();
+    }
+
+    private void drawQuad() {
+        GLES20.glUseProgram(textProg);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        int aPos = GLES20.glGetAttribLocation(textProg, "aPos"), aUv = GLES20.glGetAttribLocation(textProg, "aUv");
+        quad.position(0); GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 16, quad);
+        quad.position(2); GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 16, quad);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(textProg, "uTex"), 0);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv);
+    }
+
+    private void ensureProg() {
+        if (textProg == 0) textProg = ScanRenderer.program("attribute vec4 aPos; attribute vec2 aUv; varying vec2 vUv; void main(){ gl_Position = aPos; vUv = aUv; }",
+                "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; void main(){ gl_FragColor = texture2D(uTex, vUv); }");
+    }
+
     private void drawText(String text, long now) {
-        if (textProg == 0) {
-            textProg = ScanRenderer.program("attribute vec4 aPos; attribute vec2 aUv; varying vec2 vUv; void main(){ gl_Position = aPos; vUv = aUv; }",
-                    "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; void main(){ gl_FragColor = texture2D(uTex, vUv); }");
+        ensureProg();
+        if (textTex == 0) {
             int[] t = new int[1]; GLES20.glGenTextures(1, t, 0); textTex = t[0];
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textTex);
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
