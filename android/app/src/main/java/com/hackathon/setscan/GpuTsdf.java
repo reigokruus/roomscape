@@ -42,6 +42,20 @@ final class GpuTsdf {
         bx = (int) Math.ceil((maxX - minX) / voxel / 8); by = (int) Math.ceil((maxY - minY) / voxel / 8); bz = (int) Math.ceil((maxZ - minZ) / voxel / 8);
         nx = bx * 8; ny = by * 8; nz = bz * 8;
         try {
+            // Not every GPU is the S24's (rk 10 Nov: a teammate's S23+, Adreno 740): check what this path needs against
+            // the driver's limits rather than the GLES 3.1 minimums the S24 happens to exceed; any shortfall = the CPU.
+            String ver = GLES20.glGetString(GLES20.GL_VERSION);
+            if (ver == null || !(ver.contains("OpenGL ES 3.1") || ver.contains("OpenGL ES 3.2"))) throw new RuntimeException("needs OpenGL ES 3.1, have " + ver);
+            int[] q = new int[1];
+            GLES20.glGetIntegerv(GLES31.GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, q, 0); int blocks = q[0];
+            GLES20.glGetIntegerv(GLES31.GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, q, 0); int bindings = q[0];
+            GLES20.glGetIntegerv(GLES31.GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, q, 0); int inv = q[0];
+            GLES20.glGetIntegerv(GLES31.GL_MAX_SHADER_STORAGE_BLOCK_SIZE, q, 0); long maxBlock = q[0] < 0 ? Integer.MAX_VALUE : q[0];
+            long need = (long) nx * ny * nz * 4;
+            Log.i(TAG, "GPU: " + ver + " " + GLES20.glGetString(GLES20.GL_RENDERER) + "; storage blocks " + blocks + ", bindings " + bindings
+                    + ", work group " + inv + ", block size " + maxBlock / 1048576 + " MB (need " + need / 1048576 + ")");
+            if (blocks < 8 || bindings < 10 || inv < 256) throw new RuntimeException("GPU limits too small: storage blocks " + blocks + ", bindings " + bindings + ", work group " + inv);
+            if (need > maxBlock) throw new RuntimeException("block " + need / 1048576 + " MB over the GPU's " + maxBlock / 1048576 + " MB buffer limit");
             fuseProg = compute(FUSE);
             packProg = compute(PACK);
             int voxels = nx * ny * nz, bricks = bx * by * bz;

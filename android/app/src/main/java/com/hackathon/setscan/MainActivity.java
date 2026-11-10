@@ -463,7 +463,9 @@ public class MainActivity extends Activity {
         FrameLayout root = new FrameLayout(this);
         glView = new GLSurfaceView(this);
         glView.setPreserveEGLContextOnPause(true);
-        glView.setEGLContextClientVersion(2);
+        // ES 3 context: the GPU surface (GpuTsdf) needs 3.1 compute; drivers don't have to hand out 3.x for a request of 2
+        // (the S24 does, an Adreno may not). The scan's own drawing is ES 2 code, which runs in it unchanged.
+        glView.setEGLContextClientVersion(3);
         glView.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
         renderer = new ScanRenderer(this);
         nearby = new Nearby(this);
