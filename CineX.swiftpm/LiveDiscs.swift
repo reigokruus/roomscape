@@ -183,6 +183,8 @@ final class LiveCapture {
         previewTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self, weak captureView] _ in
             MainActor.assumeIsolated {
                 guard let self, let captureView, let preview = Self.previewView(in: captureView) else { return }
+                // points-only: RoomPlan's small 3D preview hidden too (only points, tiles, the hint and the buttons)
+                preview.isHidden = LivePreview.livePoints
                 #if DEBUG
                 if !self.loggedPreview {
                     self.loggedPreview = true
@@ -440,7 +442,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         // The wide overview: work out the camera first, since the backdrop (the clear colour) depends on it.
         var overviewView: (view: simd_float4x4, projection: simd_float4x4)?
-        if ScanOverview.enabled, window != nil, let frame = session?.currentFrame, view.bounds.width > 0 {
+        // (points-only: no pulled-back overview and no camera-window frame, the clean screen as on Android)
+        if ScanOverview.enabled, !LivePreview.livePoints, window != nil, let frame = session?.currentFrame, view.bounds.width > 0 {
             let camera = frame.camera
             let realView = camera.viewMatrix(for: .portrait)
             let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
