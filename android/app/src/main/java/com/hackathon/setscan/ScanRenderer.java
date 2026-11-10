@@ -6093,7 +6093,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 heldMode == 0 ? "live" : heldMode == 1 ? "held (rotation sensor)" : "held (ARCore movement)", fusion,
                 newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0,
                 vk0 + vn0 > 0 ? Math.round(100f * vk0 / (vk0 + vn0)) + "% scanned surface" : "-", walkingWhileLost ? ", walking" : "")
-                + (gpuTsdf != null ? ", GPU bricks read back " + syncedBricks + (syncFull > 0 ? " (" + syncFull + " full)" : "") : ""));
+                + (gpuTsdf != null ? ", GPU bricks read back " + syncedBricks + (syncFull > 0 ? " (" + syncFull + " full)" : "") : "")
+                + String.format(java.util.Locale.US, ", heap %d MB", (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20));
         syncedBricks = 0; syncFull = 0;
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
     }
@@ -6513,7 +6514,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Each scan frame: eases in once there's mesh, then replaces mvp with the pulled-back camera's. */
     private void overviewCamera(boolean tracking, long nowMs) {
         if (viewing) { overviewBlend = 0; ovEaseStart = -1; ovPos = null; return; }
-        if (ovEaseStart < 0 && tracking && liveMeshTriVerts >= OV_MIN_VERTS) ovEaseStart = nowMs;
+        if (ovEaseStart < 0 && tracking && (liveMeshTriVerts >= OV_MIN_VERTS || (LIVE_POINTS && count > 20000))) ovEaseStart = nowMs;
         if (ovEaseStart < 0) return;
         float t = Math.min(1f, (nowMs - ovEaseStart) / (float) OV_EASE_MS);
         overviewBlend = t * t * (3 - 2 * t);
@@ -7010,7 +7011,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final java.util.List<java.nio.FloatBuffer> liveGroupPos = new java.util.ArrayList<>(), liveGroupUv = new java.util.ArrayList<>();
 
     /** Live doorway outlines while scanning (rk 10 Nov): on/off, and when the last search ran. */
-    static boolean LIVE_DOORS = true;
+    // Off for now (rk 10 Nov 15:29): in the scans where ARCore stopped giving depth (13:52, 14:01, 15:23) a 1-5 s live
+    // doorway search ran just before each stop (15:23: 4.8 s, then no new depth for 8 s); the outlines at Done stay.
+    static volatile boolean LIVE_DOORS = false;
     /** The floor in a mesh: the fullest 2 cm height band in the lowest 0.7 m (above the lowest 1% of corners, which
      *  are noise), refined to the middle of the corners within 3 cm of it. */
     static float meshFloor(float[] vv, int nv) {
@@ -7092,6 +7095,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** GL thread: every ~1 s, copy the voxels near the phone and build their mesh on another thread. */
     private void maybeLiveMesh(Camera camera, long nowMs) {
+        if (LIVE_POINTS && !LIVE_DOORS) return;   // nothing uses it then: the CPU goes to ARCore (its depth stopped after heavy work)
         if (liveMeshBusy || liveMeshNew != null || nowMs - liveMeshAt < LIVE_MESH_MS || tsdf.size() < 50) return; // the last one is uploaded before its buffers are reused
         // not while lost: the mesh is built around ARCore's position, which is wrong then, and the room vanished
         if (camera.getTrackingState() != TrackingState.TRACKING || needRealign) return;

@@ -38,6 +38,8 @@ while true; do
   SER=""
   while [ -z "$SER" ]; do SER=$($ADB devices | awk 'NR>1 && $2=="device" {print $1; exit}'); [ -z "$SER" ] && sleep 3; done
   echo "$(date +%H:%M:%S) phone connected: $SER" | tee -a $LOG
+  # everything the phone logs (ARCore's own lines too), for the next depth stop; ends with the link
+  ( A logcat -v time -T 1 >> ${LOG%.log}-all.log 2>/dev/null ) &
   last=""
   # the app's lines only, from now on; the stream ends when the link drops, then it waits for the phone again
   A logcat -v time -T 1 -s RoomScape:V 2>/dev/null | while IFS= read -r line; do
