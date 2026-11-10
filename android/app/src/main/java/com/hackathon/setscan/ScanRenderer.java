@@ -6330,10 +6330,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         healthMinFeatures = Math.min(healthMinFeatures, n);
         if (n >= 15 || depthFine) { fewFeaturesSince = 0; return; }
         if (fewFeaturesSince == 0) { fewFeaturesSince = nowMs; return; }
-        if (nowMs - fewFeaturesSince > 3000 && nowMs - plainHintAt > 60000) {
+        if (nowMs - fewFeaturesSince > 2000 && nowMs - plainHintAt > 30000) {   // (most losses today were plain walls/ceiling)
             plainHintAt = nowMs;
             log("few features (" + n + "): plain-wall hint");
-            activity.toast("Plain wall: move slowly, keep some furniture or an edge in view.");
+            activity.toast("Plain wall: keep an edge or some detail in view.");
         }
     }
 
@@ -7437,6 +7437,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */
     static final float SPOT_DONE = 0.85f; // "done" only when the middle of the screen is (nearly) all green
+    /** Which way to turn to look where the phone last looked while it was lined up (rk 10 Nov 15:42: after a loss the
+     *  matches only work on well-scanned surface, 80-94% there against 31-60% elsewhere): from the view shown now. */
+    private String backTo() {
+        if (!haveGoodCam) return "point at an area you already scanned";
+        float[] g = lastGoodCam;
+        float tx = g[12] - g[8] * 1.5f, ty = g[13] - g[9] * 1.5f, tz = g[14] - g[10] * 1.5f;   // 1.5 m ahead of it
+        float[] c = new float[4]; Matrix.multiplyMV(c, 0, viewMvp, 0, new float[]{tx, ty, tz, 1}, 0);
+        boolean behind = c[3] <= 0.05f;
+        float nx = behind ? -Math.signum(c[0] == 0 ? 1 : c[0]) * 2 : c[0] / c[3], ny = behind ? 0 : c[1] / c[3];
+        if (!behind && Math.abs(nx) < 0.35f && Math.abs(ny) < 0.35f) return "hold the phone on the area in the middle of the screen";
+        String h = Math.abs(nx) >= Math.abs(ny) || behind ? (nx < 0 ? "turn left" : "turn right") : (ny > 0 ? "tilt up" : "tilt down");
+        return h + (behind ? " (it's behind you)" : "") + ", back to where you last scanned";
+    }
+
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
@@ -7446,7 +7460,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (ts != TrackingState.TRACKING && everTracked) {
             // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
             level = 2;
-            hint = walkingWhileLost ? "Lost position. Stand still and turn the phone back to the scanned area" : "Lost position. Turn the phone back to the scanned area";
+            hint = (walkingWhileLost ? "Lost position. Stand still, " : "Lost position: ") + backTo();
         }
         else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
             // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said)
@@ -7457,7 +7471,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed
             // for 24 s while nothing was being scanned)
             level = 2;
-            hint = "Finding your place: point at an area you already scanned";
+            hint = "Finding your place: " + backTo();
         }
         else if (ts != TrackingState.TRACKING) {
             level = 2;
