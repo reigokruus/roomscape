@@ -1889,6 +1889,12 @@ public class MainActivity extends Activity {
     }
 
     private void startNewScan() {
+        if (session == null) {   // no AR on this run: say why, don't open a black camera screen
+            if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED && shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) { arProblemShown = true; requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_REQ); return; }   // onResume follows the dialog
+            if (arProblem == null) arProblem = "AR is still starting. Try again in a moment.";
+            showArProblem();
+            return;
+        }
         hideHome();
         glView.queueEvent(() -> renderer.startNewScan());
         scanUi();
@@ -2367,8 +2373,9 @@ public class MainActivity extends Activity {
                         break;
                 }
                 if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-                    requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_REQ);
-                    return;
+                    // Asked once per run; denied = no scanning, but saved and shared rooms still open.
+                    if (!cameraAsked) { cameraAsked = true; requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_REQ); return; }
+                    throw new SecurityException("camera");
                 }
                 session = new Session(this);
                 // Debug: replay a recorded session instead of the camera (tools/replay-s24.sh):
@@ -2383,14 +2390,39 @@ public class MainActivity extends Activity {
                 // The renderer picks the depth mode and falls back to another one if tracking never starts.
                 renderer.setSession(session);
             } catch (Exception e) {
-                Toast.makeText(this, "ARCore error: " + e, Toast.LENGTH_LONG).show();
-                updateStatus("ARCore could not start: " + e.getMessage());
-                return;
+                // No scanning on this run, but the app stays usable for saved and shared rooms (it used to stop here,
+                // leaving even the 3D view paused).
+                arProblem = arProblemText(e);
+                updateStatus(arProblem);
+                if (!arProblemShown) { arProblemShown = true; showArProblem(); }
             }
         }
         renderer.sensors.start(this);
-        if (!renderer.isViewing() && !homeShown()) resumeSession();
+        if (session != null && !renderer.isViewing() && !homeShown()) resumeSession();
         glView.onResume();
+    }
+
+    private boolean cameraAsked, arProblemShown;
+    /** Why this run can't scan (null = it can). */
+    private String arProblem;
+
+    private String arProblemText(Exception e) {
+        if (e instanceof SecurityException) return "RoomScape needs the camera to scan. Allow it in Settings > Apps > RoomScape > Permissions. Saved rooms still open without it.";
+        if (e instanceof com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException) return "Scanning needs Google Play Services for AR. Reopen the app to install it.";
+        if (e instanceof com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException) return "This phone doesn't support ARCore, so it can't scan rooms. Saved and shared rooms still open.";
+        if (e instanceof com.google.ar.core.exceptions.UnavailableApkTooOldException) return "Google Play Services for AR is out of date. Update it in the Play Store, then reopen RoomScape.";
+        if (e instanceof com.google.ar.core.exceptions.UnavailableSdkTooOldException) return "This version of RoomScape is too old for the phone's ARCore. Install a newer RoomScape.";
+        if (e instanceof com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException) return "Scanning needs Google Play Services for AR. Install it from the Play Store, then reopen RoomScape.";
+        return "AR couldn't start on this phone (" + e.getClass().getSimpleName() + "). Saved rooms still open. Long-press the logo to share diagnostics.";
+    }
+
+    private void showArProblem() {
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this).setTitle("Can't scan right now").setMessage(arProblem)
+                .setNegativeButton("OK", null);
+        if (arProblem != null && arProblem.startsWith("RoomScape needs the camera")) b.setPositiveButton("Open settings", (d, w) -> {
+            try { startActivity(new android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", getPackageName(), null))); } catch (Exception ignored) { }
+        });
+        b.show();
     }
 
     /** Called from the GL thread when tracking is stuck: pause and resume the AR session. */
@@ -2447,8 +2479,7 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (results.length == 0 || results[0] != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "Camera permission is needed to scan", Toast.LENGTH_LONG).show();
-            finish();
+            // Stay open: saved and shared rooms work without the camera (onResume shows why scanning can't start).
         }
     }
 }

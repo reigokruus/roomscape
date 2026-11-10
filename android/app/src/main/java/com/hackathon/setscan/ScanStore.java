@@ -66,7 +66,15 @@ final class ScanStore {
         List<Entry> out = new ArrayList<>();
         File[] dirs = root(c).listFiles();
         if (dirs == null) return out;
+        // A save cut off between its two renames leaves scan_X.old without scan_X: put it back (data is gold).
         for (File d : dirs) {
+            String n = d.getName();
+            if (n.endsWith(".old")) { File real = new File(d.getParentFile(), n.substring(0, n.length() - 4)); if (!real.exists()) d.renameTo(real); }
+        }
+        dirs = root(c).listFiles();
+        if (dirs == null) return out;
+        for (File d : dirs) {
+            if (d.getName().endsWith(".saving") || d.getName().endsWith(".old")) continue;   // half-written or replaced saves
             try {
                 JSONObject m = new JSONObject(readText(new File(d, "meta.json")));
                 Entry e = new Entry();
@@ -96,6 +104,9 @@ final class ScanStore {
             // Data is gold: never save an empty scan over one that has points or photos (a half-loaded view).
             if (d.n == 0 && d.kfs.isEmpty() && (om.optInt("points") > 0 || om.optInt("photos") > 0))
                 throw new IllegalStateException("not saving an empty scan over " + om.optInt("points") + " points");
+            // Nor a scan whose photos are gone (a lost GL context clears the live photo list) over one that has them.
+            if (d.kfs.isEmpty() && om.optInt("photos") > 0 && d.n > 0)
+                throw new IllegalStateException("not saving a scan without its " + om.optInt("photos") + " photos over the saved one");
         } catch (IllegalStateException e) { throw e; } catch (Exception ignored) { }
         File tmp = new File(dir.getParentFile(), dir.getName() + ".saving");
         deleteRec(tmp);
@@ -157,20 +168,28 @@ final class ScanStore {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }
-        // The raw recording (big): moved, not copied.
-        File recFrom = new File(dir, "recording.mp4"), recTo = new File(tmp, "recording.mp4");
-        if (recFrom.exists() && !recTo.exists() && !recFrom.renameTo(recTo)) copyTree(recFrom, recTo);
         // Built from the points (the Photo view's surface, room outline, flat planes): kept while the points are the
         // same; after Continue scan they're stale, and are built again.
         if (samePoints) for (String keep : new String[]{"surface.ply", "outline.json", "planes.json"}) {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }
+        // The raw recording (big): moved, not copied, last (a failed save before this point leaves it where it was).
+        File recFrom = new File(dir, "recording.mp4"), recTo = new File(tmp, "recording.mp4");
+        if (recFrom.exists() && !recTo.exists() && !recFrom.renameTo(recTo)) copyTree(recFrom, recTo);
         // swap in the new version
         File old = new File(dir.getParentFile(), dir.getName() + ".old");
         deleteRec(old);
-        if (dir.exists() && !dir.renameTo(old)) throw new Exception("could not replace the old save");
-        if (!tmp.renameTo(dir)) throw new Exception("could not write the save");
+        if (dir.exists() && !dir.renameTo(old)) {
+            if (recTo.exists() && !recFrom.exists()) recTo.renameTo(recFrom);   // put the recording back
+            throw new Exception("could not replace the old save");
+        }
+        if (!tmp.renameTo(dir)) {
+            old.renameTo(dir);   // keep the old save (it has the recording back only if the move above was undone)
+            File r2 = new File(dir, "recording.mp4");
+            if (recTo.exists() && !r2.exists()) recTo.renameTo(r2);
+            throw new Exception("could not write the save");
+        }
         deleteRec(old);
         int outletsAfter = 0;
         try { if (d.outlets != null) outletsAfter = new JSONArray(d.outlets).length(); } catch (Exception ignored) { }

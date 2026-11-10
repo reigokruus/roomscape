@@ -169,6 +169,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (s.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) modes.add(Config.DepthMode.AUTOMATIC);
         modes.add(Config.DepthMode.DISABLED);
         log("session created, depth modes to try: " + modes);
+        if (modes.size() == 1) activity.toast("This phone has no ARCore depth: scans will be rough (outlines and photos only).");
         try {
             com.google.ar.core.CameraConfig cc = s.getCameraConfig();
             log("camera config: cpu image " + cc.getImageSize() + ", texture " + cc.getTextureSize()
@@ -1148,6 +1149,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         perf.start(new File(activity.getCacheDir(), "perf-scan-" + System.currentTimeMillis() + ".jsonl"), "scanning");
         improveDir = null; improveT = null; contAuto = false; contBase = null; currentDir = null; currentName = null;
         idle = false;
+        // Each scan starts in the best depth mode again (a fallback in an earlier scan shouldn't stick).
+        if (session != null && modeIndex != 0 && !modes.isEmpty()) { modeIndex = 0; try { applyMode(); } catch (Exception e) { logError("configure", e); } }
     }
 
     /**
@@ -4256,9 +4259,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } else if (!everTracked) {
             long now = System.currentTimeMillis();
             if (notTrackingSince == 0) notTrackingSince = now;
-            else if (now - notTrackingSince > 8000 && modeIndex < modes.size() - 1) {
-                modeIndex++;
-                log("no tracking after 8s, falling back");
+            // Only between the two depth modes, after 20 s: a first-time user standing still reading the hint, or a
+            // plain wall, used to drop depth for the whole run (RAW -> AUTOMATIC -> DISABLED in 16 s).
+            else if (now - notTrackingSince > 20000 && modeIndex < modes.size() - 1 && modes.get(modeIndex + 1) != Config.DepthMode.DISABLED) {
+                modeIndex++; notTrackingSince = now;
+                log("no tracking after 20 s, trying depth mode " + modes.get(modeIndex));
                 try { applyMode(); } catch (Exception e) { logError("configure", e); }
             }
         }
