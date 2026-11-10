@@ -3456,6 +3456,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
         gpuSurfaceReset();
+        depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
@@ -4638,6 +4639,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 } catch (Throwable ignored) { }
                 recs.add(r);
             }
+            depthFitCollect(frame, camera, dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy);
+            final float dfK = depthK, dfC = depthC;   // this frame's depth correction (identity until the fit is sure)
             long pxT0 = System.nanoTime();
             fuseN = 0;
             boolean gpuOn = gpuSurfaceReady(m);
@@ -4663,7 +4666,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                             || Math.abs((dbuf.get((v + 1) * dRow + u * dPix) & 0xFFFF) - mm) > tol) {
                         depthRejectedEdge++; continue;
                     }
-                    float d = mm * 0.001f;
+                    float d = (mm * 0.001f - dfC) / dfK;   // motion-based depth correction (depthFit), 1:1 until sure
                     float xc = (u + 0.5f - cx) * d / fx;
                     float yc = (cy - (v + 0.5f)) * d / fy;
                     float zc = -d;
@@ -4698,7 +4701,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                             if (m2 >= 200 && m2 < nearMm) nearMm = m2;
                         }
                         float rayLen = (float) Math.sqrt(xc * xc + yc * yc + zc * zc);
-                        fuseBuf[fuseN * 5 + 4] = rayLen * (nearMm * 0.001f) / d;
+                        fuseBuf[fuseN * 5 + 4] = rayLen * ((nearMm * 0.001f - dfC) / dfK) / d;
                     }
                     fuseN++;
                     }
@@ -4878,7 +4881,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // and a bar's point just beside its pixel saw the wall and was erased (rk 10 Nov: bars vanished up close).
             int rp = Math.max(1, Math.min(6, Math.round(0.6f * VOXEL * fx / dp)));
             if (u < rp || vv < rp || u >= dw - rp || vv >= dh - rp) continue;
-            float lim = dp + Math.max(0.10f, 0.08f * dp);
+            float lim = (dp + Math.max(0.10f, 0.08f * dp)) * depthK + depthC;   // in the raw depth's units
             boolean through = true;
             for (int ny = -1; ny <= 1 && through; ny++) for (int nx = -1; nx <= 1; nx++)
                 if (!beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u + nx * rp, vv + ny * rp, lim)) { through = false; break; }
@@ -5275,6 +5278,83 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private boolean seenThroughDrained(float x, float y, float z) { drainFuse(); return tsdf.seenThrough(x, y, z); }
+
+    // ---- Depth from the phone's own motion (rk 10 Nov: S24 rooms come out ~3% big). Against the iPhone's LiDAR the
+    // S24's depth is compressed (three rooms): under 1 m it reads 15-20% too far, beyond 3 m a few % too near
+    // (raw ≈ 0.87·true + 0.23 m). ARCore's feature points are triangulated from the motion (camera + IMU), so their
+    // distances are metric: the depth at each feature's pixel is fitted against the feature's distance (raw = k·true + c,
+    // robust), and depth is corrected as (raw - c) / k before it's fused, once the fit has enough spread. ----
+    static final boolean DEPTH_FIX = true;
+    /** Apply the fit to the depth (false: measure and log only). Off until a real scan shows it helps: offline, a fixed
+     *  correction of this form didn't improve the sizes on three rooms (the keyframes' depth and the alignment's free
+     *  scale muddy the test), so first the phone's own fits are logged against the iPhone's sizes. */
+    static final boolean DEPTH_FIX_APPLY = false;
+    private volatile float depthK = 1f, depthC = 0f;
+    private final float[] dfTrue = new float[6000], dfRaw = new float[6000];
+    private int dfN, dfAt;
+    private long dfLastFit;
+
+    private void depthFitCollect(Frame frame, Camera camera, ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix,
+                                 int dw, int dh, float fx, float fy, float cx, float cy) {
+        if (!DEPTH_FIX) return;
+        float[] raw = new float[16], view = new float[16];
+        camera.getPose().toMatrix(raw, 0);   // ARCore's own frame: the feature points are in it too
+        Matrix.invertM(view, 0, raw, 0);
+        try (PointCloud pc = frame.acquirePointCloud()) {
+            FloatBuffer pts = pc.getPoints();
+            int nf = pts.remaining() / 4;
+            int[] s9 = new int[9];
+            for (int i = 0; i < nf; i++) {
+                float x = pts.get(i * 4), y = pts.get(i * 4 + 1), z = pts.get(i * 4 + 2), conf = pts.get(i * 4 + 3);
+                if (conf < 0.3f) continue;
+                float xc = view[0] * x + view[4] * y + view[8] * z + view[12], yc = view[1] * x + view[5] * y + view[9] * z + view[13];
+                float zc = view[2] * x + view[6] * y + view[10] * z + view[14];
+                float dz = -zc;
+                if (dz < 0.3f || dz > 4f) continue;
+                int u = (int) (fx * xc / dz + cx), v = (int) (cy - fy * yc / dz);
+                if (u < 1 || v < 1 || u >= dw - 1 || v >= dh - 1) continue;
+                int n = 0;   // the median of the sure 3x3 depth there
+                for (int b = -1; b <= 1; b++) for (int a = -1; a <= 1; a++) {
+                    int mm = dbuf.get((v + b) * dRow + (u + a) * dPix) & 0xFFFF;
+                    if (mm < 200 || mm > 5000) continue;
+                    if (cbuf != null && (cbuf.get((v + b) * cRow + (u + a) * cPix) & 0xFF) < 55) continue;
+                    s9[n++] = mm;
+                }
+                if (n < 5) continue;
+                java.util.Arrays.sort(s9, 0, n);
+                float r = s9[n / 2] * 0.001f;
+                if (Math.abs(r - dz) > 0.5f * dz) continue;   // a different surface there (edge, occlusion)
+                dfTrue[dfAt] = dz; dfRaw[dfAt] = r; dfAt = (dfAt + 1) % dfTrue.length; if (dfN < dfTrue.length) dfN++;
+            }
+        } catch (Throwable ignored) { }
+        long now = System.currentTimeMillis();
+        if (now - dfLastFit > 2000 && dfN >= 300) { dfLastFit = now; depthFit(); }
+    }
+
+    /** Robust line raw = k·true + c (iteratively reweighted, Huber 3 cm); used once the distances spread 0.8 m+. */
+    private void depthFit() {
+        int n = dfN;
+        float[] t = java.util.Arrays.copyOf(dfTrue, n); java.util.Arrays.sort(t);
+        float spread = t[n * 9 / 10] - t[n / 10];
+        double k = 1, c = 0;
+        for (int it = 0; it < 8; it++) {
+            double sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+            for (int i = 0; i < n; i++) {
+                double x = dfTrue[i], y = dfRaw[i], r = Math.abs(y - (k * x + c));
+                double w = r < 0.03 ? 1 : 0.03 / r;
+                sw += w; sx += w * x; sy += w * y; sxx += w * x * x; sxy += w * x * y;
+            }
+            double den = sw * sxx - sx * sx;
+            if (Math.abs(den) < 1e-9) return;
+            k = (sw * sxy - sx * sy) / den; c = (sy - k * sx) / sw;
+        }
+        perf.note("depth fit k x1000", k * 1000); perf.note("depth fit c mm", c * 1000); perf.note("depth fit pairs", n);
+        boolean sure = spread >= 0.8f && k > 0.7 && k < 1.3 && c > -0.4 && c < 0.5;
+        if (!sure) { log(String.format(java.util.Locale.US, "depth fit (not used yet): raw = %.3f true %+.3f m, %d pairs, spread %.2f m", k, c, n, spread)); return; }
+        if (!DEPTH_FIX_APPLY) { log(String.format(java.util.Locale.US, "depth fit (measured, not applied): raw = %.3f true %+.3f m (%d pairs, spread %.2f m)", k, c, n, spread)); return; }
+        depthK += ((float) k - depthK) * 0.3f; depthC += ((float) c - depthC) * 0.3f;   // smoothly towards the fit
+        log(String.format(java.util.Locale.US, "depth fit: raw = %.3f true %+.3f m (%d pairs, spread %.2f m); correcting with %.3f / %+.3f", k, c, n, spread, depthK, depthC));
+    }
 
     // Re-alignment after a tracking loss (see integrate).
     private volatile boolean needRealign;

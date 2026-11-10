@@ -28,7 +28,35 @@ enum Align {
 
     static func run(iphone: URL, s24: URL, out: URL) {
         let a0 = Replay.readMesh(iphone.appendingPathComponent("mesh.bin")) ?? []
-        let b0 = readPly(s24.appendingPathComponent("surface.ply"))
+        var b0 = readPly(s24.appendingPathComponent("surface.ply"))
+        // KF_POINTS=1: the S24's geometry from its keyframes' depth instead (DEPTH_FIX="k,c": corrected as (raw - c) / k).
+        if ProcessInfo.processInfo.environment["KF_POINTS"] == "1", let data = try? Data(contentsOf: s24.appendingPathComponent("kf.bin")) {
+            let fix = (ProcessInfo.processInfo.environment["DEPTH_FIX"] ?? "1,0").split(separator: ",").compactMap { Float($0) }
+            let k = fix.count == 2 ? fix[0] : 1, c = fix.count == 2 ? fix[1] : 0
+            var o = 0, pts: [SIMD3<Float>] = []
+            func f() -> Float { let v = UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o, as: UInt32.self) }); o += 4; return Float(bitPattern: v) }
+            func i32() -> Int { let v = Int32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o, as: Int32.self) }); o += 4; return Int(v) }
+            let nk = i32()
+            for _ in 0..<nk {
+                o += 64
+                var pose = [Float](); for _ in 0..<16 { pose.append(f()) }
+                o += 25
+                let dw = i32(), dh = i32(); let dfx = f(), dfy = f(), dcx = f(), dcy = f()
+                guard dw > 0 else { continue }
+                let M = simd_float4x4(SIMD4(pose[0], pose[1], pose[2], pose[3]), SIMD4(pose[4], pose[5], pose[6], pose[7]),
+                                      SIMD4(pose[8], pose[9], pose[10], pose[11]), SIMD4(pose[12], pose[13], pose[14], pose[15]))
+                for v in stride(from: 1, to: dh - 1, by: 2) { for u in stride(from: 1, to: dw - 1, by: 2) {
+                    let mm = Float(UInt16(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o + (v * dw + u) * 2, as: UInt16.self) }))
+                    guard mm > 300, mm < 4000 else { continue }
+                    let d = (mm / 1000 - c) / k
+                    let pw = M * SIMD4((Float(u) + 0.5 - dcx) * d / dfx, (dcy - (Float(v) + 0.5)) * d / dfy, -d, 1)
+                    pts.append(SIMD3(pw.x, pw.y, pw.z))
+                } }
+                o += dw * dh * 2
+            }
+            print("S24 geometry from \(nk) keyframes' depth: \(pts.count) points, depth fix k \(k) c \(c)")
+            b0 = pts
+        }
         guard !a0.isEmpty, !b0.isEmpty else { print("missing meshes (\(a0.count), \(b0.count))"); return }
         // Floors at 0.
         let fa = floorY(a0), fb = floorY(b0)
@@ -43,7 +71,7 @@ enum Align {
         var best = (score: -1, yaw: Float(0), scale: Float(1), t: SIMD2<Float>.zero)
         let band = b.filter { $0.y > 0.3 && $0.y < 2.0 }
         let sample = Array(band.enumerated().filter { $0.offset % max(1, band.count / 800) == 0 }.map(\.element))
-        for scale in [Float(0.86), 0.88, 0.90, 0.92, 0.94, 0.97, 1.0] {
+        for scale in [Float(0.86), 0.88, 0.90, 0.92, 0.94, 0.96, 0.97, 0.98, 0.99, 1.0, 1.01, 1.02, 1.04] {
             for deg in stride(from: Float(0), to: 360, by: 4) {
                 let r = deg * .pi / 180, c = cos(r), s = sin(r)
                 // Rotate/scale about the S24's centre, then search the shift on the grid around the iPhone's centre.
@@ -116,6 +144,56 @@ enum Align {
         for p in onlyS24 where p.y < 2.2 { put(p, (220, 40, 40)) }
         Images.png(px, width: w, height: h, to: out)
         print("top view: \(out.path)")
+        // ALIGN_DEPTH=1: where the S24's depth disagrees with the iPhone's surface. Each S24 keyframe's depth pixel, moved
+        // with the alignment (incl. its scale), is followed along its ray to the iPhone surface: S24 depth vs true depth.
+        if ProcessInfo.processInfo.environment["ALIGN_DEPTH"] == "1" {
+            let shiftD = bt.isEmpty ? SIMD3<Float>.zero : bt[0] - transform(b[0])
+            func toI(_ q: SIMD3<Float>) -> SIMD3<Float> { transform(q - SIMD3(0, fb, 0)) + shiftD }
+            var occ = Set<SIMD3<Int32>>()
+            for p in a { let k = SIMD3<Int32>((p / 0.02).rounded(.down)); for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 { occ.insert(k &+ SIMD3(dx, dy, dz)) } } } }
+            var pairs: [(Float, Float)] = []   // (S24 depth along the ray, true distance)
+            if let data = try? Data(contentsOf: s24.appendingPathComponent("kf.bin")) {
+                var o = 0
+                func f() -> Float { let v = UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o, as: UInt32.self) }); o += 4; return Float(bitPattern: v) }
+                func i32() -> Int { let v = Int32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o, as: Int32.self) }); o += 4; return Int(v) }
+                let nk = i32()
+                for _ in 0..<nk {
+                    var view = [Float](), pose = [Float]()
+                    for _ in 0..<16 { view.append(f()) }
+                    for _ in 0..<16 { pose.append(f()) }
+                    o += 24; o += 1   // fx fy cx cy w h, closeUp
+                    let dw = i32(), dh = i32()
+                    let dfx = f(), dfy = f(), dcx = f(), dcy = f()
+                    var dep = [UInt16](repeating: 0, count: dw * dh)
+                    for j in 0..<(dw * dh) { dep[j] = UInt16(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o + j * 2, as: UInt16.self) }) }
+                    o += dw * dh * 2
+                    guard dw > 0 else { continue }
+                    let M = simd_float4x4(SIMD4(pose[0], pose[1], pose[2], pose[3]), SIMD4(pose[4], pose[5], pose[6], pose[7]),
+                                          SIMD4(pose[8], pose[9], pose[10], pose[11]), SIMD4(pose[12], pose[13], pose[14], pose[15]))
+                    let c = toI(SIMD3(M.columns.3.x, M.columns.3.y, M.columns.3.z))
+                    for v in stride(from: 2, to: dh - 2, by: 3) { for u in stride(from: 2, to: dw - 2, by: 3) {
+                        let mm = Float(dep[v * dw + u]); guard mm > 300, mm < 4000 else { continue }
+                        let d = mm / 1000
+                        let pc = SIMD4((Float(u) + 0.5 - dcx) * d / dfx, (dcy - (Float(v) + 0.5)) * d / dfy, -d, 1)
+                        let pw4 = M * pc
+                        let p = toI(SIMD3(pw4.x, pw4.y, pw4.z))
+                        let dir = simd_normalize(p - c), ds = simd_distance(p, c)
+                        var t = ds * 0.6, hit: Float = -1
+                        while t < ds * 1.5 { if occ.contains(SIMD3<Int32>(((c + dir * t) / 0.02).rounded(.down))) { hit = t; break }; t += 0.01 }
+                        if hit > 0 { pairs.append((ds, hit)) }
+                    } }
+                }
+            }
+            let ratios = pairs.map { $0.0 / $0.1 }.sorted()
+            if !ratios.isEmpty {
+                let med = ratios[ratios.count / 2]
+                print(String(format: "depth check: %d S24 depth samples hit the iPhone surface; S24 depth / true distance: median %.3f (25%% %.3f, 75%% %.3f)", ratios.count, med, ratios[ratios.count / 4], ratios[ratios.count * 3 / 4]))
+                for (lo, hi) in [(0.3, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 3.0), (3.0, 4.0)] as [(Float, Float)] {
+                    let r = pairs.filter { $0.1 >= lo && $0.1 < hi }.map { $0.0 / $0.1 }.sorted()
+                    if r.count > 20 { print(String(format: "  true %.1f-%.1f m: %6d samples, median ratio %.3f", lo, hi, r.count, r[r.count / 2])) }
+                }
+            } else { print("depth check: no samples") }
+        }
         // ALIGN_LOOK="x,y,z;x,y,z": the two surfaces from the same camera, looking at each spot (iPhone coordinates)
         // from 1.6 m towards the room's middle, 1.5 m above the floor: harness-out/look-<n>-iphone.png / -s24.png.
         guard let looks = ProcessInfo.processInfo.environment["ALIGN_LOOK"] else { return }
