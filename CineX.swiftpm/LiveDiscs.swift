@@ -366,6 +366,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let queue: MTLCommandQueue
     private let depthPipeline: MTLRenderPipelineState
     private let colorPipeline: MTLRenderPipelineState
+    /// Points-only: the spots in their camera colour (the white grid look is for the mesh-first view).
+    private let pointPipeline: MTLRenderPipelineState
     private let depthWrite: MTLDepthStencilState
     private let depthEqual: MTLDepthStencilState
     /// The wide overview (ScanOverview): the pulled-back camera and the camera-image window.
@@ -391,7 +393,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         guard let queue = device.makeCommandQueue(),
               let library = try? device.makeLibrary(source: Self.shaderSource, options: options),
               let vertex = library.makeFunction(name: "tileVertex"),
-              let fragment = library.makeFunction(name: "tileFragment") else { return nil }
+              let fragment = library.makeFunction(name: "tileFragment"),
+              let pointFragment = library.makeFunction(name: "pointFragment") else { return nil }
         func pipeline(fragment: MTLFunction?) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertex
@@ -415,6 +418,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             return device.makeDepthStencilState(descriptor: depth)
         }
         guard let depthPipeline = pipeline(fragment: nil), let colorPipeline = pipeline(fragment: fragment),
+              let pointPipeline = pipeline(fragment: pointFragment),
               let depthWrite = depthState(.less, write: true),
               let depthEqual = depthState(.lessEqual, write: false) else { return nil }
         self.cloud = cloud
@@ -426,6 +430,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         self.queue = queue
         self.depthPipeline = depthPipeline
         self.colorPipeline = colorPipeline
+        self.pointPipeline = pointPipeline
         self.depthWrite = depthWrite
         self.depthEqual = depthEqual
         window = ScanOverview.enabled ? OverviewWindowRenderer(device: device) : nil
@@ -532,7 +537,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             encoder.setRenderPipelineState(depthPipeline)
             encoder.setDepthStencilState(depthWrite)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
-            encoder.setRenderPipelineState(colorPipeline)
+            encoder.setRenderPipelineState(LivePreview.livePoints ? pointPipeline : colorPipeline)
             encoder.setDepthStencilState(depthEqual)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
         }
@@ -556,6 +561,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float3 world;
         float3 normal [[flat]];
         float solid [[flat]];
+        float3 color [[flat]];
     };
 
     vertex TileOut tileVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
@@ -577,7 +583,13 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         out.world = world;
         out.normal = n;
         out.solid = float(p.color.a) / 255.0;
+        out.color = float3(p.color.rgb) / 255.0;
         return out;
+    }
+
+    // Points-only live view (rk 10 Nov, as on Android): each spot in the camera's colour, round, nearly opaque.
+    fragment float4 pointFragment(TileOut in [[stage_in]]) {
+        return float4(in.color, mix(0.75, 0.95, in.solid));
     }
 
     fragment float4 tileFragment(TileOut in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {
