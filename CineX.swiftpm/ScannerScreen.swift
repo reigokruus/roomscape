@@ -263,10 +263,13 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             var speed: Float = 0
             var tooFast = false
             var shown: (hint: String, level: Int, at: Date)?
+            var scanSeconds: Double = 0, lastTick = Date()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 guard let self, self.phase == .scanning else { return }
                 guard let frame = session.currentFrame else { continue }
+                if case .normal = frame.camera.trackingState { scanSeconds += min(1, Date().timeIntervalSince(lastTick)) }
+                lastTick = Date()
                 let t = frame.camera.transform.columns.3
                 let position = SIMD3<Float>(t.x, t.y, t.z)
                 if let lastPosition, frame.timestamp > lastTime {
@@ -298,7 +301,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 self.areaNote = Self.areaNote(frame: frame, cloud: cloud)
                 let justCleared = Date().timeIntervalSince(self.clearedAt) < 3
                 self.hud = ScanHud(hint: hint, level: level, spot: justCleared ? min(max(0, spot), self.hud.spot) : max(0, spot),
-                                   room: justCleared ? room : max(self.hud.room, room))
+                                   room: justCleared ? room : max(self.hud.room, room), seconds: Int(scanSeconds))
             }
         }
     }
@@ -311,7 +314,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             guard let self, removed > 0 else { return }
             self.clearedAt = Date()
             self.hud = ScanHud(hint: "Cleared, scan that spot again", level: 1, spot: 0,
-                               room: self.live.cloud?.solidShare() ?? self.hud.room)
+                               room: self.live.cloud?.solidShare() ?? self.hud.room, seconds: self.hud.seconds)
         }
     }
 
@@ -709,6 +712,8 @@ struct ScanHud: Equatable {
     var spot: Float = 0
     /// Room: share of everything scanned that is solid, 0…1; never goes down.
     var room: Float = 0
+    /// Scan length (rk 10 Nov): seconds of tracking so far (not while lost).
+    var seconds = 0
 
     static let spotDone: Float = 0.85
 
@@ -762,6 +767,11 @@ struct ScanHudCard: View {
             bar("This spot", hud.spot, hud.spot >= ScanHud.spotDone ? Self.green : Self.accent)
                 .padding(.top, 4)
             bar("Room", hud.room, Self.accent)
+            Text(String(format: "%d:%02d", hud.seconds / 60, hud.seconds % 60))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .accessibilityLabel("Scan length \(hud.seconds / 60) minutes \(hud.seconds % 60) seconds")
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
