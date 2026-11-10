@@ -392,7 +392,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         try {
             org.json.JSONArray a = new org.json.JSONArray();
             for (DoorwayFinder.Doorway d : ds) a.put(new org.json.JSONObject().put("x0", d.x0).put("z0", d.z0).put("x1", d.x1).put("z1", d.z1)
-                    .put("floorY", d.floorY).put("width", d.width).put("height", d.height).put("open", d.open));
+                    .put("floorY", d.floorY).put("width", d.width).put("height", d.height).put("open", d.open).put("sure", d.sure));
             try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "doorways.json"))) { o.write(a.toString(1).getBytes("UTF-8")); }
         } catch (Exception e) { logError("doorways save", e); }
     }
@@ -472,7 +472,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
             // Doorways (rk 10 Nov 11:35): openings in the wall planes found on the surface, the depth seen through them.
-            if (DOORWAYS && ownMesh && mvAll > 0) try {
+            // A scan opened again keeps the doorways it was saved with (rk 10 Nov 13:13: reopening gave different ones);
+            // only a scan without doorways.json is searched.
+            java.util.List<DoorwayFinder.Doorway> savedDoors = viewing && dirNow != null ? DoorwayFinder.load(new File(dirNow, "doorways.json")) : null;
+            if (savedDoors != null) {
+                doorways = savedDoors; activity.setDoorways(savedDoors); activity.loadMeasurements(dirNow);
+                log("doorways: " + savedDoors.size() + " kept from the save");
+            } else if (DOORWAYS && ownMesh && mvAll > 0) try {
                 long td = System.currentTimeMillis();
                 float[] vv = new float[mvAll * 3];
                 for (int i = 0; i < vv.length; i++) vv[i] = mp0.get(i);
@@ -2333,7 +2339,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             File dir = currentDir;
             perf.stop();
-            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); }
+            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
         }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
@@ -3340,6 +3346,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try {
                 synchronized (featLock) { room.featureYs = java.util.Arrays.copyOf(featY, featN); room.featureN = featN; }
                 room.build(planes, planner, pos, col, count);
+                // The height decided when the scan was made (with ARCore's planes, which aren't saved) is kept with
+                // the scan and used when it's opened again (rk 10 Nov 13:13: 2.97 m at Done, ~3.13 m on reopening).
+                File hd = currentDir;
+                if (viewing && hd != null && new File(hd, "height.json").exists()) {
+                    try {
+                        org.json.JSONObject hj = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(new File(hd, "height.json").toPath()), "UTF-8"));
+                        if (Math.abs((float) hj.getDouble("floorY") - room.floorY) < 0.05f) {
+                            room.ceilingY = (float) hj.getDouble("ceilingY"); room.hasCeiling = true; room.ceilingTrusted = hj.optBoolean("trusted");
+                        }
+                    } catch (Exception e) { logError("height.json", e); }
+                } else if (!viewing) pendingHeight = new float[]{room.floorY, room.ceilingY, room.ceilingTrusted ? 1 : 0};
                 log(String.format(java.util.Locale.US, "ceiling: depth %.3f, ARCore features %s (%d feature heights), used %.3f %s; floor %.3f; height %.2f m",
                         room.depthCeilingY, Float.isNaN(room.featureCeilingY) ? "none" : String.format(java.util.Locale.US, "%.3f", room.featureCeilingY), featN,
                         room.ceilingY, room.ceilingTrusted ? "(trusted)" : "(depth only)", room.floorY, room.ceilingY - room.floorY));
@@ -5764,6 +5781,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean ceilingHinted;
 
     /** feature-heights.bin: ARCore's feature point heights from the scan (for the ceiling when it's opened again). */
+    private float[] pendingHeight;
+
+    private void saveHeight(File dir) {
+        float[] h = pendingHeight; if (h == null) return;
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "height.json"))) {
+            o.write(new org.json.JSONObject().put("floorY", h[0]).put("ceilingY", h[1]).put("trusted", h[2] > 0).toString().getBytes("UTF-8"));
+        } catch (Exception e) { logError("height save", e); }
+    }
+
     private void saveDepthPairs(File dir) {
         if (pairN == 0) return;
         try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "depth-pairs.bin"))))) {

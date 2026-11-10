@@ -21,7 +21,7 @@ final class MeasureOverlay extends View {
     private float[] pending; private float floorY;
     private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG), dot = new Paint(Paint.ANTI_ALIAS_FLAG),
             bg = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG), halo = new Paint(Paint.ANTI_ALIAS_FLAG),
-            selLine = new Paint(Paint.ANTI_ALIAS_FLAG), del = new Paint(Paint.ANTI_ALIAS_FLAG);
+            selLine = new Paint(Paint.ANTI_ALIAS_FLAG), del = new Paint(Paint.ANTI_ALIAS_FLAG), dashed = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final float dp;
 
     MeasureOverlay(Context c, ScanRenderer r) {
@@ -32,6 +32,7 @@ final class MeasureOverlay extends View {
         halo.setColor(0x99000000); halo.setStrokeWidth(5.5f * dp); halo.setStrokeCap(Paint.Cap.ROUND);
         dot.setColor(0xFFFFD60A);
         selLine.set(line); selLine.setColor(0xFFFFFFFF); selLine.setStrokeWidth(4 * dp);
+        dashed.set(line); dashed.setPathEffect(new android.graphics.DashPathEffect(new float[]{10 * dp, 7 * dp}, 0));
         del.setColor(0xFFE5484D);
         bg.setColor(0xE61C1C1E);
         text.setColor(0xFFFFFFFF); text.setTextSize(15 * dp); text.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
@@ -41,6 +42,7 @@ final class MeasureOverlay extends View {
     int count() { return lines.size() + (pending != null ? 1 : 0); }
 
     private java.util.List<DoorwayFinder.Doorway> doors = new ArrayList<>();
+    private final ArrayList<RectF> doorLabels = new ArrayList<>();
     void setDoorways(java.util.List<DoorwayFinder.Doorway> ds) { doors = ds == null ? new ArrayList<>() : new ArrayList<>(ds); invalidate(); }
 
     void add(float[] p, float floor) {
@@ -137,14 +139,19 @@ final class MeasureOverlay extends View {
     }
 
     @Override protected void onDraw(Canvas c) {
-        labelRects.clear(); deleteRect = null;
+        labelRects.clear(); deleteRect = null; doorLabels.clear();
         for (DoorwayFinder.Doorway d : doors) {   // a thin outline of the opening and its size
             float top = d.floorY + d.height;
             float[] a = project(d.x0, d.floorY, d.z0), b = project(d.x1, d.floorY, d.z1), cc = project(d.x1, top, d.z1), dd = project(d.x0, top, d.z0);
             if (a == null || b == null || cc == null || dd == null) continue;
             float[] seg = {a[0], a[1], dd[0], dd[1], dd[0], dd[1], cc[0], cc[1], cc[0], cc[1], b[0], b[1]};
-            for (int k = 0; k < seg.length; k += 4) { c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], halo); c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], line); }
-            label(c, String.format(java.util.Locale.US, "Doorway %.2f × %.2f m", d.width, d.height), (dd[0] + cc[0]) / 2, (dd[1] + cc[1]) / 2 - 18 * dp);
+            Paint lp = d.sure ? line : dashed;   // dashed while a side or the top wasn't seen
+            for (int k = 0; k < seg.length; k += 4) { c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], halo); c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], lp); }
+            String t = d.sure ? String.format(java.util.Locale.US, "Doorway %.2f × %.2f m", d.width, d.height) : "Doorway (scan around the frame for its size)";
+            float lx = (dd[0] + cc[0]) / 2, ly = (dd[1] + cc[1]) / 2 - 18 * dp;
+            // never on top of another doorway's label (two doors at a corner)
+            for (RectF o : doorLabels) if (Math.abs(o.centerX() - lx) < o.width() && Math.abs(o.centerY() - ly) < o.height() + 4 * dp) ly = o.top - o.height() / 2 - 6 * dp;
+            doorLabels.add(label(c, t, lx, ly));
         }
         for (float[] l : lines) {
             float[] a = project(l[0], l[1], l[2]), b = project(l[3], l[4], l[5]);

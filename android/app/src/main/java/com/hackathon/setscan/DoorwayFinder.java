@@ -25,6 +25,8 @@ final class DoorwayFinder {
     static final class Doorway {
         int wall; float x0, z0, x1, z1;   // the opening's bottom corners (on the floor), world
         float floorY, width, height, nx, nz; boolean open; float seenShare;
+        /** Both jambs and the lintel were seen: the size is shown; otherwise only the outline. */
+        boolean sure = true;
         @Override public String toString() {
             return String.format(java.util.Locale.US, "doorway on wall %d: %.2f × %.2f m at (%.2f, %.2f)-(%.2f, %.2f), floor %.2f, %s (seen through %.0f%%)",
                     wall, width, height, x0, z0, x1, z1, floorY, open ? "open" : "no see-through", seenShare * 100);
@@ -32,6 +34,24 @@ final class DoorwayFinder {
     }
 
     interface SeenThrough { boolean test(float x, float y, float z); }
+
+    /** The doorways saved with a scan (doorways.json), or null when there's no file. */
+    static List<Doorway> load(java.io.File f) {
+        if (!f.exists()) return null;
+        try {
+            org.json.JSONArray a = new org.json.JSONArray(new String(java.nio.file.Files.readAllBytes(f.toPath()), "UTF-8"));
+            List<Doorway> out = new ArrayList<>();
+            for (int i = 0; i < a.length(); i++) {
+                org.json.JSONObject o = a.getJSONObject(i); Doorway d = new Doorway();
+                d.x0 = (float) o.getDouble("x0"); d.z0 = (float) o.getDouble("z0"); d.x1 = (float) o.getDouble("x1"); d.z1 = (float) o.getDouble("z1");
+                d.floorY = (float) o.getDouble("floorY"); d.width = (float) o.getDouble("width"); d.height = (float) o.getDouble("height");
+                d.open = o.optBoolean("open", true); d.sure = o.optBoolean("sure", true);
+                float l = (float) Math.hypot(d.x1 - d.x0, d.z1 - d.z0); if (l > 1e-3f) { d.nx = -(d.z1 - d.z0) / l; d.nz = (d.x1 - d.x0) / l; }
+                out.add(d);
+            }
+            return out;
+        } catch (Exception e) { return null; }
+    }
 
     /** walls: x0, z0, x1, z1 per wall (the outline). seen may be null. */
     static List<Doorway> find(float[] xyz, int n, float[] walls, float floorY, SeenThrough seen, StringBuilder why) {
@@ -147,6 +167,7 @@ final class DoorwayFinder {
                 dw.x1 = ax + ux * e * CELL + nx * off; dw.z1 = az + uz * e * CELL + nz * off;
                 dw.seenShare = tested > 0 ? (float) through / tested : 0;
                 dw.open = dw.seenShare > (oneSided ? 0.5f : 0.2f);
+                dw.sure = !oneSided;
                 // A gap the depth never looked through could be a dark wardrobe or a mirror: only an open one counts.
                 if (seen != null && !dw.open) { if (why != null) why.append(" " + dw + " -> not taken (no see-through)"); continue; }
                 out.add(dw);
