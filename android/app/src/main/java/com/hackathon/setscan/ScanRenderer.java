@@ -403,7 +403,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Camera focus for tracking: fixed (true) or auto (false, the photos' sharpness up close). */
     static boolean FIXED_FOCUS = true;
     /** Debug A/B: draw at most 30 fps. */
-    volatile boolean fpsCap30;
+    volatile boolean fpsCap30 = true;
     /** Tracking health for the scan log's summary line. */
     private int healthLosses, healthMinFeatures = Integer.MAX_VALUE; private long healthMaxExposureNs;
     static boolean PHOTO_LINTEL = false;
@@ -4525,7 +4525,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void onDrawFrameInner(GL10 gl) {
         long drawStartNs = System.nanoTime();
         // Debug A/B: draw at most 30 fps (the camera's own rate) to leave the GPU and CPU to ARCore.
-        if (fpsCap30 && lastFrameNs > 0 && drawStartNs - lastFrameNs < 30_000_000L) {
+        // While scanning: at most 30 draws a second, the camera's own rate (rk 10 Nov 15:39: a fast 2.5 min scan reached
+        // thermal 'severe' with ~1M points drawn 60 times a second, fps fell and ARCore lost track). The viewer stays at 60.
+        if (fpsCap30 && !viewing && lastFrameNs > 0 && drawStartNs - lastFrameNs < 30_000_000L) {
             try { Thread.sleep((33_000_000L - (drawStartNs - lastFrameNs)) / 1_000_000L); } catch (InterruptedException ignored) { }
             drawStartNs = System.nanoTime();
         }
@@ -4660,6 +4662,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 frameTurn = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, dot))));
             }
             moveSpeed = moveSpeed * 0.9f + Math.min(frameMove, 0.15f) * 30f * 0.1f;
+            if (frameDt > 0.005f) turnSpeed = turnSpeed * 0.9f + Math.min(frameTurn / frameDt, 400f) * 0.1f;   // deg/s
             // A sudden jump means ARCore just corrected its map: the next moment's poses can't be trusted yet.
             // Measured against the time since the last frame we saw: after a pause (a save, a slow frame) the phone
             // has simply walked further. Up to 2 m/s counts as walking, not as ARCore moving its map.
@@ -5588,6 +5591,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float detailHere = -1;           // smoothed share of solid points where the phone points
     private int solidCount, hudCalls;        // points seen often enough to count as solid
     private float moveSpeed;                 // smoothed phone speed, m/s
+    private float turnSpeed;                 // smoothed turning speed, deg/s
 
     private void addPoint(float x, float y, float z, int[] rgb) {
         int i = count * 3;
@@ -7434,7 +7438,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int level; String hint, sub = null;
         float d = detailHere;
         if (LIVE_MESH && d >= 0 && (livePreview.filledRoom > 0 || livePreview.filledInView > 0)) d = Math.min(d, livePreview.filledInView);
-        tooFast = moveSpeed > (tooFast ? 0.45f : 0.6f); // a slow walk (~0.4 m/s) is fine
+        tooFast = moveSpeed > (tooFast ? 0.45f : 0.6f) || turnSpeed > (tooFast ? 50f : 70f); // a slow walk (~0.4 m/s) is fine; quick turns lose ARCore too
         tooFar = !DEMO_FAR && farShare > (tooFar ? 0.45f : 0.6f); // demo: looking out over a hall is the point
         if (ts != TrackingState.TRACKING && everTracked) {
             // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
@@ -7462,7 +7466,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (d < 0 || count < 3000) { level = 1; hint = LIVE_MESH ? "Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas" : "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
         else if (photoWanted && d >= 0.35f) { level = 1; hint = "Hold still a moment… taking a photo"; }
         else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
-        else if (tooFast && d < 0.7f) { level = 2; hint = "Too fast. Slow down and sway gently over this spot"; }
+        else if (tooFast) { level = 2; hint = "Too fast: slow down, or the phone loses its place"; }   // (was only on unfinished spots; rk 10 Nov 15:39: lost track after a fast scan)
         else if (d < 0.35f) { level = 2; hint = LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
         else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = LIVE_MESH ? "This spot is done. Move on to the next orange area" : "This spot is done. Move on to the next red area"; }
