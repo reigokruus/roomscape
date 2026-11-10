@@ -236,6 +236,8 @@ final class FlatTiles {
     int floorIdx = -1, floorPainted;
     /** Spots whose tile was taken back: only depth paints them again, growth doesn't (no flicker). */
     final java.util.HashSet<Long> banned = new java.util.HashSet<>();
+    /** Floor tiles where something clearly stood (or stood in front of them) in some look: never painted as floor. */
+    final java.util.HashSet<Long> tallSeen = new java.util.HashSet<>();
 
     /** Floor tiles wherever the camera sees the floor and nothing stands on it: depth on the floor or below it
      *  (glossy floors reflect: depth reads below) counts as floor, depth more than 7 cm above it is an object. Oblique
@@ -247,7 +249,9 @@ final class FlatTiles {
         for (int i = 0; i < n; i++) {
             float x = wp[i * 3], y = wp[i * 3 + 1], z = wp[i * 3 + 2];
             float s = y + p.d;   // height above the floor
-            if (s > 0.5f) continue;   // walls, furniture tops: not the floor's business
+            // (anything up to 2.5 m counts: a box or a chair seen from above hides the floor behind it on the picture;
+            // 16:40 scan: floor tiles showed boxes and a wall when only things below 0.5 m were counted)
+            if (s > 2.5f) continue;
             float rx = x - camx, ry = y - camy, rz = z - camz;
             if (ry > -1e-3f) continue;
             float t = -(camy + p.d) / ry;   // where the ray meets the floor
@@ -270,16 +274,23 @@ final class FlatTiles {
             float dist = (float) Math.sqrt((cx - camx) * (cx - camx) + h * h + (cz - camz) * (cz - camz));
             if (dist > 3.0f) continue;
             int[] c = cnt.get(k); Tile t = tiles.get(k);
-            if (c != null && c[1] > Math.max(2, 0.1f * (c[0] + c[1]))) {   // something stands there
+            if (c != null && c[1] > Math.max(2, 0.1f * (c[0] + c[1]))) {   // something stands there (or in front of it)
                 if (t != null && t.score > 0 && c[1] > 0.5f * (c[0] + c[1]) && ++t.contra >= 3) { tiles.remove(k); banned.add(k); removed++; dirty = true; }
+                if (c[1] > Math.max(8, 0.3f * (c[0] + c[1]))) tallSeen.add(k);   // clearly something there: never a floor picture
                 continue;
             }
-            boolean nearPainted = false;
-            if (c == null && banned.contains(k)) continue;
-            if (c == null) {
-                for (int[] dd : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) { Tile nb = tiles.get(key(floorIdx, iu + dd[0], iv + dd[1])); if (nb != null && nb.score > 0 && nb.ring < GROW) nearPainted = true; }
-                if (!nearPainted) continue;
+            // stricter floor (coordinator 10 Nov 17:37): a picture only from a look where the pixels really are floor
+            if (banned.contains(k) || tallSeen.contains(k)) continue;
+            if (c != null && c[0] < 3) continue;   // too little depth on the floor there in this look
+            if (c == null) {   // no depth there: only between two depth-confirmed floor tiles (both sides)
+                boolean both = false;
+                for (int[] dd : new int[][]{{1, 0}, {0, 1}}) {
+                    Tile a = tiles.get(key(floorIdx, iu + dd[0], iv + dd[1])), b = tiles.get(key(floorIdx, iu - dd[0], iv - dd[1]));
+                    if (a != null && b != null && a.score > 0 && b.score > 0 && !a.inferred && !b.inferred) both = true;
+                }
+                if (!both) continue;
             }
+            if (t != null && c != null) t.inferred = false;   // depth has now seen floor there
             float score = head / Math.max(0.3f, dist);
             if (t == null) {
                 if (slots >= MAX_TILES) continue;
@@ -587,5 +598,5 @@ final class FlatTiles {
         } catch (Exception e) { return false; }
     }
 
-    synchronized void clear() { banned.clear(); floorIdx = -1; floorPainted = 0; maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
+    synchronized void clear() { banned.clear(); tallSeen.clear(); floorIdx = -1; floorPainted = 0; maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
 }
