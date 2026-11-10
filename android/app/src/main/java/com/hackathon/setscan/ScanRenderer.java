@@ -4455,7 +4455,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     snapshotForRealign();
                     healthLosses++;
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
-                    activity.toast("Lost position. Point back at an area you already scanned.");
+                    activity.toast("Lost position. Stand still and turn the phone back to the scanned area.");
                 }
             }
             else if (camera.getTrackingFailureReason() == com.google.ar.core.TrackingFailureReason.NONE
@@ -4541,6 +4541,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // sits on the camera picture (rk 10 Nov 11:17: "the view seemed off from where the scanned world and real
             // view should merge").
             if (hasFix) { float[] fi = new float[16], v2 = new float[16]; if (Matrix.invertM(fi, 0, poseFix, 0)) { Matrix.multiplyMM(v2, 0, view, 0, fi, 0); System.arraycopy(v2, 0, view, 0, 16); } }
+            // While lost (ARCore not tracking, or tracking but not yet lined up with the scan): hold the last good
+            // camera position and turn the view with the phone's own rotation sensor (rk 10 Nov 13:44: "it hides the
+            // whole room ... use the gyro to keep the position"), so the scan stays put and the user can aim back at
+            // it. Back on track: 0.3 s from the held view to the real one.
+            holding = everTracked && haveHeldView && (ts != TrackingState.TRACKING || needRealign);
+            if (holding) { heldView(view); System.arraycopy(view, 0, lastShownView, 0, 16); holdEndMs = 0; }
+            else {
+                if (wasHolding) holdEndMs = nowMs;
+                if (holdEndMs > 0 && nowMs - holdEndMs < 300) {
+                    float t = (nowMs - holdEndMs) / 300f;
+                    for (int i = 0; i < 16; i++) view[i] = lastShownView[i] + (view[i] - lastShownView[i]) * t;
+                }
+                if (ts == TrackingState.TRACKING) { System.arraycopy(view, 0, heldView, 0, 16); haveHeldView = true; synchronized (scanRot) { System.arraycopy(scanRot, 0, heldRot, 0, 9); heldRotOk = scanRotOk; } }
+            }
+            wasHolding = holding;
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
             System.arraycopy(mvp, 0, realMvp, 0, 16);
             if (OVERVIEW) overviewCamera(ts == TrackingState.TRACKING, nowMs);
@@ -4564,6 +4579,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             cutouts.draw(mvp);
             drawMarks(mvp, true);
             drawRescanTarget(mvp, camera);
+            if (holding) drawDim(0.18f);   // held view: slightly darker, so it reads as "not live"
             if (overviewBlend > 0.001f) drawOverviewWindow();
             float[] clearTap = pendingClear;
             if (clearTap != null) { pendingClear = null; clearAt(clearTap[0], clearTap[1]); }
@@ -5801,6 +5817,58 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private long fewFeaturesSince, plainHintAt;
+
+    // ---- the held view while lost ----
+    private final float[] heldView = new float[16], heldRot = new float[9];
+    private boolean haveHeldView, heldRotOk, holding, wasHolding;
+    private final float[] lastShownView = new float[16]; private long holdEndMs;
+    final float[] scanRot = new float[9]; volatile boolean scanRotOk;
+    private volatile float accelJitter; volatile boolean walkingWhileLost;
+    /** The rotation sensor while scanning (MainActivity registers it): the device's rotation, and whether it's shaking
+     *  like walking. */
+    final android.hardware.SensorEventListener scanRotListener = new android.hardware.SensorEventListener() {
+        private float lastA = -1;
+        @Override public void onSensorChanged(android.hardware.SensorEvent e) {
+            if (e.sensor.getType() == android.hardware.Sensor.TYPE_LINEAR_ACCELERATION) {
+                float a = (float) Math.sqrt(e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]);
+                accelJitter = accelJitter * 0.9f + a * 0.1f;   // walking: ~1-2 m/s² of bobbing; standing still: ~0.1-0.3
+                walkingWhileLost = accelJitter > 0.9f;
+                return;
+            }
+            float[] r = new float[9];
+            android.hardware.SensorManager.getRotationMatrixFromVector(r, e.values);
+            synchronized (scanRot) { System.arraycopy(r, 0, scanRot, 0, 9); scanRotOk = true; }
+        }
+        @Override public void onAccuracyChanged(android.hardware.Sensor s, int a) { }
+    };
+
+    /** view = (the turn since the last good frame, in the camera's axes)^T · the last good view. */
+    private void heldView(float[] out) {
+        System.arraycopy(heldView, 0, out, 0, 16);
+        float[] now = new float[9]; boolean ok;
+        synchronized (scanRot) { System.arraycopy(scanRot, 0, now, 0, 9); ok = scanRotOk; }
+        if (!ok || !heldRotOk) return;
+        // M = R0^T · Rnow (row-major, device axes): a vector in the device frame now -> the device frame then
+        float[] m = new float[9];
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) { float s = 0; for (int k = 0; k < 3; k++) s += heldRot[k * 3 + i] * now[k * 3 + j]; m[i * 3 + j] = s; }
+        // device axes -> the display-oriented camera axes (turned about z by the display rotation)
+        int rot = displayRotation(); double ang = rot * Math.PI / 2; float c = (float) Math.cos(ang), sn = (float) Math.sin(ang);
+        float[] z = {c, -sn, 0, sn, c, 0, 0, 0, 1}, zt = {c, sn, 0, -sn, c, 0, 0, 0, 1};
+        float[] t = mul3(zt, mul3(m, z));
+        // view_now = M^T · view_then (4x4, column-major)
+        float[] mt = new float[16];
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) mt[j * 4 + i] = t[j * 3 + i];   // transpose: (M^T)[i][j] = M[j][i]
+        mt[15] = 1;
+        float[] v = new float[16];
+        Matrix.multiplyMM(v, 0, mt, 0, heldView, 0);
+        System.arraycopy(v, 0, out, 0, 16);
+    }
+
+    private static float[] mul3(float[] a, float[] b) {
+        float[] r = new float[9];
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) { float s = 0; for (int k = 0; k < 3; k++) s += a[i * 3 + k] * b[k * 3 + j]; r[i * 3 + j] = s; }
+        return r;
+    }
     private boolean ceilingHinted;
 
     /** feature-heights.bin: ARCore's feature point heights from the scan (for the ceiling when it's opened again). */
@@ -6036,7 +6104,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 realignRunning = false;
             }, "realign").start();
         }
-        if (nowMs - realignHintAt > 6000) { realignHintAt = nowMs; activity.toast("Lost position. Point back at an area you already scanned."); }
+        if (nowMs - realignHintAt > 6000) { realignHintAt = nowMs; activity.toast("Lost position. Stand still and turn the phone back to the scanned area."); }
         return false;
     }
     private static long key(float x, float y, float z) {
@@ -6205,7 +6273,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Full-screen stripes, `a` opaque, under everything (no depth). */
     private void drawZebra(float a) {
         if (zebraProg == 0) zebraProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
-                "precision mediump float; uniform float uW; uniform float uA; uniform vec3 uL; uniform vec3 uD;"
+                "precision highp float; uniform float uW; uniform float uA; uniform vec3 uL; uniform vec3 uD;"
                 + "void main(){ float s = mod(floor((gl_FragCoord.x + gl_FragCoord.y) / (uW * 1.41421)), 2.0);"
                 + " gl_FragColor = vec4(mix(uD, uL, s), uA); }");
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
@@ -6602,8 +6670,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float[][] views = new float[phs.size()][];
         for (int i = 0; i < phs.size(); i++) views[i] = OutlineFill.invert(phs.get(i).pose);
         float floor = planner.isReady() ? planner.floorY : walkFloorY();
+        StringBuilder why = new StringBuilder();
         java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, nv, walls, floor,
-                (x, y, z) -> OutlineFill.judge(phs, views, new float[]{x, y, z}, null) == 1, null);
+                (x, y, z) -> tsdf.seenThrough(x, y, z) || OutlineFill.judge(phs, views, new float[]{x, y, z}, null) == 1, why);   // the same evidence as at Done
+        if (ds.isEmpty() && why.length() > 0) log("live doorways, left out:" + (why.length() > 300 ? why.substring(0, 300) : why));
         synchronized (liveTrack) {
             for (float[] t : liveTrack) t[11] = 0;   // matched this time?
             for (DoorwayFinder.Doorway d : ds) {
@@ -6636,6 +6706,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread: every ~1 s, copy the voxels near the phone and build their mesh on another thread. */
     private void maybeLiveMesh(Camera camera, long nowMs) {
         if (liveMeshBusy || liveMeshNew != null || nowMs - liveMeshAt < LIVE_MESH_MS || tsdf.size() < 50) return; // the last one is uploaded before its buffers are reused
+        // not while lost: the mesh is built around ARCore's position, which is wrong then, and the room vanished
+        if (camera.getTrackingState() != TrackingState.TRACKING || needRealign) return;
         liveMeshAt = nowMs; liveMeshBusy = true;
         com.google.ar.core.Pose p = camera.getPose();
         final float px = p.tx(), py = p.ty(), pz = p.tz();
@@ -6926,7 +6998,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (LIVE_MESH && d >= 0 && (livePreview.filledRoom > 0 || livePreview.filledInView > 0)) d = Math.min(d, livePreview.filledInView);
         tooFast = moveSpeed > (tooFast ? 0.45f : 0.6f); // a slow walk (~0.4 m/s) is fine
         tooFar = !DEMO_FAR && farShare > (tooFar ? 0.45f : 0.6f); // demo: looking out over a hall is the point
-        if (ts != TrackingState.TRACKING) {
+        if (ts != TrackingState.TRACKING && everTracked) {
+            // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
+            level = 2;
+            hint = walkingWhileLost ? "Lost position. Stand still and turn the phone back to the scanned area" : "Lost position. Turn the phone back to the scanned area";
+        }
+        else if (ts != TrackingState.TRACKING) {
             level = 2;
             hint = lastFail == com.google.ar.core.TrackingFailureReason.INSUFFICIENT_FEATURES ? "Lost track: point at something with texture, not a plain wall"
                     : lastFail == com.google.ar.core.TrackingFailureReason.EXCESSIVE_MOTION ? "Lost track: moving too fast. Slow down"

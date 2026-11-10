@@ -2575,6 +2575,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // the phone's rotation and shaking while scanning: the held view and the "stand still" hint when tracking is lost
+        try {
+            android.hardware.SensorManager sm = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE);
+            if (sm != null && renderer != null) {
+                android.hardware.Sensor rv = sm.getDefaultSensor(android.hardware.Sensor.TYPE_GAME_ROTATION_VECTOR), la = sm.getDefaultSensor(android.hardware.Sensor.TYPE_LINEAR_ACCELERATION);
+                if (rv != null) sm.registerListener(renderer.scanRotListener, rv, android.hardware.SensorManager.SENSOR_DELAY_GAME);
+                if (la != null) sm.registerListener(renderer.scanRotListener, la, android.hardware.SensorManager.SENSOR_DELAY_UI);
+            }
+        } catch (Exception ignored) { }
         nearby.start();
         renderer.paused = false;
         setGyroSensor(walkState == 2 && renderer.gyroLook);
@@ -2663,6 +2672,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        try { android.hardware.SensorManager sm = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE); if (sm != null && renderer != null) sm.unregisterListener(renderer.scanRotListener); } catch (Exception ignored) { }
         // The app's event log, for "Share diagnostics" even when no scan was finished.
         if (renderer != null) try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(getFilesDir(), "app-log.txt"))) { o.write(renderer.logText().getBytes("UTF-8")); } catch (Exception ignored) { }
         setGyroSensor(false);
