@@ -116,7 +116,7 @@ live mesh stages) say otherwise.
 | recording/ (video 131, depth 69, frames 0.2) | 200 (~67/min) | rebuild after Done, recovery, text patches | keep |
 | photos/ + keyframes.json | 16 | Photo view, objects, sharing | keep |
 | before-rebuild/ (photos 16, points 6, surfels 6, mesh 1) | 29 | backup of the live result when "Build scans from the recording" is on | keep for now (data is gold); offer "delete backups older than N days" |
-| surfels.bin | 8 | splat cache (Splats view, Lighting) | drop once Lighting is off splats (and its copy in before-rebuild) |
+| surfels.bin | 8 | the Points view's dots, Objects (finding and moving things), the patch colours where an object was removed, S24 imports without a photo room; Lighting only as a fallback now | keep: dropping it means dropping or rebuilding Points (rk's call); it is a cache of points.bin, so it could be rebuilt on open instead (a few seconds each time) |
 | points.bin | 7 | Points view, objects, Continue scan | keep |
 | worldmap.arexperience | 11 | Continue scan / Scan area again | keep |
 | mesh.bin | 1.6 | Photo + Mesh views | keep |
@@ -129,7 +129,14 @@ Live per frame: per-point normals (LiveCloud.normalBuffer, 4.8 MB) only for the 
 | kf/ + kf.bin | 5 | photos + their depth/poses | keep |
 | points.bin | 6 | Points view, room analysis | keep |
 | surface.ply | 2.7 | Photo/Mesh views | keep |
-Splat building after Done (3–7 s) → goes with the Lighting port.
+Splat building after Done (3–7 s): still needed for Points and Objects (see surfels.bin above).
+
+### Splat data: what still reads it (05:45)
+Lighting is off it (c04eee2). Still on it: the Points tab (the dots are the splats drawn as points), Objects (ObjectsScene
+builds each object's part from them; Claude's object finding feeds it), the patch under a removed object (colours of
+nearby splats), the storyboard's size fallback, and S24 scans imported without a photo room. The photo room already
+cuts out / moves objects without them (HoleFill.cutOut). Options for rk: (a) keep as is; (b) Points from points.bin
+directly (plain dots, no splat build) and patch colours from the photo room, then drop surfels.bin and the build.
 
 ## Backlog (rk 9 Nov, 23:00)
 - S24 recordings are kept (rk). Add an S24 "rebuild from recording" (ARCore playback of recording.mp4 through the
