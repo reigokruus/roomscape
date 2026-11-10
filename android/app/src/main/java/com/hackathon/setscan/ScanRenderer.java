@@ -4677,14 +4677,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // the overlay (live doorway outlines) draws with the matrix the scan is drawn with: after the overview's
             // pulled-back camera (13:35: the outlines were projected with the phone's own camera and never showed)
             System.arraycopy(mvp, 0, viewMvp, 0, 16);
-            if (!LIVE_MESH) uploadNew(); // the points aren't drawn while scanning with the mesh: upload them for the viewer only
+            if (!LIVE_MESH || LIVE_POINTS) uploadNew(); // the points: drawn live (Points view), else uploaded for the viewer only
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             drawPaint(mvp);
             if (OVERVIEW && overviewBlend > 0.5f) { // where the screen's corners are in the camera texture (overview projection)
                 frame.transformCoordinates2d(com.google.ar.core.Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
                         new float[]{-1, -1, 1, -1, -1, 1}, com.google.ar.core.Coordinates2d.TEXTURE_NORMALIZED, ovCamUv);
             }
-            if (LIVE_MESH) { long lmT0 = System.nanoTime(); if (trackingNow) maybeLiveMesh(camera, nowMs); drawLiveMesh(mvp); perf.note("ms: live mesh draw", (System.nanoTime() - lmT0) / 1e6); }
+            if (LIVE_MESH) {
+                long lmT0 = System.nanoTime();
+                if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
+                if (LIVE_POINTS) { consumeLiveMesh(); drawPoints(mvp, 1f); }   // rk 10 Nov 15:20: "only points, no triangles no photo"
+                else drawLiveMesh(mvp);
+                perf.note(LIVE_POINTS ? "ms: live points draw" : "ms: live mesh draw", (System.nanoTime() - lmT0) / 1e6);
+            }
             else if (LIVE_DISCS) drawLiveDiscs(mvp);
             if (contAuto && improveDir != null && trackingNow) { maybeContinueAlign(nowMs); drawContinueGhost(mvp); }
             float[] tap = pendingTap;
@@ -5695,20 +5701,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (g == null) return;
         final GpuTsdf.Sync sy = g.sync();
         if (sy == null || sy.count == 0) return;
+        syncedBricks += sy.count; if (sy.count >= GpuTsdf.MAX_SYNC_BRICKS) syncFull++;
         synchronized (fuseExec) { fuseDrained = false;
         fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } }); }
     }
 
     /** GL thread: everything the GPU has, into the CPU surface, before it's read (Done, depth AI). */
+    private volatile int syncedBricks, syncFull;
+
     private void gpuSyncAll() {
+        int before = tsdf.surfaceVoxels(), bricks = 0;
         for (int k = 0; k < 64 && gpuTsdf != null; k++) {
             GpuTsdf.Sync sy = gpuTsdf.sync();
             if (sy == null || sy.count == 0) break;
             final GpuTsdf g = gpuTsdf;
             synchronized (fuseExec) { fuseDrained = false;
             fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } }); }
+            bricks += sy.count;
             if (sy.count < GpuTsdf.MAX_SYNC_BRICKS) break;
         }
+        drainFuse();
+        // (15:09 scan: the live mesh covered the whole room at Done, the saved surface 16% of it: does this step erase it?)
+        log(String.format(java.util.Locale.US, "GPU surface at Done: %d bricks read back; surface voxels %d -> %d", bricks, before, tsdf.surfaceVoxels()));
     }
 
     /**
@@ -6013,7 +6027,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log(String.format(java.util.Locale.US, "state: %s, view %s, fusion %s, depth new %d stale %d not ready %d, looking at %s%s", ts,
                 heldMode == 0 ? "live" : heldMode == 1 ? "held (rotation sensor)" : "held (ARCore movement)", fusion,
                 newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0,
-                vk0 + vn0 > 0 ? Math.round(100f * vk0 / (vk0 + vn0)) + "% scanned surface" : "-", walkingWhileLost ? ", walking" : ""));
+                vk0 + vn0 > 0 ? Math.round(100f * vk0 / (vk0 + vn0)) + "% scanned surface" : "-", walkingWhileLost ? ", walking" : "")
+                + (gpuTsdf != null ? ", GPU bricks read back " + syncedBricks + (syncFull > 0 ? " (" + syncFull + " full)" : "") : ""));
+        syncedBricks = 0; syncFull = 0;
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
     }
 
@@ -6895,6 +6911,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- live surface mesh (rk, 7 Nov: like the iPhone's LiDAR mesh, polygons on what's detected, not splats) ----
     static final boolean LIVE_MESH = true;
+    /** The live scan view: the captured points (the same ones the Points view shows after Done), or the photo-textured
+     *  mesh. Debug switch "Live view". */
+    static volatile boolean LIVE_POINTS = true;
+
+    /** Points live view: the finished live mesh isn't drawn; take it so the next one gets built (for the doorways). */
+    private void consumeLiveMesh() {
+        Object[] nm = liveMeshNew;
+        if (nm == null) return;
+        liveMeshNew = null;
+        liveMeshTriVerts = ((LivePreview.Result) nm[0]).restVerts;   // the wide overview starts once there's enough
+    }
     static final long LIVE_MESH_MS = 1200;
     static final float LIVE_MESH_RADIUS = 8f;
     private volatile boolean liveMeshBusy;
