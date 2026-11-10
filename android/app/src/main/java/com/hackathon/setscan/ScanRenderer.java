@@ -3930,6 +3930,49 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private volatile float walkYaw, walkPitch;
     private long walkLast;
 
+    // ---- gyro look (rk 10 Nov): standing in the room, turning / tilting the phone looks around; drags add on top ----
+    volatile boolean gyroLook = true;
+    private final float[] gyroRot = new float[9];
+    private volatile float gyroHeading, gyroPitch;
+    private volatile boolean gyroHave;
+    private float gyroHeading0;
+    private volatile boolean gyroRef;
+    /** The game rotation vector (gyro + gravity, no compass): the back camera's heading and tilt, smoothed. */
+    final android.hardware.SensorEventListener gyroListener = new android.hardware.SensorEventListener() {
+        @Override public void onSensorChanged(android.hardware.SensorEvent e) {
+            android.hardware.SensorManager.getRotationMatrixFromVector(gyroRot, e.values);
+            // The back camera looks along the device's -z; in the world frame (z up) that's minus the third column.
+            float bx = -gyroRot[2], by = -gyroRot[5], bz = -gyroRot[8];
+            float heading = (float) Math.atan2(by, bx), pitch = (float) Math.asin(clamp(bz, -1f, 1f));
+            if (!gyroHave) { gyroHeading = heading; gyroPitch = pitch; gyroHave = true; return; }
+            float d = heading - gyroHeading;
+            while (d > Math.PI) d -= 2 * Math.PI;
+            while (d < -Math.PI) d += 2 * Math.PI;
+            gyroHeading += d * 0.6f;                 // light smoothing (a hand shakes)
+            gyroPitch += (pitch - gyroPitch) * 0.6f;
+        }
+        @Override public void onAccuracyChanged(android.hardware.Sensor sensor, int accuracy) { }
+    };
+
+    /** Gyro look on/off; turning it off keeps the view where it is. */
+    void setGyroLook(boolean on) {
+        if (!on && gyroLook && gyroHave && gyroRef) { walkYaw = walkYawNow(); walkPitch = walkPitchNow(); }
+        if (on && !gyroLook) { gyroRef = false; walkPitch = 0; }
+        gyroLook = on;
+    }
+
+    private float walkYawNow() {
+        if (!(gyroLook && gyroHave)) return walkYaw;
+        if (!gyroRef) { gyroHeading0 = gyroHeading; gyroRef = true; }
+        float d = gyroHeading - gyroHeading0;
+        return walkYaw + d;
+    }
+
+    private float walkPitchNow() {
+        if (!(gyroLook && gyroHave)) return walkPitch;
+        return clamp(walkPitch + gyroPitch, -1.45f, 1.45f);
+    }
+
     float walkFloorY() { return roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY; }
 
     /** Where a tap's ray meets the floor plane (x, z), or null. */
@@ -3952,7 +3995,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     boolean enterAt(float tx, float ty) {
         float[] p = floorPoint(tx, ty);
         if (p == null) return false;
-        if (!walking) { walkYaw = topView ? 0 : yaw; walkPitch = -0.1f; walkFov = 65f; topView = false; }
+        if (!walking) { walkYaw = topView ? 0 : yaw; walkPitch = gyroLook ? 0f : -0.1f; walkFov = 65f; topView = false; gyroRef = false; }
         eye[0] = p[0]; eye[1] = walkFloorY() + eyeH; eye[2] = p[1];
         walking = true;
         walkLast = 0;
@@ -3965,7 +4008,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void look(float dx, float dy) {
         float s = 0.002f * walkFov / 60f;
         walkYaw += dx * s;
-        walkPitch = clamp(walkPitch + dy * s, -1.3f, 1.3f);
+        walkPitch = clamp(walkPitch + dy * s, gyroLook && gyroHave ? -2.6f : -1.3f, gyroLook && gyroHave ? 2.6f : 1.3f);
     }
 
     void walkZoom(float f) { walkFov = clamp(walkFov / f, 30f, 90f); }
@@ -6008,9 +6051,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             long now = System.nanoTime();
             float dt = walkLast == 0 ? 0 : Math.min(0.1f, (now - walkLast) / 1e9f);
             walkLast = now;
-            float fx = (float) -Math.sin(walkYaw), fz = (float) -Math.cos(walkYaw);
+            float yawE = walkYawNow(), pitchE = walkPitchNow();
+            float fx = (float) -Math.sin(yawE), fz = (float) -Math.cos(yawE);
             eye[0] += fx * walkMove * 1.2f * dt; eye[2] += fz * walkMove * 1.2f * dt;
-            float cp = (float) Math.cos(walkPitch), sp = (float) Math.sin(walkPitch);
+            float cp = (float) Math.cos(pitchE), sp = (float) Math.sin(pitchE);
             ex = eye[0]; ey = eye[1]; ez = eye[2];
             Matrix.setLookAtM(view, 0, ex, ey, ez, ex + fx * cp, ey + sp, ez + fz * cp, 0, 1, 0);
         } else if (topView) Matrix.setLookAtM(view, 0, target[0], target[1] + dist, target[2], target[0], target[1], target[2], 0, 0, -1);

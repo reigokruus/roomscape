@@ -1181,6 +1181,22 @@ public class MainActivity extends Activity {
         Ios.filled(exit);
         exit.setOnClickListener(v -> setWalk(0));
         c.addView(exit, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46)));
+        // Gyro look (rk 10 Nov): turn / tilt the phone to look around; on by default, remembered.
+        Button gyro = new Button(this);
+        boolean gyroOn = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("walkGyro", true);
+        renderer.gyroLook = gyroOn;
+        gyro.setText(gyroOn ? "Gyro: on" : "Gyro: off");
+        Ios.textButton(gyro);
+        gyro.setOnClickListener(v -> {
+            boolean on = !renderer.gyroLook;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("walkGyro", on).apply();
+            glView.queueEvent(() -> renderer.setGyroLook(on));
+            gyro.setText(on ? "Gyro: on" : "Gyro: off");
+            setGyroSensor(walkState == 2 && on);
+        });
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
+        glp.leftMargin = dp(8);
+        c.addView(gyro, glp);
         c.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
         // Eye height: taller / shorter, 10 cm a tap, remembered.
         LinearLayout h = new LinearLayout(this);
@@ -1206,7 +1222,7 @@ public class MainActivity extends Activity {
         walkControls = c;
         c.setVisibility(View.GONE);
         walkTip = new TextView(this);
-        walkTip.setText("Drag to look · pinch to zoom · double-tap the floor to walk there");
+        walkTip.setText("Turn the phone or drag to look · pinch to zoom · double-tap the floor to walk there");
         walkTip.setTextColor(Color.WHITE);
         walkTip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         android.graphics.drawable.GradientDrawable tb = new android.graphics.drawable.GradientDrawable();
@@ -1259,9 +1275,25 @@ public class MainActivity extends Activity {
         heightLabel.setText(String.format(java.util.Locale.US, "%.2f m", h));
     }
 
+    private boolean gyroRegistered;
+
+    /** The rotation sensor only while standing in the room with gyro look on. */
+    private void setGyroSensor(boolean on) {
+        android.hardware.SensorManager sm = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE);
+        if (sm == null) return;
+        if (on && !gyroRegistered) {
+            android.hardware.Sensor rv = sm.getDefaultSensor(android.hardware.Sensor.TYPE_GAME_ROTATION_VECTOR);
+            if (rv != null) gyroRegistered = sm.registerListener(renderer.gyroListener, rv, android.hardware.SensorManager.SENSOR_DELAY_GAME);
+        } else if (!on && gyroRegistered) {
+            sm.unregisterListener(renderer.gyroListener);
+            gyroRegistered = false;
+        }
+    }
+
     /** 0 = back to orbiting, 1 = "tap the floor", 2 = standing in the room. */
     private void setWalk(int state) {
         walkState = state;
+        setGyroSensor(state == 2 && renderer.gyroLook);
         if (state == 0) glView.queueEvent(renderer::exitWalk);
         if (objPanel.getVisibility() == View.VISIBLE) setObjectMode(false);
         boolean viewerChrome = state == 0;
@@ -2216,6 +2248,7 @@ public class MainActivity extends Activity {
         super.onResume();
         nearby.start();
         renderer.paused = false;
+        setGyroSensor(walkState == 2 && renderer.gyroLook);
         if (session == null) {
             try {
                 switch (ArCoreApk.getInstance().requestInstall(this, !installRequested)) {
@@ -2273,6 +2306,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        setGyroSensor(false);
         stopRecordingIfAny();
         super.onPause();
         nearby.stop();
