@@ -451,6 +451,25 @@ final class FlatTiles {
         return false;
     }
 
+    /** Shadow anchoring (rk 10 Nov): the share of these samples (ARCore's world) that land within 3 cm of a painted
+     *  tile once the correction F is applied, and how many samples were tested. */
+    synchronized float[] onTiles(java.util.List<float[]> pts, float[] F) {
+        int on = 0, n = 0;
+        for (float[] q : pts) {
+            float x = F[0] * q[0] + F[4] * q[1] + F[8] * q[2] + F[12], y = F[1] * q[0] + F[5] * q[1] + F[9] * q[2] + F[13], z = F[2] * q[0] + F[6] * q[1] + F[10] * q[2] + F[14];
+            n++;
+            for (int pi = 0; pi < planes.size(); pi++) {
+                Plane p = planes.get(pi);
+                float dd = p.nx * x + p.ny * y + p.nz * z + p.d;
+                if (dd > 0.03f || dd < -0.03f) continue;
+                int iu = (int) Math.floor((p.ux * x + p.uy * y + p.uz * z) / TILE), iv = (int) Math.floor((p.vx * x + p.vy * y + p.vz * z) / TILE);
+                Tile t = tiles.get(key(pi, iu, iv));
+                if (t != null && t.score > 0) { on++; break; }
+            }
+        }
+        return new float[]{n == 0 ? 0 : (float) on / n, n};
+    }
+
     /** The painted tiles as flat triangles on their planes (x, y, z per corner, 6 corners per tile). */
     synchronized float[] flatTriangles() {
         ArrayList<float[]> out = new ArrayList<>();

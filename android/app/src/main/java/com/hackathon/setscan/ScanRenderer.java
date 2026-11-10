@@ -6504,6 +6504,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             double dYaw = Math.toDegrees(Math.atan2(F[2], F[0]) - Math.atan2(refFix[2], refFix[0]));
             while (dYaw > 180) dYaw -= 360; while (dYaw < -180) dYaw += 360;
             if (strong && Math.abs(dYaw) > 10) { strong = false; log(String.format(java.util.Locale.US, "  (a %.0f deg turn: needs a second agreeing try)", dYaw)); }
+            // Shadow tile check (logged only, nothing decided by it yet): does this correction still put the view on
+            // the tiles painted before the loss? Offline on the 16:39 scan the -36 deg resume put 1-6% of the view on
+            // the old tiles where the correction from before the loss put 12-15% (tools/tile-anchor).
+            if (FLAT_TILES && ok && !recentPts.isEmpty()) {
+                java.util.ArrayList<float[]> tp = new java.util.ArrayList<>();
+                for (java.util.ArrayList<float[]> fr : recentPts) tp.addAll(fr);
+                float[] withF = flatTiles.onTiles(tp, F), withOld = flatTiles.onTiles(tp, poseFix);
+                boolean veto = withOld[0] >= 0.08f && withF[0] < 0.5f * withOld[0];
+                log(String.format(java.util.Locale.US, "  tile check (shadow): %.0f%% of %d samples on the old tiles with this correction, %.0f%% with the one before%s",
+                        withF[0] * 100, (int) withF[1], withOld[0] * 100, veto ? " -> the tiles would refuse it" : ""));
+            }
             if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
                 evMark(); shadowRealign = realign; shadowUntil = nowMs + 20000; shadowFrom = nowMs;   // check the alignment for 20 s (shadow, not applied)
