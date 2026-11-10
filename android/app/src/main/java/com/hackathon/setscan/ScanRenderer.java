@@ -480,6 +480,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
             int pv = proxy.length / 3;
             boolean[] ceil = simple ? new boolean[0] : ceilingTriangles(mp, mvUse / 3);
+            // Ragged bits inside an open doorway (see-through noise fused into the opening): left out of the photo room.
+            java.util.List<DoorwayFinder.Doorway> dws = doorways;
+            if (!simple && dws != null && !dws.isEmpty()) {
+                int cut = 0;
+                for (int t = 0; t < ceil.length; t++) {
+                    if (ceil[t]) continue;
+                    float x = (mp.get(t * 9) + mp.get(t * 9 + 3) + mp.get(t * 9 + 6)) / 3, y = (mp.get(t * 9 + 1) + mp.get(t * 9 + 4) + mp.get(t * 9 + 7)) / 3, z = (mp.get(t * 9 + 2) + mp.get(t * 9 + 5) + mp.get(t * 9 + 8)) / 3;
+                    for (DoorwayFinder.Doorway d : dws) {
+                        float wx = d.x1 - d.x0, wz = d.z1 - d.z0, wl = (float) Math.sqrt(wx * wx + wz * wz); if (wl < 0.1f) continue;
+                        float u = ((x - d.x0) * wx + (z - d.z0) * wz) / wl, off = (x - d.x0) * d.nx + (z - d.z0) * d.nz;
+                        if (Math.abs(off) < 0.12f && u > 0.03f && u < wl - 0.03f && y > d.floorY + 0.05f && y < d.floorY + d.height - 0.03f) { ceil[t] = true; cut++; break; }
+                    }
+                }
+                if (cut > 0) log("doorways: " + cut + " ragged triangles inside the openings left out");
+            }
             int keepTris = 0;
             for (boolean c : ceil) if (!c) keepTris++;
             int mv = simple ? 0 : keepTris * 3;
