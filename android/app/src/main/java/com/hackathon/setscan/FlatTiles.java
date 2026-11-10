@@ -341,6 +341,37 @@ final class FlatTiles {
         vbo.position(0);
     }
 
+    /** Whether a point lies on a painted tile (within 7 cm in front, 15 cm behind its plane). */
+    synchronized boolean covers(float x, float y, float z) {
+        for (int pi = 0; pi < planes.size(); pi++) {
+            Plane p = planes.get(pi);
+            float dd = p.nx * x + p.ny * y + p.nz * z + p.d;
+            if (dd > 0.07f || dd < -0.15f) continue;
+            int iu = (int) Math.floor((p.ux * x + p.uy * y + p.uz * z) / TILE), iv = (int) Math.floor((p.vx * x + p.vy * y + p.vz * z) / TILE);
+            Tile t = tiles.get(key(pi, iu, iv));
+            if (t != null && t.score > 0) return true;
+        }
+        return false;
+    }
+
+    /** The painted tiles as flat triangles on their planes (x, y, z per corner, 6 corners per tile). */
+    synchronized float[] flatTriangles() {
+        ArrayList<float[]> out = new ArrayList<>();
+        for (Tile t : tiles.values()) {
+            if (t.score <= 0) continue;
+            Plane p = planes.get(t.plane);
+            float[][] c = new float[4][];
+            for (int k = 0; k < 4; k++) {
+                float a = (t.iu + ((k & 1) == 0 ? 0 : 1)) * TILE, b = (t.iv + ((k & 2) == 0 ? 0 : 1)) * TILE;
+                c[k] = new float[]{p.ux * a + p.vx * b - p.nx * p.d, p.uy * a + p.vy * b - p.ny * p.d, p.uz * a + p.vz * b - p.nz * p.d};
+            }
+            for (int idx : new int[]{0, 1, 3, 0, 3, 2}) out.add(c[idx]);
+        }
+        float[] r = new float[out.size() * 3];
+        for (int i = 0; i < out.size(); i++) System.arraycopy(out.get(i), 0, r, i * 3, 3);
+        return r;
+    }
+
     // ---- Saved with the scan (tiles.json + tiles.png: the used part of the atlas) ----
     static final class Saved { String json; android.graphics.Bitmap img; }
 

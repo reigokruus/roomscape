@@ -2439,6 +2439,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 mergeDetail();
                 log("detail zones: " + zones.size() + ", " + detail.size() + " fine voxels -> " + dt + " triangles; merged mesh " + meshVerts / 3 + " triangles");
             }
+            if (FLAT_TILES && flatTiles.countShown() > 0) flattenMeshToTiles();
         } catch (Throwable e) { logError("surface", new RuntimeException(e)); }
         lastPlanes = planes;
         if (improveDir != null) { mergeImprove(); return; }
@@ -4516,6 +4517,33 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "live-mesh.bin"))))) {
             o.writeInt(vv.length / 3); o.writeFloat(lastLiveFloor); for (float v : vv) o.writeFloat(v);
         } catch (Exception e) { logError("live mesh", e); }
+    }
+
+    /** Where tiles were painted, the surface is the tile's flat plane (rk 10 Nov 16:24: "the mesh should be flat as
+     *  well where the tiles land"): triangles on a tile (within its noise band) are dropped and the tiles' flat squares
+     *  put in, so the Mesh view, Measure taps and the saved surface.ply are flat there. */
+    private void flattenMeshToTiles() {
+        FloatBuffer p = meshPosAll != null ? meshPosAll : tsdf.meshPos; ByteBuffer c = meshPosAll != null ? meshColAll : tsdf.meshCol;
+        int verts = meshPosAll != null ? meshVerts : tsdf.meshVerts;
+        if (p == null || c == null || verts < 3) return;
+        float[] flat = flatTiles.flatTriangles();
+        int tris = verts / 3, kept = 0, fv = flat.length / 3;
+        boolean[] keep = new boolean[tris];
+        for (int t = 0; t < tris; t++) {
+            float x = 0, y = 0, z = 0;
+            for (int k = 0; k < 3; k++) { x += p.get((t * 3 + k) * 3); y += p.get((t * 3 + k) * 3 + 1); z += p.get((t * 3 + k) * 3 + 2); }
+            keep[t] = !flatTiles.covers(x / 3, y / 3, z / 3);
+            if (keep[t]) kept++;
+        }
+        int nv = kept * 3 + fv;
+        FloatBuffer np = ByteBuffer.allocateDirect(nv * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        ByteBuffer nc = ByteBuffer.allocateDirect(nv * 4).order(ByteOrder.nativeOrder());
+        for (int t = 0; t < tris; t++) if (keep[t]) for (int k = 0; k < 9; k++) np.put(p.get(t * 9 + k));
+        for (int t = 0; t < tris; t++) if (keep[t]) for (int k = 0; k < 12; k++) nc.put(c.get(t * 12 + k));
+        np.put(flat); for (int i = 0; i < fv; i++) { nc.put((byte) 205); nc.put((byte) 200); nc.put((byte) 192); nc.put((byte) 255); }
+        np.position(0); nc.position(0);
+        meshPosAll = np; meshColAll = nc; meshVerts = nv; meshTris = nv / 3;
+        log(String.format(java.util.Locale.US, "flat tiles in the surface: %d triangles on tiles dropped, %d flat tile triangles put in", tris - kept, fv / 3));
     }
 
     /** tiles.json + tiles.png in the scan folder (the flat tiles; not in the .rmsc yet). */
