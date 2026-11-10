@@ -664,16 +664,16 @@ public class MainActivity extends Activity {
             // In the viewer these live in the top bar (Back, Share) and under the 3D view (Continue scan), like iOS.
             if (bt != homeButton && bt != exportButton && bt != improveButton && bt != lightButton && bt != objButton) bars.addView(bt);
         }
-        // GPU surface (rk 10 Nov, test): off by default; the self-test compares it with the CPU on the last scan's depth.
+        // GPU surface (rk 10 Nov): on by default (self-test 10:13: 50x faster, 99% the same surface); the switch turns it off.
         {
             Button gpuB = new Button(this), testB = new Button(this);
-            boolean on = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("gpuSurface", false);
+            boolean on = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("gpuSurface2", true);
             renderer.gpuSurfaceWanted = on;
             gpuB.setText(on ? "GPU surface: on" : "GPU surface: off");
             gpuB.setOnClickListener(v -> {
                 boolean now = !renderer.gpuSurfaceWanted;
                 renderer.gpuSurfaceWanted = now;
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("gpuSurface", now).apply();
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("gpuSurface2", now).apply();
                 gpuB.setText(now ? "GPU surface: on" : "GPU surface: off");
                 toast(now ? "GPU surface on from the next scan" : "GPU surface off");
             });
