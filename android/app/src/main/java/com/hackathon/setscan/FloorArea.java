@@ -25,10 +25,10 @@ final class FloorArea {
         byte[] grid;         // 0 none, 1 floor seen, 2 furniture, 3 wall, 4 filled (counted, not seen); +8 = in the room
         /** The line for the result: "Floor area ≈ 14.2 m²", "about" when the outline is open, "scanned area" with more parts. */
         String text() {
-            if (area < 0.5f) return null;
-            String a = area < 10 ? String.format(java.util.Locale.US, "%.1f", area) : String.format(java.util.Locale.US, "%.0f", area);
+            if (area < 0.5f || rooms.isEmpty()) return null;
+            String a = Room.m2(rooms.get(0).shown());
             if (rooms.size() >= 2) {
-                float all = 0; for (Room rm : rooms) all += rm.area;
+                float all = 0; for (Room rm : rooms) all += rm.shown();
                 return String.format(java.util.Locale.US, "%d rooms, floor ≈%.0f m² in all (tap a room)", rooms.size(), all);
             }
             return (enclosed < 0.6f ? "floor area about " : "floor area ≈") + a + " m²";
@@ -37,8 +37,13 @@ final class FloorArea {
 
     static final class Room {
         float area, w, l;    // m², and the size along its own walls (the smallest rectangle around it), metres
+        float hull;          // m² inside its convex outline (unscanned edges filled; more than the floor in an L-shaped room)
         int cells;
-        String text(int i) { return String.format(java.util.Locale.US, "Room %d: %s m², %.1f × %.1f m", i + 1, area < 10 ? String.format(java.util.Locale.US, "%.1f", area) : String.format(java.util.Locale.US, "%.0f", area), w, l); }
+        /** The floor to show: within its convex outline when the seen floor fills most of it (the floor along the walls
+         *  is often not seen: 20:25 scan, 8.7 m² seen of 10.8, outline 9.9), else what was seen. */
+        float shown() { return hull > 0 && area / hull >= 0.8f ? hull : area; }
+        static String m2(float a) { return a < 10 ? String.format(java.util.Locale.US, "%.1f", a) : String.format(java.util.Locale.US, "%.0f", a); }
+        String text(int i) { return String.format(java.util.Locale.US, "Room %d: ≈%s m², %.1f × %.1f m", i + 1, m2(shown()), w, l); }
     }
 
     /** pos: x, y, z per point (count points); floorY: the floor's height. */
@@ -101,12 +106,16 @@ final class FloorArea {
         for (int c = 0; c < n; c++) if (lab[c] > 0 && sizes.get(lab[c] - 1) * CELL * CELL < 0.5f) lab[c] = 0;
         // grow each core back by the 45 cm it lost (walking over the floor, nearest core first): a doorway's floor goes
         // to the room on its side, and floor further through a doorway without a core of its own stays out
-        int[] owner = new int[n], dist = new int[n];
+        // (grown back exactly as far as the opening took away: a 45 cm disc, not grid steps, which cut the corners
+        // off at 10 steps and ran into the doorway at 13; 20:25 scan)
+        boolean[] kept = new boolean[n];
+        for (int c = 0; c < n; c++) kept[c] = lab[c] > 0;
+        boolean[] allowed = dilate(kept, nx, nz, 9);
+        int[] owner = new int[n];
         for (int c = 0; c < n; c++) if (lab[c] > 0 && in[c]) { owner[c] = lab[c]; q.add(c); }
         while (!q.isEmpty()) { int d = q.poll(); int x = d % nx, z = d / nx;
-            if (dist[d] >= 10) continue;
             for (int e : new int[]{x > 0 ? d - 1 : -1, x < nx - 1 ? d + 1 : -1, z > 0 ? d - nx : -1, z < nz - 1 ? d + nx : -1})
-                if (e >= 0 && in[e] && owner[e] == 0) { owner[e] = owner[d]; dist[e] = dist[d] + 1; q.add(e); } }
+                if (e >= 0 && in[e] && allowed[e] && owner[e] == 0) { owner[e] = owner[d]; q.add(e); } }
         int[] count2 = new int[k + 1];
         for (int c = 0; c < n; c++) count2[owner[c]]++;
         // rooms of 2 m² or more, biggest first; smaller bits stay with nobody
@@ -120,6 +129,7 @@ final class FloorArea {
         for (int i = 0; i < order.size(); i++) {
             Room room = new Room(); room.cells = count2[order.get(i)]; room.area = room.cells * CELL * CELL;
             float[] wl = minRect(r.roomOf, i + 1, nx, nz); room.w = Math.max(wl[0], wl[1]); room.l = Math.min(wl[0], wl[1]);
+            room.hull = hullArea(r.roomOf, i + 1, nx, nz);
             r.rooms.add(room);
         }
         boolean[] main = new boolean[n];
@@ -144,6 +154,25 @@ final class FloorArea {
         r.nx = nx; r.nz = nz; r.x0 = x0; r.z0 = z0; r.grid = g;
         return r;
     }
+
+    /** Area inside the convex outline of a room's cells (their corners), m². */
+    private static float hullArea(int[] roomOf, int id, int nx, int nz) {
+        java.util.ArrayList<long[]> pts = new java.util.ArrayList<>();
+        for (int z = 0; z < nz; z++) {   // per row only the outermost cells matter
+            int a = -1, b = -1;
+            for (int x = 0; x < nx; x++) if (roomOf[z * nx + x] == id) { if (a < 0) a = x; b = x; }
+            if (a < 0) continue;
+            pts.add(new long[]{a, z}); pts.add(new long[]{a, z + 1}); pts.add(new long[]{b + 1, z}); pts.add(new long[]{b + 1, z + 1});
+        }
+        if (pts.size() < 3) return 0;
+        pts.sort((p, q) -> p[0] != q[0] ? Long.compare(p[0], q[0]) : Long.compare(p[1], q[1]));
+        long[][] h = new long[pts.size() * 2][]; int k = 0;
+        for (long[] p : pts) { while (k >= 2 && cross(h[k - 2], h[k - 1], p) <= 0) k--; h[k++] = p; }
+        for (int i = pts.size() - 2, t = k + 1; i >= 0; i--) { long[] p = pts.get(i); while (k >= t && cross(h[k - 2], h[k - 1], p) <= 0) k--; h[k++] = p; }
+        double a2 = 0; for (int i = 0; i < k - 1; i++) a2 += h[i][0] * h[i + 1][1] - h[i + 1][0] * h[i][1];
+        return (float) (Math.abs(a2) / 2 * CELL * CELL);
+    }
+    private static long cross(long[] o, long[] a, long[] b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
 
     /** The smallest rectangle (turned in 2° steps) around a room's cells: its width and length along its own walls. */
     private static float[] minRect(int[] roomOf, int id, int nx, int nz) {
@@ -207,7 +236,7 @@ final class FloorArea {
         Result r = compute(p, n, floorY);
         System.out.printf(java.util.Locale.US, "%s: floor y %.2f; %s (main %.1f m², other %.1f m², outline %.0f%% walls) in %d ms%n",
                 dir.getName(), floorY, r.text(), r.area, r.other, r.enclosed * 100, System.currentTimeMillis() - t0);
-        for (int i = 0; i < r.rooms.size(); i++) System.out.println("  " + r.rooms.get(i).text(i));
+        for (int i = 0; i < r.rooms.size(); i++) System.out.println("  " + r.rooms.get(i).text(i) + String.format(java.util.Locale.US, " (convex outline %.1f m², rectangle %.1f m²)", r.rooms.get(i).hull, r.rooms.get(i).w * r.rooms.get(i).l));
         if (args.length > 2) {
             // a top-down picture as PPM (no java.awt on Android): sips -s format png out.ppm --out out.png
             int S = 4, W = r.nx * S, H = r.nz * S; byte[] rgb = new byte[W * H * 3];
