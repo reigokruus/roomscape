@@ -79,6 +79,31 @@ case "decals":
     let sem = DispatchSemaphore(value: 0)
     Task { do { try await Decals.run(URL(fileURLWithPath: args[1]), out: out) } catch { print("decals failed: \(error)") }; sem.signal() }
     sem.wait()
+case "plyview":
+    // harness plyview <ply> <S24 scan folder> <photo index>... : the mesh from that S24 photo's camera, plyview-<name>-<i>.png
+    let ply = URL(fileURLWithPath: args[1]), scan = URL(fileURLWithPath: args[2])
+    let pos = Align.readPly(ply), tris = Align.readPlyFaces(ply)
+    let kd = try Data(contentsOf: scan.appendingPathComponent("kf.bin"))
+    var o = 0
+    func rf() -> Float { let v = UInt32(bigEndian: kd.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o, as: UInt32.self) }); o += 4; return Float(bitPattern: v) }
+    func ri() -> Int { let v = Int32(bigEndian: kd.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: o, as: Int32.self) }); o += 4; return Int(v) }
+    let nk = ri()
+    var cams: [(simd_float4x4, simd_float3x3, Int, Int)] = []
+    for _ in 0..<nk {
+        for _ in 0..<16 { _ = rf() }
+        var c = [Float](); for _ in 0..<16 { c.append(rf()) }
+        let fx = rf(), fy = rf(), cx = rf(), cy = rf(), w = rf(), h = rf()
+        o += 1
+        let dw = ri(), dh = ri(); for _ in 0..<4 { _ = rf() }; o += dw * dh * 2
+        let pose = simd_float4x4(SIMD4(c[0], c[1], c[2], c[3]), SIMD4(c[4], c[5], c[6], c[7]), SIMD4(c[8], c[9], c[10], c[11]), SIMD4(c[12], c[13], c[14], c[15]))
+        cams.append((pose, simd_float3x3(SIMD3(fx, 0, 0), SIMD3(0, fy, 0), SIMD3(cx, cy, 1)), Int(w), Int(h)))
+    }
+    for a in args.dropFirst(3) { if let i = Int(a), i < cams.count {
+        let (pose, k, w, h) = cams[i]
+        let url = URL(fileURLWithPath: "harness-out/plyview-\(ply.deletingPathExtension().lastPathComponent)-\(i).png")
+        Images.renderFromCamera(pos, tris, pose: pose, k: k, imageWidth: w, imageHeight: h, to: url)
+        print("  render: \(url.path)")
+    } }
 case "replay":
     try Replay.run(URL(fileURLWithPath: args[1]), out: out)
 case "holefill":
