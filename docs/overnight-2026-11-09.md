@@ -243,3 +243,15 @@ S24:
   fixed correction is wrong; the per-scan fit (logged, not applied, in the 10:38 build) needs one scan. Not switched on.
 - Bars: iPhone f267 at 4 cm / 1.9 cm: rungs as ridges on a slab with the wall/door, 1.9 cm shows each rung's outline.
   Pictures: recordings/overnight-pictures/bars-1034.
+
+## 10:44 scans (iPhone Scan_2026-11-10_10-44-42, S24 scan_1794300100660, S24 build 10:38)
+- Tracking loss 10:44:19 (insufficient features, plain wall), AR restart 10:44:24, TRACKING 10:44:28; the 5 s
+  realign timeout counted from the loss had expired, so 10:44:33-41 fused from ARCore's wrong pose (no ICP ran).
+  Segment ids were scrambled by point compaction (segments.bin not written): the stretch can't be cut out. Fixed 698868b.
+- Room size: this pair lines up well: S24 scale 1.00 (surface), 1.01 (raw keyframes). Logged per-scan fit settled at
+  raw = 0.957 true + 0.063 (started 0.84/0.26 in the first seconds). Applying it: scale 1.00, ratios 1-4 m unchanged
+  within 1%, under 1 m slightly worse. Not switched on: S24 size already matches here.
+- S24 fps 14.2 (worse than 19): depth fusion 73 ms mean: carve 58 ms even at 60k points (cost isn't the point count),
+  pixels 66 ms, GPU 8.8 ms, plus depth-fit collection. Next: move carve/pixels off the drawing thread.
+- Bars: rungs as ridges on a slab with the wall/door on both phones; S24 at 1.9 cm-like detail similar to iPhone
+  4 cm. Pictures: recordings/overnight-pictures/bars-1044.
