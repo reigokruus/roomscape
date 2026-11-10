@@ -6494,6 +6494,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // ARCore came back in its old frame. Today's scans: the good returns were 0.00-0.05 away (m + deg/30), the
             // doubtful ones 0.17 and more (13:52's wrong-angle 65.8 s resume: 0.58), so 0.10.
             if (ok && jg == null && res.fit.inliers >= 0.55f && res.fit.median < 0.02f && Realign.away(F, poseFix) < 0.10f) { strong = true; log(String.format(java.util.Locale.US, "one match is enough: it keeps the old correction (%.2f away)", Realign.away(F, poseFix))); }
+            // A single strong match may not turn the scan by more than 10 degrees from the correction in use (or from
+            // the jump guess): 16:40 scan, after a camera restart three tries said -10, -24, -36 deg, the last at 82%
+            // was taken, and the tiles then disagreed with the new data (taken back 37 -> 139). Bigger turns need two
+            // tries in a row that agree.
+            float[] refFix = jg != null ? jg : poseFix;
+            double dYaw = Math.toDegrees(Math.atan2(F[2], F[0]) - Math.atan2(refFix[2], refFix[0]));
+            while (dYaw > 180) dYaw -= 360; while (dYaw < -180) dYaw += 360;
+            if (strong && Math.abs(dYaw) > 10) { strong = false; log(String.format(java.util.Locale.US, "  (a %.0f deg turn: needs a second agreeing try)", dYaw)); }
             if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
                 evMark(); shadowRealign = realign; shadowUntil = nowMs + 20000; shadowFrom = nowMs;   // check the alignment for 20 s (shadow, not applied)
