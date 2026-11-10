@@ -68,7 +68,10 @@ final class MeasureOverlay extends View {
         float[] m = r.shownMvp; int w = r.shownW, h = r.shownH;
         float cx = m[0] * x + m[4] * y + m[8] * z + m[12], cy = m[1] * x + m[5] * y + m[9] * z + m[13], cw = m[3] * x + m[7] * y + m[11] * z + m[15];
         if (cw < 0.02f || w == 0) return null;
-        return new float[]{(cx / cw + 1) / 2 * w * getWidth() / (float) w, (1 - cy / cw) / 2 * h * getHeight() / (float) h};
+        // In the 3D view's own pixels: this overlay starts at the same top-left corner, but the 3D view can be shorter
+        // (the panel under it), so no stretching to the overlay's size (rk 10 Nov 11:49: a doorway outline drawn
+        // below the scan).
+        return new float[]{(cx / cw + 1) / 2 * w, (1 - cy / cw) / 2 * h};
     }
 
     @Override protected void onDraw(Canvas c) {

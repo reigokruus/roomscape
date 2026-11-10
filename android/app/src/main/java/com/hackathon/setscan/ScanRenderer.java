@@ -206,7 +206,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Config.DepthMode m = modes.get(modeIndex);
         Config config = new Config(session);
         config.setDepthMode(m);
-        config.setFocusMode(Config.FocusMode.AUTO);
+        // Fixed focus (ARCore's default, recommended for tracking): auto focus hunting on a close plain surface can
+        // cost tracking. Photos are taken from ~0.5-3 m, where the fixed focus is sharp enough.
+        config.setFocusMode(FIXED_FOCUS ? Config.FocusMode.FIXED : Config.FocusMode.AUTO);
         config.setUpdateMode(Config.UpdateMode.LATEST_CAMERA_IMAGE);
         config.setPlaneFindingMode(Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL);
         config.setLightEstimationMode(Config.LightEstimationMode.AMBIENT_INTENSITY); // scene brightness + colour cast per frame
@@ -375,6 +377,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Flat colour = plane on (see Planes). */
     static boolean FLAT_WALLS = true;
+    /** Camera focus for tracking: fixed (true) or auto (false, the photos' sharpness up close). */
+    static boolean FIXED_FOCUS = true;
     /** Doorway marks (DoorwayFinder) after the scan. */
     static boolean DOORWAYS = true;
     volatile java.util.List<DoorwayFinder.Doorway> doorways = new java.util.ArrayList<>();
@@ -3315,7 +3319,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 roomReady = true;
                 buildFloorMesh();
                 log(room.logLine());
-                activity.setRoomSize(room.sizeLine());
+                activity.setRoomSize(roomSizeText());
             } catch (Exception e) { logError("room", e); }
         }
         buildPhotos();
@@ -5781,14 +5785,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] F = res.fit.fix;
             float drift = Realign.away(F, fixPrev);
             boolean ok = res.good && !res.ambiguous;
-            realignOk = ok && (realignOk == 0 || drift < 0.05f) ? realignOk + 1 : (ok ? 1 : 0);
+            realignOk = ok && (realignOk == 0 || drift < 0.08f) ? realignOk + 1 : (ok ? 1 : 0);
             System.arraycopy(F, 0, fixPrev, 0, 16);
             if (ok) fixTry = F;
             log(String.format(java.util.Locale.US, "re-align attempt (%s): %d%% on the scan, median %.1f cm, correction %.2f, %.2f, %.2f m %.0f deg%s%s -> %s",
                     res.source, Math.round(res.fit.inliers * 100), res.fit.median * 100, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])),
                     res.ambiguous ? ", ambiguous" : "", res.detail.isEmpty() ? "" : "; " + res.detail, ok ? "match " + realignOk + "/2" : "no"));
-            // Two agreeing attempts in a row (one when ARCore came back on its own onto the old correction).
-            if (realignOk >= (res.quick ? 1 : 2)) {
+            // Two agreeing attempts in a row; one when ARCore came back on its own onto the old correction, or when one
+            // attempt fits very well (rk 10 Nov 11:47: ARCore came back after 1.2 s about 20 cm off; three attempts in
+            // 16 s, 63-90% on the scan, each a few cm different from the last, so it never resumed).
+            boolean strong = ok && res.fit.inliers >= 0.8f && res.fit.median < 0.015f;
+            if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
                 hasFix = true; needRealign = false; realign = null; recentPts.clear();
                 segment++;
@@ -5799,7 +5806,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
         }
         // Start the next attempt (at most one running, about one a second).
-        if (!realignRunning && nowMs - realignLastStart > 800 && !recentPts.isEmpty()) {
+        if (!realignRunning && nowMs - realignLastStart > 500 && !recentPts.isEmpty()) {
             realignRunning = true; realignLastStart = nowMs;
             final java.util.ArrayList<float[]> all = new java.util.ArrayList<>();
             for (java.util.ArrayList<float[]> f : recentPts) all.addAll(f);
@@ -5815,7 +5822,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         Realign.Fit f2 = rl.solve(all, stay);
                         if (f2.inliers > f.inliers) { f = f2; r.source = "where it was lost"; }
                     }
-                    if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && attempt % 2 == 1) {   // the search every other attempt (~0.5 s)
+                    // The whole search (seconds on the phone) only when the quick attempts keep failing: every 4th attempt
+                    // from the 3rd on, so the quick ones come about once a second.
+                    if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && attempt >= 3 && attempt % 4 == 3) {
                         Realign.Fit f3 = rl.search(all, stay != null ? stay : tryFix, pivX, pivZ);
                         r.detail = rl.lastSearch;
                         if (f3 != null && f3.inliers > f.inliers) { f = f3; r.source = "searched"; r.ambiguous = rl.ambiguous; }
@@ -6172,9 +6181,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // This phone's own scan: the room model's size and height (the same robust numbers the log prints), not the
         // points' bounding box, which stray points stretch (rk 9 Nov: 6.8 × 5.6 m, 3.6 m for a 5.4 × 3.8 m, ~2.9 m room).
         if (roomReady && room.sizeX > 0 && room.sizeZ > 0) {
-            String size = String.format(java.util.Locale.US, "%.1f × %.1f m", Math.max(room.sizeX, room.sizeZ), Math.min(room.sizeX, room.sizeZ));
-            if (room.hasCeiling) return size + String.format(java.util.Locale.US, ", %.1f m high", room.ceilingY - room.floorY);
-            return size + (room.ceilingUnknown ? ", height not scanned" : "");
+            // One number everywhere (the title and the room card); a scan that covers little of the floor is called
+            // what it is (rk 10 Nov 11:49: a door-area scan showed 2.76 × 1.48 m in the title and 3.7 × 3.3 m below).
+            String size = (room.floorCoverage > 0 && room.floorCoverage < 0.5f ? "scanned area " : "")
+                    + String.format(java.util.Locale.US, "%.2f × %.2f m", Math.max(room.sizeX, room.sizeZ), Math.min(room.sizeX, room.sizeZ));
+            if (room.hasCeiling) return size + String.format(java.util.Locale.US, " · %.2f m high", room.ceilingY - room.floorY);
+            return size + (room.ceilingUnknown ? " · height not scanned" : "");
         }
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
         if (w <= 0 || d <= 0) return null;
