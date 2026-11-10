@@ -3442,6 +3442,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
+        needRealign = false; realignOk = 0;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
@@ -4156,7 +4157,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         } else if (everTracked) {
             // Lost tracking after it worked. ARCore usually recovers by itself once it sees something textured again;
             // restarting only helps the S24's "paused for no reason" case, and a restart can shift the whole map.
-            if (lostSince == 0) lostSince = nowMs;
+            if (lostSince == 0) {
+                lostSince = nowMs;
+                if (count > 2000 && !needRealign) {
+                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs;
+                    log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
+                    activity.toast("Lost track. Point at a part you already scanned.");
+                }
+            }
             else if (camera.getTrackingFailureReason() == com.google.ar.core.TrackingFailureReason.NONE
                     && nowMs - lostSince > 3000 && recoveries < 10) {
                 recoveries++;
@@ -4197,6 +4205,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 // Per-stage times in the hardware log (S24 drew at 10.5 fps with the GL thread ~80% busy; rk 9 Nov).
                 long intT0 = System.nanoTime();
                 try {
+                    nowMsFrame = nowMs;
                     integrate(frame, camera);
                 } catch (Exception e) {
                     logError("integrate", e);
@@ -4517,6 +4526,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
+            // After tracking was lost mid-scan: nothing is fused until the depth lines up with what's already there
+            // (rk 10 Nov: after a loss and an AR restart a second, shifted layer was fused over the first).
+            if (needRealign && !realigned(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m, nowMsFrame)) return;
             int[] rgb = new int[3];
             frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
@@ -4974,6 +4986,39 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         long iy = (long) Math.floor(y / VOXEL_FINE) + (1 << 20);
         long iz = (long) Math.floor(z / VOXEL_FINE) + (1 << 20);
         return ((ix & 0x1FFFFF) | ((iy & 0x1FFFFF) << 21) | ((iz & 0x1FFFFF) << 42)) | Long.MIN_VALUE;
+    }
+
+    // Re-alignment after a tracking loss (see integrate).
+    private volatile boolean needRealign;
+    private int realignOk;
+    private long realignSince, realignHintAt, nowMsFrame;
+
+    /** Whether this depth frame lines up with the points already scanned: at least 40% of its depth samples
+     *  (0.3–3 m) land within 2 cm cells of existing points, three frames in a row. Until then nothing is fused. */
+    private boolean realigned(ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m, long nowMs) {
+        int valid = 0, hits = 0;
+        for (int v = 3; v < dh - 3; v += 6) for (int u = 3; u < dw - 3; u += 6) {
+            int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
+            if (mm < 300 || mm > 3000) continue;
+            float d = mm * 0.001f, xc = (u + 0.5f - cx) * d / fx, yc = (cy - (v + 0.5f)) * d / fy, zc = -d;
+            float wx = m[0] * xc + m[4] * yc + m[8] * zc + m[12];
+            float wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13];
+            float wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
+            valid++;
+            search:
+            for (int a = -1; a <= 1; a++) for (int b = -1; b <= 1; b++) for (int c = -1; c <= 1; c++)
+                if (voxels.get(key(wx + a * VOXEL, wy + b * VOXEL, wz + c * VOXEL)) >= 0) { hits++; break search; }
+        }
+        boolean ok = valid >= 50 && hits * 10 >= valid * 4;
+        realignOk = ok ? realignOk + 1 : 0;
+        if (realignOk >= 3) {
+            needRealign = false;
+            log(String.format(java.util.Locale.US, "back on track after %.1f s (%d%% of the view on the scan)", (nowMs - realignSince) / 1000f, valid > 0 ? hits * 100 / valid : 0));
+            activity.toast("Back on track, scanning again.");
+            return true;
+        }
+        if (nowMs - realignHintAt > 8000) { realignHintAt = nowMs; activity.toast("Still lost. Go back to where you were and point at what you scanned."); }
+        return false;
     }
 
     private static long key(float x, float y, float z) {
