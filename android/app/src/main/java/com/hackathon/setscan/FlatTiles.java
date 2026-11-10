@@ -26,6 +26,52 @@ final class FlatTiles {
     static final float INLIER = 0.035f, FRONT = 0.07f;
 
     static final class Plane { float nx, ny, nz, d, ux, uy, uz, vx, vy, vz; }
+
+    // ---- Hiding the points under painted tiles (rk 10 Nov 16:22: "remove all dots on top of tiles and behind
+    // tiles"): a mask of painted tiles per plane (first 8 planes, 256 x 256 tiles each, +-38 m), read in the points'
+    // vertex shader; a point within 7 cm in front of or 15 cm behind a painted tile isn't drawn. Measured wall scatter
+    // is ~6-7 cm (90%); things further in front (a drying rack) and further behind (the next room) stay. ----
+    static final int MP = 8, MG = 256;
+    static final String MASK_DECL = "uniform vec4 uTP[8]; uniform vec4 uTU[8]; uniform vec4 uTV[8]; uniform float uTN; uniform sampler2D uTMask;";
+    static final String MASK_TEST =
+            "  for (int i = 0; i < 8; i++) { if (float(i) >= uTN) break;" +
+            "    float dd = dot(uTP[i].xyz, aPos.xyz) + uTP[i].w;" +
+            "    if (dd < 0.07 && dd > -0.15) { float a = floor(dot(uTU[i].xyz, aPos.xyz) / 0.30) + 128.0, b = floor(dot(uTV[i].xyz, aPos.xyz) / 0.30) + 128.0;" +
+            "      if (a >= 0.0 && a < 256.0 && b >= 0.0 && b < 256.0 && texture2DLod(uTMask, vec2((a + 0.5) / 256.0, (b + 256.0 * float(i) + 0.5) / 2048.0), 0.0).r > 0.5) hh = 1.0; } }";
+    private int maskTex; private final byte[] mask = new byte[MG * MG * MP]; private boolean maskDirty = true; private int maskN; private final int[] maskPlane = new int[MP];
+
+    /** Before drawing points: the mask and planes for the shader (off: nothing hidden). Texture unit 3. */
+    synchronized void bindMask(int prog, boolean on) {
+        if (on && dirty) rebuild();
+        int np = on ? maskN : 0;
+        if (np > 0 && (maskTex == 0 || maskDirty)) {
+            if (maskTex == 0) {
+                int[] t = new int[1]; GLES20.glGenTextures(1, t, 0); maskTex = t[0];
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+            }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex);
+            GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, MG, MG * MP, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, ByteBuffer.wrap(mask));
+            maskDirty = false;
+        }
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(prog, "uTN"), np);
+        if (np == 0) return;
+        float[] tp = new float[32], tu = new float[32], tv = new float[32];
+        for (int i = 0; i < np; i++) { Plane p = planes.get(maskPlane[i]);
+            tp[i * 4] = p.nx; tp[i * 4 + 1] = p.ny; tp[i * 4 + 2] = p.nz; tp[i * 4 + 3] = p.d;
+            tu[i * 4] = p.ux; tu[i * 4 + 1] = p.uy; tu[i * 4 + 2] = p.uz; tv[i * 4] = p.vx; tv[i * 4 + 1] = p.vy; tv[i * 4 + 2] = p.vz; }
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTP"), 8, tp, 0);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTU"), 8, tu, 0);
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(prog, "uTV"), 8, tv, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTMask"), 3);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+    }
     static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; float born = -1, repainted = -1; }
     private final long base = System.currentTimeMillis();
     private float now() { return (System.currentTimeMillis() - base) / 1000f; }
@@ -264,6 +310,18 @@ final class FlatTiles {
     private void rebuild() {
         dirty = false;
         ArrayList<Tile> live = new ArrayList<>(); for (Tile t : tiles.values()) if (t.score > 0) live.add(t);
+        java.util.Arrays.fill(mask, (byte) 0);
+        // the (up to) 8 planes with the most painted tiles get a mask layer
+        HashMap<Integer, Integer> per = new HashMap<>(); for (Tile t : live) per.merge(t.plane, 1, Integer::sum);
+        ArrayList<Integer> order = new ArrayList<>(per.keySet()); order.sort((x, y) -> per.get(y) - per.get(x));
+        maskN = Math.min(MP, order.size());
+        HashMap<Integer, Integer> layer = new HashMap<>();
+        for (int i = 0; i < maskN; i++) { maskPlane[i] = order.get(i); layer.put(order.get(i), i); }
+        for (Tile t : live) {
+            Integer L = layer.get(t.plane); int a = t.iu + 128, b = t.iv + 128;
+            if (L != null && a >= 0 && a < MG && b >= 0 && b < MG) mask[(L * MG + b) * MG + a] = (byte) 255;
+        }
+        maskDirty = true;
         vboVerts = live.size() * 6;
         vbo = ByteBuffer.allocateDirect(Math.max(1, vboVerts) * 28).order(ByteOrder.nativeOrder()).asFloatBuffer();
         float inset = 0.5f / PX;
@@ -283,5 +341,5 @@ final class FlatTiles {
         vbo.position(0);
     }
 
-    synchronized void clear() { tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
+    synchronized void clear() { maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
 }

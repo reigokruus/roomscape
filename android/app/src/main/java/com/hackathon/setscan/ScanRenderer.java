@@ -4370,8 +4370,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
                 // Dollhouse cutaway: hide the wall band facing the viewer and the ceiling.
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
-                HIDE_DECL +
-                "void main(){ float hh = 0.0;" + HIDE_TEST.replace("HIDE", "hh = 1.0;") +
+                HIDE_DECL + FlatTiles.MASK_DECL +
+                "void main(){ float hh = 0.0;" + HIDE_TEST.replace("HIDE", "hh = 1.0;") + FlatTiles.MASK_TEST +
                 "  if (hh > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; }" +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
                 "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
@@ -6944,6 +6944,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void drawPoints(float[] m, float sizeScale) {
         if (count == 0) return;
         GLES20.glUseProgram(ptProg);
+        flatTiles.bindMask(ptProg, FLAT_TILES);   // points on and just behind painted tiles aren't drawn (rk 10 Nov 16:22)
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
         float pxPerMeter = height / (2f * (float) Math.tan(Math.toRadians(30)));
         int uSize = GLES20.glGetUniformLocation(ptProg, "uSize");
