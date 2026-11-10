@@ -5820,8 +5820,25 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void saveHeight(File dir) {
         float[] h = pendingHeight; if (h == null) return;
         try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "height.json"))) {
-            o.write(new org.json.JSONObject().put("floorY", h[0]).put("ceilingY", h[1]).put("trusted", h[2] > 0).toString().getBytes("UTF-8"));
+            o.write(new org.json.JSONObject().put("floorY", h[0]).put("ceilingY", h[1]).put("trusted", h[2] > 0)
+                    // the sources it was chosen from (ARCore's planes aren't kept anywhere else)
+                    .put("depthCeilingY", Float.isNaN(room.depthCeilingY) ? JSONNULL : room.depthCeilingY)
+                    .put("featureCeilingY", Float.isNaN(room.featureCeilingY) ? JSONNULL : room.featureCeilingY)
+                    .put("arcorePlanes", arcorePlanesJson()).toString().getBytes("UTF-8"));
         } catch (Exception e) { logError("height save", e); }
+    }
+
+    private static final Object JSONNULL = org.json.JSONObject.NULL;
+
+    /** ARCore's planes at Done: type (0 up, 1 down, 2 vertical), centre, normal (for measuring later; not saved elsewhere). */
+    private org.json.JSONArray arcorePlanesJson() {
+        org.json.JSONArray a = new org.json.JSONArray();
+        try {
+            for (RoomModel.PlaneData pd : lastPlanes) a.put(new org.json.JSONObject().put("type", pd.type)
+                    .put("center", new org.json.JSONArray().put((double) pd.center[0]).put((double) pd.center[1]).put((double) pd.center[2]))
+                    .put("normal", new org.json.JSONArray().put((double) pd.normal[0]).put((double) pd.normal[1]).put((double) pd.normal[2])));
+        } catch (Exception ignored) { }
+        return a;
     }
 
     private void saveDepthPairs(File dir) {
@@ -6351,9 +6368,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (roomReady && room.sizeX > 0 && room.sizeZ > 0) {
             // One number everywhere (the title and the room card); a scan that covers little of the floor is called
             // what it is (rk 10 Nov 11:49: a door-area scan showed 2.76 × 1.48 m in the title and 3.7 × 3.3 m below).
+            // "≈": the automatic sizes are estimates (S24: room size a few %, height about ±10 cm; rk 10 Nov)
             String size = (room.floorCoverage > 0 && room.floorCoverage < 0.5f ? "scanned area " : "")
-                    + String.format(java.util.Locale.US, "%.2f × %.2f m", Math.max(room.sizeX, room.sizeZ), Math.min(room.sizeX, room.sizeZ));
-            if (room.hasCeiling) return size + String.format(java.util.Locale.US, room.ceilingTrusted ? " · %.2f m high" : " · ~%.2f m high", room.ceilingY - room.floorY);
+                    + String.format(java.util.Locale.US, "≈%.2f × %.2f m", Math.max(room.sizeX, room.sizeZ), Math.min(room.sizeX, room.sizeZ));
+            if (room.hasCeiling) return size + String.format(java.util.Locale.US, " · ≈%.2f m high", room.ceilingY - room.floorY);
             return size + (room.ceilingUnknown ? " · height not scanned" : "");
         }
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
