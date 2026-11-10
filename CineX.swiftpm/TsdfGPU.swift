@@ -48,7 +48,7 @@ final class TsdfGPU {
         let dims = hi &- lo
         let count = Int(dims.x) * Int(dims.y) * Int(dims.z)
         guard count > 0, count < 40_000_000,
-              let library = try? device.makeLibrary(source: Self.source, options: nil),
+              let library = try? device.makeLibrary(source: Self.source.replacingOccurrences(of: "MARGIN_K", with: String(format: "%.4f", Self.marginK)).replacingOccurrences(of: "BEHIND_K", with: String(format: "%.4f", Self.behindK)), options: nil),
               let function = library.makeFunction(name: "integrate"),
               let pipeline = try? device.makeComputePipelineState(function: function),
               let sdf = device.makeBuffer(length: count * 4, options: .storageModeShared),
@@ -213,6 +213,13 @@ final class TsdfGPU {
         return cleared
     }
 
+    /// Free space is carved from this share of the distance in front of a seen surface (plus the band). 5% kept rungs
+    /// 10–15 cm in front of a wall from ever being carved: they merged with it into a sheet (harness: CARVE_MARGIN).
+    nonisolated(unsafe) static var marginK: Float = 0.05
+    /// How far behind a seen surface it's marked inside, as a share of the band. 1 = the whole band (8 cm at 4 cm
+    /// voxels): a rung 10–15 cm in front of a wall then merges with it (harness: BEHIND).
+    nonisolated(unsafe) static var behindK: Float = 1.0
+
     private static let source = """
     #include <metal_stdlib>
     using namespace metal;
@@ -254,7 +261,7 @@ final class TsdfGPU {
         ushort add = ushort(clamp((p.vs / footprint) * (p.vs / footprint), 1.0, 8.0));
         if (s > p.trunc) {
             // Free space: only voxels already seen, between the margin and `carve` in front of the surface.
-            float nearS = p.trunc + 0.05 * L, farS = min(p.carve, L - 0.25);
+            float nearS = p.trunc + MARGIN_K * L, farS = min(p.carve, L - 0.25);
             if (w == 0 || s <= nearS || s > farS) return;
             if (w >= solidW) { sdf[i] += (1.0 - sdf[i]) * 0.04; dirty[bi] = 1; return; }
             float sum = sdf[i] * float(w) + float(add);
@@ -264,8 +271,8 @@ final class TsdfGPU {
             dirty[bi] = 1;
             return;
         }
-        if (s < -p.trunc) return;              // behind the surface: unknown
-        float dn = clamp(s / p.trunc, -1.0, 1.0);
+        if (s < -p.trunc * BEHIND_K) return;   // behind the surface: unknown
+        float dn = clamp(s / p.trunc, -1.0, 1.0);   // (behind: at most -BEHIND_K)
         sdf[i] = (sdf[i] * float(w) + dn * float(add)) / float(w + add);
         wgt[i] = min(ushort(w + add), maxW);
         dirty[bi] = 1;

@@ -249,6 +249,8 @@ enum GPUBench {
             }
             print("view at (\(look[0]), \(look[1]), \(look[2])): frame \(view ?? -1)")
         }
+        if let k = ProcessInfo.processInfo.environment["CARVE_MARGIN"].flatMap(Float.init) { TsdfGPU.marginK = k }
+        if let k = ProcessInfo.processInfo.environment["BEHIND"].flatMap(Float.init) { TsdfGPU.behindK = k }
         let prepTime = Date().timeIntervalSince(t1)
         // Fine voxels: only a box around the chosen view's camera (a detail zone), so the block fits.
         if voxel < 0.02, ProcessInfo.processInfo.environment["NO_BOX"] != "1", let view, view < frames.count {

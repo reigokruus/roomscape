@@ -181,6 +181,22 @@ low-confidence hole fill in that mode. Simulator, real rebuild of the 20:33 reco
 peak memory 396 MB (293 MB at 4 cm); the photo room paints the same share as on the 4 cm mesh (photocover), built in
 26 s in the Debug Simulator. A faint crack can show along a tile border.
 
+## Morning 10 Nov: rk's 08:24 iPhone / 08:20 S24 scans (bars, many passes)
+- iPhone: memory during the scan +120 MB in 4.4 min (was ~400 MB in 3 min): the queue fix worked; the jump to 1.4 GB
+  is at Done (RoomPlan). Live per build: sync 11 ms, extract 28 ms, photos 9 ms. Rebuild 34 s, hole fill +2.3k voxels.
+  Finer-surface switch was off. Door clean (finer: crisper); bars close up still ridges on a sheet with the wall.
+- Bars/wall carving tried (harness, 08:24 recording f1200): smaller free-space margin (5% → 2% / 0%): no change at
+  the rungs, more holes. Half the band behind surfaces: rungs separate as slats, but the 19:00 desk loses the
+  headphones and gets holes; not clean, so not on. Both kept as settings at today's values (TsdfGPU.marginK/behindK).
+  Pictures: overnight-pictures/bars-0824.
+- S24 08:20: tracking lost 1.5 min in (insufficient features), the app restarted the AR session after 3 s, tracking
+  came back with an 18 cm jump: a second layer fused over the first. Fixed: d1a83ae + 6d25679 (fusion paused after a
+  loss; ICP re-alignment onto the scan before fusing again, correction carried to every later pose; segment id per
+  point, segments.bin). tools/realign-test: 18 cm case corrected to 0.1 cm, larger shift+turn not accepted (stays
+  paused), unscanned place rejected. The 08:20 scan can't be split afterwards (no per-point time in old scans).
+- S24 drawing thread: depth fusion 73% (139 ms pixels + 36 ms carve per depth frame), 19.5 fps, stalls to 0.8 s.
+  The surface fusion now runs on its own thread (f5e708e); untested on the phone.
+
 ## S24 GPU fusion: plan (not built; needs the phone to test)
 1. One test scan with tonight's stage timings (e8365f7) to see how the GL thread's 95 ms split (ARCore update, depth
    fusion pixels, carve, photo, live mesh draw).
