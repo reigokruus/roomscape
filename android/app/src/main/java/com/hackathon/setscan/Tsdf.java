@@ -125,6 +125,12 @@ final class Tsdf {
 
     /** One depth sample: camera at o, surface point p. Updates the voxels along the ray within the band. */
     void integrate(float ox, float oy, float oz, float px, float py, float pz, int[] c) {
+        integrate(ox, oy, oz, px, py, pz, c, Float.MAX_VALUE);
+    }
+
+    /** As above; free space is cleared only up to `clearRange` from the camera along the ray (the nearest depth around
+     *  this pixel, over a voxel's width: a ray passing just beside a thin bar mustn't clear the bar's voxels, rk 10 Nov). */
+    void integrate(float ox, float oy, float oz, float px, float py, float pz, int[] c, float clearRange) {
         float dx = px - ox, dy = py - oy, dz = pz - oz;
         float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (len < 1e-3f) return;
@@ -134,7 +140,7 @@ final class Tsdf {
         // carve is how far back along the ray this goes (>= 10 means all the way to 25 cm from the camera).
         // A margin that grows with distance keeps depth noise from eating the real surface.
         // The margin is wider further away: rays to far surfaces pass close over nearer ones at a shallow angle.
-        float farS = Math.min(carve, len - 0.25f), nearS = trunc + 0.05f * len;
+        float farS = Math.min(carve, len - 0.25f), nearS = Math.max(trunc + 0.05f * len, len - clearRange + trunc);
         for (float s = farS; s > nearS; s -= vs) {
             int vx = (int) Math.floor((px - dx * s) / vs), vy = (int) Math.floor((py - dy * s) / vs), vz = (int) Math.floor((pz - dz * s) / vs);
             int i = get(vx, vy, vz);

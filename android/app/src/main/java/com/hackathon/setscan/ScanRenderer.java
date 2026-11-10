@@ -4666,9 +4666,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     int hit = voxels.get(vk);
                     sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
                     // The surface (TSDF) part goes to the fusion thread (below), the points stay here.
-                    if (fuseN * 4 + 4 > fuseBuf.length) fuseBuf = java.util.Arrays.copyOf(fuseBuf, fuseBuf.length * 2);
-                    fuseBuf[fuseN * 4] = wx; fuseBuf[fuseN * 4 + 1] = wy; fuseBuf[fuseN * 4 + 2] = wz;
-                    fuseBuf[fuseN * 4 + 3] = Float.intBitsToFloat((rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16 | (fine ? 1 << 24 : 0));
+                    if (fuseN * 5 + 5 > fuseBuf.length) fuseBuf = java.util.Arrays.copyOf(fuseBuf, fuseBuf.length * 2);
+                    fuseBuf[fuseN * 5] = wx; fuseBuf[fuseN * 5 + 1] = wy; fuseBuf[fuseN * 5 + 2] = wz;
+                    fuseBuf[fuseN * 5 + 3] = Float.intBitsToFloat((rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16 | (fine ? 1 << 24 : 0));
+                    // How far along this ray free space may be cleared: the nearest depth over a voxel's width around the
+                    // pixel (a ray just beside a thin bar mustn't clear the bar), in ray length.
+                    {
+                        int rpx = Math.max(1, Math.min(6, Math.round(0.6f * tsdf.vs * fx / d)));
+                        int nearMm = mm;
+                        for (int ny = -1; ny <= 1; ny++) for (int nx = -1; nx <= 1; nx++) {
+                            int uu = u + nx * rpx, vv = v + ny * rpx;
+                            if (uu < 0 || vv < 0 || uu >= dw || vv >= dh) continue;
+                            int m2 = dbuf.get(vv * dRow + uu * dPix) & 0xFFFF;
+                            if (m2 >= 200 && m2 < nearMm) nearMm = m2;
+                        }
+                        float rayLen = (float) Math.sqrt(xc * xc + yc * yc + zc * zc);
+                        fuseBuf[fuseN * 5 + 4] = rayLen * (nearMm * 0.001f) / d;
+                    }
                     fuseN++;
                     if (weak) continue;
                     if (hit < 0 || seenStamp[hit] != depthFrames) frameHits++;
@@ -4835,11 +4849,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (dp < 0.25f || dp > 3.5f) continue;
             float xc = v[0] * x + v[4] * y + v[8] * z + v[12], yc = v[1] * x + v[5] * y + v[9] * z + v[13];
             int u = (int) (fx * xc / dp + cx), vv = (int) (cy - fy * yc / dp);
-            if (u < 1 || vv < 1 || u >= dw - 1 || vv >= dh - 1) continue;
+            // The whole spot must be seen through, not just its own pixel: close up a 2 cm point covers several pixels,
+            // and a bar's point just beside its pixel saw the wall and was erased (rk 10 Nov: bars vanished up close).
+            int rp = Math.max(1, Math.min(6, Math.round(0.6f * VOXEL * fx / dp)));
+            if (u < rp || vv < rp || u >= dw - rp || vv >= dh - rp) continue;
             float lim = dp + Math.max(0.10f, 0.08f * dp);
-            if (!beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv, lim) || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u - 1, vv, lim)
-                    || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u + 1, vv, lim) || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv - 1, lim)
-                    || !beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv + 1, lim)) continue;
+            boolean through = true;
+            for (int ny = -1; ny <= 1 && through; ny++) for (int nx = -1; nx <= 1; nx++)
+                if (!beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u + nx * rp, vv + ny * rp, lim)) { through = false; break; }
+            if (!through) continue;
             int t = Math.min(255, (thru[i] & 0xFF) + 1);
             thru[i] = (byte) t;
             int seen = Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f));
@@ -5056,14 +5074,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final java.util.concurrent.ExecutorService fuseExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "tsdf-fuse"); t.setPriority(Thread.NORM_PRIORITY); return t; });
     private java.util.concurrent.Future<?> fuseLast;
-    private float[] fuseBuf = new float[4 * 16384];
+    private float[] fuseBuf = new float[5 * 16384];
     private int fuseN;
     private boolean fuseDrained = true;
 
     /** Hands this depth frame's surface samples to the fusion thread. At most one frame waits behind the running one. */
     private void submitFuse(final float ox, final float oy, final float oz) {
         final int n = fuseN;
-        final float[] buf = java.util.Arrays.copyOf(fuseBuf, n * 4);
+        final float[] buf = java.util.Arrays.copyOf(fuseBuf, n * 5);
         java.util.concurrent.Future<?> prev = fuseLast;
         if (prev != null && !prev.isDone()) {
             long t0 = System.nanoTime();
@@ -5078,10 +5096,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     tsdf.beginFrame(); detail.beginFrame();
                     int[] rgb = new int[3];
                     for (int i = 0; i < n; i++) {
-                        int bits = Float.floatToRawIntBits(buf[i * 4 + 3]);
+                        int bits = Float.floatToRawIntBits(buf[i * 5 + 3]);
                         rgb[0] = bits & 255; rgb[1] = (bits >> 8) & 255; rgb[2] = (bits >> 16) & 255;
-                        tsdf.integrate(ox, oy, oz, buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], rgb);
-                        if ((bits & (1 << 24)) != 0) detail.integrate(ox, oy, oz, buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], rgb);
+                        float clear = buf[i * 5 + 4];
+                        tsdf.integrate(ox, oy, oz, buf[i * 5], buf[i * 5 + 1], buf[i * 5 + 2], rgb, clear);
+                        if ((bits & (1 << 24)) != 0) detail.integrate(ox, oy, oz, buf[i * 5], buf[i * 5 + 1], buf[i * 5 + 2], rgb, clear);
                     }
                 }
             } catch (Throwable e) { logError("fuse", new RuntimeException(e)); }
