@@ -4273,16 +4273,36 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float tt = (e2x * qx + e2y * qy + e2z * qz) * f;
             if (tt > 0.05f && tt < best) best = tt;
         }
+        // The points along the ray (rk 10 Nov 15:24: results open in Points, and where the surface is missing Measure
+        // must still land): the nearest points within 3 cm of the ray, then the median of those within 4 cm behind
+        // the first one (one point alone can be a speck).
+        // On the surface where there is one (offline, picks on the points differed from the surface by ~10 cm along
+        // the ray at grazing views, so the surface stays first); on the points only where there's no surface.
         if (best < Float.MAX_VALUE) return new float[]{a[0] + dx * best, a[1] + dy * best, a[2] + dz * best};
-        // No surface there: the nearest scan point within 3 cm of the ray.
-        float bt = Float.MAX_VALUE; int bi = -1;
+        float[] pp = pointPick(a, dx, dy, dz);
+        return pp == null ? null : new float[]{pp[0], pp[1], pp[2]};
+    }
+
+    /** x, y, z and the distance along the ray of the robust point hit, or null. */
+    private float[] pointPick(float[] a, float dx, float dy, float dz) {
+        float bt = Float.MAX_VALUE;
         for (int i = 0; i < count; i++) {
             float px = pos.get(i * 3) - a[0], py = pos.get(i * 3 + 1) - a[1], pz = pos.get(i * 3 + 2) - a[2];
             float t = px * dx + py * dy + pz * dz; if (t < 0.05f || t >= bt) continue;
             float d2 = px * px + py * py + pz * pz - t * t;
-            if (d2 < 0.03f * 0.03f) { bt = t; bi = i; }
+            if (d2 < 0.03f * 0.03f) bt = t;
         }
-        return bi < 0 ? null : new float[]{pos.get(bi * 3), pos.get(bi * 3 + 1), pos.get(bi * 3 + 2)};
+        if (bt == Float.MAX_VALUE) return null;
+        java.util.ArrayList<float[]> near = new java.util.ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            float px = pos.get(i * 3) - a[0], py = pos.get(i * 3 + 1) - a[1], pz = pos.get(i * 3 + 2) - a[2];
+            float t = px * dx + py * dy + pz * dz; if (t < bt || t > bt + 0.04f) continue;
+            float d2 = px * px + py * py + pz * pz - t * t;
+            if (d2 < 0.03f * 0.03f) near.add(new float[]{pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2), t});
+        }
+        float[] out = new float[4];
+        for (int k = 0; k < 4; k++) { final int kk = k; near.sort((p, q) -> Float.compare(p[kk], q[kk])); out[k] = near.get(near.size() / 2)[k]; }
+        return out;
     }
 
     /** Drag to look around (the scene follows the finger); pitch kept short of straight up or down. */
