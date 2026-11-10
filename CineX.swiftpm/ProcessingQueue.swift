@@ -66,6 +66,13 @@ private enum log {
         set { UserDefaults.standard.set(newValue, forKey: "recordThenProcess") }
     }
 
+    /// "Finer surface" (test, off by default): rebuilds from the recording use 1.9 cm voxels, simplified (FineSurface),
+    /// so thin things like 3 cm bars come out as rods. Launch argument -fineSurface turns it on too.
+    nonisolated static var fineSurface: Bool {
+        get { UserDefaults.standard.bool(forKey: "fineSurface") || ProcessInfo.processInfo.arguments.contains("-fineSurface") }
+        set { UserDefaults.standard.set(newValue, forKey: "fineSurface") }
+    }
+
     private var runner: Task<Void, Never>?
     private var inner: Task<Void, Error>?
     /// iOS 26+: the continued-processing task this run reports to (BGContinuedProcessingTask).
@@ -330,16 +337,20 @@ struct ProcessingCard: View {
 struct ProcessingSection: View {
     @ObservedObject private var queue = ProcessingQueue.shared
     @State private var fromRecording = ProcessingQueue.recordThenProcess
+    @State private var fine = ProcessingQueue.fineSurface
 
     var body: some View {
         Section {
             if queue.current != nil { ProcessingCard() }
             Toggle("Build scans from the recording (test)", isOn: $fromRecording)
                 .onChange(of: fromRecording) { _, on in ProcessingQueue.recordThenProcess = on }
+            Toggle("Finer surface for thin things (test)", isOn: $fine)
+                .onChange(of: fine) { _, on in ProcessingQueue.fineSurface = on }
         } footer: {
-            Text(fromRecording
-                 ? "After Done, the scan is built again from its recording, in the background. The live scan is kept in the scan's before-rebuild folder."
-                 : "After Done, sharp text patches are made from the scan's recording, in the background. The live scan stays as it is.")
+            Text((fromRecording
+                  ? "After Done, the scan is built again from its recording, in the background. The live scan is kept in the scan's before-rebuild folder."
+                  : "After Done, sharp text patches are made from the scan's recording, in the background. The live scan stays as it is.")
+                 + (fine ? " Rebuilds from the recording use a finer surface (bars and edges sharper, slower, about twice the triangles)." : ""))
         }
     }
 }

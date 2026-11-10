@@ -164,6 +164,23 @@ directly (plain dots, no splat build) and patch colours from the photo room, the
   code): the corner check costs little (grey 6.7→7.4%, 22.3→22.8%, 5.5→6.1% on 19:00 / 22:14 / 22:39); 22:14's grey is
   coverage (no photo sees those parts well enough; a 200-photo cap only takes it to 19%), not tonight's change.
 
+## Finer surface (test switch, 05:00–06:00)
+MeshSimplify (quadric edge collapse; flat parts merge, bends and borders stay; no flips) on the 1.9 cm surface around
+the pull-up bars: 116k → 44k (2 mm) / 32k (4 mm) / 22k (8 mm) triangles in 0.25 s, the bars intact at 8 mm.
+Detail zones (close-up dwell) at 1.9 cm: round 1 left holes and missed the bars (zones only fuse depth under 1.3 m,
+the bars were seen from further); round 2 (2 m, a cell goes fine only when covered) had no holes but still missed
+the bars. So instead: the whole room at 1.9 cm, extracted in ~1.8 m tiles and simplified to 8 mm (FineSurface):
+| | 4 cm (now) | 1.9 cm tiles + 8 mm | 4 cm surface missing / added |
+|---|---|---|---|
+| 20:33 | 105k triangles | 193k (GPU block 171 MB, tiles 1.4 s) | 1.1% / 2.2%, nothing far off |
+| 22:14 | 158k | 289k (233 MB, 2.0 s) | 1.2% / 0.6%, nothing far off |
+Bars come out as rods (20:33) and the ladder's rungs, rails and a ring show (22:14): overnight-pictures/finer-surface.
+In the app: "Finer surface for thin things (test)" under "Build scans from the recording (test)" on the home screen,
+off by default; rebuilds from the recording then fuse at 1.9 cm (blocks up to 40M voxels, else 4 cm as before), no
+low-confidence hole fill in that mode. Simulator, real rebuild of the 20:33 recording: 192.7k triangles, surface 14 s,
+peak memory 396 MB (293 MB at 4 cm); the photo room paints the same share as on the 4 cm mesh (photocover), built in
+26 s in the Debug Simulator. A faint crack can show along a tile border.
+
 ## S24 GPU fusion: plan (not built; needs the phone to test)
 1. One test scan with tonight's stage timings (e8365f7) to see how the GL thread's 95 ms split (ARCore update, depth
    fusion pixels, carve, photo, live mesh draw).
@@ -183,6 +200,9 @@ iPhone:
 4. New 2–3 min scan, Done, let it build: floor by the chair / box sides should have fewer holes (hole fill); no sheet
    across the ladder.
 5. After that scan, send me the scan's perf-scan.jsonl (memory every 30 s, stage times) and processing log.
+6. (Optional) Turn on "Build scans from the recording (test)" and "Finer surface for thin things (test)", scan the
+   climbing bars from ~1–2 m, Done, wait for the rebuild: the bars should be rods, not a slab. Rebuild is slower and
+   uses more memory; turn it off again if anything misbehaves.
 S24:
 1. Install: ~/Library/Android/sdk/platform-tools/adb install -r ~/DEV/shootlocal/android/app/build/outputs/apk/debug/app-debug.apk
 2. Open a scan: Photo; Lighting on: the photo room is lit (if it stays unlit, the shader fell back: tell me).

@@ -136,6 +136,23 @@ final class TsdfGPU {
         }
     }
 
+    /// Grid voxels `lo`..<`hi` (block coordinates, clamped) into `tsdf`, for extracting one tile of a big block.
+    func copy(into tsdf: Tsdf, gridLo: SIMD3<Int32>, gridHi: SIMD3<Int32>) {
+        finish()
+        let s = sdf.contents().bindMemory(to: Float.self, capacity: voxelCount)
+        let w = weight.contents().bindMemory(to: UInt16.self, capacity: voxelCount)
+        let lo = simd_max(gridLo, .zero), hi = simd_min(gridHi, dims)
+        guard all(lo .< hi) else { return }
+        let nx = Int(dims.x), ny = Int(dims.y)
+        for z in Int(lo.z)..<Int(hi.z) { for y in Int(lo.y)..<Int(hi.y) {
+            var i = (z * ny + y) * nx + Int(lo.x)
+            for x in Int(lo.x)..<Int(hi.x) {
+                if w[i] > 0 { tsdf.set(origin &+ SIMD3(Int32(x), Int32(y), Int32(z)), sdf: s[i], weight: Int16(clamping: Int(w[i]))) }
+                i += 1
+            }
+        } }
+    }
+
     /// One voxel's signed distance and weight (tests).
     func value(at v: SIMD3<Int32>) -> (sdf: Float, weight: UInt16)? {
         finish()

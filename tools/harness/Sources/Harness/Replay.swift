@@ -251,7 +251,7 @@ enum GPUBench {
         }
         let prepTime = Date().timeIntervalSince(t1)
         // Fine voxels: only a box around the chosen view's camera (a detail zone), so the block fits.
-        if voxel < 0.02, let view, view < frames.count {
+        if voxel < 0.02, ProcessInfo.processInfo.environment["NO_BOX"] != "1", let view, view < frames.count {
             let c = SIMD3(frames[view].pose.columns.3.x, frames[view].pose.columns.3.y, frames[view].pose.columns.3.z)
             lo = simd_max(lo, c - 1.6); hi = simd_min(hi, c + 1.6)
         }
@@ -314,6 +314,13 @@ enum GPUBench {
             print(String(format: "low-confidence hole fill: %d voxels added (%.1f%%), %.2f s", tsdf.count - before, Double(tsdf.count - before) * 100 / Double(max(1, before)), Date().timeIntervalSince(tl)))
         }
         var gpuMesh = Fusion.mesh(tsdf)
+        // FINE_TILES=1: the app's FineSurface extraction (tiles + simplification) instead of the whole-block copy.
+        if ProcessInfo.processInfo.environment["FINE_TILES"] == "1" {
+            let tf = Date()
+            let m = FineSurface.extract(gpu)
+            gpuMesh.positions = m.positions; gpuMesh.triangles = m.triangles
+            print(String(format: "fine tiles: %d triangles in %.2f s", m.triangles.count / 3, Date().timeIntervalSince(tf)))
+        }
         // ZONES=1: close-up detail zones (DetailZones) fused again at 1.5 cm, their fine surface replacing the coarse.
         if ProcessInfo.processInfo.environment["ZONES"] == "1" {
             let tz = Date()
@@ -349,24 +356,38 @@ enum GPUBench {
             }
             func cell(_ p: SIMD3<Float>) -> SIMD3<Int32> { SIMD3<Int32>((p / 0.04).rounded(.down)) }
             var fineCells = Set<SIMD3<Int32>>()
+            var fineCount: [SIMD3<Int32>: Int] = [:]
             var fineMeshes: [(Tsdf.MeshScratch, DetailZones.Zone)] = []
             for z in settled {
                 let h = SIMD3<Float>(repeating: DetailZones.size / 2)
-                guard let fine = TsdfGPU(min: z.centre - h, max: z.centre + h, voxel: DetailZones.voxel, truncation: DetailZones.voxel * 2, carve: 1.5) else { continue }
+                let zv = Float(ProcessInfo.processInfo.environment["ZONE_VOXEL"] ?? "") ?? DetailZones.voxel
+                guard let fine = TsdfGPU(min: z.centre - h, max: z.centre + h, voxel: zv, truncation: zv * 2, carve: 1.5) else { continue }
                 for d in depth {
                     var m = d.m
-                    for i in m.indices where m[i] > DetailZones.maxDepth { m[i] = 0 }
+                    let zmax = Float(ProcessInfo.processInfo.environment["ZONE_MAXDEPTH"] ?? "") ?? DetailZones.maxDepth
+                    for i in m.indices where m[i] > zmax { m[i] = 0 }
                     fine.integrate(depth: m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
                 }
-                let ft = Tsdf(capacity: 2_000_000, voxel: DetailZones.voxel, truncation: DetailZones.voxel * 2, carve: 1.5)
+                let ft = Tsdf(capacity: 2_000_000, voxel: zv, truncation: zv * 2, carve: 1.5)
                 fine.copy(into: ft)
-                let fm = Fusion.mesh(ft)
+                var fm = Fusion.mesh(ft)
+                // ZONE_SIMPLIFY=<mm>: the zone's surface simplified (MeshSimplify) before it goes in.
+                if let mm = ProcessInfo.processInfo.environment["ZONE_SIMPLIFY"].flatMap(Float.init) {
+                    let r = MeshSimplify.simplify(positions: fm.positions, triangles: fm.triangles, maxError: mm / 1000)
+                    fm.positions = r.positions; fm.triangles = r.triangles
+                }
                 for t in stride(from: 0, to: fm.triangles.count, by: 3) {
                     let c = (fm.positions[Int(fm.triangles[t])] + fm.positions[Int(fm.triangles[t + 1])] + fm.positions[Int(fm.triangles[t + 2])]) / 3
-                    if DetailZones.contains(z, c, margin: 0.03), distToCoarse(c) > (Float(ProcessInfo.processInfo.environment["FINE_DEV"] ?? "") ?? 0.025) { fineCells.insert(cell(c)) }
+                    let replaceAll = ProcessInfo.processInfo.environment["ZONE_REPLACE"] == "1"
+                    if replaceAll {
+                        if DetailZones.contains(z, c, margin: 0.03) { fineCount[cell(c), default: 0] += 1 }
+                    } else if DetailZones.contains(z, c, margin: 0.03), distToCoarse(c) > (Float(ProcessInfo.processInfo.environment["FINE_DEV"] ?? "") ?? 0.025) { fineCells.insert(cell(c)) }
                 }
                 fineMeshes.append((fm, z))
             }
+            // ZONE_REPLACE: a 4 cm cell goes fine only when the fine surface really covers it (ZONE_MINTRIS triangles).
+            let minTris = Int(ProcessInfo.processInfo.environment["ZONE_MINTRIS"] ?? "4") ?? 4
+            for (k, n) in fineCount where n >= minTris { fineCells.insert(k) }
             var positions = coarse.positions, triangles: [UInt32] = []
             for t in stride(from: 0, to: coarse.triangles.count, by: 3) {
                 let c = (positions[Int(coarse.triangles[t])] + positions[Int(coarse.triangles[t + 1])] + positions[Int(coarse.triangles[t + 2])]) / 3
@@ -462,6 +483,13 @@ enum GPUBench {
                 let r = ring.isEmpty ? 0 : ring[min(ring.count - 1, ring.count * 9 / 10)]
                 print(String(format: "bar at (%d, %d), %.2f m from the camera: %d mesh corners within 12 cm; thickness (2 x 90th-percentile distance from the axis) %.1f cm", bar[0], bar[1], z, near.count, r * 200))
             } else { print("bar: only \(near.count) mesh corners near it") }
+        }
+        // SIMPLIFY=<mm>: quadric edge collapse up to that error (MeshSimplify).
+        if let mm = ProcessInfo.processInfo.environment["SIMPLIFY"].flatMap(Float.init) {
+            let ts = Date(), before = gpuMesh.triangles.count / 3
+            let r = MeshSimplify.simplify(positions: gpuMesh.positions, triangles: gpuMesh.triangles, maxError: mm / 1000)
+            gpuMesh.positions = r.positions; gpuMesh.triangles = r.triangles
+            print(String(format: "simplify %.1f mm: %d -> %d triangles in %.2f s", mm, before, r.triangles.count / 3, Date().timeIntervalSince(ts)))
         }
         // MESH_OUT=folder: the mesh as <folder>/mesh.bin (MSH1), e.g. for `harness align` views.
         if let outDir = ProcessInfo.processInfo.environment["MESH_OUT"] {

@@ -210,11 +210,16 @@ enum RecordingProcessor {
         }
         guard lo.x.isFinite else { return nil }
         // A phone-sized block (12 M voxels, ~70 MB); bigger rooms go to the CPU.
+        // Finer surface (test switch): 1.9 cm voxels up to 40 M (~240 MB), else the usual 4 cm.
+        let fineSize = (hi - lo + 0.4) / FineSurface.voxel
+        let fine = ProcessingQueue.fineSurface && Double(fineSize.x) * Double(fineSize.y) * Double(fineSize.z) < Double(FineSurface.maxVoxels)
+        let vs: Float = fine ? FineSurface.voxel : 0.04
         let size = (hi - lo + 0.4) / 0.04
-        guard size.x * size.y * size.z < 12_000_000,
-              let gpu = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5) else { return nil }
-        // The hole fill's block (same size); without it the scan is built as before.
-        let low = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5)
+        guard fine || size.x * size.y * size.z < 12_000_000,
+              let gpu = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: vs, truncation: vs * 2, carve: 1.5) else { return nil }
+        // The hole fill's block (same size); without it the scan is built as before. Not with the finer surface (a
+        // second 1.9 cm block would double the memory).
+        let low = fine ? nil : TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5)
         for n in depthFrames.indices {
             guard let (f, d) = frame(n) else { continue }
             let r = filtered(f, d, bounds: false, low: low != nil)
@@ -232,6 +237,16 @@ enum RecordingProcessor {
         }
         gpu.finish()
         if gpu.failed { return nil }
+        if fine {
+            let t0 = Date()
+            let mesh = FineSurface.extract(gpu, cancelled: { Task.isCancelled }, progress: { progress(0.95 + 0.05 * $0) })
+            try Task.checkCancellation()
+            PerfLog.processing?.mark("finer surface", sizes: ["triangles (k)": Double(mesh.triangles.count / 3) / 1000,
+                                                             "extract s": Date().timeIntervalSince(t0),
+                                                             "GPU block MB": Double(gpu.voxelCount * 6) / 1_048_576])
+            progress(1)
+            return mesh
+        }
         let tsdf = Tsdf(capacity: max(700_000, gpu.voxelCount / 4), voxel: 0.04, truncation: 0.08, carve: 1.5)
         gpu.copy(into: tsdf)
         if let low {
