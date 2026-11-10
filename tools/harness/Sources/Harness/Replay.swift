@@ -333,6 +333,66 @@ enum GPUBench {
             print(String(format: "zones: %d close-up spots, %d settled; %d fine triangles; %.2f s", zones.count, settled.count, fineTris, Date().timeIntervalSince(tz)))
             for z in settled { print(String(format: "  zone at %.2f, %.2f, %.2f (%d frames)", z.centre.x, z.centre.y, z.centre.z, z.frames)) }
         }
+        // RODS=1: thin bars the surface misses, fitted to off-surface depth points (ThinRods), added as cylinders.
+        if ProcessInfo.processInfo.environment["RODS"] == "1" {
+            let tr = Date()
+            let collector = ThinRods.Collector(positions: gpuMesh.positions, triangles: gpuMesh.triangles)
+            for d in depth { collector.add(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy) }
+            let before = collector.points.count
+            for d in depth { collector.check(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy) }
+            let pts = collector.points
+            print("rods: \(before) cells seen in 3+ frames, \(pts.count) hit in half the frames that could see them")
+            print("rods: depth points \(collector.stats.seen), no surface near \(collector.stats.noSurface), off it \(collector.stats.off)")
+            if ProcessInfo.processInfo.environment["RODS_DUMP"] == "1" {
+                let txt = pts.map { String(format: "%.3f %.3f %.3f", $0.x, $0.y, $0.z) }.joined(separator: "\n")
+                try? txt.write(toFile: "harness-out/rods-points.xyz", atomically: true, encoding: .utf8)
+            }
+            if let view, view < frames.count {
+                // The candidate cells as 1.2 cm cubes on the mesh, from the view's camera.
+                var cp = gpuMesh.positions, ct = gpuMesh.triangles
+                let cube: [SIMD3<Float>] = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]]
+                let faces: [UInt32] = [0,1,2,0,2,3, 4,6,5,4,7,6, 0,4,5,0,5,1, 1,5,6,1,6,2, 2,6,7,2,7,3, 3,7,4,3,4,0]
+                for q in pts { let b = UInt32(cp.count); cp += cube.map { q + $0 * 0.006 }; ct += faces.map { $0 + b } }
+                let f = frames[view]
+                Images.renderFromCamera(cp, ct, pose: f.pose, k: f.k, imageWidth: f.w, imageHeight: f.h, to: URL(fileURLWithPath: "harness-out/rods-cells-f\(view).png"))
+            }
+            let rods = ThinRods.fit(pts)
+            let rm = ThinRods.mesh(rods)
+            let base = UInt32(gpuMesh.positions.count)
+            gpuMesh.positions += rm.positions
+            gpuMesh.triangles += rm.triangles.map { $0 + base }
+            if let view, view < frames.count {
+                let c = frames[view].pose.columns.3, f = -frames[view].pose.columns.2
+                print(String(format: "rods: view %d camera at (%.2f, %.2f, %.2f) looking (%.2f, %.2f, %.2f)", view, c.x, c.y, c.z, f.x, f.y, f.z))
+            }
+            print(String(format: "rods: %d off-surface cells, %d rods, %d triangles; %.2f s", pts.count, rods.count, rm.triangles.count / 3, Date().timeIntervalSince(tr)))
+            // RODS_LOOK=x,y,z: render from the frame that looks most squarely at that point from within 1.6 m.
+            if let look = ProcessInfo.processInfo.environment["RODS_LOOK"]?.split(separator: ",").compactMap({ Float($0) }), look.count == 3 {
+                let P = SIMD3(look[0], look[1], look[2])
+                var best = -1, bestScore: Float = -2
+                for (i, f) in frames.enumerated() where f.ok {
+                    let c = SIMD3(f.pose.columns.3.x, f.pose.columns.3.y, f.pose.columns.3.z), fw = -SIMD3(f.pose.columns.2.x, f.pose.columns.2.y, f.pose.columns.2.z)
+                    let d = simd_distance(c, P); guard d < 1.6, d > 0.5 else { continue }
+                    let score = simd_dot(simd_normalize(P - c), fw)
+                    if score > bestScore { bestScore = score; best = i }
+                }
+                if best >= 0 {
+                    let f = frames[best]
+                    var cp = gpuMesh.positions, ct = gpuMesh.triangles
+                    let cube: [SIMD3<Float>] = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]]
+                    let faces: [UInt32] = [0,1,2,0,2,3, 4,6,5,4,7,6, 0,4,5,0,5,1, 1,5,6,1,6,2, 2,6,7,2,7,3, 3,7,4,3,4,0]
+                    for q in pts { let b = UInt32(cp.count); cp += cube.map { q + $0 * 0.004 }; ct += faces.map { $0 + b } }
+                    Images.renderFromCamera(cp, ct, pose: f.pose, k: f.k, imageWidth: f.w, imageHeight: f.h, to: URL(fileURLWithPath: "harness-out/rods-look-f\(best).png"))
+                    print("rods: look frame \(best) (rods + cells): harness-out/rods-look-f\(best).png")
+                }
+            }
+            if let view, view < frames.count {
+                let c = frames[view].pose.columns.3, cam = SIMD3(c.x, c.y, c.z)
+                let near = rods.filter { simd_distance(($0.a + $0.b) / 2, cam) < 1.2 }
+                print("rods: \(near.count) within 1.2 m of the view's camera")
+            }
+            for r in rods { print(String(format: "  rod %.2f m long, %.1f cm across, %d cells, from (%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f)", r.length, r.radius * 200, r.support, r.a.x, r.a.y, r.a.z, r.b.x, r.b.y, r.b.z)) }
+        }
         // BAR=x,y: measure the thickness of a bar through depth pixel (x, y) of the view's frame (axis by PCA).
         if let bar = ProcessInfo.processInfo.environment["BAR"]?.split(separator: ",").compactMap({ Int($0) }), bar.count == 2, let view,
            let i = depthFrameIndex.firstIndex(where: { $0 >= view }) {

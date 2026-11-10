@@ -63,6 +63,21 @@ flat fine areas collapse, and zone placement that follows thin things (not only 
   are thin parts the surface lost; draw them (as small photo-coloured discs) in the Photo view and/or seed fine
   detail zones there. Test on the iPhone 22:39 and S24 22:37 scans (find the ladder frames in the 22:39 video first).
 
+## Thin rods (ThinRods.swift, harness RODS=1; 20:33 recording), 03:30–04:00
+Depth points more than 3 cm off the 4 cm surface, on the camera's side of it, in 1.5 cm cells; a cell counts when it's
+hit in at least half the frames that could see it unblocked; straight runs of cells (RANSAC + PCA, no gap > 5 cm,
+≥ 15 cm long) become 8-sided cylinders.
+| round | candidate cells | rods | what was wrong |
+|---|---|---|---|
+| 1: off-surface, seen in 3+ frames | 178k | 60 | wall noise; rods lying in wall and floor planes |
+| 2: + hit in ≥ half the frames that could see it | 5.3k | 60 | a plain wall above a door: the mesh 3+ cm in front of the depth there |
+| 3: + only on the camera's side of the surface | 1.4k | 17–19 | rods now on real thin things (a ladder rail at x −0.50, a chair's star base on the floor) |
+Not good enough for the phone yet: the upper pull-up bar is mostly inside the coarse mesh already (a flat slab), so only
+its first 11 cm near the wall is off the surface; diameters come out at the 5 cm cap (cells only on the seen side);
+130 s on the Mac for 4,000 frames (needs every 2nd frame / pixel for the phone). Next: replace the slab with the rod
+(drop coarse triangles inside a rod's tube), fit radius from both sides, speed.
+Pictures: recordings/overnight-pictures/rods/.
+
 ## S24 room size (fixed, b7d0e68)
 - Viewer size now from the room model (5.4 × 3.8 m for 22:37, was the points' bounding box 6.8 × 5.6 m, 3.6 m);
   height "not scanned" when fewer than 20 columns reach 1.8 m above the floor.

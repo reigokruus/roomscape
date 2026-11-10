@@ -20,6 +20,17 @@ for i in {1..60}; do
   sleep 10
 done
 
+# Heat (the Air has no fan): wait while macOS reports the thermal state above nominal, up to 10 minutes.
+THERM=/tmp/roomscape-thermal
+[[ -x $THERM ]] || { echo 'import Foundation; print(ProcessInfo.processInfo.thermalState.rawValue)' > $THERM.swift && swiftc -O -o $THERM $THERM.swift 2>/dev/null; }
+if [[ -x $THERM ]]; then
+  for i in {1..60}; do
+    t=$($THERM); [[ $t -le 0 ]] && break
+    [[ $i == 1 ]] && log "  resting: thermal state $t"
+    sleep 10
+  done
+fi
+
 start=$(date +%s)
 nice -n ${HEAVY_NICE:-0} "$@"
 rc=$?
