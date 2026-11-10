@@ -4380,6 +4380,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- screen.mp4: what the user saw while scanning (ScreenVideo) ----
     /** Debug switch "Screen video" (MainActivity). */
     static volatile boolean SCREEN_VIDEO = true;
+    /** Depth fusion test variant for replays (intent extra fuseVariant): 0 as before, 1 head-on weighted, 2 border steps dropped. */
+    static volatile int FUSE_VARIANT = 0;
+    volatile Runnable replayDone;
     private ScreenVideo screenVideo;
     private File screenFile, screenPending;
     private volatile String fusionState = "";
@@ -4486,6 +4489,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
 
         TrackingState ts = camera.getTrackingState();
+        // a replay: when the recording has played to its end, Done (MainActivity.replayFinished)
+        Runnable rd = replayDone;
+        if (rd != null && !viewing && frameNo % 15 == 0) {
+            try { if (session.getPlaybackStatus() == com.google.ar.core.PlaybackStatus.FINISHED) { replayDone = null; log("replay: the recording ended"); rd.run(); } }
+            catch (Exception ignored) { }
+        }
         sensors.active = !viewing;
         if (!viewing && frame.getTimestamp() != 0) {
             com.google.ar.core.Pose cp = camera.getPose();
@@ -5130,6 +5139,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                             || Math.abs((dbuf.get((v - 1) * dRow + u * dPix) & 0xFFFF) - mm) > tol
                             || Math.abs((dbuf.get((v + 1) * dRow + u * dPix) & 0xFFFF) - mm) > tol) {
                         depthRejectedEdge++; continue;
+                    }
+                    // Test variants (replays, rk 10 Nov 14:30; FUSE_VARIANT, 0 = as before):
+                    // 1: head-on looks count more: towards the picture's corners fewer pixels are used (all within 40% of
+                    //    the way to a corner, down to 30% of them at the corners), so a straight look outweighs an edge look;
+                    // 2: no depth steps near the picture's border: the outer 3 pixels dropped, and within 8 pixels of the
+                    //    border a pixel whose neighbours (2 away) differ by more than 2% + 1 cm.
+                    if (FUSE_VARIANT == 1) {
+                        float nu = (u + 0.5f) / dw * 2 - 1, nv = (v + 0.5f) / dh * 2 - 1, rr = (float) Math.sqrt((nu * nu + nv * nv) / 2);
+                        float keep = 1f - 0.7f * Math.max(0f, Math.min(1f, (rr - 0.4f) / 0.6f));
+                        int hsh = (u * 73856093) ^ (v * 19349663) ^ ((int) depthFrames * 83492791);
+                        if (((hsh >>> 8) & 1023) / 1024f >= keep) { depthRejectedEdge++; continue; }
+                    } else if (FUSE_VARIANT == 2) {
+                        int bd = Math.min(Math.min(u, v), Math.min(dw - 1 - u, dh - 1 - v));
+                        if (bd < 3) { depthRejectedEdge++; continue; }
+                        if (bd < 8) {
+                            int t2 = mm / 50 + 10; boolean step = false;
+                            for (int q = -2; q <= 2 && !step; q += 4) {
+                                int a1 = dbuf.get(v * dRow + (u + q) * dPix) & 0xFFFF, a2 = dbuf.get((v + q) * dRow + u * dPix) & 0xFFFF;
+                                if ((a1 > 0 && Math.abs(a1 - mm) > t2) || (a2 > 0 && Math.abs(a2 - mm) > t2)) step = true;
+                            }
+                            if (step) { depthRejectedEdge++; continue; }
+                        }
                     }
                     float d = (mm * 0.001f - dfC) / dfK;   // motion-based depth correction (depthFit), 1:1 until sure
                     float xc = (u + 0.5f - cx) * d / fx;

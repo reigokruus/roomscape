@@ -47,8 +47,21 @@ public class MainActivity extends Activity {
     /** The recording of the scan in progress, and a finished one waiting to move into its scan's folder. */
     private File recordingFile, finishedRecording;
 
+    /** A replay (intent extra replayName): its name; started once. */
+    private String replayName; private boolean replayStarted, replayEnded;
+
+    /** The replayed recording ended: Done, as if tapped. */
+    void replayFinished() {
+        runOnUiThread(() -> {
+            if (replayEnded || renderer.isViewing()) return;
+            replayEnded = true;
+            android.util.Log.i("RoomScape", "replay: recording ended, Done");
+            onMainButton();
+        });
+    }
+
     private void startRecordingIfNeeded() {
-        if (!recordWanted) return;
+        if (!recordWanted || replayName != null) return;   // a replay isn't recorded again
         try {
             if (session == null || session.getRecordingStatus() == com.google.ar.core.RecordingStatus.OK) return;
             File dir = new File(getExternalFilesDir(null), "recordings");
@@ -2617,6 +2630,11 @@ public class MainActivity extends Activity {
                     try {
                         session.setPlaybackDatasetUri(android.net.Uri.fromFile(new File(playback)));
                         android.util.Log.i("RoomScape", "playback from " + playback);
+                        // Replays for tests (tools/replay-s24.sh): which fusion variant, and a name; the scan then starts
+                        // by itself (always a new scan) and ends with Done when the recording ends.
+                        ScanRenderer.FUSE_VARIANT = getIntent().getIntExtra("fuseVariant", 0);
+                        replayName = getIntent().getStringExtra("replayName");
+                        android.util.Log.i("RoomScape", "replay: fusion variant " + ScanRenderer.FUSE_VARIANT + ", name " + replayName);
                     } catch (Exception e) { android.util.Log.e("RoomScape", "playback failed: " + e); }
                 }
                 // The renderer picks the depth mode and falls back to another one if tracking never starts.
@@ -2632,6 +2650,15 @@ public class MainActivity extends Activity {
         renderer.sensors.start(this);
         if (session != null && !renderer.isViewing() && !homeShown()) resumeSession();
         glView.onResume();
+        if (replayName != null && !replayStarted && session != null) {
+            replayStarted = true;
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                if (!homeShown()) showHome();
+                startNewScan();
+                final String nm = replayName;
+                glView.queueEvent(() -> { renderer.currentName = nm; renderer.replayDone = this::replayFinished; renderer.log("replay \"" + nm + "\": fusion variant " + ScanRenderer.FUSE_VARIANT); });
+            }, 1500);
+        }
     }
 
     private boolean cameraAsked, arProblemShown;
