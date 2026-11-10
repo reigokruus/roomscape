@@ -233,6 +233,10 @@ final class Rmsc {
         if (objs.length() > 0) m.put("objects", objs);
         JSONArray shared = sharedOutlets(d.outlets, floorY);
         if (shared.length() > 0) m.put("outlets", shared);
+        // floor area (optional, docs/rmsc-format.md "floorArea"): per room, from the walls or set by hand; outline x, z
+        // need no floor shift
+        File fa = new File(dir, "floor-area.json");
+        if (fa.exists()) try { m.put("floorArea", new JSONObject(text(fa))); } catch (Exception ignored) { }
         put(z, "manifest.json", m.toString(1).getBytes("UTF-8"));
 
         // thumbnail and the Android extras

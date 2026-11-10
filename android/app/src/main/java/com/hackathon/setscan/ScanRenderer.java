@@ -3460,6 +3460,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     FloorArea.Result fa = FloorArea.compute(pos, count, room.floorY);
                     floorArea = fa; selectedRoom = 0; selectedRoomVerts = null;
                     loadWallEdits(fa);
+                    saveFloorAreaJson();
                     StringBuilder rs = new StringBuilder();
                     for (int i = 0; i < fa.rooms.size(); i++) rs.append(i == 0 ? "" : "; ").append(fa.rooms.get(i).text(i));
                     log(String.format(java.util.Locale.US, "floor area: %s (%s; outline %.0f%% walls, %.1f m² of floor in no room) in %d ms",
@@ -6947,6 +6948,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         FloorArea.Result fa = floorArea; if (fa == null) return;
         wallEdits = new float[fa.rooms.size()][4];
         File d = currentDir; if (d != null) new File(d, "floor-edits.json").delete();
+        saveFloorAreaJson();
         activity.setRoomSize(roomSizeText());
     }
     /** A room's sides with the edits (u0, u1, v0, v1), or null when it has no wall rectangle. */
@@ -7013,7 +7015,32 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         wallEdits[i][sd] = out;
         activity.setRoomSize(roomSizeText());
     }
-    void wallDragEnd() { if (dragSide >= 0) { saveWallEdits(); dragRoom = -1; dragSide = -1; activity.setRoomSize(roomSizeText()); } }
+    void wallDragEnd() { if (dragSide >= 0) { saveWallEdits(); saveFloorAreaJson(); dragRoom = -1; dragSide = -1; activity.setRoomSize(roomSizeText()); } }
+
+    /** floor-area.json in the scan folder (and so in the .rmsc): per room its floor area, width × length, outline corners
+     *  (x, z in the scan's world) and whether the walls were set by hand. */
+    private void saveFloorAreaJson() {
+        FloorArea.Result fa = floorArea; File d = currentDir; if (fa == null || d == null) return;
+        try {
+            org.json.JSONArray rooms = new org.json.JSONArray(); float total = 0;
+            for (int i = 0; i < fa.rooms.size(); i++) {
+                FloorArea.Room r = fa.rooms.get(i); boolean ed = edited(i);
+                float area = ed ? r.editedArea(wallEdits[i]) : r.shown(); float[] sz = ed ? r.editedSize(wallEdits[i]) : new float[]{r.w, r.l};
+                total += area;
+                org.json.JSONObject o = new org.json.JSONObject().put("area", Math.round(area * 100) / 100.0).put("width", Math.round(sz[0] * 100) / 100.0)
+                        .put("length", Math.round(sz[1] * 100) / 100.0).put("handSet", ed).put("wallSides", r.wallSides);
+                float[] e = editedRect(i);
+                if (e != null) {
+                    org.json.JSONArray c = new org.json.JSONArray();
+                    for (float[] uv : new float[][]{{e[0], e[2]}, {e[1], e[2]}, {e[1], e[3]}, {e[0], e[3]}}) { float[] w = worldOf(fa, r.deg, uv[0], uv[1]); c.put(new org.json.JSONArray(new double[]{Math.round(w[0] * 1000) / 1000.0, Math.round(w[2] * 1000) / 1000.0})); }
+                    o.put("outline", c);
+                }
+                rooms.put(o);
+            }
+            java.nio.file.Files.write(new File(d, "floor-area.json").toPath(),
+                    new org.json.JSONObject().put("total", Math.round(total * 100) / 100.0).put("rooms", rooms).toString().getBytes("UTF-8"));
+        } catch (Exception e) { logError("floor area save", e); }
+    }
 
     /** The adjustable room's wall lines (the one being dragged white). */
     private void drawWallLines(float[] m) {

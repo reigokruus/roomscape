@@ -35,6 +35,19 @@ Diagnostics that stay in the Android scan folder only (never in a `.rmsc`): `eve
 
 A reader must ignore files it doesn't know. A writer may leave out every optional file.
 
+### Floor area (`floorArea` in manifest.json, optional)
+
+```json
+"floorArea": {"total": 10.67, "rooms": [{"area": 10.67, "width": 3.95, "length": 2.70, "handSet": true, "wallSides": 4,
+              "outline": [[x, z], [x, z], [x, z], [x, z]]}]}
+```
+
+The floor split into rooms at doorways (Android, from 10 Nov 2026). `area` in m², `width` × `length` in metres (longer
+first) along the room's own walls. `outline` is the room's wall rectangle on the floor, corners in order, x and z in
+metres in the package's frame (the floor shift doesn't change them); absent when the room's walls weren't found (then
+`area` is the seen floor). `handSet`: the user moved walls in the result (the scan's own numbers are then replaced).
+`wallSides`: how many of the 4 sides the scan found a wall on (fewer: "about"). Readers that don't know it ignore it.
+
 ### Flat tiles (`tiles.json` + `tiles.png`, optional)
 
 ```json
