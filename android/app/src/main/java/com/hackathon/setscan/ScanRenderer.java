@@ -6840,20 +6840,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return k > 0 ? (float) (sum / k) : c;
     }
 
-    private long liveDoorAt, liveDoorMs;
+    private long liveDoorAt; private volatile long liveDoorMs; private volatile boolean liveDoorBusy;
     private volatile float[] lastLiveMesh; private volatile float lastLiveFloor;   // the search runs at most a third of the time (14:01: 1-2.4 s each, frame dips)
     /** Doorways being tracked during the scan: each with how many searches in a row found it and missed it. */
     private final java.util.ArrayList<float[]> liveTrack = new java.util.ArrayList<>();   // x0 z0 x1 z1 floorY width height sure hits misses shown
 
     /** Live-mesh thread, every ~2 s: the doorway search on the mesh so far; a doorway is shown after two searches agree
      *  (within 5 cm), moves smoothly, and goes only after 3 searches in a row miss it. */
-    private void liveDoors(Tsdf near, int nt, java.util.List<PhotoRoom.Keyframe> kfs) {
+    private void liveDoors(float[] vv, int nv, java.util.List<PhotoRoom.Keyframe> kfs, float camX, float camZ) {
         long t0 = System.currentTimeMillis();
-        int nv = nt * 3; float[] vv = new float[nv * 3];
-        for (int i = 0; i < vv.length; i++) vv[i] = near.meshPos.get(i);
         float[] walls = DoorwayFinder.wallsFromSurface(vv, nv);
+        // only the 12 photos taken nearest to where the phone is: the see-through test looks at each photo per cell
+        java.util.ArrayList<PhotoRoom.Keyframe> near12 = new java.util.ArrayList<>();
+        for (PhotoRoom.Keyframe k : kfs) if (k.depth != null) near12.add(k);
+        near12.sort((a, b) -> Float.compare((float) Math.hypot(a.pose[12] - camX, a.pose[14] - camZ), (float) Math.hypot(b.pose[12] - camX, b.pose[14] - camZ)));
+        while (near12.size() > 12) near12.remove(near12.size() - 1);
         java.util.ArrayList<OutlineFill.Photo> phs = new java.util.ArrayList<>();
-        for (PhotoRoom.Keyframe k : kfs) {
+        for (PhotoRoom.Keyframe k : near12) {
             if (k.depth == null) continue;
             OutlineFill.Photo ph = new OutlineFill.Photo();
             ph.pose = k.pose; ph.fx = k.fx; ph.fy = k.fy; ph.cx = k.cx; ph.cy = k.cy; ph.w = (int) k.w; ph.h = (int) k.h;
@@ -6921,7 +6924,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 Tsdf near = tsdf.copyNear(px, py, pz, LIVE_MESH_RADIUS, liveScratch); // read while the GL thread keeps fusing: fine for a preview
                 liveScratch = near; near.reuseBuffers = true;
                 int nt = near.extractMesh();
-                if (LIVE_DOORS && nowMs - liveDoorAt > Math.max(2000, 3 * liveDoorMs) && nt > 2000) { liveDoorAt = nowMs; long ld0 = System.currentTimeMillis(); liveDoors(near, nt, kfs); liveDoorMs = System.currentTimeMillis() - ld0; }
+                // The doorway search on its own thread: inline it held the live mesh for 7-15 s at a time once it could
+                // find doors (rk 10 Nov 15:09: "at 3:30 it stopped adding new features": the mesh just wasn't redrawn).
+                if (LIVE_DOORS && !liveDoorBusy && nowMs - liveDoorAt > Math.max(2000, 3 * liveDoorMs) && nt > 2000) {
+                    liveDoorAt = nowMs; liveDoorBusy = true;
+                    final int nv3 = nt * 9; final float[] vv = new float[nv3];
+                    for (int i = 0; i < nv3; i++) vv[i] = near.meshPos.get(i);   // a copy: the mesh's buffers are reused
+                    final float cpx = px, cpz = pz;
+                    Thread dt = new Thread(() -> {
+                        long ld0 = System.currentTimeMillis();
+                        try { liveDoors(vv, nt * 3, kfs, cpx, cpz); } catch (Throwable e) { logError("live doorways", new RuntimeException(e)); }
+                        finally { liveDoorMs = System.currentTimeMillis() - ld0; liveDoorBusy = false; }
+                    }, "live-doors");
+                    dt.setPriority(Thread.MIN_PRIORITY); dt.start();
+                }
                 LivePreview.Result r = livePreview.build(near.meshPos, near.meshConf, nt, kfs, px, py, pz, fx, fy, fz);
                 if (gen == surfGen) liveMeshNew = new Object[]{r};
             } catch (Throwable e) { logError("live mesh", new RuntimeException(e)); }
