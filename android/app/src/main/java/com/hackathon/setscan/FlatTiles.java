@@ -181,7 +181,7 @@ final class FlatTiles {
             int[] c = e.getValue(); int tot = c[0] + c[1] + c[2];
             long k = e.getKey(); Tile t = tiles.get(k);
             if (t != null && tot >= 8 && c[0] < 0.4f * tot) {   // the depth now says it isn't flat there
-                if (++t.contra >= 2) { tiles.remove(k); removed++; dirty = true; }
+                if (++t.contra >= 3) { tiles.remove(k); banned.add(k); removed++; dirty = true; }   // (3 contradicting looks in a row)
                 continue;
             }
             if (t != null) t.contra = 0;
@@ -211,7 +211,7 @@ final class FlatTiles {
             float score = head / Math.max(0.3f, vdist);
             for (Tile s0 : seeds) for (int[] dd : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
                 long k = key(pi, s0.iu + dd[0], s0.iv + dd[1]);
-                if (tiles.containsKey(k)) continue;
+                if (tiles.containsKey(k) || banned.contains(k)) continue;
                 int[] c = cnt.get(k);
                 if (c != null) { int tot = c[0] + c[1] + c[2]; if (c[1] > Math.max(3, 0.08f * tot) || c[2] > 0.2f * tot) continue; }
                 if (slots >= MAX_TILES) break;
@@ -233,6 +233,8 @@ final class FlatTiles {
     }
 
     int floorIdx = -1, floorPainted;
+    /** Spots whose tile was taken back: only depth paints them again, growth doesn't (no flicker). */
+    final java.util.HashSet<Long> banned = new java.util.HashSet<>();
 
     /** Floor tiles wherever the camera sees the floor and nothing stands on it: depth on the floor or below it
      *  (glossy floors reflect: depth reads below) counts as floor, depth more than 7 cm above it is an object. Oblique
@@ -268,10 +270,11 @@ final class FlatTiles {
             if (dist > 3.0f) continue;
             int[] c = cnt.get(k); Tile t = tiles.get(k);
             if (c != null && c[1] > Math.max(2, 0.1f * (c[0] + c[1]))) {   // something stands there
-                if (t != null && t.score > 0 && c[1] > 0.5f * (c[0] + c[1]) && ++t.contra >= 2) { tiles.remove(k); removed++; dirty = true; }
+                if (t != null && t.score > 0 && c[1] > 0.5f * (c[0] + c[1]) && ++t.contra >= 3) { tiles.remove(k); banned.add(k); removed++; dirty = true; }
                 continue;
             }
             boolean nearPainted = false;
+            if (c == null && banned.contains(k)) continue;
             if (c == null) {
                 for (int[] dd : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) { Tile nb = tiles.get(key(floorIdx, iu + dd[0], iv + dd[1])); if (nb != null && nb.score > 0 && nb.ring < GROW) nearPainted = true; }
                 if (!nearPainted) continue;
@@ -515,5 +518,5 @@ final class FlatTiles {
         } catch (Exception e) { return false; }
     }
 
-    synchronized void clear() { floorIdx = -1; floorPainted = 0; maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
+    synchronized void clear() { banned.clear(); floorIdx = -1; floorPainted = 0; maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
 }
