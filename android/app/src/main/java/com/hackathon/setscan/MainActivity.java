@@ -1195,7 +1195,13 @@ public class MainActivity extends Activity {
         sizeValue = new TextView(this);
         sizeValue.setTextColor(Ios.SECONDARY);
         sizeValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        sizeRow.addView(sizeValue);
+        // The label keeps its width; the value takes the rest and wraps onto a second line (rk 10 Nov 13:30: a long
+        // value squeezed "Approx. size" down to "A").
+        ((TextView) sizeRow.getChildAt(0)).setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        sizeValue.setGravity(Gravity.END); sizeValue.setMaxLines(2);
+        LinearLayout.LayoutParams svp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        svp.leftMargin = dp(12);
+        sizeRow.addView(sizeValue, svp);
         roomCard = (LinearLayout) Ios.card(this, nameRow, sizeRow);
         viewerBottom.addView(roomCard);
         viewerBottom.addView(Ios.footer(this, "≈ estimate. Use Measure in Enter the room for exact sizes."));
