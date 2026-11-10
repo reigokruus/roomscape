@@ -58,6 +58,7 @@ struct ResultView: View {
     /// Measure (rk 10 Nov): tap two spots on the scan while standing in the room.
     @State private var measuring = false
     @State private var measureClear = 0
+    @State private var confirmClearMeasures = false
     /// Eye height above the floor when standing in the room, metres; remembered.
     @AppStorage("walkEyeHeight") private var eyeHeight = 1.5
     /// The photo room as a .glb (`PhotoRoomExport`), being written or ready to share (AirDrop, Save to Files).
@@ -124,7 +125,8 @@ struct ResultView: View {
                                   onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove, walkStrafe: walkStrafe, gyroLook: walkGyro,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)),
-                                  measuring: measuring && walk.standingAt != nil, measureClear: measureClear)
+                                  measuring: measuring && walk.standingAt != nil, measureClear: measureClear,
+                                  measureFile: scan.captureURL.appendingPathComponent("measurements.json"))
                     // The room is drawn below the controls, never under them.
                     .padding(.top, walk == .off ? controlsHeight : 0)
                     .clipped()
@@ -958,8 +960,11 @@ struct ResultView: View {
         }
         .buttonStyle(.bordered)
         if measuring {
-            Button("Clear") { measureClear += 1 }
+            Button("Clear") { confirmClearMeasures = true }
                 .buttonStyle(.bordered)
+                .confirmationDialog("Remove all measurements? They're saved with this scan.", isPresented: $confirmClearMeasures, titleVisibility: .visible) {
+                    Button("Remove all", role: .destructive) { measureClear += 1 }
+                }
         }
     }
 
@@ -1018,7 +1023,7 @@ struct ResultView: View {
             }
             .frame(maxWidth: .infinity)
             .overlay(alignment: .top) {
-                Text(measuring ? "Tap two spots on the scan to measure · hold a label to remove it"
+                Text(measuring ? "Tap two spots on the scan to measure · tap a measurement to select or delete it"
                      : walkGyro ? "Turn the phone or drag to look · pinch to zoom · double-tap the floor to walk there"
                               : "Drag to look · pinch to zoom · double-tap the floor to walk there")
                     .font(.caption2)
@@ -1290,6 +1295,8 @@ struct RoomSceneView: UIViewRepresentable {
     /// Measure mode while standing: taps pick spots on the scan; a change of `measureClear` removes all measurements.
     var measuring = false
     var measureClear = 0
+    /// Where the scan's measurements are kept.
+    var measureFile: URL? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1476,12 +1483,87 @@ struct RoomSceneView: UIViewRepresentable {
         let measureRoot = SCNNode()
         private var measurePending: (p: SIMD3<Float>, node: SCNNode)?
         private var measureItems: [SCNNode] = []
+        private var measureEnds: [(SIMD3<Float>, SIMD3<Float>)] = []
+        private var measureSelected: Int?
+        /// measurements.json in the scan's folder ([[x0, y0, z0, x1, y1, z1], ...]); loaded when first set.
+        var measureFile: URL? { didSet { if measureFile != oldValue { loadMeasures() } } }
         static let measureYellow = UIColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)
 
         static func distanceText(_ m: Float) -> String { m < 1 ? "\(Int((m * 100).rounded())) cm" : String(format: "%.2f m", m) }
 
+        /// Nearly upright or level (within ~5°): the straight height or width, which is what's meant (as on Android).
+        static func lineText(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> String {
+            let d = simd_distance(a, b), dy = abs(b.y - a.y), hz = simd_length(SIMD2(b.x - a.x, b.z - a.z))
+            if hz < 0.08 * d { return distanceText(dy) + " ↕" }
+            if dy < 0.08 * d { return distanceText(hz) + " ↔" }
+            return distanceText(d)
+        }
+
+        private func makeItem(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> SCNNode {
+            let item = SCNNode()
+            item.addChildNode(dot(a)); item.addChildNode(dot(b))
+            let d = simd_distance(a, b)
+            let cyl = SCNCylinder(radius: 0.004, height: CGFloat(d)); cyl.firstMaterial?.diffuse.contents = Self.measureYellow; onTop(cyl.firstMaterial!)
+            let line = SCNNode(geometry: cyl); line.renderingOrder = 100; line.name = "measure-line"
+            line.simdPosition = (a + b) / 2
+            if d > 1e-4 { line.simdOrientation = simd_quatf(from: SIMD3(0, 1, 0), to: simd_normalize(b - a)) }
+            item.addChildNode(line)
+            item.addChildNode(label(Self.lineText(a, b), at: (a + b) / 2))
+            return item
+        }
+
+        private func saveMeasures() {
+            guard let url = measureFile else { return }
+            let arr = measureEnds.map { [$0.0.x, $0.0.y, $0.0.z, $0.1.x, $0.1.y, $0.1.z].map(Double.init) }
+            if arr.isEmpty { try? FileManager.default.removeItem(at: url); return }
+            if let data = try? JSONSerialization.data(withJSONObject: arr) { try? data.write(to: url) }
+        }
+
+        private func loadMeasures() {
+            measureItems.forEach { $0.removeFromParentNode() }; measureItems = []; measureEnds = []; measureSelected = nil
+            guard let url = measureFile, let data = try? Data(contentsOf: url),
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[Double]] else { return }
+            for m in arr where m.count == 6 {
+                let a = SIMD3(Float(m[0]), Float(m[1]), Float(m[2])), b = SIMD3(Float(m[3]), Float(m[4]), Float(m[5]))
+                let item = makeItem(a, b); measureRoot.addChildNode(item); measureItems.append(item); measureEnds.append((a, b))
+            }
+            if measureRoot.parent == nil, let root = view?.scene?.rootNode { root.addChildNode(measureRoot) }
+        }
+
+        /// A tap on a measurement selects it (white line, a Delete chip by its label); on the Delete chip removes it;
+        /// anywhere else, with one selected, deselects. True when the tap was used.
+        func measureSelectTap(_ pt: CGPoint, in view: SCNView) -> Bool {
+            let hits = view.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.all.rawValue, .rootNode: measureRoot])
+            if let del = hits.first(where: { $0.node.name == "measure-delete" }), let i = measureSelected, i < measureItems.count {
+                _ = del
+                measureItems[i].removeFromParentNode(); measureItems.remove(at: i); measureEnds.remove(at: i); measureSelected = nil
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred(); saveMeasures(); return true
+            }
+            if let h = hits.first(where: { $0.node.name == "measure-label" || $0.node.name == "measure-line" }), let item = h.node.parent,
+               let i = measureItems.firstIndex(where: { $0 === item }) {
+                select(measureSelected == i ? nil : i); return true
+            }
+            if measureSelected != nil { select(nil); return true }
+            return false
+        }
+
+        private func select(_ i: Int?) {
+            for (k, item) in measureItems.enumerated() {
+                item.childNode(withName: "measure-delete", recursively: false)?.removeFromParentNode()
+                let line = item.childNode(withName: "measure-line", recursively: false)
+                line?.geometry?.firstMaterial?.diffuse.contents = k == i ? UIColor.white : Self.measureYellow
+            }
+            measureSelected = i
+            if let i, i < measureItems.count, let lbl = measureItems[i].childNode(withName: "measure-label", recursively: false) {
+                let del = label("Delete", at: lbl.simdPosition, color: UIColor(red: 0.9, green: 0.28, blue: 0.3, alpha: 0.95))
+                del.name = "measure-delete"
+                del.simdPosition = lbl.simdPosition + SIMD3(0, -0.09, 0)
+                measureItems[i].addChildNode(del)
+            }
+        }
+
         func clearMeasures() {
-            measureItems.forEach { $0.removeFromParentNode() }; measureItems = []
+            measureItems.forEach { $0.removeFromParentNode() }; measureItems = []; measureEnds = []; measureSelected = nil; saveMeasures()
             measurePending?.node.removeFromParentNode(); measurePending = nil
         }
 
@@ -1492,12 +1574,12 @@ struct RoomSceneView: UIViewRepresentable {
             let n = SCNNode(geometry: s); n.simdPosition = p; n.renderingOrder = 100; return n
         }
 
-        private func label(_ text: String, at p: SIMD3<Float>) -> SCNNode {
+        private func label(_ text: String, at p: SIMD3<Float>, color: UIColor = UIColor(white: 0.11, alpha: 0.9)) -> SCNNode {
             let font = UIFont.boldSystemFont(ofSize: 40)
             let size = (text as NSString).size(withAttributes: [.font: font])
             let w = size.width + 36, h = size.height + 20
             let img = UIGraphicsImageRenderer(size: CGSize(width: w, height: h)).image { _ in
-                UIColor(white: 0.11, alpha: 0.9).setFill()
+                color.setFill()
                 UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h), cornerRadius: h / 2).fill()
                 (text as NSString).draw(at: CGPoint(x: 18, y: 10), withAttributes: [.font: font, .foregroundColor: UIColor.white])
             }
@@ -1519,16 +1601,8 @@ struct RoomSceneView: UIViewRepresentable {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             if let first = measurePending {
                 first.node.removeFromParentNode(); measurePending = nil
-                let item = SCNNode()
-                item.addChildNode(dot(first.p)); item.addChildNode(dot(p))
-                let d = simd_distance(first.p, p)
-                let cyl = SCNCylinder(radius: 0.004, height: CGFloat(d)); cyl.firstMaterial?.diffuse.contents = Self.measureYellow; onTop(cyl.firstMaterial!)
-                let line = SCNNode(geometry: cyl); line.renderingOrder = 100
-                line.simdPosition = (first.p + p) / 2
-                if d > 1e-4 { line.simdOrientation = simd_quatf(from: SIMD3(0, 1, 0), to: simd_normalize(p - first.p)) }
-                item.addChildNode(line)
-                item.addChildNode(label(Self.distanceText(d), at: (first.p + p) / 2))
-                measureRoot.addChildNode(item); measureItems.append(item)
+                let item = makeItem(first.p, p)
+                measureRoot.addChildNode(item); measureItems.append(item); measureEnds.append((first.p, p)); saveMeasures()
             } else {
                 let n = SCNNode(); n.addChildNode(dot(p))
                 if let fy = walkFloorY { n.addChildNode(label(Self.distanceText(max(0, p.y - fy)) + " above the floor", at: p + SIMD3(0, 0.06, 0))) }
@@ -1541,7 +1615,7 @@ struct RoomSceneView: UIViewRepresentable {
             let hits = view.hitTest(g.location(in: view), options: [.searchMode: SCNHitTestSearchMode.all.rawValue, .rootNode: measureRoot])
             guard let h = hits.first(where: { $0.node.name == "measure-label" }), let item = h.node.parent,
                   let i = measureItems.firstIndex(where: { $0 === item }) else { return }
-            item.removeFromParentNode(); measureItems.remove(at: i)
+            item.removeFromParentNode(); measureItems.remove(at: i); measureEnds.remove(at: i); measureSelected = nil; saveMeasures()
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
 
@@ -1762,6 +1836,7 @@ struct RoomSceneView: UIViewRepresentable {
         /// Intersects the tapped ray with the floor plane. (SceneKit's hit test can't see the splats: their discs
         /// are opened up in the shader, so on the CPU they have no area.)
         @objc func tapped(_ gesture: UITapGestureRecognizer) {
+            if standing != nil, let view = gesture.view as? SCNView, measureSelectTap(gesture.location(in: view), in: view) { return }
             if measuring, standing != nil, let view = gesture.view as? SCNView { measureTap(gesture.location(in: view), in: view); return }
             if standing == nil, let onTapRay, let view = gesture.view as? SCNView {
                 let p = gesture.location(in: view)
@@ -1882,6 +1957,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.setEyeHeight(eyeHeight)
         context.coordinator.setStanding(standAt)
         context.coordinator.measuring = measuring
+        context.coordinator.measureFile = measureFile
         if context.coordinator.measureClearSeen != measureClear { context.coordinator.measureClearSeen = measureClear; context.coordinator.clearMeasures() }
         guard standAt == nil, context.coordinator.lastTop != topView else { return }
         context.coordinator.lastTop = topView
