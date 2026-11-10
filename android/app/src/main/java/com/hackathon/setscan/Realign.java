@@ -97,6 +97,130 @@ final class Realign {
         return best;
     }
 
+    // ---- Global search (rk 10 Nov 11:17: after a restart ARCore came back in a frame shifted by more than the ICP's
+    // reach and the scan never lined up again). Gravity is known, so only a turn about the vertical and a shift are
+    // unknown: every 10° turn and every 10 cm shift within SEARCH_R is scored on a floor plan of the scan's upright
+    // parts (walls, furniture), then the best few go to the ICP. ----
+    static final float PLAN = 0.10f, SEARCH_R = 4f, COARSE_STEP = 0.2f;
+    private boolean[] plan; private float px0, pz0, planFloor; private int pw, ph;
+
+    /** The floor plan: cells with scan points 25 cm to 2 m above the floor (dilated by a cell). */
+    void buildPlan(float[] xyz, int n, float floorY) {
+        planFloor = floorY;
+        float x0 = Float.MAX_VALUE, x1 = -Float.MAX_VALUE, z0 = Float.MAX_VALUE, z1 = -Float.MAX_VALUE;
+        int step = Math.max(1, n / 400000);
+        for (int i = 0; i < n; i += step) { float x = xyz[i * 3], z = xyz[i * 3 + 2]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+        if (x0 > x1) return;
+        px0 = x0 - 1; pz0 = z0 - 1;
+        pw = (int) ((x1 - x0 + 2) / PLAN) + 1; ph = (int) ((z1 - z0 + 2) / PLAN) + 1;
+        if ((long) pw * ph > 4_000_000) { plan = null; return; }
+        boolean[] g = new boolean[pw * ph];
+        for (int i = 0; i < n; i += step) {
+            float y = xyz[i * 3 + 1] - floorY; if (y < 0.25f || y > 2f) continue;
+            int u = (int) ((xyz[i * 3] - px0) / PLAN), v = (int) ((xyz[i * 3 + 2] - pz0) / PLAN);
+            g[v * pw + u] = true;
+        }
+        plan = new boolean[pw * ph];
+        for (int v = 1; v < ph - 1; v++) for (int u = 1; u < pw - 1; u++) if (g[v * pw + u])
+            for (int b = -1; b <= 1; b++) for (int a = -1; a <= 1; a++) plan[(v + b) * pw + u + a] = true;
+    }
+
+    /** The `keep` best (yaw deg, tx, tz, score) over turns [d0, d1) by dd about (cx, cz) and shifts within r of (tx0, tz0). */
+    private float[][] top(ArrayList<float[]> up, float cx, float cz, int m, float[] rx, float[] rz, float d0, float d1, float dd,
+                          float tx0, float tz0, float r, float step, int keep) {
+        float[][] best = new float[keep][];
+        int steps = (int) (r / step);
+        for (float deg = d0; deg < d1; deg += dd) {
+            double a = Math.toRadians(deg); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+            for (int i = 0; i < m; i++) { float dx = up.get(i)[0] - cx, dz = up.get(i)[1] - cz; rx[i] = cx + ca * dx - sa * dz; rz[i] = cz + sa * dx + ca * dz; }
+            for (int ti = -steps; ti <= steps; ti++) for (int tj = -steps; tj <= steps; tj++) {
+                if (ti * ti + tj * tj > steps * steps) continue;
+                float tx = tx0 + ti * step, tz = tz0 + tj * step;
+                int sc = 0;
+                for (int i = 0; i < m; i++) {
+                    int u = (int) ((rx[i] + tx - px0) / PLAN), v = (int) ((rz[i] + tz - pz0) / PLAN);
+                    if (u >= 0 && v >= 0 && u < pw && v < ph && plan[v * pw + u]) sc++;
+                }
+                for (int k = 0; k < keep; k++) if (best[k] == null || sc > best[k][3]) {
+                    for (int j = keep - 1; j > k; j--) best[j] = best[j - 1];
+                    best[k] = new float[]{deg, tx, tz, sc}; break;
+                }
+            }
+        }
+        return best;
+    }
+
+    /** How different two placements are: metres of shift plus 1 m per 30° of turn (about the vertical). */
+    static float away(float[] a, float[] b) {
+        float dx = a[12] - b[12], dz = a[14] - b[14];
+        double t = Math.abs(Math.atan2(a[2], a[0]) - Math.atan2(b[2], b[0])); if (t > Math.PI) t = 2 * Math.PI - t;
+        return (float) (Math.sqrt(dx * dx + dz * dz) + Math.toDegrees(t) / 30);
+    }
+
+    /** Last search's numbers, for the log; and whether a different placement was nearly as good. */
+    String lastSearch = "";
+    boolean ambiguous;
+
+    /** The best fit over all turns and shifts around `guess` (pts in ARCore's frame), ICP-refined; null without a plan. */
+    Fit search(List<float[]> pts, float[] guess) { return search(pts, guess, Float.NaN, Float.NaN); }
+
+    /** As above, turning about (pivotX, pivotZ) in the guess's frame: the camera's spot, so a pure turn of ARCore's
+     *  frame needs no shift (about the view's middle, a half turn needs a shift of twice the viewing distance). */
+    Fit search(List<float[]> pts, float[] guess, float pivotX, float pivotZ) {
+        if (plan == null || pts.size() < 60) return null;
+        // The upright samples, placed by the guess; at most 300.
+        ArrayList<float[]> up = new ArrayList<>();
+        int stride = Math.max(1, pts.size() / 600);
+        for (int i = 0; i < pts.size(); i += stride) {
+            float[] p = pts.get(i);
+            float x = guess[0] * p[0] + guess[4] * p[1] + guess[8] * p[2] + guess[12], y = guess[1] * p[0] + guess[5] * p[1] + guess[9] * p[2] + guess[13], z = guess[2] * p[0] + guess[6] * p[1] + guess[10] * p[2] + guess[14];
+            if (y - planFloor < 0.3f || y - planFloor > 1.9f) continue;
+            up.add(new float[]{x, z});
+            if (up.size() >= 200) break;
+        }
+        if (up.size() < 40) { lastSearch = "search: too few upright samples (" + up.size() + ")"; return null; }
+        float cx = 0, cz = 0;
+        for (float[] q : up) { cx += q[0]; cz += q[1]; }
+        cx /= up.size(); cz /= up.size();
+        if (!Float.isNaN(pivotX)) { cx = pivotX; cz = pivotZ; }
+        int m = up.size(); float[] rx = new float[m], rz = new float[m];
+        // Coarse: every 10° and 20 cm within SEARCH_R; then each of the best five again at 5° and 10 cm around it.
+        float[][] coarse = top(up, cx, cz, m, rx, rz, 0, 360, 10, 0, 0, SEARCH_R, COARSE_STEP, 8);
+        int[] bestS = new int[5]; float[][] bestP = new float[5][];
+        for (float[] c0 : coarse) if (c0 != null) {
+            float[][] fine = top(up, cx, cz, m, rx, rz, c0[0] - 10, c0[0] + 10, 5, c0[1], c0[2], 0.25f, PLAN, 1);
+            float[] f0 = fine[0]; if (f0 == null) continue;
+            int sc = (int) f0[3];
+            for (int k = 0; k < 5; k++) if (bestP[k] == null || sc > bestS[k]) {
+                for (int j = 4; j > k; j--) { bestS[j] = bestS[j - 1]; bestP[j] = bestP[j - 1]; }
+                bestS[k] = sc; bestP[k] = f0; break;
+            }
+        }
+        Fit best = null; String tried = ""; ArrayList<Fit> fits = new ArrayList<>();
+        for (int k = 0; k < 5 && bestP[k] != null; k++) {
+            float deg = bestP[k][0], tx = bestP[k][1], tz = bestP[k][2];
+            double a = Math.toRadians(deg); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+            float[] t = identity(); t[0] = ca; t[8] = -sa; t[2] = sa; t[10] = ca;
+            t[12] = cx - (ca * cx - sa * cz) + tx; t[14] = cz - (sa * cx + ca * cz) + tz;
+            Fit f = solveFrom(pts, mul(t, guess));
+            fits.add(f);
+            tried += String.format(java.util.Locale.US, " [%.0f° %.1f,%.1f m plan %d%% -> %d%%, %.1f cm]", deg, tx, tz, 100 * bestS[k] / m, Math.round(f.inliers * 100), f.median * 100);
+            if (best == null || f.inliers > best.inliers + 0.02f || (Math.abs(f.inliers - best.inliers) <= 0.02f && f.median < best.median)) best = f;
+        }
+        // Among placements nearly as good as the best (a symmetric room), the one closest to the guess; ambiguous when
+        // another, different one is as good, unless the chosen one is close to the guess itself.
+        ambiguous = false;
+        if (best != null) {
+            Fit pick = best;
+            for (Fit f : fits) if (f.inliers > best.inliers - 0.05f && f.median < MAX_MEDIAN && away(f.fix, guess) < away(pick.fix, guess)) pick = f;
+            best = pick;
+            boolean nearGuess = away(best.fix, guess) < 0.3f;
+            for (Fit f : fits) if (f != best && f.inliers > best.inliers - 0.05f && away(f.fix, best.fix) > 0.2f && !nearGuess) { ambiguous = true; break; }
+        }
+        lastSearch = "search:" + tried + (ambiguous ? " AMBIGUOUS" : "");
+        return best;
+    }
+
     private Fit solveFrom(List<float[]> pts, float[] start) {
         float[] F = start.clone();
         float inl = 0, med = 1;

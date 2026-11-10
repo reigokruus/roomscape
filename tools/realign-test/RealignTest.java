@@ -40,6 +40,33 @@ public class RealignTest {
             if (Math.abs(c[0]) == 0.18f && !ok) fails++; // rk's 08:20 case (18 cm) must be corrected
             System.out.printf("shift (%.2f, %.2f, %.2f) turn %.0f deg: corrected error %.1f cm, %d%% on scan, median %.1f cm -> %s%n", c[0], c[1], c[2], c[3], err * 100, Math.round(f.inliers * 100), f.median * 100, ok ? "corrected" : (Realign.good(f) ? "WRONG" : "not accepted (stays paused)"));
         }
+        // Big jumps (ARCore back in another frame after a restart): the global search must find them.
+        rl.buildPlan(xyz, room.size(), 0f);
+        float[][] big = {{1.2f, 0, -0.8f, 70}, {-2.0f, 0.05f, 0.5f, 180}, {0.6f, 0, 1.5f, -35}, {0.3f, 0, 0.2f, 15}};
+        for (float[] c : big) {
+            double ang = Math.toRadians(c[3]); float ca = (float) Math.cos(ang), sa = (float) Math.sin(ang);
+            ArrayList<float[]> view = new ArrayList<>();
+            // several frames' worth: the corner with the box and part of the next wall
+            for (float[] p : room) if (p[0] > 1.5f && p[2] < 2.0f && r.nextFloat() < 0.08f) {
+                float x = p[0] - c[0], y = p[1] - c[1], z = p[2] - c[2];
+                view.add(new float[]{ca * x + sa * z + (float) r.nextGaussian() * 0.006f, y + (float) r.nextGaussian() * 0.006f, -sa * x + ca * z + (float) r.nextGaussian() * 0.006f});
+            }
+            long t0 = System.currentTimeMillis();
+            Realign.Fit f = rl.search(view, Realign.identity(), 0f, 0f);
+            long ms = System.currentTimeMillis() - t0;
+            double err = 0; int n = 0;
+            for (float[] p : room) if (p[0] > 1.5f && p[2] < 2.0f && n < 400 && r.nextFloat() < 0.02f) {
+                float x = p[0] - c[0], y = p[1] - c[1], z = p[2] - c[2];
+                float ax = ca * x + sa * z, ay = y, az = -sa * x + ca * z;
+                float[] F = f.fix;
+                float bx = F[0] * ax + F[4] * ay + F[8] * az + F[12], by = F[1] * ax + F[5] * ay + F[9] * az + F[13], bz = F[2] * ax + F[6] * ay + F[10] * az + F[14];
+                err += Math.sqrt((bx - p[0]) * (bx - p[0]) + (by - p[1]) * (by - p[1]) + (bz - p[2]) * (bz - p[2])); n++;
+            }
+            err /= n;
+            boolean acc = Realign.good(f) && !rl.ambiguous; boolean ok = err < 0.02 && acc, falseAccept = err >= 0.03 && acc;
+            if (!ok) fails++;
+            System.out.printf("BIG shift (%.1f, %.2f, %.1f) turn %.0f deg: search %d ms, error %.1f cm, %d%% on scan, median %.1f cm -> %s%n  %s%n", c[0], c[1], c[2], c[3], ms, err * 100, Math.round(f.inliers * 100), f.median * 100, ok ? "corrected" : falseAccept ? "FALSE ACCEPT" : "not found", rl.lastSearch);
+        }
         // A wrong place (looking at a part never scanned: shifted by 1.5 m): must not pass.
         ArrayList<float[]> stranger = new ArrayList<>();
         for (int i = 0; i < 2000; i++) stranger.add(new float[]{6 + r.nextFloat(), r.nextFloat() * 2, 6 + r.nextFloat()});

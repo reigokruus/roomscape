@@ -2861,8 +2861,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         final int n = count;
         final FloatBuffer p = FloatBuffer.allocate(n * 3);
         final ByteBuffer c = ByteBuffer.allocate(n * 4);
-        pos.position(0); pos.limit(n * 3); p.put(pos); pos.limit(pos.capacity()); pos.position(0); p.position(0);
-        col.position(0); col.limit(n * 4); c.put(col); col.limit(col.capacity()); col.position(0); c.position(0);
+        // Copies through duplicates: the depth thread writes these buffers meanwhile, and a changed limit on the shared
+        // buffer made its writes past the limit fail (11:15 scan: a frame lost every 5-15 s).
+        FloatBuffer pd = pos.duplicate(); pd.position(0); pd.limit(n * 3); p.put(pd); p.position(0);
+        ByteBuffer cd = col.duplicate(); cd.position(0); cd.limit(n * 4); c.put(cd); c.position(0);
         final float h = knownH, w = knownW, d = knownD;
         final java.util.List<float[]> poly; final float uf, uc;
         synchronized (marks) { poly = roomPolygon(); uf = markFloor != null ? markFloor[1] : Float.NaN; uc = markCeiling != null ? markCeiling[1] : Float.NaN; }
@@ -4316,18 +4318,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (lostSince == 0) {
                 lostSince = nowMs;
                 if (count > 2000 && !needRealign) {
-                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false;
+                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null;
                     snapshotForRealign();
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
                     activity.toast("Lost position. Point back at an area you already scanned.");
                 }
             }
             else if (camera.getTrackingFailureReason() == com.google.ar.core.TrackingFailureReason.NONE
-                    && nowMs - lostSince > 3000 && recoveries < 10) {
+                    && nowMs - lostSince > 8000 && recoveries < 10) {   // ARCore gets 8 s to find its own map first (was 3 s)
                 recoveries++;
                 lostSince = 0;
-                log("tracking lost for 3s, restarting AR session (attempt " + recoveries + ")");
+                log("tracking lost for 8 s, restarting AR session (attempt " + recoveries + ")");
                 sessionRestarted = true;   // a restart can come back in a shifted frame: re-align before fusing
+                recentPts.clear();
                 activity.restartSession();
             }
         } else if (!everTracked) {
@@ -4784,7 +4787,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private final java.util.concurrent.ExecutorService depthExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "depth-points"); t.setPriority(Thread.NORM_PRIORITY); return t; });
+        // A little below normal: ARCore's own tracking threads come first (a plain wall is hard enough for it).
+        Thread t = new Thread(() -> { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT + 2); r.run(); }, "depth-points"); return t; });
     private final java.util.concurrent.atomic.AtomicInteger depthQueued = new java.util.concurrent.atomic.AtomicInteger();
     private volatile java.util.concurrent.Future<?> depthLast;
     /** Depth frames done on the depth thread whose GPU part waits for the drawing thread. */
@@ -5609,6 +5613,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         long t0 = System.currentTimeMillis();
         drainDepth();
         final int n = count;
+        final float floorNow = walkFloorY();
         final float[] xyz = new float[n * 3];
         FloatBuffer pd = pos.duplicate(); pd.position(0); pd.get(xyz, 0, n * 3);
         fixTry = poseFix.clone();
@@ -5618,6 +5623,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // meanwhile (realigned() waits for them).
         new Thread(() -> {
             Realign r = new Realign(xyz, n);
+            r.buildPlan(xyz, n, floorNow);
             realign = r; realignBuilding = false;
             log("realign snapshot: " + r.coarse.size() + " / " + r.fine.size() + " cells in " + (System.currentTimeMillis() - t0) + " ms");
         }, "realign-snapshot").start();
@@ -5647,6 +5653,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    static final class RealignResult { Realign.Fit fit; boolean good, ambiguous, quick; String source = "", detail = ""; }
+    private volatile RealignResult realignResult;
+    private volatile boolean realignRunning;
+    private long realignLastStart; private int realignAttempts;
+    private final java.util.ArrayList<java.util.ArrayList<float[]>> recentPts = new java.util.ArrayList<>();
     volatile boolean forceResume;
     private boolean newPartOffered;
 
@@ -5693,7 +5704,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             return true;
         }
         if (nowMs - realignSince > 30000 && !newPartOffered) { newPartOffered = true; activity.offerNewPart(); }
-        if (realignTick++ % 3 != 0) return false;   // the ICP every 3rd depth frame (it's heavy for the drawing thread)
+        // This depth frame's samples (ARCore's frame) join the last few frames' (a second or two of looking: more of
+        // the room than one view, so a corner can't be taken for another corner as easily).
         java.util.ArrayList<float[]> pts = new java.util.ArrayList<>();
         for (int v = 3; v < dh - 3; v += 5) for (int u = 3; u < dw - 3; u += 5) {
             int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
@@ -5701,32 +5713,59 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float d = mm * 0.001f, xc = (u + 0.5f - cx) * d / fx, yc = (cy - (v + 0.5f)) * d / fy, zc = -d;
             pts.add(new float[]{m[0] * xc + m[4] * yc + m[8] * zc + m[12], m[1] * xc + m[5] * yc + m[9] * zc + m[13], m[2] * xc + m[6] * yc + m[10] * zc + m[14]});
         }
-        if (pts.size() < 60) { realignOk = 0; return false; }
-        Realign.Fit fit = realign.solve(pts, fixTry);   // ~5 ICP runs: only while re-aligning
-        if (!Realign.good(fit) && stayGuess != null && realignOk == 0) {
-            Realign.Fit f2 = realign.solve(pts, stayGuess);
-            if (f2.inliers > fit.inliers) fit = f2;
+        if (pts.size() >= 30) { recentPts.add(pts); while (recentPts.size() > 8) recentPts.remove(0); }
+        // A finished attempt (on its own thread): use it.
+        RealignResult res = realignResult; realignResult = null;
+        if (res != null) {
+            float[] F = res.fit.fix;
+            float drift = Realign.away(F, fixPrev);
+            boolean ok = res.good && !res.ambiguous;
+            realignOk = ok && (realignOk == 0 || drift < 0.05f) ? realignOk + 1 : (ok ? 1 : 0);
+            System.arraycopy(F, 0, fixPrev, 0, 16);
+            if (ok) fixTry = F;
+            log(String.format(java.util.Locale.US, "re-align attempt (%s): %d%% on the scan, median %.1f cm, correction %.2f, %.2f, %.2f m %.0f deg%s%s -> %s",
+                    res.source, Math.round(res.fit.inliers * 100), res.fit.median * 100, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])),
+                    res.ambiguous ? ", ambiguous" : "", res.detail.isEmpty() ? "" : "; " + res.detail, ok ? "match " + realignOk + "/2" : "no"));
+            // Two agreeing attempts in a row (one when ARCore came back on its own onto the old correction).
+            if (realignOk >= (res.quick ? 1 : 2)) {
+                System.arraycopy(F, 0, poseFix, 0, 16);
+                hasFix = true; needRealign = false; realign = null; recentPts.clear();
+                segment++;
+                log(String.format(java.util.Locale.US, "back on track after %.1f s: correction %.3f, %.3f, %.3f m, %.1f deg; %d%% of the view on the scan, median %.1f cm; segment %d",
+                        (nowMs - realignSince) / 1000f, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])), Math.round(res.fit.inliers * 100), res.fit.median * 100, segment));
+                activity.toast("Back on track, scanning again.");
+                return true;
+            }
         }
-        float[] F = fit.fix; float inl = fit.inliers, med = fit.median;
-        // Part of the view may be new (a wall not scanned yet): half the samples on the scan is enough.
-        boolean good = fit.inliers >= 0.5f && fit.median < Realign.MAX_MEDIAN;
-        // ARCore relocalised by itself (no restart) and the view already sits on the scan with the old correction:
-        // two agreeing frames are enough (rk 10 Nov 10:15: a short loss shouldn't pause for long).
-        float moved = (float) Math.sqrt((F[12] - poseFix[12]) * (F[12] - poseFix[12]) + (F[13] - poseFix[13]) * (F[13] - poseFix[13]) + (F[14] - poseFix[14]) * (F[14] - poseFix[14]));
-        boolean quick = !sessionRestarted && fit.inliers >= 0.55f && fit.median < 0.03f && moved < 0.05f;
-        float drift = (float) Math.sqrt((F[12] - fixPrev[12]) * (F[12] - fixPrev[12]) + (F[13] - fixPrev[13]) * (F[13] - fixPrev[13]) + (F[14] - fixPrev[14]) * (F[14] - fixPrev[14]));
-        boolean ok = good || quick;
-        realignOk = ok && (realignOk == 0 || drift < 0.02f) ? realignOk + 1 : (ok ? 1 : 0);
-        System.arraycopy(F, 0, fixPrev, 0, 16);
-        if (good) fixTry = F;
-        if (realignOk >= (quick ? 2 : 3)) {
-            System.arraycopy(F, 0, poseFix, 0, 16);
-            hasFix = true; needRealign = false; realign = null;
-            segment++;
-            log(String.format(java.util.Locale.US, "back on track after %.1f s: correction %.3f, %.3f, %.3f m, %.1f deg; %d%% of the view on the scan, median %.1f cm; segment %d",
-                    (nowMs - realignSince) / 1000f, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])), Math.round(inl * 100), med * 100, segment));
-            activity.toast("Back on track, scanning again.");
-            return true;
+        // Start the next attempt (at most one running, about one a second).
+        if (!realignRunning && nowMs - realignLastStart > 800 && !recentPts.isEmpty()) {
+            realignRunning = true; realignLastStart = nowMs;
+            final java.util.ArrayList<float[]> all = new java.util.ArrayList<>();
+            for (java.util.ArrayList<float[]> f : recentPts) all.addAll(f);
+            final float[] tryFix = fixTry.clone(), stay = stayGuess == null ? null : stayGuess.clone(), oldFix = poseFix.clone();
+            final float pivX = haveGoodCam ? lastGoodCam[12] : Float.NaN, pivZ = haveGoodCam ? lastGoodCam[14] : Float.NaN;
+            final boolean restarted = sessionRestarted; final Realign rl = realign; final int attempt = ++realignAttempts;
+            new Thread(() -> {
+                RealignResult r = new RealignResult();
+                try {
+                    // 1) ARCore's pose with the correction so far; 2) the phone where it was lost; 3) the whole search.
+                    Realign.Fit f = rl.solve(all, tryFix); r.source = "as before";
+                    if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && stay != null) {
+                        Realign.Fit f2 = rl.solve(all, stay);
+                        if (f2.inliers > f.inliers) { f = f2; r.source = "where it was lost"; }
+                    }
+                    if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && attempt % 2 == 1) {   // the search every other attempt (~0.5 s)
+                        Realign.Fit f3 = rl.search(all, stay != null ? stay : tryFix, pivX, pivZ);
+                        r.detail = rl.lastSearch;
+                        if (f3 != null && f3.inliers > f.inliers) { f = f3; r.source = "searched"; r.ambiguous = rl.ambiguous; }
+                    }
+                    r.fit = f;
+                    r.good = f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN;
+                    r.quick = !restarted && r.good && Realign.away(f.fix, oldFix) < 0.05f;
+                    realignResult = r;
+                } catch (Throwable e) { logError("re-align", new RuntimeException(e)); }
+                realignRunning = false;
+            }, "realign").start();
         }
         if (nowMs - realignHintAt > 6000) { realignHintAt = nowMs; activity.toast("Lost position. Point back at an area you already scanned."); }
         return false;
