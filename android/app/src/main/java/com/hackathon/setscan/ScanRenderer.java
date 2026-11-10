@@ -3459,6 +3459,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     long t0 = System.currentTimeMillis();
                     FloorArea.Result fa = FloorArea.compute(pos, count, room.floorY);
                     floorArea = fa; selectedRoom = 0; selectedRoomVerts = null;
+                    loadWallEdits(fa);
                     StringBuilder rs = new StringBuilder();
                     for (int i = 0; i < fa.rooms.size(); i++) rs.append(i == 0 ? "" : "; ").append(fa.rooms.get(i).text(i));
                     log(String.format(java.util.Locale.US, "floor area: %s (%s; outline %.0f%% walls, %.1f m² of floor in no room) in %d ms",
@@ -6918,11 +6919,124 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private volatile int selectedRoom;
     private float[] selectedRoomVerts;
 
+    // ---- Adjusting a room's walls by hand (debug switch "Adjust room walls"; rk 10 Nov: a thick curtain read as the
+    // wall, 20:25 scan 3.6 m for a 3.95 m room). The walled rectangle's sides move along their own direction; saved in
+    // floor-edits.json (metres outwards per side, per room), the automatic outline stays as it was. ----
+    static volatile boolean ADJUST_WALLS = true;   // (rk chose it 10 Nov 21:38: on for everyone)
+    private float[][] wallEdits;           // per room: outwards metres for sides u0, u1, v0, v1
+    private volatile int dragRoom = -1, dragSide = -1;
+
+    private void loadWallEdits(FloorArea.Result fa) {
+        wallEdits = new float[fa.rooms.size()][4];
+        File d = currentDir; if (d == null) return;
+        File f = new File(d, "floor-edits.json"); if (!f.exists()) return;
+        try {
+            org.json.JSONArray a = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(f.toPath()), "UTF-8")).getJSONArray("rooms");
+            for (int i = 0; i < a.length() && i < wallEdits.length; i++) for (int k = 0; k < 4; k++) wallEdits[i][k] = (float) a.getJSONArray(i).getDouble(k);
+        } catch (Exception e) { logError("floor edits", e); }
+    }
+    private void saveWallEdits() {
+        File d = currentDir; float[][] we = wallEdits; if (d == null || we == null) return;
+        try {
+            org.json.JSONArray a = new org.json.JSONArray();
+            for (float[] r : we) a.put(new org.json.JSONArray(new double[]{r[0], r[1], r[2], r[3]}));
+            java.nio.file.Files.write(new File(d, "floor-edits.json").toPath(), new org.json.JSONObject().put("rooms", a).toString().getBytes("UTF-8"));
+        } catch (Exception e) { logError("floor edits", e); }
+    }
+    void resetWallEdits() {
+        FloorArea.Result fa = floorArea; if (fa == null) return;
+        wallEdits = new float[fa.rooms.size()][4];
+        File d = currentDir; if (d != null) new File(d, "floor-edits.json").delete();
+        activity.setRoomSize(roomSizeText());
+    }
+    /** A room's sides with the edits (u0, u1, v0, v1), or null when it has no wall rectangle. */
+    private float[] editedRect(int i) {
+        FloorArea.Result fa = floorArea; if (fa == null || i < 0 || i >= fa.rooms.size()) return null;
+        FloorArea.Room r = fa.rooms.get(i); if (r.rect == null) return null;
+        float[] e = wallEdits != null && i < wallEdits.length ? wallEdits[i] : new float[4];
+        return new float[]{r.rect[0] - e[0], r.rect[1] + e[1], r.rect[2] - e[2], r.rect[3] + e[3]};
+    }
+    private boolean edited(int i) { float[][] we = wallEdits; return we != null && i < we.length && (we[i][0] != 0 || we[i][1] != 0 || we[i][2] != 0 || we[i][3] != 0); }
+    /** A room's line with the edits: the walled area changes by the rectangle's change. */
+    private String roomLine(int i) {
+        FloorArea.Result fa = floorArea; FloorArea.Room r = fa.rooms.get(i);
+        if (!edited(i)) return r.text(i);
+        float[] o = r.rect, e = editedRect(i);
+        float area = r.shown() + (e[1] - e[0]) * (e[3] - e[2]) - (o[1] - o[0]) * (o[3] - o[2]);
+        float a = Math.max(e[1] - e[0], e[3] - e[2]), b = Math.min(e[1] - e[0], e[3] - e[2]);
+        return String.format(java.util.Locale.US, "Room %d: ≈%s m², %.2f × %.2f m (walls adjusted by hand)", i + 1, FloorArea.Room.m2(area), a, b);
+    }
+    private float[] worldOf(FloorArea.Result fa, float deg, float u, float v) {
+        double t = Math.toRadians(deg); float ca = (float) Math.cos(t), sa = (float) Math.sin(t);
+        return new float[]{fa.x0 + u * ca - v * sa, room.floorY + 0.02f, fa.z0 + u * sa + v * ca};
+    }
+    private float[] screenOf(float[] w) {
+        float[] c = new float[4]; Matrix.multiplyMV(c, 0, viewMvp, 0, new float[]{w[0], w[1], w[2], 1}, 0);
+        if (c[3] <= 0.01f) return null;
+        return new float[]{(c[0] / c[3] + 1) / 2 * width, (1 - c[1] / c[3]) / 2 * height};
+    }
+    private int adjustRoom() { int s = selectedRoom; return s > 0 ? s - 1 : 0; }
+    /** UI thread: a finger near one of the room's wall lines picks it up. */
+    boolean wallDragStart(float tx, float ty) {
+        if (!ADJUST_WALLS || !viewing || floorArea == null || !roomReady) return false;
+        int i = adjustRoom(); float[] e = editedRect(i); if (e == null) return false;
+        float deg = floorArea.rooms.get(i).deg; float bestD = 48 * height / 1000f; int best = -1;
+        for (int sd = 0; sd < 4; sd++) {
+            float[] a = sd < 2 ? worldOf(floorArea, deg, e[sd], e[2]) : worldOf(floorArea, deg, e[0], e[sd]);
+            float[] b = sd < 2 ? worldOf(floorArea, deg, e[sd], e[3]) : worldOf(floorArea, deg, e[1], e[sd]);
+            float[] sa = screenOf(a), sb = screenOf(b); if (sa == null || sb == null) continue;
+            float dx = sb[0] - sa[0], dy = sb[1] - sa[1], l2 = dx * dx + dy * dy;
+            float t = l2 == 0 ? 0 : Math.max(0, Math.min(1, ((tx - sa[0]) * dx + (ty - sa[1]) * dy) / l2));
+            float d = (float) Math.hypot(tx - sa[0] - t * dx, ty - sa[1] - t * dy);
+            if (d < bestD) { bestD = d; best = sd; }
+        }
+        if (best < 0) return false;
+        dragRoom = i; dragSide = best; return true;
+    }
+    /** UI thread: the side follows the finger on the floor, in 1 cm steps, at most 1.5 m from the automatic line. */
+    void wallDragTo(float tx, float ty) {
+        int i = dragRoom, sd = dragSide; FloorArea.Result fa = floorArea;
+        if (i < 0 || sd < 0 || fa == null || wallEdits == null) return;
+        float[] inv = new float[16]; if (!Matrix.invertM(inv, 0, viewMvp, 0)) return;
+        float nx = 2f * tx / width - 1f, ny = 1f - 2f * ty / height;
+        float[] a = new float[4], b = new float[4];
+        Matrix.multiplyMV(a, 0, inv, 0, new float[]{nx, ny, -1, 1}, 0); Matrix.multiplyMV(b, 0, inv, 0, new float[]{nx, ny, 1, 1}, 0);
+        float ox = a[0] / a[3], oy = a[1] / a[3], oz = a[2] / a[3], dx = b[0] / b[3] - ox, dy = b[1] / b[3] - oy, dz = b[2] / b[3] - oz;
+        if (Math.abs(dy) < 1e-6f) return;
+        float t = (room.floorY - oy) / dy; if (t <= 0) return;
+        FloorArea.Room r = fa.rooms.get(i);
+        double rad = Math.toRadians(r.deg); float ca = (float) Math.cos(rad), sa = (float) Math.sin(rad);
+        float px = ox + dx * t - fa.x0, pz = oz + dz * t - fa.z0, u = px * ca + pz * sa, v = -px * sa + pz * ca;
+        float at = sd < 2 ? u : v, auto = r.rect[sd];
+        float out = (sd % 2 == 0 ? auto - at : at - auto);
+        out = Math.round(Math.max(-1.5f, Math.min(1.5f, out)) * 100) / 100f;
+        wallEdits[i][sd] = out;
+        activity.setRoomSize(roomLine(i));
+    }
+    void wallDragEnd() { if (dragSide >= 0) { saveWallEdits(); dragRoom = -1; dragSide = -1; activity.setRoomSize(roomSizeText()); } }
+
+    /** The adjustable room's wall lines (the one being dragged white). */
+    private void drawWallLines(float[] m) {
+        if (!ADJUST_WALLS || floorArea == null) return;
+        int i = adjustRoom(); float[] e = editedRect(i); if (e == null) return;
+        float deg = floorArea.rooms.get(i).deg;
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        for (int sd = 0; sd < 4; sd++) {
+            float[] a = sd < 2 ? worldOf(floorArea, deg, e[sd], e[2]) : worldOf(floorArea, deg, e[0], e[sd]);
+            float[] b = sd < 2 ? worldOf(floorArea, deg, e[sd], e[3]) : worldOf(floorArea, deg, e[1], e[sd]);
+            GLES20.glLineWidth(dragSide == sd ? 8f : 5f);
+            planDraw(m, new float[]{a[0], a[1], a[2], b[0], b[1], b[2]}, GLES20.GL_LINES, dragSide == sd ? new float[]{1, 1, 1, 1} : new float[]{1f, 0.69f, 0.13f, 1f}, 1f);
+        }
+        GLES20.glLineWidth(1f);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+    }
+
     String roomSizeText() {
         String base = roomSizeTextBase();
         FloorArea.Result fa = viewing ? floorArea : null;
         if (fa == null || fa.text() == null) return base;
-        if (selectedRoom > 0 && selectedRoom <= fa.rooms.size()) return fa.rooms.get(selectedRoom - 1).text(selectedRoom - 1);
+        if (selectedRoom > 0 && selectedRoom <= fa.rooms.size()) return roomLine(selectedRoom - 1);
+        if (fa.rooms.size() == 1 && edited(0)) return (base == null ? "" : base + " · ") + roomLine(0);
         return base == null ? fa.text() : base + " · " + fa.text();
     }
 
@@ -7829,7 +7943,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (clean) { }
         else if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
         else { drawProps(mvp); if (roomReady && overlays && !planningPreview) drawRoom(mvp, simple); }
-        if (viewing && roomReady) drawSelectedRoom(mvp);
+        if (viewing && roomReady) { drawSelectedRoom(mvp); drawWallLines(mvp); }
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         if (clean) { System.arraycopy(mvp, 0, viewMvp, 0, 16); photoThumbWanted = false; savePhotoThumb(); return; }

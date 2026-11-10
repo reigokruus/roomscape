@@ -168,7 +168,7 @@ final class ScanStore {
         // a later save (rename, Continue scan, an edit) used to leave them behind.
         for (String keep : new String[]{"sync.json", "rmsc-extra", "splats.bin", "source-manifest.json",
                 "measurements.json", "scan-log.txt", "perf-scan.jsonl", "perf-scan.summary.json",
-                "depth-pairs.bin", "feature-heights.bin", "live-mesh.bin", "events-depth.bin", "pose-track.bin", "tiles.json", "tiles.png"}) {
+                "depth-pairs.bin", "feature-heights.bin", "live-mesh.bin", "events-depth.bin", "pose-track.bin", "tiles.json", "tiles.png", "floor-edits.json"}) {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }

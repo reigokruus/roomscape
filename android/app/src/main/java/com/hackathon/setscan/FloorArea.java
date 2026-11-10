@@ -42,6 +42,9 @@ final class FloorArea {
         float hull;          // m² inside its outline along its own walls (unseen floor by straight walls filled; an L stays an L)
         float walled;        // m² bounded by its walls (wallRoom); 0 when no wall was found
         int wallSides;       // how many of the 4 sides have a wall (fewer: that side is the seen floor, "about")
+        /** The wall rectangle (walled rooms): sides u0, u1, v0, v1 in the room's own directions (deg), metres from the
+         *  grid's corner (x0, z0 of the Result); x = x0 + u cos - v sin, z = z0 + u sin + v cos. */
+        float[] rect; float deg;
         int cells;
         /** The floor to show: within its convex outline when the seen floor fills most of it (the floor along the walls
          *  is often not seen: 20:25 scan, 8.7 m² seen of 10.8, outline 9.9), else what was seen. */
@@ -239,6 +242,7 @@ final class FloorArea {
         }
         cells += extra;
         room.walled = cells * CELL * CELL; room.wallSides = found;
+        room.rect = new float[]{u0, u1, v0, v1}; room.deg = deg;
         room.w = Math.max(u1 - u0, v1 - v0); room.l = Math.min(u1 - u0, v1 - v0);
     }
 

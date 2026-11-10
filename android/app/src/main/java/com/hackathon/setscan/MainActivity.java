@@ -282,6 +282,7 @@ public class MainActivity extends Activity {
 
     /** Sends scans to, and receives them from, RoomScape phones on the same Wi-Fi (see Nearby). */
     Nearby nearby;
+    private boolean wallDragging;
 
     /** A scan arrived from a nearby phone and was imported. Any thread. */
     void nearbyReceived(File dir, String message) {
@@ -753,6 +754,11 @@ public class MainActivity extends Activity {
             capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps");
             recB.setOnClickListener(v -> { recordWanted = !recordWanted; sp.edit().putBoolean("abRecord", recordWanted).apply(); recB.setText(recordWanted ? "Video: on" : "Video: off"); toast("From the next scan"); });
             focB.setOnClickListener(v -> { ScanRenderer.FIXED_FOCUS = !ScanRenderer.FIXED_FOCUS; sp.edit().putBoolean("abFixedFocus", ScanRenderer.FIXED_FOCUS).apply(); focB.setText(ScanRenderer.FIXED_FOCUS ? "Focus: fixed" : "Focus: auto"); toast("From the next scan"); });
+            Button wallsB = new Button(this);
+            ScanRenderer.ADJUST_WALLS = sp.getBoolean("abAdjustWalls2", true);
+            wallsB.setText(ScanRenderer.ADJUST_WALLS ? "Adjust room walls: on" : "Adjust room walls: off");
+            wallsB.setOnClickListener(v -> { ScanRenderer.ADJUST_WALLS = !ScanRenderer.ADJUST_WALLS; sp.edit().putBoolean("abAdjustWalls2", ScanRenderer.ADJUST_WALLS).apply(); wallsB.setText(ScanRenderer.ADJUST_WALLS ? "Adjust room walls: on" : "Adjust room walls: off"); });
+            wallsB.setOnLongClickListener(v -> { glView.queueEvent(renderer::resetWallEdits); toast("Room walls reset to the scan's own"); return true; });
             Button tilesB = new Button(this);
             ScanRenderer.FLAT_TILES = sp.getBoolean("abFlatTiles", true);
             tilesB.setText(ScanRenderer.FLAT_TILES ? "Flat tiles: on" : "Flat tiles: off");
@@ -773,7 +779,7 @@ public class MainActivity extends Activity {
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }
@@ -904,6 +910,18 @@ public class MainActivity extends Activity {
                     && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12) && measureOverlay.tapAt(e.getX(), e.getY())) return true;
             if (walkTouch(e)) return true;
             if (objPanel.getVisibility() == View.VISIBLE && objectTouch(e)) return true;
+            if (ScanRenderer.ADJUST_WALLS) {   // a finger on a room's wall line drags that wall (debug switch "Adjust room walls")
+                int act = e.getActionMasked();
+                if (act == MotionEvent.ACTION_DOWN) wallDragging = renderer.wallDragStart(e.getX(), e.getY());
+                if (wallDragging) {
+                    if (e.getPointerCount() > 1) { wallDragging = false; glView.queueEvent(renderer::wallDragEnd); }
+                    else {
+                        if (act == MotionEvent.ACTION_MOVE) renderer.wallDragTo(e.getX(), e.getY());
+                        else if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) { wallDragging = false; glView.queueEvent(renderer::wallDragEnd); }
+                        return true;
+                    }
+                }
+            }
             if (renderer.lighting.enabled) {
                 // a finger that lands on a light or prop selects and drags it; anywhere else it orbits as usual
                 int act = e.getActionMasked();
