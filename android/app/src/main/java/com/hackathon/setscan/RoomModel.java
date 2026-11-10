@@ -133,6 +133,22 @@ final class RoomModel {
         return floorY + hs[(int) (m * 0.9f)];
     }
 
+    /** The ceiling's band: the busiest 4 cm within 0.5 m below the top of the scan, if it holds 300+ points (the median
+     *  of the points in it), else NaN. */
+    static float ceilingBand(FloatBuffer pos, int count, float floorY, float topY) {
+        if (topY - floorY < 2.0f) return Float.NaN;
+        int bins = 15; int[] h = new int[bins]; float from = topY - 0.5f;
+        for (int i = 0; i < count; i++) { float y = pos.get(i * 3 + 1); int b = (int) ((y - from) / 0.04f); if (b >= 0 && b < bins) h[b]++; }
+        int best = 0; for (int b = 1; b < bins; b++) if (h[b] > h[best]) best = b;
+        int near = h[best] + (best > 0 ? h[best - 1] : 0) + (best + 1 < bins ? h[best + 1] : 0);
+        if (near < 300) return Float.NaN;
+        float lo = from + (best - 1) * 0.04f, hi = from + (best + 2) * 0.04f;
+        float[] v = new float[near + 8]; int k = 0;
+        for (int i = 0; i < count && k < v.length; i++) { float y = pos.get(i * 3 + 1); if (y >= lo && y < hi) v[k++] = y; }
+        java.util.Arrays.sort(v, 0, k);
+        return v[k / 2];
+    }
+
     ShotPlanner grid; // the floor grid this model was built from
     float[] bounds;   // layout rectangle in layout axes {uMin, uMax, vMin, vMax}, or null
 
@@ -204,6 +220,11 @@ final class RoomModel {
             // the 90th percentile of those (rk 9 Nov: a room 2.9 m at its highest came out 3.16 m, from one sloped
             // band the S24's depth-from-motion put 0.3-0.45 m too high; this gives 2.84 m on that scan).
             float top = columnTop(pos, count, floorY);
+            // The ceiling's own band of points (rk 10 Nov 12:13: ~3,100 points at 2.83-2.88 m, but the column tops,
+            // where many columns never reached the ceiling, gave 2.76 for a 2.88 m room): the busiest 4 cm in the top
+            // 0.5 m of the scan, when it holds enough points, is the ceiling.
+            float band = ceilingBand(pos, count, floorY, maxY);
+            if (!Float.isNaN(band) && (Float.isNaN(top) || top == Float.NEGATIVE_INFINITY || band > top)) top = band;
             if (top == Float.NEGATIVE_INFINITY) { maxY = floorY; ceilingUnknown = true; } // too little ceiling scanned
             else if (!Float.isNaN(top)) maxY = top;
         }
