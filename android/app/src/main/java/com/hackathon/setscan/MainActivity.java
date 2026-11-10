@@ -1058,6 +1058,8 @@ public class MainActivity extends Activity {
         if (viewerTitle == null) return;
         String name = renderer.currentName != null ? renderer.currentName : "Scan", size = roomSizeText;
         if (size == null) { viewerTitle.setText(name); return; }
+        // "scanned area" on a line of its own, so the size itself never gets cut off (rk 10 Nov 12:07)
+        if (size.startsWith("scanned area ")) size = "scanned area\n" + size.substring(13);
         android.text.SpannableString t = new android.text.SpannableString(name + "\n" + size);
         t.setSpan(new android.text.style.RelativeSizeSpan(0.8f), name.length() + 1, t.length(), 0);
         t.setSpan(new android.text.style.ForegroundColorSpan(0xFFFFD60A), name.length() + 1, t.length(), 0);
@@ -1085,7 +1087,7 @@ public class MainActivity extends Activity {
         viewerTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         viewerTitle.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
         viewerTitle.setGravity(Gravity.CENTER);
-        viewerTitle.setMaxLines(2);
+        viewerTitle.setMaxLines(3);
         viewerTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
         viewerTop.addView(viewerTitle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         viewerShared = new android.widget.ImageView(this);
@@ -1264,15 +1266,21 @@ public class MainActivity extends Activity {
         walkHint.setVisibility(View.GONE);
         chrome.addView(walkHint, hp);
 
+        // Standing in the room (rk 10 Nov 12:07: the move buttons went off the screen): the moves (a D-pad: forward,
+        // back, left, right, hold to keep going) and the eye height in their own cluster on the right, above a bottom
+        // bar that wraps (Exit, Gyro, Measure, Clear) whatever the screen width or text size.
         LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.HORIZONTAL);
-        c.setGravity(Gravity.BOTTOM);
+        c.setOrientation(LinearLayout.VERTICAL);
         c.setPadding(dp(16), 0, dp(16), dp(28));
+        FlowRow bar = new FlowRow(this, dp(8));
+        LinearLayout cluster = new LinearLayout(this);
+        cluster.setOrientation(LinearLayout.HORIZONTAL);
+        cluster.setGravity(Gravity.BOTTOM | Gravity.END);
         Button exit = new Button(this);
         exit.setText("↩  Exit");
         Ios.filled(exit);
         exit.setOnClickListener(v -> setWalk(0));
-        c.addView(exit, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46)));
+        bar.addView(exit, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(46)));
         // Gyro look (rk 10 Nov): turn / tilt the phone to look around; on by default, remembered.
         Button gyro = new Button(this);
         boolean gyroOn = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("walkGyro", true);
@@ -1288,7 +1296,7 @@ public class MainActivity extends Activity {
         });
         LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
         glp.leftMargin = dp(8);
-        c.addView(gyro, glp);
+        bar.addView(gyro, glp);
         // Measure (rk 10 Nov): tap two spots on the scan for the distance between them.
         measureButton = new Button(this);
         measureButton.setText("Measure");
@@ -1296,14 +1304,13 @@ public class MainActivity extends Activity {
         measureButton.setOnClickListener(v -> setMeasuring(!measuring));
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
         mlp.leftMargin = dp(8);
-        c.addView(measureButton, mlp);
+        bar.addView(measureButton, mlp);
         measureClear = new Button(this);
         measureClear.setText("Clear");
         Ios.textButton(measureClear);
         measureClear.setOnClickListener(v -> { measureOverlay.clearAll(); updateMeasureButtons(); });
         measureClear.setVisibility(View.GONE);
-        c.addView(measureClear, mlp);
-        c.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        bar.addView(measureClear, mlp);
         // Eye height: taller / shorter, 10 cm a tap, remembered.
         LinearLayout h = new LinearLayout(this);
         h.setOrientation(LinearLayout.VERTICAL);
@@ -1318,13 +1325,21 @@ public class MainActivity extends Activity {
         h.addView(up); h.addView(heightLabel); h.addView(down);
         LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         hlp.rightMargin = dp(12);
-        c.addView(h, hlp);
-        LinearLayout moves = new LinearLayout(this);
-        moves.setOrientation(LinearLayout.VERTICAL);
-        moves.addView(holdButton("▲", 1));
-        View gap = new View(this); moves.addView(gap, new LinearLayout.LayoutParams(1, dp(8)));
-        moves.addView(holdButton("▼", -1));
-        c.addView(moves);
+        cluster.addView(h, hlp);
+        android.widget.GridLayout pad = new android.widget.GridLayout(this);
+        pad.setColumnCount(3);
+        View[] cells = {new View(this), holdButton("▲", 1, 0), new View(this), holdButton("◀", 0, -1), holdButton("▼", -1, 0), holdButton("▶", 0, 1)};
+        for (View v : cells) {
+            android.widget.GridLayout.LayoutParams gl = new android.widget.GridLayout.LayoutParams();
+            gl.width = dp(52); gl.height = dp(52); gl.setMargins(dp(3), dp(3), dp(3), dp(3));
+            pad.addView(v, gl);
+        }
+        cluster.addView(pad);
+        c.addView(walkTipHolder = new FrameLayout(this), new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.bottomMargin = dp(10);
+        c.addView(cluster, clp);
+        c.addView(bar, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         walkControls = c;
         c.setVisibility(View.GONE);
         walkTip = new TextView(this);
@@ -1336,18 +1351,15 @@ public class MainActivity extends Activity {
         walkTip.setBackground(tb);
         walkTip.setPadding(dp(10), dp(5), dp(10), dp(5));
         walkTip.setVisibility(View.GONE);
-        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        tp.bottomMargin = dp(170);
-        chrome.addView(walkTip, tp);
+        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL);
+        tp.bottomMargin = dp(8);
+        walkTipHolder.addView(walkTip, tp);   // above the controls, never over them
         // Above the system navigation bar (the app draws under it).
         c.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(dp(16), 0, dp(16), dp(28) + insets.getSystemWindowInsetBottom());
             FrameLayout.LayoutParams wl = (FrameLayout.LayoutParams) walkHint.getLayoutParams();
             wl.bottomMargin = dp(40) + insets.getSystemWindowInsetBottom();
             walkHint.setLayoutParams(wl);
-            FrameLayout.LayoutParams tl = (FrameLayout.LayoutParams) walkTip.getLayoutParams();
-            tl.bottomMargin = dp(170) + insets.getSystemWindowInsetBottom();
-            walkTip.setLayoutParams(tl);
             return insets;
         });
         chrome.addView(c, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
@@ -1355,7 +1367,10 @@ public class MainActivity extends Activity {
     }
 
     /** A round button that walks while held. */
-    private View holdButton(String label, int dir) {
+    private View holdButton(String label, int dir) { return holdButton(label, dir, 0); }
+
+    /** A round button that moves while held: dir forward (+1) / back (-1), side right (+1) / left (-1). */
+    private View holdButton(String label, int dir, int side) {
         TextView b = new TextView(this);
         b.setText(label);
         b.setTextColor(Color.WHITE);
@@ -1366,8 +1381,8 @@ public class MainActivity extends Activity {
         b.setBackground(bg);
         b.setOnTouchListener((v, e) -> {
             int a = e.getActionMasked();
-            if (a == MotionEvent.ACTION_DOWN) { renderer.walkMove = dir; v.setAlpha(0.6f); }
-            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) { renderer.walkMove = 0; v.setAlpha(1f); }
+            if (a == MotionEvent.ACTION_DOWN) { renderer.walkMove = dir; renderer.walkStrafe = side; v.setAlpha(0.6f); }
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) { renderer.walkMove = 0; renderer.walkStrafe = 0; v.setAlpha(1f); }
             return true;
         });
         b.setLayoutParams(new LinearLayout.LayoutParams(dp(56), dp(56)));
@@ -1707,6 +1722,7 @@ public class MainActivity extends Activity {
     }
 
     private Button measureButton, measureClear;
+    private FrameLayout walkTipHolder;
     private boolean measuring;
     private MeasureOverlay measureOverlay;
 

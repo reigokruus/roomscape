@@ -4042,7 +4042,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     volatile boolean walking;
     /** Eye height above the floor, metres; the field of view; held walk buttons (+1 forward, -1 back). */
     volatile float eyeH = 1.5f, walkFov = 65f;
-    volatile int walkMove;
+    volatile int walkMove, walkStrafe;
     private final float[] eye = new float[3];
     private volatile float walkYaw, walkPitch;
     private long walkLast;
@@ -4119,7 +4119,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return true;
     }
 
-    void exitWalk() { walking = false; walkMove = 0; }
+    void exitWalk() { walking = false; walkMove = 0; walkStrafe = 0; }
 
     // ---- Measure (rk 10 Nov): tap two spots on the scanned surface in Enter the room, see the distance ----
     /** The view matrix of the last drawn frame, for the measure overlay (copied each frame). */
@@ -6791,6 +6791,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float yawE = walkYawNow(), pitchE = walkPitchNow();
             float fx = (float) -Math.sin(yawE), fz = (float) -Math.cos(yawE);
             eye[0] += fx * walkMove * 1.2f * dt; eye[2] += fz * walkMove * 1.2f * dt;
+            eye[0] += -fz * walkStrafe * 1.0f * dt; eye[2] += fx * walkStrafe * 1.0f * dt;   // sideways: right of the look direction
             float cp = (float) Math.cos(pitchE), sp = (float) Math.sin(pitchE);
             ex = eye[0]; ey = eye[1]; ez = eye[2];
             Matrix.setLookAtM(view, 0, ex, ey, ez, ex + fx * cp, ey + sp, ez + fz * cp, 0, 1, 0);
