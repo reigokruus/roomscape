@@ -596,7 +596,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             all.put(proxy).position(0);
             allCol.put(proxyCol).position(0);
             if (!simple) log("photo room: " + ceil.length + " triangles, " + (ceil.length - keepTris) + " ceiling left out");
-            photos.build(all, allCol, mv + pv, mv, simple);
+            if (PHOTO_SURFACE) photos.build(all, allCol, mv + pv, mv, simple);   // off: no photo texturing (rk 10 Nov 15:34)
             log((simple ? "photo room: " : "photos: ") + photos.keyframes.size() + " keyframes, " + photos.texturedTris + " textured / " + photos.plainTris
                     + " plain triangles, " + pv / 3 + " wall/floor cells tried (" + (System.currentTimeMillis() - t1) + " ms)");
         } catch (Throwable e) { logError("photos", new RuntimeException(e)); } }).start();
@@ -4596,6 +4596,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (ts == TrackingState.TRACKING) {
             everTracked = true;
             notTrackingSince = 0;
+            // A blink (rk 10 Nov 15:34): ARCore back within 2 s, in the same place (its pose within 30 cm of where it
+            // was lost): carry on with the same correction, no lining up, no search. Today the short losses came back
+            // in ARCore's own frame (the final corrections were 0-4 cm); the 15:31 scan's 0.5 s loss instead ran a
+            // search that put the scan 3.9 m off.
+            if (lostSince > 0 && needRealign && jumpGuess == null && !sessionRestarted && nowMs - lostSince < 2000 && havePrevPose) {
+                float[] cp = new float[16]; camera.getPose().toMatrix(cp, 0); applyFix(cp);
+                float dd = (float) Math.sqrt((cp[12] - prevPose[12]) * (cp[12] - prevPose[12]) + (cp[13] - prevPose[13]) * (cp[13] - prevPose[13]) + (cp[14] - prevPose[14]) * (cp[14] - prevPose[14]));
+                if (dd < 0.3f) {
+                    needRealign = false; realign = null; recentPts.clear(); realignResult = null;
+                    log(String.format(java.util.Locale.US, "brief loss (%.1f s, ARCore back %.2f m from where it was lost): carrying on with the same correction", (nowMs - lostSince) / 1000f, dd));
+                    evMark();
+                } else log(String.format(java.util.Locale.US, "brief loss (%.1f s) but ARCore came back %.2f m away: lining up", (nowMs - lostSince) / 1000f, dd));
+            }
             lostSince = 0;
             if (!viewing && count > 2000 && frameNo % 10 == 0) plainWallHint(frame, nowMs);
             // (no ceiling prompt: tilting up to a plain ceiling cost tracking even with wall in view, rk 10 Nov 13:37)
@@ -5523,6 +5536,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // rotation blur + sideways blur of a surface ~1.5 m away, over one exposure
         blurPx = ((float) Math.toRadians(frameTurn) / dt + frameMove / dt / 1.5f) * exposureS * ftex;
         float[] m = curPose;
+        if (!PHOTO_SURFACE) { photoWanted = false; photoWantedSince = 0; return; }   // no photos taken (photo surface off)
         boolean near = lookingAtZone(m);
         boolean novel = photos.novel(m, near);
         long now = System.currentTimeMillis();
@@ -6385,12 +6399,29 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] F = res.fit.fix;
             float drift = Realign.away(F, fixPrev);
             boolean ok = res.good && !res.ambiguous;
+            // Plausible? After a loss without a camera restart or map jump, ARCore's own position is close to right:
+            // a correction that moves the scan more than 0.75 m sideways, 10 cm up/down or 15 degrees is a match on a
+            // look-alike part of the room (15:31 scan: lost 0.5 s, the search found a spot 3.7 m and 40 deg away, the
+            // next tries grew it to 87% and it resumed 3.9 m / 53 deg off). Today's 19 other resumes all pass.
+            String implausible = "";
+            if (ok && Math.abs(F[13] - poseFix[13]) > 0.10f) {   // gravity is known: never a big vertical shift
+                ok = false; implausible = String.format(java.util.Locale.US, " (implausible: %.2f m up/down)", F[13] - poseFix[13]);
+            }
+            if (ok && jumpGuess == null && !sessionRestarted) {
+                float ddx = F[12] - poseFix[12], ddy = F[13] - poseFix[13], ddz = F[14] - poseFix[14];
+                double dyaw = Math.toDegrees(Math.atan2(F[2], F[0]) - Math.atan2(poseFix[2], poseFix[0]));
+                while (dyaw > 180) dyaw -= 360; while (dyaw < -180) dyaw += 360;
+                if (Math.hypot(ddx, ddz) > 0.75f || Math.abs(ddy) > 0.10f || Math.abs(dyaw) > 15) {
+                    ok = false;
+                    implausible = String.format(java.util.Locale.US, " (implausible: %.2f m sideways, %.2f m up/down, %.0f deg from where ARCore says)", Math.hypot(ddx, ddz), ddy, dyaw);
+                }
+            }
             realignOk = ok && (realignOk == 0 || drift < 0.08f) ? realignOk + 1 : (ok ? 1 : 0);
             System.arraycopy(F, 0, fixPrev, 0, 16);
             if (ok) fixTry = F;
             log(String.format(java.util.Locale.US, "re-align attempt (%s): %d%% on the scan, median %.1f cm, correction %.2f, %.2f, %.2f m %.0f deg%s%s -> %s",
                     res.source, Math.round(res.fit.inliers * 100), res.fit.median * 100, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])),
-                    res.ambiguous ? ", ambiguous" : "", res.detail.isEmpty() ? "" : "; " + res.detail, ok ? "match " + realignOk + "/2" : "no"));
+                    res.ambiguous ? ", ambiguous" : "", res.detail.isEmpty() ? "" : "; " + res.detail, ok ? "match " + realignOk + "/2" : "no" + implausible));
             // Two agreeing attempts in a row; one when ARCore came back on its own onto the old correction, or when one
             // attempt fits very well (rk 10 Nov 11:47: ARCore came back after 1.2 s about 20 cm off; three attempts in
             // 16 s, 63-90% on the scan, each a few cm different from the last, so it never resumed).
@@ -6984,6 +7015,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** The live scan view: the captured points (the same ones the Points view shows after Done), or the photo-textured
      *  mesh. Debug switch "Live view". */
     static volatile boolean LIVE_POINTS = true;
+    /** Photos for texturing while scanning and the photo-textured surface at Done (rk 10 Nov 15:34: "stop generating the
+     *  photo mode, it's only wasting performance"). Off: the result is Points (and the plain Mesh); debug switch. */
+    static volatile boolean PHOTO_SURFACE = false;
 
     /** Points live view: the finished live mesh isn't drawn; take it so the next one gets built (for the doorways). */
     private void consumeLiveMesh() {
