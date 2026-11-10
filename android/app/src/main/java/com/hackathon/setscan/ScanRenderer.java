@@ -4527,7 +4527,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 try { applyMode(); } catch (Exception e) { logError("configure", e); }
             }
         }
-        if (ts == TrackingState.TRACKING && lastTrackState != TrackingState.TRACKING) { settleUntil = nowMs + 1500; if (lastNewDepthMs > 0) lastNewDepthMs = nowMs; }   // depth gets 4 s after tracking returns
+        if (ts == TrackingState.TRACKING && lastTrackState != TrackingState.TRACKING) { settleUntil = nowMs + 1500; trackingBackMs = nowMs; if (lastNewDepthMs > 0) lastNewDepthMs = nowMs; }   // depth gets 4 s after tracking returns
         lastTrackState = ts;
         if (ts == TrackingState.TRACKING) {
             camera.getPose().toMatrix(curPose, 0);
@@ -4547,6 +4547,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // has simply walked further. Up to 2 m/s counts as walking, not as ARCore moving its map.
             if (havePrevPose && frameMove > Math.max(0.15f, 2f * frameDt)) {
                 settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove));
+                relAnchored = false;   // the held view doesn't follow the jump (14:01 scan: 0.29 and 0.33 m jumps while held showed as twitches)
                 // ARCore moved its map without saying it lost track (11:47:09: 0.5 m): the scan, not ARCore, decides
                 // where the view is; nothing is fused until it lines up again (the quick path after a loss).
                 if (count > 2000 && !needRealign && realign == null && !realignBuilding) {
@@ -4606,7 +4607,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 // ARCore tracks again but isn't lined up with the scan yet: from where the view was shown when it came
                 // back, follow ARCore's own movement since then (13:52 scan: tracking was back at 41 s, lined up at
                 // 66 s, and the view stayed pinned to where it was lost, "couldn't walk away from some fixed area").
-                if (!relAnchored) { System.arraycopy(rawView, 0, relRaw, 0, 16); System.arraycopy(lastShownView, 0, relShown, 0, 16); relAnchored = true; }
+                // anchored on the view shown the frame before (14:01 scan: it used the view from the end of the previous
+                // hold, seconds old, and the picture snapped there when a pose jump started a new hold)
+                if (!relAnchored) { System.arraycopy(rawView, 0, relRaw, 0, 16); System.arraycopy(prevShown, 0, relShown, 0, 16); relAnchored = true; }
                 float[] ri = new float[16], t = new float[16];
                 if (Matrix.invertM(ri, 0, relRaw, 0)) { Matrix.multiplyMM(t, 0, rawView, 0, ri, 0); Matrix.multiplyMM(view, 0, t, 0, relShown, 0); }
             }
@@ -4625,6 +4628,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (ts == TrackingState.TRACKING) { System.arraycopy(view, 0, heldView, 0, 16); haveHeldView = true; synchronized (scanRot) { System.arraycopy(scanRot, 0, heldRot, 0, 9); heldRotOk = scanRotOk; } }
             }
             wasHolding = holding;
+            System.arraycopy(view, 0, prevShown, 0, 16);
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
             System.arraycopy(mvp, 0, realMvp, 0, 16);
             if (OVERVIEW) overviewCamera(ts == TrackingState.TRACKING, nowMs);
@@ -5891,9 +5895,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- the held view while lost ----
     private final float[] heldView = new float[16], heldRot = new float[9];
     private boolean haveHeldView, heldRotOk, holding, wasHolding;
-    private final float[] lastShownView = new float[16], rawView = new float[16], relRaw = new float[16], relShown = new float[16]; private long holdEndMs;
+    private final float[] lastShownView = new float[16], prevShown = new float[16], rawView = new float[16], relRaw = new float[16], relShown = new float[16]; private long holdEndMs;
     private boolean relAnchored; private volatile int heldMode;   // 0 live, 1 held by the rotation sensor, 2 held + ARCore's movement
-    private long lastNewDepthMs, stateLogAt; private int newDepthSince, staleSince0, notYetSince0;
+    private long lastNewDepthMs, stateLogAt, trackingBackMs; private int newDepthSince, staleSince0, notYetSince0;
     final float[] scanRot = new float[9]; volatile boolean scanRotOk;
     private volatile float accelJitter; volatile boolean walkingWhileLost;
     /** The rotation sensor while scanning (MainActivity registers it): the device's rotation, and whether it's shaking
@@ -5915,11 +5919,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     };
 
     /** Once a second: tracking, what the view shows, whether depth is fused, new/stale/missing depth images. And: ARCore
-     *  handing out only old depth images for 4 s while tracking (13:52 scan: 86-122 s, 354 stale images, nothing more
-     *  was fused and the re-align never ran) restarts the AR session, then re-aligns like after a loss. */
+     *  handing out only old depth images for 8 s while tracking (13:52 scan: 86-122 s, 354 stale images, nothing more
+     *  was fused and the re-align never ran) restarts the AR session, then re-aligns like after a loss. 8 s, and not in
+     *  the first 10 s after tracking returns (14:01 scan: at 4 s it restarted twice; the second restart cost 15 s). */
     private void logState(TrackingState ts, long nowMs) {
         if (viewing || !everTracked) return;
-        if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > 4000 && depthSupported && recoveries < 10 && count > 2000) {
+        if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > 8000 && nowMs - trackingBackMs > 10000 && depthSupported && recoveries < 10 && count > 2000) {
             recoveries++;
             log(String.format(java.util.Locale.US, "no new depth for %.1f s while tracking (%d old images repeated): restarting AR session (attempt %d)", (nowMs - lastNewDepthMs) / 1000f, depthStale - staleSince0, recoveries));
             lastNewDepthMs = nowMs;
@@ -6748,7 +6753,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Live doorway outlines while scanning (rk 10 Nov): on/off, and when the last search ran. */
     static boolean LIVE_DOORS = true;
-    private long liveDoorAt;
+    private long liveDoorAt, liveDoorMs;   // the search runs at most a third of the time (14:01: 1-2.4 s each, frame dips)
     /** Doorways being tracked during the scan: each with how many searches in a row found it and missed it. */
     private final java.util.ArrayList<float[]> liveTrack = new java.util.ArrayList<>();   // x0 z0 x1 z1 floorY width height sure hits misses shown
 
@@ -6822,7 +6827,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 Tsdf near = tsdf.copyNear(px, py, pz, LIVE_MESH_RADIUS, liveScratch); // read while the GL thread keeps fusing: fine for a preview
                 liveScratch = near; near.reuseBuffers = true;
                 int nt = near.extractMesh();
-                if (LIVE_DOORS && nowMs - liveDoorAt > 2000 && nt > 2000) { liveDoorAt = nowMs; liveDoors(near, nt, kfs); }
+                if (LIVE_DOORS && nowMs - liveDoorAt > Math.max(2000, 3 * liveDoorMs) && nt > 2000) { liveDoorAt = nowMs; long ld0 = System.currentTimeMillis(); liveDoors(near, nt, kfs); liveDoorMs = System.currentTimeMillis() - ld0; }
                 LivePreview.Result r = livePreview.build(near.meshPos, near.meshConf, nt, kfs, px, py, pz, fx, fy, fz);
                 if (gen == surfGen) liveMeshNew = new Object[]{r};
             } catch (Throwable e) { logError("live mesh", new RuntimeException(e)); }
