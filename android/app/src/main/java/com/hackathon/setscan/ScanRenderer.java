@@ -121,12 +121,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean stallLogged;
     private int recoveries;
     private final StringBuilder log = new StringBuilder();
+    /** Where the current scan's part of the log starts (rk 10 Nov: the 23:02 scan's log also held the 22:53 scan). */
+    private int logScanStart;
     private final long t0 = System.currentTimeMillis();
     private final java.util.Set<String> loggedErrors = new java.util.HashSet<>();
 
     synchronized void log(String msg) {
         android.util.Log.i("RoomScape", msg); // also in logcat, for checking from the Mac
-        if (log.length() > 300000) log.delete(0, 150000);   // keep the latest part (it goes out with the diagnostics)
+        if (log.length() > 300000) { log.delete(0, 150000); logScanStart = Math.max(0, logScanStart - 150000); }   // keep the latest part (it goes out with the diagnostics)
         log.append(String.format(java.util.Locale.US, "%6.1fs  %s%n", (System.currentTimeMillis() - t0) / 1000f, msg));
     }
 
@@ -134,7 +136,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** The app's event log as scan-log.txt in the scan folder (diagnostics in the .rmsc). */
     void saveLogInto(File dir) {
-        try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "scan-log.txt"))) { o.write(logText().getBytes("UTF-8")); }
+        String text; synchronized (this) { text = log.substring(Math.min(logScanStart, log.length())); }   // this scan's part only
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "scan-log.txt"))) { o.write(text.getBytes("UTF-8")); }
         catch (Exception ignored) { }
     }
 
@@ -3704,6 +3707,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void reset() {
+        synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
