@@ -3454,6 +3454,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 roomReady = true;
                 buildFloorMesh();
                 log(room.logLine());
+                // floor area (the footprint, split into rooms at doorways; a teammate's request, 10 Nov)
+                try {
+                    long t0 = System.currentTimeMillis();
+                    FloorArea.Result fa = FloorArea.compute(pos, count, room.floorY);
+                    floorArea = fa; selectedRoom = 0; selectedRoomVerts = null;
+                    StringBuilder rs = new StringBuilder();
+                    for (int i = 0; i < fa.rooms.size(); i++) rs.append(i == 0 ? "" : "; ").append(fa.rooms.get(i).text(i));
+                    log(String.format(java.util.Locale.US, "floor area: %s (%s; outline %.0f%% walls, %.1f m² of floor in no room) in %d ms",
+                            fa.text(), rs, fa.enclosed * 100, fa.other, System.currentTimeMillis() - t0));
+                } catch (Exception e) { logError("floor area", e); }
                 activity.setRoomSize(roomSizeText());
             } catch (Exception e) { logError("room", e); }
         }
@@ -3752,6 +3762,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Tap on the scan: move the subject to the nearest scanned point under the finger. */
     void pickSubject(float tx, float ty) {
         if (demoTool != 0 && count > 0) { demoTap(tx, ty); return; }
+        if (sceneIdx == 0 && pickRoom(tx, ty)) return;
         if (sceneIdx == 0 || count == 0) return;
         float best = (40f * height / 1000f) * (40f * height / 1000f) + 400f, bestW = Float.MAX_VALUE;
         int bestI = -1;
@@ -6897,7 +6908,66 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** "8.2 × 5.3 m, 2.9 m high" from the scan's extent, or null before it's loaded. */
+    /** The floor area: the footprint split into rooms at doorways (FloorArea); a tap picks one room (0 = none). */
+    private volatile FloorArea.Result floorArea;
+    private volatile int selectedRoom;
+    private float[] selectedRoomVerts;
+
     String roomSizeText() {
+        String base = roomSizeTextBase();
+        FloorArea.Result fa = viewing ? floorArea : null;
+        if (fa == null || fa.text() == null) return base;
+        if (selectedRoom > 0 && selectedRoom <= fa.rooms.size()) return fa.rooms.get(selectedRoom - 1).text(selectedRoom - 1);
+        return base == null ? fa.text() : base + " · " + fa.text();
+    }
+
+    /** Viewer tap with more than one room: the room under the finger (on the floor), or none again. True if handled. */
+    private boolean pickRoom(float tx, float ty) {
+        FloorArea.Result fa = floorArea;
+        if (!viewing || fa == null || fa.rooms.size() < 2 || !roomReady) return false;
+        float[] inv = new float[16];
+        if (!Matrix.invertM(inv, 0, viewMvp, 0)) return false;
+        float nx = 2f * tx / width - 1f, ny = 1f - 2f * ty / height;
+        float[] a = new float[4], b = new float[4];
+        Matrix.multiplyMV(a, 0, inv, 0, new float[]{nx, ny, -1, 1}, 0);
+        Matrix.multiplyMV(b, 0, inv, 0, new float[]{nx, ny, 1, 1}, 0);
+        float ox = a[0] / a[3], oy = a[1] / a[3], oz = a[2] / a[3], dx = b[0] / b[3] - ox, dy = b[1] / b[3] - oy, dz = b[2] / b[3] - oz;
+        int id = 0;
+        if (Math.abs(dy) > 1e-6f) {
+            float t = (room.floorY - oy) / dy;
+            if (t > 0) {
+                int cx = (int) ((ox + dx * t - fa.x0) / FloorArea.CELL), cz = (int) ((oz + dz * t - fa.z0) / FloorArea.CELL);
+                if (cx >= 0 && cz >= 0 && cx < fa.nx && cz < fa.nz) id = fa.roomOf[cz * fa.nx + cx];
+            }
+        }
+        selectedRoom = id == selectedRoom ? 0 : id;
+        selectedRoomVerts = null;
+        activity.setRoomSize(roomSizeText());
+        return true;
+    }
+
+    /** The picked room's floor, tinted. */
+    private void drawSelectedRoom(float[] m) {
+        FloorArea.Result fa = floorArea; int id = selectedRoom;
+        if (fa == null || id <= 0) return;
+        if (selectedRoomVerts == null) {
+            java.util.ArrayList<float[]> q = new java.util.ArrayList<>();
+            float y = room.floorY + 0.015f, c = FloorArea.CELL;
+            for (int i = 0; i < fa.roomOf.length; i++) if (fa.roomOf[i] == id) {
+                float x0 = fa.x0 + (i % fa.nx) * c, z0 = fa.z0 + (i / fa.nx) * c;
+                q.add(new float[]{x0, y, z0, x0 + c, y, z0, x0 + c, y, z0 + c, x0, y, z0, x0 + c, y, z0 + c, x0, y, z0 + c});
+            }
+            float[] v = new float[q.size() * 18]; for (int i = 0; i < q.size(); i++) System.arraycopy(q.get(i), 0, v, i * 18, 18);
+            selectedRoomVerts = v;
+        }
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        planDraw(m, selectedRoomVerts, GLES20.GL_TRIANGLES, new float[]{1f, 0.69f, 0.13f, 0.45f}, 1f);
+        GLES20.glDepthMask(true);
+    }
+
+    private String roomSizeTextBase() {
         // As measured by the phone that scanned it (an iPhone's RoomPlan walls), when the package said.
         org.json.JSONObject sm = sourceManifest();
         org.json.JSONArray walls = sm == null || sm.optJSONObject("room") == null ? null : sm.optJSONObject("room").optJSONArray("walls");
@@ -7749,6 +7819,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (clean) { }
         else if (lighting.enabled) { lighting.camX = ex; lighting.camY = ey; lighting.camZ = ez; lighting.haveCam = !topView; drawProps(mvp); }
         else { drawProps(mvp); if (roomReady && overlays && !planningPreview) drawRoom(mvp, simple); }
+        if (viewing && roomReady) drawSelectedRoom(mvp);
         cutActive = false;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         if (clean) { System.arraycopy(mvp, 0, viewMvp, 0, 16); photoThumbWanted = false; savePhotoThumb(); return; }
