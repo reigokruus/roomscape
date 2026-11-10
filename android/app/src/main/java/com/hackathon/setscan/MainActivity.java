@@ -44,6 +44,8 @@ public class MainActivity extends Activity {
     static final boolean AUTO_RECORD = true;
     /** Debug A/B: the ARCore session recording (video + depth) on; read at the next scan. */
     static boolean recordWanted = true;
+    /** A build for someone else's phone (gradle -PguestBuild): recording and screen video start off. */
+    private boolean guestBuild() { try { return getResources().getBoolean(R.bool.guest_build); } catch (Exception e) { return false; } }
     /** The recording of the scan in progress, and a finished one waiting to move into its scan's folder. */
     private File recordingFile, finishedRecording;
 
@@ -517,6 +519,11 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        {   // recording switches before anything scans (a guest build starts with both off; a saved choice wins)
+            android.content.SharedPreferences sp0 = getSharedPreferences(PREFS, MODE_PRIVATE);
+            recordWanted = sp0.getBoolean("abRecord", !guestBuild());
+            ScanRenderer.SCREEN_VIDEO = sp0.getBoolean("abScreen", !guestBuild());
+        }
         Rmsc.appFiles = getFilesDir();
         installCrashLog();
         writeDeviceInfo();
@@ -746,7 +753,7 @@ public class MainActivity extends Activity {
             // Tracking A/B switches (rk 10 Nov: losses on detailed scenes): video recording, camera focus, 30 fps cap.
             android.content.SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
             Button recB = new Button(this), focB = new Button(this), capB = new Button(this), scrB = new Button(this);
-            recordWanted = sp.getBoolean("abRecord", true);
+            recordWanted = sp.getBoolean("abRecord", !guestBuild());
             ScanRenderer.FIXED_FOCUS = sp.getBoolean("abFixedFocus", true);
             renderer.fpsCap30 = sp.getBoolean("abCap30v2", true);
             recB.setText(recordWanted ? "Video: on" : "Video: off");
@@ -775,7 +782,7 @@ public class MainActivity extends Activity {
             ScanRenderer.LIVE_POINTS = sp.getBoolean("abLivePoints", true);
             liveB.setText(ScanRenderer.LIVE_POINTS ? "Live view: Points" : "Live view: Surface");
             liveB.setOnClickListener(v -> { ScanRenderer.LIVE_POINTS = !ScanRenderer.LIVE_POINTS; sp.edit().putBoolean("abLivePoints", ScanRenderer.LIVE_POINTS).apply(); liveB.setText(ScanRenderer.LIVE_POINTS ? "Live view: Points" : "Live view: Surface"); });
-            ScanRenderer.SCREEN_VIDEO = sp.getBoolean("abScreen", true);
+            ScanRenderer.SCREEN_VIDEO = sp.getBoolean("abScreen", !guestBuild());
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
