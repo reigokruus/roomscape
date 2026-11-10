@@ -375,6 +375,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Flat colour = plane on (see Planes). */
     static boolean FLAT_WALLS = true;
+    /** Doorway marks (DoorwayFinder) after the scan. */
+    static boolean DOORWAYS = true;
+    volatile java.util.List<DoorwayFinder.Doorway> doorways = new java.util.ArrayList<>();
+
+    /** doorways.json in the scan folder: [{x0, z0, x1, z1, floorY, width, height, open}] (world, metres). */
+    private void saveDoorways(File dir, java.util.List<DoorwayFinder.Doorway> ds) {
+        try {
+            org.json.JSONArray a = new org.json.JSONArray();
+            for (DoorwayFinder.Doorway d : ds) a.put(new org.json.JSONObject().put("x0", d.x0).put("z0", d.z0).put("x1", d.x1).put("z1", d.z1)
+                    .put("floorY", d.floorY).put("width", d.width).put("height", d.height).put("open", d.open));
+            try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "doorways.json"))) { o.write(a.toString(1).getBytes("UTF-8")); }
+        } catch (Exception e) { logError("doorways save", e); }
+    }
     private volatile java.util.List<Planes.Plane> fillPlanes; private volatile float[] lastPlanePts; private volatile int lastPlaneN;
 
     /**
@@ -450,6 +463,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     }
                 }
             }
+            // Doorways (rk 10 Nov 11:35): openings in the wall planes found on the surface, the depth seen through them.
+            if (DOORWAYS && ownMesh && mvAll > 0) try {
+                long td = System.currentTimeMillis();
+                float[] vv = new float[mvAll * 3];
+                for (int i = 0; i < vv.length; i++) vv[i] = mp0.get(i);
+                float[] walls = DoorwayFinder.wallsFromSurface(vv, mvAll);
+                java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, mvAll, walls, walkFloorY(), (x, y, z) -> tsdf.seenThrough(x, y, z), null);
+                log("doorways: " + ds.size() + " from " + walls.length / 4 + " wall planes (" + (System.currentTimeMillis() - td) + " ms)");
+                for (DoorwayFinder.Doorway d : ds) log("  " + d);
+                doorways = ds;
+                activity.setDoorways(ds);
+                if (dirNow != null) saveDoorways(dirNow, ds);
+            } catch (Throwable e) { logError("doorways", new RuntimeException(e)); }
             RoomProxies rp = simple ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();
             float[] proxy = rp.tris; byte[] proxyCol = rp.cols;
             int pv = proxy.length / 3;
@@ -3502,7 +3528,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        drainDepth(); gpuReady.clear(); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
+        drainDepth(); gpuReady.clear(); doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;

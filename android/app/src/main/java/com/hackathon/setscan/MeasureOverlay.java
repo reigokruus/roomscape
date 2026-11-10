@@ -37,6 +37,9 @@ final class MeasureOverlay extends View {
 
     int count() { return lines.size() + (pending != null ? 1 : 0); }
 
+    private java.util.List<DoorwayFinder.Doorway> doors = new ArrayList<>();
+    void setDoorways(java.util.List<DoorwayFinder.Doorway> ds) { doors = ds == null ? new ArrayList<>() : new ArrayList<>(ds); invalidate(); }
+
     void add(float[] p, float floor) {
         floorY = floor;
         if (pending == null) pending = p;
@@ -68,13 +71,24 @@ final class MeasureOverlay extends View {
 
     @Override protected void onDraw(Canvas c) {
         labelRects.clear();
+        for (DoorwayFinder.Doorway d : doors) {   // a thin outline of the opening and its size
+            float top = d.floorY + d.height;
+            float[] a = project(d.x0, d.floorY, d.z0), b = project(d.x1, d.floorY, d.z1), cc = project(d.x1, top, d.z1), dd = project(d.x0, top, d.z0);
+            if (a == null || b == null || cc == null || dd == null) continue;
+            float[] seg = {a[0], a[1], dd[0], dd[1], dd[0], dd[1], cc[0], cc[1], cc[0], cc[1], b[0], b[1]};
+            for (int k = 0; k < seg.length; k += 4) { c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], halo); c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], line); }
+            label(c, String.format(java.util.Locale.US, "Doorway %.2f × %.2f m", d.width, d.height), (dd[0] + cc[0]) / 2, (dd[1] + cc[1]) / 2 - 18 * dp);
+        }
         for (float[] l : lines) {
             float[] a = project(l[0], l[1], l[2]), b = project(l[3], l[4], l[5]);
             if (a == null || b == null) { labelRects.add(new RectF()); continue; }
             c.drawLine(a[0], a[1], b[0], b[1], halo); c.drawLine(a[0], a[1], b[0], b[1], line);
             c.drawCircle(a[0], a[1], 5 * dp, dot); c.drawCircle(b[0], b[1], 5 * dp, dot);
-            float d = (float) Math.sqrt((l[3] - l[0]) * (l[3] - l[0]) + (l[4] - l[1]) * (l[4] - l[1]) + (l[5] - l[2]) * (l[5] - l[2]));
-            labelRects.add(label(c, format(d), (a[0] + b[0]) / 2, (a[1] + b[1]) / 2));
+            float dx = l[3] - l[0], dy = l[4] - l[1], dz = l[5] - l[2];
+            float d = (float) Math.sqrt(dx * dx + dy * dy + dz * dz), hz = (float) Math.sqrt(dx * dx + dz * dz);
+            // Nearly upright or nearly level (within ~5°): the straight height or width, which is what's meant.
+            String t = hz < 0.08f * d ? format(Math.abs(dy)) + " ↕" : Math.abs(dy) < 0.08f * d ? format(hz) + " ↔" : format(d);
+            labelRects.add(label(c, t, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2));
         }
         if (pending != null) {
             float[] a = project(pending[0], pending[1], pending[2]);
@@ -83,7 +97,7 @@ final class MeasureOverlay extends View {
                 label(c, format(Math.max(0, pending[1] - floorY)) + " above the floor", a[0], a[1] - 26 * dp);
             }
         }
-        if (!lines.isEmpty() || pending != null) postInvalidateOnAnimation();   // follows the view as it turns
+        if (!lines.isEmpty() || pending != null || !doors.isEmpty()) postInvalidateOnAnimation();   // follows the view as it turns
     }
 
     private RectF label(Canvas c, String s, float x, float y) {

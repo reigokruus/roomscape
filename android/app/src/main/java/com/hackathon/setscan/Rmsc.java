@@ -192,6 +192,7 @@ final class Rmsc {
         copyIf(z, new File(dir, "meta.json"), "android/meta.json");
         copyIf(z, new File(dir, "splats.bin"), "android/splats.bin");
         copyIf(z, new File(dir, "path.bin"), "android/path.bin");
+        copyIf(z, new File(dir, "doorways.json"), "android/doorways.json");
         // Parts of the package this app doesn't use (an iPhone's ios/ folder) go back out unchanged (mesh.ply is above).
         putTree(z, new File(dir, "rmsc-extra"), "");
         putDiagnostics(z, dir);
