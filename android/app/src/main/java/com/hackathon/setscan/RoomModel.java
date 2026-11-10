@@ -167,8 +167,11 @@ final class RoomModel {
         // from 2.25 m up (door tops and picture rails at ~2.0-2.1 m have features too), 4 cm bins
         int bins = 55; int[] h = new int[bins];
         for (int i = 0; i < featureN; i++) { int b = (int) ((featureYs[i] - floorY - 2.25f) / 0.04f); if (b >= 0 && b < bins) h[b]++; }
-        int best = -1; for (int b = 0; b < bins; b++) if (best < 0 || h[b] > h[best]) best = b;
-        if (best < 0 || h[best] < 15) return Float.NaN;
+        // the highest well-filled band: door tops and frames below the ceiling have more features than a plain ceiling
+        // (rk 10 Nov 12:21: the busiest band was at 2.23 m in a 2.88 m room)
+        int mx = 0; for (int b = 0; b < bins; b++) mx = Math.max(mx, h[b]);
+        int best = -1; for (int b = bins - 1; b >= 0; b--) if (h[b] >= Math.max(15, 0.3f * mx)) { best = b; break; }
+        if (best < 0) return Float.NaN;
         // the median of the features in and next to that band
         float lo = floorY + 2.25f + (best - 1) * 0.04f, hi = floorY + 2.25f + (best + 2) * 0.04f;
         float[] v = new float[featureN]; int k = 0;
@@ -238,8 +241,10 @@ final class RoomModel {
         // ARCore's tracked feature points on the ceiling (triangulated from the motion, metric like its floor plane):
         // this phone's depth put a 2.88 m ceiling at 2.76-2.79 m (rk 10 Nov). The busiest 4 cm band above 2 m.
         float fc = featureCeiling(floorY);
-        if (!Float.isNaN(fc)) { ceilingY = fc; hasCeiling = true; ceilingTrusted = true; }
-        for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING) { ceilingY = s.cy; hasCeiling = true; ceilingTrusted = true; }
+        // Every source can only fall short of the ceiling (a door top, a wall top, a lintel's underside that ARCore took
+        // for a ceiling plane: 12:21 had one at 1.99 m), never overshoot it: the highest supported one wins.
+        if (!Float.isNaN(fc) && (!hasCeiling || fc > ceilingY)) { ceilingY = fc; hasCeiling = true; ceilingTrusted = true; }
+        for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING && s.cy - floorY > 2.2f && (!hasCeiling || s.cy > ceilingY)) { ceilingY = s.cy; hasCeiling = true; ceilingTrusted = true; }
         if (!hasCeiling && maxY - floorY > 2.0f && maxY - floorY < 4f) hasCeiling = true;
 
         if (!Float.isNaN(userCeilingY) && userCeilingY > floorY + 1.2f) { ceilingY = userCeilingY; hasCeiling = true; }

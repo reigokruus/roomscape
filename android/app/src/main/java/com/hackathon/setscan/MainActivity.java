@@ -806,7 +806,7 @@ public class MainActivity extends Activity {
             if (b - t == ob - ot) return;
             v.post(() -> {
                 FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
-                int want = !scanning && walkState == 0 ? viewerPanel.getHeight() : 0;
+                int want = !scanning && walkState == 0 ? viewerPanel.getHeight() + ((FrameLayout.LayoutParams) viewerPanel.getLayoutParams()).bottomMargin : 0;
                 if (gp.bottomMargin != want) { gp.bottomMargin = want; glView.setLayoutParams(gp); }
             });
         });
@@ -1019,12 +1019,14 @@ public class MainActivity extends Activity {
             File cd = renderer.currentDir;
             viewerShared.setVisibility(cd != null && SyncInfo.file(cd).exists() && SyncInfo.load(this, cd).shared ? View.VISIBLE : View.GONE);
             String size = renderer.roomSizeText();
+            // "scanned area" is in the title; the card keeps just the numbers
+            if (size != null && size.startsWith("scanned area ")) size = size.substring(13) + " (scanned area)";
             sizeValue.setText(size != null ? size : "—");
             updateFacts();
             // The 3D view ends where the panel starts, so the model is framed in the part you can see (like the iPhone).
             viewerPanel.post(() -> {
                 FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
-                int want = viewer && walkState == 0 ? viewerPanel.getHeight() : 0;
+                int want = viewer && walkState == 0 ? viewerPanel.getHeight() + ((FrameLayout.LayoutParams) viewerPanel.getLayoutParams()).bottomMargin : 0;
                 if (gp.bottomMargin != want) { gp.bottomMargin = want; glView.setLayoutParams(gp); }
             });
             updateStyleSwitch();
@@ -1189,6 +1191,7 @@ public class MainActivity extends Activity {
         nameRow.addView(nameValue);
         sizeRow = (LinearLayout) Ios.row(this, 0, "Approx. size", false, false, null);
         ((TextView) sizeRow.getChildAt(0)).setTextColor(Color.WHITE);
+        ((TextView) sizeRow.getChildAt(0)).setSingleLine(true);   // the label never wraps; the value does
         sizeValue = new TextView(this);
         sizeValue.setTextColor(Ios.SECONDARY);
         sizeValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
@@ -1212,8 +1215,11 @@ public class MainActivity extends Activity {
         viewerPanel.addView(viewerBottom);
         // The app draws under the system navigation bar: pad the end of the list by its height, so the ROOM card can
         // be scrolled fully into view instead of sitting hidden under the bar.
+        // The panel ends above the system navigation bar (rk 10 Nov 12:23: the last row sat under it).
         viewerPanel.setOnApplyWindowInsetsListener((v, insets) -> {
-            viewerBottom.setPadding(dp(16), dp(10), dp(16), dp(18) + insets.getSystemWindowInsetBottom());
+            viewerBottom.setPadding(dp(16), dp(10), dp(16), dp(18));
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
+            if (lp != null && lp.bottomMargin != insets.getSystemWindowInsetBottom()) { lp.bottomMargin = insets.getSystemWindowInsetBottom(); v.setLayoutParams(lp); }
             return insets;
         });
         viewerPanel.setClipToPadding(false);
@@ -1437,7 +1443,7 @@ public class MainActivity extends Activity {
         // Standing in the room uses the whole screen; otherwise the 3D view ends above the panel.
         viewerPanel.post(() -> {
             FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
-            int want = state == 0 ? viewerPanel.getHeight() : 0;
+            int want = state == 0 ? viewerPanel.getHeight() + ((FrameLayout.LayoutParams) viewerPanel.getLayoutParams()).bottomMargin : 0;
             if (gp.bottomMargin != want) { gp.bottomMargin = want; glView.setLayoutParams(gp); }
         });
     }
