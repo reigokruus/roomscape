@@ -86,6 +86,37 @@ final class Tsdf {
         return n++;
     }
 
+    /** Sets one voxel (the GPU fusion's synced bricks). Weight 0 resets an existing voxel and creates nothing. */
+    void setVoxel(int x, int y, int z, float value, int weight, int r, int g, int b) {
+        int i = weight > 0 ? getOrCreate(x, y, z) : get(x, y, z);
+        if (i < 0) return;
+        sdf[i] = value; w[i] = (short) Math.min(weight, MAX_W);
+        rgb[i * 3] = (byte) r; rgb[i * 3 + 1] = (byte) g; rgb[i * 3 + 2] = (byte) b;
+    }
+
+    /** Voxels on the surface (seen at least minW times, within half the band of it). */
+    int surfaceVoxels() {
+        int c = 0;
+        for (int i = 0; i < n; i++) if (w[i] >= minW && Math.abs(sdf[i]) < 0.5f) c++;
+        return c;
+    }
+
+    /** How many of this volume's surface voxels `other` also has on its surface, within one voxel. */
+    int surfaceOverlap(Tsdf other) {
+        int c = 0;
+        for (int i = 0; i < n; i++) {
+            if (w[i] < minW || Math.abs(sdf[i]) >= 0.5f) continue;
+            long k = keys[at[i]];
+            int x = (int) (k & 0x1FFFFF) - (1 << 20), y = (int) ((k >>> 21) & 0x1FFFFF) - (1 << 20), z = (int) ((k >>> 42) & 0x1FFFFF) - (1 << 20);
+            search:
+            for (int dz = -1; dz <= 1; dz++) for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                int j = other.get(x + dx, y + dy, z + dz);
+                if (j >= 0 && other.w[j] >= other.minW && Math.abs(other.sdf[j]) < 0.5f) { c++; break search; }
+            }
+        }
+        return c;
+    }
+
     /** Forget everything inside a sphere so it gets rebuilt from fresh looks. Returns voxels reset. */
     /** A test on a point in the world. */
     interface Where { boolean test(float x, float y, float z); }

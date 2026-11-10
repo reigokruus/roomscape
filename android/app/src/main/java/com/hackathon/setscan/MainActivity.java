@@ -664,6 +664,26 @@ public class MainActivity extends Activity {
             // In the viewer these live in the top bar (Back, Share) and under the 3D view (Continue scan), like iOS.
             if (bt != homeButton && bt != exportButton && bt != improveButton && bt != lightButton && bt != objButton) bars.addView(bt);
         }
+        // GPU surface (rk 10 Nov, test): off by default; the self-test compares it with the CPU on the last scan's depth.
+        {
+            Button gpuB = new Button(this), testB = new Button(this);
+            boolean on = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("gpuSurface", false);
+            renderer.gpuSurfaceWanted = on;
+            gpuB.setText(on ? "GPU surface: on" : "GPU surface: off");
+            gpuB.setOnClickListener(v -> {
+                boolean now = !renderer.gpuSurfaceWanted;
+                renderer.gpuSurfaceWanted = now;
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("gpuSurface", now).apply();
+                gpuB.setText(now ? "GPU surface: on" : "GPU surface: off");
+                toast(now ? "GPU surface on from the next scan" : "GPU surface off");
+            });
+            testB.setText("GPU self-test");
+            testB.setOnClickListener(v -> { updateStatus("GPU self-test running…"); glView.queueEvent(renderer::runGpuSelfTest); });
+            for (Button bt : new Button[]{gpuB, testB}) {
+                bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
+                bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
+            }
+        }
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         blp.bottomMargin = dp(56);

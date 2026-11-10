@@ -1570,6 +1570,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void finishDepthAI(int gen) {
         if (gen != surfGen) return;
         try {
+            gpuSyncAll();
             drainFuse();
             meshTris = tsdf.extractMesh();
             meshPosAll = null;
@@ -2215,6 +2216,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
         try {
             long t0 = System.currentTimeMillis();
+            gpuSyncAll();
             drainFuse();
             meshTris = tsdf.extractMesh();
             log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
@@ -3453,6 +3455,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
+        gpuSurfaceReset();
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
@@ -4633,6 +4636,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             long pxT0 = System.nanoTime();
             fuseN = 0;
+            boolean gpuOn = gpuSurfaceReady(m);
+            if (gpuOn) {
+                if (gpuDepth == null || gpuDepth.length < dw * dh) { gpuDepth = new float[dw * dh]; gpuRgb = new int[dw * dh]; }
+                java.util.Arrays.fill(gpuDepth, 0, dw * dh, 0f);
+            }
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
@@ -4665,10 +4673,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
                     int hit = voxels.get(vk);
                     sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
-                    // The surface (TSDF) part goes to the fusion thread (below), the points stay here.
+                    // The surface (TSDF) part goes to the GPU (GpuTsdf) or the fusion thread (below), the points stay here.
+                    if (gpuOn) {
+                        gpuDepth[v * dw + u] = d;
+                        gpuRgb[v * dw + u] = (rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16;
+                    }
+                    if (!gpuOn || fine) {   // with the GPU on, only detail-zone samples still go to the CPU (bit 25: not the room)
                     if (fuseN * 5 + 5 > fuseBuf.length) fuseBuf = java.util.Arrays.copyOf(fuseBuf, fuseBuf.length * 2);
                     fuseBuf[fuseN * 5] = wx; fuseBuf[fuseN * 5 + 1] = wy; fuseBuf[fuseN * 5 + 2] = wz;
-                    fuseBuf[fuseN * 5 + 3] = Float.intBitsToFloat((rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16 | (fine ? 1 << 24 : 0));
+                    fuseBuf[fuseN * 5 + 3] = Float.intBitsToFloat((rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16 | (fine ? 1 << 24 : 0) | (gpuOn ? 1 << 25 : 0));
                     // How far along this ray free space may be cleared: the nearest depth over a voxel's width around the
                     // pixel (a ray just beside a thin bar mustn't clear the bar), in ray length.
                     {
@@ -4684,6 +4697,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         fuseBuf[fuseN * 5 + 4] = rayLen * (nearMm * 0.001f) / d;
                     }
                     fuseN++;
+                    }
                     if (weak) continue;
                     if (hit < 0 || seenStamp[hit] != depthFrames) frameHits++;
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
@@ -4693,6 +4707,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
             submitFuse(m[12], m[13], m[14]);
+            if (gpuOn) {
+                long g0 = System.nanoTime();
+                gpuTsdf.integrate(gpuDepth, gpuRgb, dw, dh, m, fx, fy, cx, cy);
+                if (System.currentTimeMillis() - gpuSyncAt > 500) { gpuSyncAt = System.currentTimeMillis(); gpuSyncToCpu(); }
+                perf.note("ms: GPU surface (dispatch + sync)", (System.nanoTime() - g0) / 1e6);
+                if (gpuTsdf.failed) { log("GPU surface stopped: " + gpuTsdf.error + "; the CPU fuses from here"); gpuTsdf = null; gpuSurfaceBroken = true; }
+            }
             long cvT0 = System.nanoTime();
             perf.note("ms: depth fusion pixels", (cvT0 - pxT0) / 1e6);
             carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
@@ -5099,13 +5120,146 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int bits = Float.floatToRawIntBits(buf[i * 5 + 3]);
                         rgb[0] = bits & 255; rgb[1] = (bits >> 8) & 255; rgb[2] = (bits >> 16) & 255;
                         float clear = buf[i * 5 + 4];
-                        tsdf.integrate(ox, oy, oz, buf[i * 5], buf[i * 5 + 1], buf[i * 5 + 2], rgb, clear);
+                        if ((bits & (1 << 25)) == 0) tsdf.integrate(ox, oy, oz, buf[i * 5], buf[i * 5 + 1], buf[i * 5 + 2], rgb, clear);
                         if ((bits & (1 << 24)) != 0) detail.integrate(ox, oy, oz, buf[i * 5], buf[i * 5 + 1], buf[i * 5 + 2], rgb, clear);
                     }
                 }
             } catch (Throwable e) { logError("fuse", new RuntimeException(e)); }
             perf.note("ms: surface fusion (thread)", (System.nanoTime() - t0) / 1e6);
         });
+    }
+
+    // ---- GPU surface (GpuTsdf, debug switch "GPU surface"; rk 10 Nov) ----
+    volatile boolean gpuSurfaceWanted;
+    private GpuTsdf gpuTsdf;
+    private boolean gpuSurfaceBroken;
+    private float[] gpuDepth; private int[] gpuRgb;
+    private long gpuSyncAt;
+
+    /** GL thread: whether this frame's room surface goes to the GPU (making the block around the camera on first use). */
+    private boolean gpuSurfaceReady(float[] m) {
+        if (!gpuSurfaceWanted || gpuSurfaceBroken) return false;
+        if (gpuTsdf == null) {
+            gpuTsdf = new GpuTsdf(m[12] - 6, m[13] - 2.2f, m[14] - 6, m[12] + 6, m[13] + 2.6f, m[14] + 6, tsdf.vs, tsdf.trunc, tsdf.carve, tsdf.carveWeight);
+            if (gpuTsdf.failed) { log("GPU surface unavailable: " + gpuTsdf.error); gpuTsdf = null; gpuSurfaceBroken = true; return false; }
+            log("GPU surface on: " + gpuTsdf.nx + "x" + gpuTsdf.ny + "x" + gpuTsdf.nz + " voxels");
+        }
+        return true;
+    }
+
+    /** GL thread: the GPU's changed bricks into the CPU surface (on the fusion thread, in order with its work). */
+    private void gpuSyncToCpu() {
+        GpuTsdf g = gpuTsdf;
+        if (g == null) return;
+        final GpuTsdf.Sync sy = g.sync();
+        if (sy == null || sy.count == 0) return;
+        fuseDrained = false;
+        fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } });
+    }
+
+    /** GL thread: everything the GPU has, into the CPU surface, before it's read (Done, depth AI). */
+    private void gpuSyncAll() {
+        for (int k = 0; k < 64 && gpuTsdf != null; k++) {
+            GpuTsdf.Sync sy = gpuTsdf.sync();
+            if (sy == null || sy.count == 0) break;
+            final GpuTsdf g = gpuTsdf;
+            fuseDrained = false;
+            fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } });
+            if (sy.count < GpuTsdf.MAX_SYNC_BRICKS) break;
+        }
+    }
+
+    /**
+     * GL thread, debug "GPU self-test": the scan's saved depth frames (recs, up to 300) fused on the CPU (as now) and on
+     * the GPU, compared: surface voxels in each, how many agree (within a voxel), triangles, and timings. Logged, shown,
+     * and written to files/gpu-selftest.txt.
+     */
+    void runGpuSelfTest() {
+        java.util.List<ScanExport.Rec> rs = new java.util.ArrayList<>(recs);
+        if (rs.size() < 10) { activity.updateStatus("GPU self-test: scan something first (needs saved depth frames)."); return; }
+        if (rs.size() > 300) rs = rs.subList(rs.size() - 300, rs.size());
+        StringBuilder out = new StringBuilder();
+        try {
+            Tsdf cpu = new Tsdf(1_500_000, tsdf.vs, tsdf.trunc, tsdf.carve); cpu.minW = tsdf.minW; cpu.carveWeight = tsdf.carveWeight;
+            long c0 = System.nanoTime();
+            int[] grey = {180, 180, 180};
+            for (ScanExport.Rec r : rs) {
+                cpu.beginFrame();
+                for (int v = 1; v < r.h - 1; v++) for (int u = 1; u < r.w - 1; u++) {
+                    float d = selfTestDepth(r, u, v);
+                    if (d <= 0) continue;
+                    float xc = (u + 0.5f - r.cx) * d / r.fx, yc = (r.cy - (v + 0.5f)) * d / r.fy, zc = -d;
+                    float[] m = r.pose;
+                    float wx = m[0] * xc + m[4] * yc + m[8] * zc + m[12], wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13], wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
+                    int rpx = Math.max(1, Math.min(6, Math.round(0.6f * cpu.vs * r.fx / d)));
+                    float near = d;
+                    for (int ny = -1; ny <= 1; ny++) for (int nx = -1; nx <= 1; nx++) {
+                        int uu = u + nx * rpx, vv = v + ny * rpx;
+                        if (uu < 1 || vv < 1 || uu >= r.w - 1 || vv >= r.h - 1) continue;
+                        float d2 = (r.depth[vv * r.w + uu] & 0xFFFF) * 0.001f;
+                        if (d2 >= 0.2f && d2 < near) near = d2;
+                    }
+                    float rayLen = (float) Math.sqrt(xc * xc + yc * yc + zc * zc);
+                    cpu.integrate(m[12], m[13], m[14], wx, wy, wz, grey, rayLen * near / d);
+                }
+            }
+            long cpuMs = (System.nanoTime() - c0) / 1_000_000;
+            float[] p0 = rs.get(0).pose;
+            GpuTsdf g = new GpuTsdf(p0[12] - 6, p0[13] - 2.2f, p0[14] - 6, p0[12] + 6, p0[13] + 2.6f, p0[14] + 6, tsdf.vs, tsdf.trunc, tsdf.carve, tsdf.carveWeight);
+            if (g.failed) { out.append("GPU unavailable: ").append(g.error); throw new RuntimeException(g.error); }
+            long g0 = System.nanoTime();
+            for (ScanExport.Rec r : rs) {
+                float[] dd = new float[r.w * r.h]; int[] col = new int[r.w * r.h];
+                for (int v = 1; v < r.h - 1; v++) for (int u = 1; u < r.w - 1; u++) { dd[v * r.w + u] = selfTestDepth(r, u, v); col[v * r.w + u] = 0xB4B4B4; }
+                g.integrate(dd, col, r.w, r.h, r.pose, r.fx, r.fy, r.cx, r.cy);
+                if (g.failed) break;
+            }
+            GLES20.glFinish();
+            long gpuMs = (System.nanoTime() - g0) / 1_000_000;
+            Tsdf fromGpu = new Tsdf(1_500_000, tsdf.vs, tsdf.trunc, tsdf.carve); fromGpu.minW = tsdf.minW;
+            long s0 = System.nanoTime(); int bricks = 0;
+            for (int k = 0; k < 64 && !g.failed; k++) {
+                GpuTsdf.Sync sy = g.sync();
+                if (sy == null || sy.count == 0) break;
+                g.apply(sy, fromGpu); bricks += sy.count;
+            }
+            long syncMs = (System.nanoTime() - s0) / 1_000_000;
+            boolean gpuFailed = g.failed; String gpuErr = g.error;
+            g.release();
+            if (gpuFailed) throw new RuntimeException(gpuErr);
+            int sc = cpu.surfaceVoxels(), sg = fromGpu.surfaceVoxels();
+            int cInG = cpu.surfaceOverlap(fromGpu), gInC = fromGpu.surfaceOverlap(cpu);
+            int tc = cpu.extractMesh(), tg = fromGpu.extractMesh();
+            out.append(String.format(java.util.Locale.US,
+                    "GPU self-test, %d depth frames %dx%d: CPU %d ms, GPU %d ms (+ %d ms reading %d bricks back).%n"
+                  + "Surface voxels: CPU %d, GPU %d. CPU's found by the GPU %.1f%%, GPU's found by the CPU %.1f%%.%n"
+                  + "Triangles: CPU %d, GPU %d.",
+                    rs.size(), rs.get(0).w, rs.get(0).h, cpuMs, gpuMs, syncMs, bricks, sc, sg,
+                    sc > 0 ? 100f * cInG / sc : 0, sg > 0 ? 100f * gInC / sg : 0, tc, tg));
+        } catch (Throwable e) {
+            out.append("\nGPU self-test failed: ").append(e.getMessage());
+        }
+        String txt = out.toString();
+        log(txt.replace('\n', ' '));
+        activity.updateStatus(txt);
+        try { java.nio.file.Files.write(new java.io.File(activity.getFilesDir(), "gpu-selftest.txt").toPath(), txt.getBytes()); } catch (Exception ignored) { }
+    }
+
+    /** A saved depth frame's pixel as the live fusion uses it (0.2–4 m, confidence ≥ 40, no flying pixels), or 0. */
+    private static float selfTestDepth(ScanExport.Rec r, int u, int v) {
+        int mm = r.depth[v * r.w + u] & 0xFFFF;
+        if (mm < 200 || mm > 4000) return 0;
+        if (r.conf != null && (r.conf[v * r.w + u] & 0xFF) < 40) return 0;
+        int tol = mm / 25 + 20;
+        if (Math.abs((r.depth[v * r.w + u - 1] & 0xFFFF) - mm) > tol || Math.abs((r.depth[v * r.w + u + 1] & 0xFFFF) - mm) > tol
+                || Math.abs((r.depth[(v - 1) * r.w + u] & 0xFFFF) - mm) > tol || Math.abs((r.depth[(v + 1) * r.w + u] & 0xFFFF) - mm) > tol) return 0;
+        return mm * 0.001f;
+    }
+
+    /** GL thread: drop the GPU block (new scan / reset). */
+    private void gpuSurfaceReset() {
+        if (gpuTsdf != null) { gpuTsdf.release(); gpuTsdf = null; }
+        gpuSurfaceBroken = false;
     }
 
     /** Waits until the fusion thread has fused everything handed to it (before anything else reads or changes the surface). */
