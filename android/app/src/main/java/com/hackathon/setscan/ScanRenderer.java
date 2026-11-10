@@ -4418,7 +4418,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (lostSince == 0) {
                 lostSince = nowMs;
                 if (count > 2000 && !needRealign) {
-                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null;
+                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null; jumpGuess = null;
                     snapshotForRealign();
                     healthLosses++;
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
@@ -4470,7 +4470,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (count > 2000 && !needRealign && realign == null && !realignBuilding) {
                     needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null;
                     snapshotForRealign();
-                    log("pose jump: fusion paused until the view lines up with the scan again");
+                    // We know the jump exactly: carry on in the old frame (the correction that puts this frame's camera
+                    // where the last one was), checked against one depth view (rk 10 Nov 12:58: ARCore flipped +0.9 m
+                    // and back -0.8 m between two versions of its map).
+                    float[] inv = new float[16], t = new float[16], c = new float[16];
+                    if (Matrix.invertM(inv, 0, curPose, 0)) {
+                        Matrix.multiplyMM(t, 0, prevPose, 0, inv, 0);
+                        Matrix.multiplyMM(c, 0, t, 0, poseFix, 0);
+                        jumpGuess = c; fixTry = c.clone();
+                    }
+                    log("pose jump: fusion paused until the view lines up with the scan again (trying the old frame first)");
                 }
             }
             System.arraycopy(curPose, 0, prevPose, 0, 16);
@@ -5786,7 +5795,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (near >= 30) { ceilingHinted = true; return; }
         ceilingHinted = true;
         log("ceiling hint: only " + near + " feature points up there");
-        activity.toast("Tilt up to the ceiling once so the room height can be measured.");
+        activity.toast("Tilt up until you see where the walls meet the ceiling (keep some wall in view), so the room height can be measured.");
     }
     private long scanMs, lastTickMs;
 
@@ -5818,6 +5827,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private long realignLastStart; private int realignAttempts;
     private final java.util.ArrayList<java.util.ArrayList<float[]>> recentPts = new java.util.ArrayList<>();
     volatile boolean forceResume;
+    /** The correction that undoes ARCore's last jump (null if none). */
+    private float[] jumpGuess;
     private boolean newPartOffered;
 
     private final float[] lastGoodCam = new float[16];
@@ -5889,9 +5900,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // attempt fits very well (rk 10 Nov 11:47: ARCore came back after 1.2 s about 20 cm off; three attempts in
             // 16 s, 63-90% on the scan, each a few cm different from the last, so it never resumed).
             boolean strong = ok && res.fit.inliers >= 0.8f && res.fit.median < 0.015f;
+            // after a jump: a fit that keeps the old frame (within 15 cm / ~2°) is the jump undone, accepted at once
+            float[] jg = jumpGuess;
+            if (ok && jg != null && Realign.away(F, jg) < 0.2f) strong = true;
             if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
-                hasFix = true; needRealign = false; realign = null; recentPts.clear();
+                hasFix = true; needRealign = false; realign = null; recentPts.clear(); jumpGuess = null;
                 segment++;
                 log(String.format(java.util.Locale.US, "back on track after %.1f s: correction %.3f, %.3f, %.3f m, %.1f deg; %d%% of the view on the scan, median %.1f cm; segment %d",
                         (nowMs - realignSince) / 1000f, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])), Math.round(res.fit.inliers * 100), res.fit.median * 100, segment));

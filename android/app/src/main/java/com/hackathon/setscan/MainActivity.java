@@ -2091,6 +2091,19 @@ public class MainActivity extends Activity {
             return;
         }
         hideHome();
+        // A fresh ARCore session for every scan after the first: an old session keeps its map, and after a tracking
+        // loss that map can hold two versions of the room ~0.8 m apart that ARCore then flips between (rk 10 Nov
+        // 12:58: +0.9 m at the start of a scan and -0.8 m back 17 s later).
+        if (scansInSession > 0) {
+            try {
+                final Session old = session;
+                try { old.pause(); } catch (Exception ignored) { }
+                final Session fresh = new Session(this);
+                session = fresh;
+                glView.queueEvent(() -> { renderer.setSession(fresh); try { old.close(); } catch (Exception ignored) { } });
+            } catch (Exception e) { android.util.Log.w("RoomScape", "fresh AR session failed, keeping the old one: " + e); }
+        }
+        scansInSession++;
         glView.queueEvent(() -> renderer.startNewScan());
         scanUi();
         updateStatus("Scanning. Walk around the room slowly. Tap things to mark corners, walls, floor or objects.");
@@ -2598,6 +2611,8 @@ public class MainActivity extends Activity {
     }
 
     private boolean cameraAsked, arProblemShown;
+    /** Scans started on the current ARCore session (a new scan after the first gets a fresh session). */
+    private int scansInSession;
     /** Why this run can't scan (null = it can). */
     private String arProblem;
 
