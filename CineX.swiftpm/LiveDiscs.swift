@@ -368,6 +368,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let colorPipeline: MTLRenderPipelineState
     /// Points-only: the spots in their camera colour (the white grid look is for the mesh-first view).
     private let pointPipeline: MTLRenderPipelineState
+    private let pointDepthPipeline: MTLRenderPipelineState
     private let depthWrite: MTLDepthStencilState
     private let depthEqual: MTLDepthStencilState
     /// The wide overview (ScanOverview): the pulled-back camera and the camera-image window.
@@ -384,6 +385,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         var cameraPosition: SIMD4<Float>
         var halfSize: Float
         var cell: Float
+        /// 1: points-only look (round dots facing the camera, opaque), 0: the white grid squares on the surface
+        var points: Float = 0
     }
 
     init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?, ghost: LiveGhost, tiles: FlatTiles? = nil) {
@@ -394,7 +397,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let library = try? device.makeLibrary(source: Self.shaderSource, options: options),
               let vertex = library.makeFunction(name: "tileVertex"),
               let fragment = library.makeFunction(name: "tileFragment"),
-              let pointFragment = library.makeFunction(name: "pointFragment") else { return nil }
+              let pointFragment = library.makeFunction(name: "pointFragment"),
+              let pointDepth = library.makeFunction(name: "pointDepth") else { return nil }
         func pipeline(fragment: MTLFunction?) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertex
@@ -411,6 +415,15 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
             return try? device.makeRenderPipelineState(descriptor: descriptor)
         }
+        func depthOnly(_ fragment: MTLFunction) -> MTLRenderPipelineState? {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertex
+            descriptor.fragmentFunction = fragment
+            descriptor.depthAttachmentPixelFormat = .depth32Float
+            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            descriptor.colorAttachments[0].writeMask = []
+            return try? device.makeRenderPipelineState(descriptor: descriptor)
+        }
         func depthState(_ compare: MTLCompareFunction, write: Bool) -> MTLDepthStencilState? {
             let depth = MTLDepthStencilDescriptor()
             depth.depthCompareFunction = compare
@@ -418,7 +431,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             return device.makeDepthStencilState(descriptor: depth)
         }
         guard let depthPipeline = pipeline(fragment: nil), let colorPipeline = pipeline(fragment: fragment),
-              let pointPipeline = pipeline(fragment: pointFragment),
+              let pointPipeline = pipeline(fragment: pointFragment), let pointDepthPipeline = depthOnly(pointDepth),
               let depthWrite = depthState(.less, write: true),
               let depthEqual = depthState(.lessEqual, write: false) else { return nil }
         self.cloud = cloud
@@ -431,6 +444,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         self.depthPipeline = depthPipeline
         self.colorPipeline = colorPipeline
         self.pointPipeline = pointPipeline
+        self.pointDepthPipeline = pointDepthPipeline
         self.depthWrite = depthWrite
         self.depthEqual = depthEqual
         window = ScanOverview.enabled ? OverviewWindowRenderer(device: device) : nil
@@ -529,7 +543,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         do {
             var uniforms = Uniforms(viewProjection: projection * viewMatrix,
                                     cameraPosition: viewMatrix.inverse.columns.3,
-                                    halfSize: cloud.voxelSize * 0.7, cell: Self.cell)
+                                    halfSize: LivePreview.livePoints ? cloud.voxelSize * 0.6 : cloud.voxelSize * 0.7, cell: Self.cell,
+                                    points: LivePreview.livePoints ? 1 : 0)   // points: round 2.4 cm dots on the 2 cm grid
             encoder.setVertexBuffer(cloud.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(cloud.normalBuffer, offset: 0, index: 1)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
@@ -538,7 +553,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBytes(&none, length: none.count * MemoryLayout<SIMD4<Float>>.stride, index: 3)
             }
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
-            encoder.setRenderPipelineState(depthPipeline)
+            encoder.setRenderPipelineState(LivePreview.livePoints ? pointDepthPipeline : depthPipeline)
             encoder.setDepthStencilState(depthWrite)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
             encoder.setRenderPipelineState(LivePreview.livePoints ? pointPipeline : colorPipeline)
@@ -560,6 +575,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float4 cameraPosition;
         float halfSize;
         float cell;
+        float points;
     };
     struct TileOut {
         float4 position [[position, invariant]];
@@ -567,6 +583,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float3 normal [[flat]];
         float solid [[flat]];
         float3 color [[flat]];
+        float2 corner;
     };
 
     vertex TileOut tileVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
@@ -594,6 +611,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float3 n = float3(normals[iid].xyz) / 127.0;
         // No normal yet: a tile facing the camera.
         n = dot(n, n) > 0.25 ? normalize(n) : normalize(u.cameraPosition.xyz - c);
+        // points-only: a dot facing the camera (no edge-on streaks on walls seen at an angle, as Android's points)
+        if (u.points > 0.5) n = normalize(u.cameraPosition.xyz - c);
         float3 a = abs(n.y) < 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
         float3 t1 = normalize(cross(a, n));
         float3 t2 = cross(n, t1);
@@ -605,12 +624,18 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         out.normal = n;
         out.solid = float(p.color.a) / 255.0;
         out.color = float3(p.color.rgb) / 255.0;
+        out.corner = corner;
         return out;
     }
 
     // Points-only live view (rk 10 Nov, as on Android): each spot in the camera's colour, round, nearly opaque.
     fragment float4 pointFragment(TileOut in [[stage_in]]) {
-        return float4(in.color, mix(0.75, 0.95, in.solid));
+        if (dot(in.corner, in.corner) > 1.0) discard_fragment();
+        return float4(in.color, 1.0);   // opaque: the background's stripes only where nothing is scanned
+    }
+    // the depth pass for dots: round (the corners are left out, so they don't hide the dots behind)
+    fragment void pointDepth(TileOut in [[stage_in]]) {
+        if (dot(in.corner, in.corner) > 1.0) discard_fragment();
     }
 
     fragment float4 tileFragment(TileOut in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {

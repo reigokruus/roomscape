@@ -84,16 +84,7 @@ enum TilesRun {
         if let f = frames.first { print("first pose", f.pose, "k", f.k, f.w, f.h) }
         let folder = out.appendingPathComponent("tiles-" + dir.deletingLastPathComponent().deletingPathExtension().lastPathComponent)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        if let json = tiles.sharedJSON(floorY: 0) { try json.write(to: folder.appendingPathComponent("tiles.json")) }
-        let rows = tiles.usedRows
-        if rows > 0 {
-            var bytes = tiles.atlasBytes(rows: rows)
-            let w = FlatTiles.atlas, h = rows * FlatTiles.px
-            let ctx = bytes.withUnsafeMutableBytes { CGContext(data: $0.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) }
-            if let img = ctx?.makeImage(), let dest = CGImageDestinationCreateWithURL(folder.appendingPathComponent("tiles.png") as CFURL, "public.png" as CFString, 1, nil) {
-                CGImageDestinationAddImage(dest, img, nil); CGImageDestinationFinalize(dest)
-            }
-        }
+        print("saved", tiles.save(to: folder), "tiles (FlatTiles.save, as the app at Done)")
         print("wrote", folder.path)
     }
 }

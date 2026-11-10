@@ -132,6 +132,12 @@ enum Rmsc {
         let objectsURL = RoomObjects.url(scan)
         if FileManager.default.fileExists(atPath: objectsURL.path) { try zip.add("ios/objects.json", file: objectsURL) }
         try zip.add("ios/shift.json", data: try JSONSerialization.data(withJSONObject: ["floorY": floorY]))
+        // Flat tiles (docs/rmsc-format.md "Flat tiles"): the floor moved to 0 like everything else.
+        let tilesJSON = folder.appendingPathComponent("tiles.json"), tilesPNG = folder.appendingPathComponent("tiles.png")
+        if let data = try? Data(contentsOf: tilesJSON), let moved = FlatTiles.shifted(data, dy: -floorY), FileManager.default.fileExists(atPath: tilesPNG.path) {
+            try zip.add("tiles.json", data: moved)
+            try zip.add("tiles.png", file: tilesPNG)
+        }
 
         // Manifest.
         let iso = ISO8601DateFormatter()
@@ -359,6 +365,11 @@ enum Rmsc {
 
             // iOS extras.
             if let map = try zip.read("ios/worldmap.arexperience") { try map.write(to: folder.appendingPathComponent("worldmap.arexperience")) }
+            // Flat tiles (from either phone): back into this scan's coordinates.
+            if let tj = try zip.read("tiles.json"), let png = try zip.read("tiles.png"), let moved = FlatTiles.shifted(tj, dy: lift) {
+                try moved.write(to: folder.appendingPathComponent("tiles.json"))
+                try png.write(to: folder.appendingPathComponent("tiles.png"))
+            }
             if let objects = try zip.read("ios/objects.json") { try objects.write(to: folder.appendingPathComponent("objects.json")) }
             // The shared list is the latest (it may have been edited on another phone): it wins, by id; this
             // phone's own extras (lights, sockets, anything not in it) are kept.

@@ -477,6 +477,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                         if main { Task { @MainActor in ProcessingQueue.shared.scanSaved(saved) } }
                     }
                 }
+                if FlatTiles.enabled, let tiles = self.live.tiles {
+                    let n = tiles.save(to: saved.captureURL)
+                    log.info("flat tiles: \(n) saved; \(tiles.stats(), privacy: .public)")
+                }
                 if let s = self.screen {
                     self.screen = nil
                     s.end { file in

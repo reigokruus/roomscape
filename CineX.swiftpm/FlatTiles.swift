@@ -3,6 +3,8 @@ import ARKit
 #endif
 import Metal
 import QuartzCore
+import CoreGraphics
+import ImageIO
 import simd
 
 /// Flat tiles (rk 10 Nov, ported from the Android app's FlatTiles): where LiDAR depth shows a flat surface, 30 cm
@@ -401,6 +403,35 @@ final class FlatTiles {
                                                             "imageWidth": Self.atlas, "imageHeight": rows * Self.px, "tiles": list])
     }
 
+    /// Saved with the scan (rk 10 Nov, as on Android): tiles.json (the .rmsc's shared form, in the scan's own
+    /// coordinates) and tiles.png (the atlas rows in use). Nothing is written when no tile is painted.
+    @discardableResult
+    func save(to folder: URL) -> Int {
+        guard let json = sharedJSON(floorY: 0) else { return 0 }
+        let rows = usedRows
+        var bytes = atlasBytes(rows: rows)
+        let w = Self.atlas, h = rows * Self.px
+        let image: CGImage? = bytes.withUnsafeMutableBytes {
+            CGContext(data: $0.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+        }
+        guard let image, let dest = CGImageDestinationCreateWithURL(folder.appendingPathComponent("tiles.png") as CFURL, "public.png" as CFString, 1, nil) else { return 0 }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest), (try? json.write(to: folder.appendingPathComponent("tiles.json"))) != nil else { return 0 }
+        return countShown
+    }
+
+    /// A saved (or imported) tiles.json moved up or down by `dy` metres (the .rmsc's floor at 0 and back).
+    static func shifted(_ data: Data, dy: Float) -> Data? {
+        guard var j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let list = j["tiles"] as? [[String: Any]] else { return nil }
+        j["tiles"] = list.map { t -> [String: Any] in
+            var t = t
+            if let c = t["corners"] as? [[Double]] { t["corners"] = c.map { [$0[0], (($0[1] + Double(dy)) * 10000).rounded() / 10000, $0[2]] } }
+            return t
+        }
+        return try? JSONSerialization.data(withJSONObject: j)
+    }
+
     func reset() {
         lock.lock(); defer { lock.unlock() }
         planes.removeAll(); tiles.removeAll(); banned.removeAll(); tallSeen.removeAll(); floorIdx = -1; slots = 0; version += 1
@@ -551,3 +582,43 @@ final class FlatTilesRenderer {
     }
     """
 }
+
+#if canImport(SceneKit)
+import SceneKit
+extension FlatTiles {
+    /// A finished scan's saved tiles (tiles.json + tiles.png) as one textured, unlit SceneKit node, 5 mm in front of their
+    /// surfaces (the result view shows them over the points). Nil when the scan has none.
+    static func node(folder: URL) -> SCNNode? {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("tiles.json")),
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let list = j["tiles"] as? [[String: Any]],
+              let iw = (j["imageWidth"] as? NSNumber)?.floatValue, let ih = (j["imageHeight"] as? NSNumber)?.floatValue, iw > 0, ih > 0,
+              let src = CGImageSourceCreateWithURL(folder.appendingPathComponent("tiles.png") as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        var verts: [SCNVector3] = [], uvs: [CGPoint] = [], idx: [Int32] = []
+        for t in list {
+            guard let c = t["corners"] as? [[Double]], let p = t["pixels"] as? [[Double]], c.count == 4, p.count == 4 else { continue }
+            let n = (t["normal"] as? [Double]) ?? [0, 0, 0]
+            let base = Int32(verts.count)
+            for k in 0..<4 {
+                verts.append(SCNVector3(Float(c[k][0] + n[0] * 0.005), Float(c[k][1] + n[1] * 0.005), Float(c[k][2] + n[2] * 0.005)))
+                // half a pixel inwards, so neighbouring tiles' pictures don't bleed in
+                let cx = (p[0][0] + p[2][0]) / 2, cy = (p[0][1] + p[2][1]) / 2
+                let x = p[k][0] + (cx > p[k][0] ? 0.5 : -0.5), y = p[k][1] + (cy > p[k][1] ? 0.5 : -0.5)
+                uvs.append(CGPoint(x: x / Double(iw), y: y / Double(ih)))
+            }
+            idx += [base, base + 1, base + 2, base, base + 2, base + 3]
+        }
+        guard !idx.isEmpty else { return nil }
+        let geometry = SCNGeometry(sources: [SCNGeometrySource(vertices: verts), SCNGeometrySource(textureCoordinates: uvs)],
+                                   elements: [SCNGeometryElement(indices: idx, primitiveType: .triangles)])
+        let m = SCNMaterial()
+        m.diffuse.contents = image
+        m.lightingModel = .constant
+        m.isDoubleSided = true
+        geometry.materials = [m]
+        let node = SCNNode(geometry: geometry)
+        node.name = "flatTiles"
+        return node
+    }
+}
+#endif

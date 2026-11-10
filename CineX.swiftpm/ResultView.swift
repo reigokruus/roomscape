@@ -25,6 +25,7 @@ struct ResultView: View {
     @State private var loadError: String?
     @State private var style: Style = .model
     @State private var modelGroup: SCNNode?
+    @State private var tilesNode: SCNNode?
     @State private var splatGroup: SCNNode?
     /// The scan's photos painted onto its fused mesh (`PhotoRoom`): what Photo shows when the scan has both; else the
     /// splats in their scanned colours.
@@ -682,6 +683,12 @@ struct ResultView: View {
             let photo = await Task.detached(priority: .userInitiated) {
                 PhotoRoom.build(scan) ?? GLBScene.node(forScan: scan.captureURL)
             }.value
+            // Flat tiles saved with the scan: over the points and the photo room
+            if let tiles = FlatTiles.node(folder: scan.captureURL) {
+                tiles.isHidden = style == .model || style == .mesh
+                scene.rootNode.addChildNode(tiles)
+                tilesNode = tiles
+            }
             if let mesh = await Task.detached(priority: .utility) { BareMesh.node(scan) }.value {
                 mesh.isHidden = style != .mesh
                 scene.rootNode.addChildNode(mesh)
@@ -1046,6 +1053,7 @@ struct ResultView: View {
         modelGroup?.isHidden = style != .model
         photoRoom?.isHidden = !photos
         meshNode?.isHidden = !bareMesh
+        tilesNode?.isHidden = style == .model || style == .mesh
         splatGroup?.isHidden = style == .model || photos || bareMesh
         if let splatGroup {
             SplatScene.setMeshLook(style == .mesh, in: splatGroup)
