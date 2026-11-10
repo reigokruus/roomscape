@@ -295,6 +295,22 @@ final class RoomModel {
         }
         sizeX = fx1 > fx0 ? fx1 - fx0 + cell : 0;
         sizeZ = fz1 > fz0 ? fz1 - fz0 + cell : 0;
+        // Along the room's own walls, not the world's x/z (rk 10 Nov 13:44: 5.30 x 3.50 m shown for a room whose walls
+        // measure 3.6 x 2.7 m: ARCore's axes start wherever the phone pointed, and a box around a turned room is too big).
+        // A side whose two walls the scan saw: the distance between them; otherwise the seen floor's extent along it
+        // (1-99%, so a few stray cells don't stretch it).
+        if (hasLayout && layout.size() == 4) {
+            float lc = (float) Math.cos(Math.toRadians(layoutAngle)), ls = (float) Math.sin(Math.toRadians(layoutAngle));
+            java.util.ArrayList<Float> us = new java.util.ArrayList<>(), vs = new java.util.ArrayList<>();
+            for (int i = 0; i < nx * nz; i++) if (grid.floorKnown[i]) {
+                float x = grid.minX + (i % nx + 0.5f) * cell, z = grid.minZ + (i / nx + 0.5f) * cell;
+                us.add(x * lc + z * ls); vs.add(-x * ls + z * lc);
+            }
+            float fu = trimmedExtent(us) + cell, fv = trimmedExtent(vs) + cell;
+            boolean uBoth = layout.get(1).seen && layout.get(3).seen, vBoth = layout.get(0).seen && layout.get(2).seen;
+            float su = uBoth ? roomW : Math.min(roomW, fu), sv = vBoth ? roomD : Math.min(roomD, fv);
+            if (su > 0.5f && sv > 0.5f) { sizeX = su; sizeZ = sv; }
+        }
 
         // 4) Light sources: clusters of very bright points (windows, lamps, ceiling lights).
         Map<Long, int[]> bright = new HashMap<>();
@@ -474,6 +490,14 @@ final class RoomModel {
             layout.add(w);
         }
         hasLayout = true;
+    }
+
+    /** Extent of the values between their 1st and 99th percentile (0 for fewer than 2). */
+    private static float trimmedExtent(java.util.ArrayList<Float> a) {
+        if (a.size() < 2) return 0;
+        java.util.Collections.sort(a);
+        int lo = (int) (a.size() * 0.01f), hi = Math.max(lo, (int) Math.ceil(a.size() * 0.99f) - 1);
+        return a.get(hi) - a.get(lo);
     }
 
     private static void fitKnown(float[] b, float len) {
