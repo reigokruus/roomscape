@@ -3683,6 +3683,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void reset() {
+        flatTiles.clear();
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
         screenFile = null;   // the next scan records its own screen video
@@ -4775,7 +4776,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (LIVE_MESH) {
                 long lmT0 = System.nanoTime();
                 if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
-                if (LIVE_POINTS) { consumeLiveMesh(); drawPoints(mvp, 0.6f); }   // smaller: close up they were big soft blobs   // rk 10 Nov 15:20: "only points, no triangles no photo"
+                if (LIVE_POINTS) {
+                    consumeLiveMesh(); drawPoints(mvp, 0.6f);   // smaller: close up they were big soft blobs
+                    if (FLAT_TILES) { maybeTiles(frame, camera, nowMs); flatTiles.draw(mvp); }
+                }   // rk 10 Nov 15:20: "only points, no triangles no photo"
                 else drawLiveMesh(mvp);
                 perf.note(LIVE_POINTS ? "ms: live points draw" : "ms: live mesh draw", (System.nanoTime() - lmT0) / 1e6);
             }
@@ -7031,6 +7035,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Photos for texturing while scanning and the photo-textured surface at Done (rk 10 Nov 15:34: "stop generating the
      *  photo mode, it's only wasting performance"). Off: the result is Points (and the plain Mesh); debug switch. */
     static volatile boolean PHOTO_SURFACE = false;
+    /** Flat tiles (rk 10 Nov 16:05 trial): flat surfaces painted from the camera in 30 cm tiles. Debug switch. */
+    static volatile boolean FLAT_TILES = true;
+    final FlatTiles flatTiles = new FlatTiles();
+
+    /** Twice a second while tracking well and not moving fast: tiles from the latest depth image, when it was taken
+     *  from where the camera is now (so the picture and the depth agree). */
+    private void maybeTiles(Frame frame, Camera camera, long nowMs) {
+        if (nowMs - flatTiles.lastMs < 500 || camera.getTrackingState() != TrackingState.TRACKING || needRealign || tooFast || lastDepth == null) return;
+        float dx = curPose[12] - lastDPose[12], dy = curPose[13] - lastDPose[13], dz = curPose[14] - lastDPose[14];
+        float dot = curPose[8] * lastDPose[8] + curPose[9] * lastDPose[9] + curPose[10] * lastDPose[10];
+        if (dx * dx + dy * dy + dz * dz > 0.03f * 0.03f || dot < 0.999f) return;
+        long t0 = System.nanoTime();
+        CameraIntrinsics ti = camera.getTextureIntrinsics(); int[] td = ti.getImageDimensions();
+        float[] tin = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
+        int before = flatTiles.tiles.size();
+        try {
+            flatTiles.update(lastDepth, lastDw, lastDh, lastDIntr, lastDPose.clone(), tin, bgTex,
+                    (px, out) -> { for (int i = 0; i < px.length; i += 2) { out[i] = px[i] / tin[4]; out[i + 1] = px[i + 1] / tin[5]; } }, nowMs);   // texture pixels -> ARCore's TEXTURE_NORMALIZED (0,0 top left), what the background shader samples
+        } catch (Exception e) { logError("flat tiles", e); }
+        perf.note("ms: flat tiles", (System.nanoTime() - t0) / 1e6);
+        if (flatTiles.tiles.size() / 25 != before / 25) log(String.format(java.util.Locale.US, "flat tiles: %d on %d planes, %d paints, %d taken back", flatTiles.tiles.size(), flatTiles.planes.size(), flatTiles.painted, flatTiles.removed));
+    }
 
     /** Points live view: the finished live mesh isn't drawn; take it so the next one gets built (for the doorways). */
     private void consumeLiveMesh() {
@@ -7615,7 +7641,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             photos.draw(mvp, cutaway && cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         else if (style == 3 && !lighting.enabled && meshTris > 0) drawBareMesh(mvp);
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
-        else drawPoints(mvp, roomReady ? 0.9f : 1f);
+        else { drawPoints(mvp, roomReady ? 0.9f : 1f); if (FLAT_TILES) flatTiles.draw(mvp); }
         // A thumbnail frame shows just the room: no labels, markers or props.
         boolean clean = photoThumbWanted && style == 2 && !walking && count > 0 && currentDir != null;
         if (!clean) {
