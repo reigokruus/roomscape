@@ -252,6 +252,8 @@ enum GPUBench {
         if let k = ProcessInfo.processInfo.environment["CARVE_MARGIN"].flatMap(Float.init) { TsdfGPU.marginK = k }
         if let k = ProcessInfo.processInfo.environment["BEHIND"].flatMap(Float.init) { TsdfGPU.behindK = k }
         if let f = ProcessInfo.processInfo.environment["FOOTPRINT"] { TsdfGPU.footprintCheck = f == "1" }
+        if let k = ProcessInfo.processInfo.environment["LOCK_W"].flatMap(Float.init) { TsdfGPU.lockWeight = k }
+        if let k = ProcessInfo.processInfo.environment["UNLOCK_N"].flatMap(Int.init) { TsdfGPU.unlockFrames = k }
         let prepTime = Date().timeIntervalSince(t1)
         // Fine voxels: only a box around the chosen view's camera (a detail zone), so the block fits.
         if voxel < 0.02, ProcessInfo.processInfo.environment["NO_BOX"] != "1", let view, view < frames.count {
@@ -263,10 +265,27 @@ enum GPUBench {
         // `only`: just the depth frames around the view (to see what a few frames give before the rest is fused).
         let onlyNear = ProcessInfo.processInfo.environment["ONLY_NEAR"].flatMap(Int.init)
         let maxFrame = ProcessInfo.processInfo.environment["MAX_FRAME"].flatMap(Int.init)
+        // ALIGN=1: each frame lined up with the surface fused so far before it's fused (FrameAlign).
+        var aligner = ProcessInfo.processInfo.environment["ALIGN"] == "1" ? FrameAlign() : nil
         for (i, d) in depth.enumerated() {
             if let k = onlyNear, let view, abs(depthFrameIndex[i] - view) > k { continue }
             if let mf = maxFrame, depthFrameIndex[i] > mf { continue }
-            gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+            var pose = d.pose
+            if aligner != nil {
+                gpu.finish()
+                var pts: [SIMD3<Float>] = []
+                for y in stride(from: 2, to: d.h - 2, by: 6) { for x in stride(from: 2, to: d.w - 2, by: 6) {
+                    let z = d.m[y * d.w + x]; guard z > 0.3, z < 3 else { continue }
+                    pts.append(SIMD3((Float(x) + 0.5 - d.cx) * z / d.fx, -(Float(y) + 0.5 - d.cy) * z / d.fy, -z))
+                } }
+                guard let p = aligner!.align(gpu, points: pts, pose: d.pose) else { continue }
+                pose = p
+            }
+            gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+        }
+        if let a = aligner {
+            let c = a.correction.columns.3
+            print(String(format: "align: %d aligned, %d skipped, %d with too little surface; final correction %.3f, %.3f, %.3f m", a.aligned, a.skipped, a.tooLittle, c.x, c.y, c.z))
         }
         gpu.finish()
         let gpuTime = Date().timeIntervalSince(t2)

@@ -22,6 +22,10 @@ final class TsdfGPU {
     /// (copying the whole block every mesh build took ~0.8 s in the virtual scan; rk 10 Nov).
     private let dirty: MTLBuffer
     let bricks: SIMD3<Int32>
+    /// Per voxel: frames in a row that clearly saw through a finished (locked) voxel; 15 unlock and clear it.
+    private let contra: MTLBuffer
+    /// Per voxel: frames that saw it as surface (saturating); `lockWeight` of them finish it.
+    private let seen: MTLBuffer
     private var commands: MTLCommandBuffer?
     private var encoder: MTLComputeCommandEncoder?
     private var pending = 0
@@ -48,13 +52,18 @@ final class TsdfGPU {
         let dims = hi &- lo
         let count = Int(dims.x) * Int(dims.y) * Int(dims.z)
         guard count > 0, count < 40_000_000,
-              let library = try? device.makeLibrary(source: Self.source.replacingOccurrences(of: "MARGIN_K", with: String(format: "%.4f", Self.marginK)).replacingOccurrences(of: "BEHIND_K", with: String(format: "%.4f", Self.behindK)).replacingOccurrences(of: "FOOTPRINT_CHECK", with: Self.footprintCheck ? "1.0" : "0.0"), options: nil),
+              let library = try? device.makeLibrary(source: Self.source.replacingOccurrences(of: "MARGIN_K", with: String(format: "%.4f", Self.marginK)).replacingOccurrences(of: "BEHIND_K", with: String(format: "%.4f", Self.behindK)).replacingOccurrences(of: "FOOTPRINT_CHECK", with: Self.footprintCheck ? "1.0" : "0.0").replacingOccurrences(of: "UNLOCK_N", with: String(Self.unlockFrames)).replacingOccurrences(of: "LOCK_W", with: String(format: "%.1f", Self.lockWeight)), options: nil),
               let function = library.makeFunction(name: "integrate"),
               let pipeline = try? device.makeComputePipelineState(function: function),
               let sdf = device.makeBuffer(length: count * 4, options: .storageModeShared),
               let weight = device.makeBuffer(length: count * 2, options: .storageModeShared) else { return nil }
         let bricks = (dims &+ 7) / 8
-        guard let dirty = device.makeBuffer(length: Swift.max(1, Int(bricks.x) * Int(bricks.y) * Int(bricks.z)), options: .storageModeShared) else { return nil }
+        guard let dirty = device.makeBuffer(length: Swift.max(1, Int(bricks.x) * Int(bricks.y) * Int(bricks.z)), options: .storageModeShared),
+              let contra = device.makeBuffer(length: count, options: .storageModeShared),
+              let seen = device.makeBuffer(length: count, options: .storageModeShared) else { return nil }
+        memset(contra.contents(), 0, count)
+        memset(seen.contents(), 0, count)
+        self.contra = contra; self.seen = seen
         memset(sdf.contents(), 0, count * 4)
         memset(weight.contents(), 0, count * 2)
         memset(dirty.contents(), 0, dirty.length)
@@ -90,6 +99,8 @@ final class TsdfGPU {
         encoder.setBuffer(buffer, offset: 0, index: 2)
         encoder.setBytes(&p, length: MemoryLayout<Params>.stride, index: 3)
         encoder.setBuffer(dirty, offset: 0, index: 4)
+        encoder.setBuffer(contra, offset: 0, index: 5)
+        encoder.setBuffer(seen, offset: 0, index: 6)
         let size = MTLSize(width: Int(dims.x), height: Int(dims.y), depth: Int(dims.z))
         let w = pipeline.threadExecutionWidth
         encoder.dispatchThreads(size, threadsPerThreadgroup: MTLSize(width: w, height: max(1, pipeline.maxTotalThreadsPerThreadgroup / w / 4), depth: 4))
@@ -153,6 +164,11 @@ final class TsdfGPU {
         } }
     }
 
+    /// The block's signed distances (in band units, -1…1) and weights, for reading on the CPU after `finish()`
+    /// (frame-to-model alignment, FrameAlign). Shared memory: valid while the block lives.
+    var sdfPointer: UnsafeMutablePointer<Float> { sdf.contents().bindMemory(to: Float.self, capacity: voxelCount) }
+    var weightPointer: UnsafeMutablePointer<UInt16> { weight.contents().bindMemory(to: UInt16.self, capacity: voxelCount) }
+
     /// One voxel's signed distance and weight (tests).
     func value(at v: SIMD3<Int32>) -> (sdf: Float, weight: UInt16)? {
         finish()
@@ -208,7 +224,11 @@ final class TsdfGPU {
         var cleared = 0
         for i in 0..<voxelCount where w[i] > 0 {
             let v = origin &+ SIMD3(Int32(i % nx), Int32((i / nx) % ny), Int32(i / (nx * ny)))
-            if test((SIMD3<Float>(v) + 0.5) * vs) { w[i] = 0; s[i] = 0; cleared += 1; markDirty(v &- origin) }
+            if test((SIMD3<Float>(v) + 0.5) * vs) {
+                w[i] = 0; s[i] = 0; cleared += 1; markDirty(v &- origin)
+                seen.contents().storeBytes(of: 0, toByteOffset: i, as: UInt8.self)
+                contra.contents().storeBytes(of: 0, toByteOffset: i, as: UInt8.self)
+            }
         }
         return cleared
     }
@@ -221,6 +241,12 @@ final class TsdfGPU {
     nonisolated(unsafe) static var behindK: Float = 1.0
     /// Carve a voxel only when the depth over its whole patch lies beyond it (see the kernel; harness: FOOTPRINT=0/1).
     nonisolated(unsafe) static var footprintCheck = true
+    /// Frames that saw a voxel as surface before it is finished and stops changing (rk 10 Nov: looking again made the
+    /// bars worse, not better). Only `unlockFrames` clear see-throughs in a row, tap to clear or Scan area again undo it.
+    /// Harness: LOCK_W (1000 = never). 20 kept the bars and changed whole rooms by <= 1%.
+    nonisolated(unsafe) static var lockWeight: Float = 20
+    /// Clear see-through frames that undo a finished voxel (harness: UNLOCK_N).
+    nonisolated(unsafe) static var unlockFrames = 250
 
     private static let source = """
     #include <metal_stdlib>
@@ -239,7 +265,8 @@ final class TsdfGPU {
 
     kernel void integrate(device float *sdf [[buffer(0)]], device ushort *wgt [[buffer(1)]],
                           const device float *depth [[buffer(2)]], constant Params &p [[buffer(3)]],
-                          device uchar *dirty [[buffer(4)]], uint3 g [[thread_position_in_grid]]) {
+                          device uchar *dirty [[buffer(4)]], device uchar *contra [[buffer(5)]], device uchar *seen [[buffer(6)]],
+                          uint3 g [[thread_position_in_grid]]) {
         int3 dims = p.dims;
         if (g.x >= uint(dims.x) || g.y >= uint(dims.y) || g.z >= uint(dims.z)) return;
         float3 c = (float3(p.origin + int3(g)) + 0.5) * p.vs;
@@ -258,6 +285,7 @@ final class TsdfGPU {
         uint3 b = g / 8; uint3 nb = (uint3(dims) + 7) / 8;
         uint bi = (b.z * nb.y + b.y) * nb.x + b.x;
         ushort w = wgt[i];
+        bool locked = float(seen[i]) >= LOCK_W;  // finished: seen as surface in enough frames; no more averaging
         // How many CPU samples (every `step`th pixel) would pass through this voxel: its size over a pixel's footprint.
         float footprint = z / p.fx * p.step;
         ushort add = ushort(clamp((p.vs / footprint) * (p.vs / footprint), 1.0, 8.0));
@@ -279,6 +307,13 @@ final class TsdfGPU {
                     if (dd > 0.0 && dd * r / z < r + p.trunc) return;   // something at or in front of the voxel there
                 }
             }
+            if (locked) {
+                // Finished: only sustained clear see-through (the thing really moved) undoes it.
+                uchar c = contra[i];
+                if (c >= UNLOCK_N) { wgt[i] = 0; sdf[i] = 0; contra[i] = 0; seen[i] = 0; dirty[bi] = 1; }
+                else contra[i] = c + 1;
+                return;
+            }
             if (w >= solidW) { sdf[i] += (1.0 - sdf[i]) * 0.04; dirty[bi] = 1; return; }
             float sum = sdf[i] * float(w) + float(add);
             ushort nw = min(ushort(w + add), maxW);
@@ -288,9 +323,11 @@ final class TsdfGPU {
             return;
         }
         if (s < -p.trunc * BEHIND_K) return;   // behind the surface: unknown
+        if (locked) { contra[i] = 0; return; }   // seen as surface again: the see-through count starts over
         float dn = clamp(s / p.trunc, -1.0, 1.0);   // (behind: at most -BEHIND_K)
         sdf[i] = (sdf[i] * float(w) + dn * float(add)) / float(w + add);
         wgt[i] = min(ushort(w + add), maxW);
+        if (abs(dn) < 0.5 && seen[i] < 255) seen[i] = seen[i] + 1;
         dirty[bi] = 1;
     }
     """
