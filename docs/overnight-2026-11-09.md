@@ -147,6 +147,31 @@ nearby splats), the storyboard's size fallback, and S24 scans imported without a
 cuts out / moves objects without them (HoleFill.cutOut). Options for rk: (a) keep as is; (b) Points from points.bin
 directly (plain dots, no splat build) and patch colours from the photo room, then drop surfels.bin and the build.
 
+## S24 GPU fusion: plan (not built; needs the phone to test)
+1. One test scan with tonight's stage timings (e8365f7) to see how the GL thread's 95 ms split (ARCore update, depth
+   fusion pixels, carve, photo, live mesh draw).
+2. If depth fusion dominates: a GLES 3.1 compute shader, the iPhone kernel (TsdfGPU) line for line: SSBOs for sdf
+   (float) and weight (uint16 packed in uint), the depth image as an r16ui texture, one dispatch per depth frame on the
+   GL thread (the context is there already), dirty-brick bytes as on the iPhone.
+3. The live mesh needs the voxels on the CPU: map only the dirty bricks (glMapBufferRange per brick range) into the Java
+   Tsdf, the same incremental copy as the iPhone's 5b6ce5d; points and photos stay on the CPU.
+4. Guard: compile/link failure or GL error → the Java fusion as now (same as the lit-photo shader's fallback).
+5. Check on the phone with tools/replay-s24.sh (phone free): fps, GL thread %, mesh identical within noise.
+
+## Morning test list (both builds ready; install when a phone is free)
+iPhone:
+1. Open an older scan: Photo / Points / Mesh look as before; Points are plain dots (no Splats, no Sharpen).
+2. Lighting: the photo room darkens/brightens with the lights; move a light, the beam moves on the walls.
+3. Objects: remove a thing (patch behind it), move it, put it back; in Photo and in Points.
+4. New 2–3 min scan, Done, let it build: floor by the chair / box sides should have fewer holes (hole fill); no sheet
+   across the ladder.
+5. After that scan, send me the scan's perf-scan.jsonl (memory every 30 s, stage times) and processing log.
+S24:
+1. Install: ~/Library/Android/sdk/platform-tools/adb install -r ~/DEV/shootlocal/android/app/build/outputs/apk/debug/app-debug.apk
+2. Open a scan: Photo; Lighting on: the photo room is lit (if it stays unlit, the shader fell back: tell me).
+3. Done after a new scan finishes without the splat step; Points still there.
+4. One scan for the stage timings (perf-scan.summary.json "timed").
+
 ## Backlog (rk 9 Nov, 23:00)
 - S24 recordings are kept (rk). Add an S24 "rebuild from recording" (ARCore playback of recording.mp4 through the
   scan pipeline, as the iPhone's RecordingProcessor), after the iPhone overnight items, so old S24 scans can be
