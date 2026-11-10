@@ -133,13 +133,16 @@ final class RoomModel {
         return floorY + hs[(int) (m * 0.9f)];
     }
 
-    /** The ceiling's band: the busiest 4 cm within 0.5 m below the top of the scan, if it holds 300+ points (the median
+    /** The ceiling's band: the highest well-filled 4 cm within 0.5 m below the top of the scan, if it holds 300+ points (the median
      *  of the points in it), else NaN. */
     static float ceilingBand(FloatBuffer pos, int count, float floorY, float topY) {
         if (topY - floorY < 2.0f) return Float.NaN;
         int bins = 15; int[] h = new int[bins]; float from = topY - 0.5f;
         for (int i = 0; i < count; i++) { float y = pos.get(i * 3 + 1); int b = (int) ((y - from) / 0.04f); if (b >= 0 && b < bins) h[b]++; }
-        int best = 0; for (int b = 1; b < bins; b++) if (h[b] > h[best]) best = b;
+        // the highest well-filled band (the walls below are busier than the ceiling, so not simply the busiest)
+        int mx = 0; for (int b = 0; b < bins; b++) mx = Math.max(mx, h[b]);
+        int best = -1; for (int b = bins - 1; b >= 0; b--) if (h[b] >= 0.4f * mx && h[b] >= 100) { best = b; break; }
+        if (best < 0) return Float.NaN;
         int near = h[best] + (best > 0 ? h[best - 1] : 0) + (best + 1 < bins ? h[best + 1] : 0);
         if (near < 300) return Float.NaN;
         float lo = from + (best - 1) * 0.04f, hi = from + (best + 2) * 0.04f;
