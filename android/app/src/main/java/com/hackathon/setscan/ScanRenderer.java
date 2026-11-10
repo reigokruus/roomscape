@@ -4527,8 +4527,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // Debug A/B: draw at most 30 fps (the camera's own rate) to leave the GPU and CPU to ARCore.
         // While scanning: at most 30 draws a second, the camera's own rate (rk 10 Nov 15:39: a fast 2.5 min scan reached
         // thermal 'severe' with ~1M points drawn 60 times a second, fps fell and ARCore lost track). The viewer stays at 60.
-        if (fpsCap30 && !viewing && lastFrameNs > 0 && drawStartNs - lastFrameNs < 30_000_000L) {
-            try { Thread.sleep((33_000_000L - (drawStartNs - lastFrameNs)) / 1_000_000L); } catch (InterruptedException ignored) { }
+        // rk 10 Nov 15:44: 15 a second while scanning ("no need to have it any faster; it slows the user down too").
+        // The camera itself stays at 30 (the S24 offers ARCore only 30 fps configs); ARCore tracks on every camera frame
+        // internally, this only sets how often we take a frame, fuse and draw.
+        if (fpsCap30 && !viewing && lastFrameNs > 0 && drawStartNs - lastFrameNs < 63_000_000L) {
+            try { Thread.sleep((66_000_000L - (drawStartNs - lastFrameNs)) / 1_000_000L); } catch (InterruptedException ignored) { }
             drawStartNs = System.nanoTime();
         }
         if (lastFrameNs > 0) perf.frame((drawStartNs - lastFrameNs) / 1e6); // frame interval
@@ -4661,7 +4664,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float dot = curPose[8] * prevPose[8] + curPose[9] * prevPose[9] + curPose[10] * prevPose[10];
                 frameTurn = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, dot))));
             }
-            moveSpeed = moveSpeed * 0.9f + Math.min(frameMove, 0.15f) * 30f * 0.1f;
+            moveSpeed = moveSpeed * 0.9f + (frameDt > 0.005f ? Math.min(frameMove / frameDt, 4.5f) : Math.min(frameMove, 0.15f) * 30f) * 0.1f;   // m/s at any frame rate
             if (frameDt > 0.005f) turnSpeed = turnSpeed * 0.9f + Math.min(frameTurn / frameDt, 400f) * 0.1f;   // deg/s
             // A sudden jump means ARCore just corrected its map: the next moment's poses can't be trusted yet.
             // Measured against the time since the last frame we saw: after a pause (a save, a slow frame) the phone

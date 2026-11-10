@@ -750,7 +750,7 @@ public class MainActivity extends Activity {
             renderer.fpsCap30 = sp.getBoolean("abCap30v2", true);
             recB.setText(recordWanted ? "Video: on" : "Video: off");
             focB.setText(ScanRenderer.FIXED_FOCUS ? "Focus: fixed" : "Focus: auto");
-            capB.setText(renderer.fpsCap30 ? "Draw: 30 fps" : "Draw: 60 fps");
+            capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps");
             recB.setOnClickListener(v -> { recordWanted = !recordWanted; sp.edit().putBoolean("abRecord", recordWanted).apply(); recB.setText(recordWanted ? "Video: on" : "Video: off"); toast("From the next scan"); });
             focB.setOnClickListener(v -> { ScanRenderer.FIXED_FOCUS = !ScanRenderer.FIXED_FOCUS; sp.edit().putBoolean("abFixedFocus", ScanRenderer.FIXED_FOCUS).apply(); focB.setText(ScanRenderer.FIXED_FOCUS ? "Focus: fixed" : "Focus: auto"); toast("From the next scan"); });
             Button photoB = new Button(this);
@@ -764,7 +764,7 @@ public class MainActivity extends Activity {
             ScanRenderer.SCREEN_VIDEO = sp.getBoolean("abScreen", true);
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
-            capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 30 fps" : "Draw: 60 fps"); });
+            capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
             for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
