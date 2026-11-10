@@ -229,10 +229,13 @@ final class Rmsc {
     }
 
     /** The scan's own video (recording.mp4), as <name>-video.mp4. */
-    static Uri exportVideo(Context ctx, File dir, String base) throws Exception {
-        File f = new File(dir, "recording.mp4");
+    static Uri exportVideo(Context ctx, File dir, String base) throws Exception { return exportVideo(ctx, dir, base, "recording.mp4", "-video.mp4"); }
+
+    /** A video in the scan folder (recording.mp4 = the camera; screen.mp4 = what the screen showed), to Downloads. */
+    static Uri exportVideo(Context ctx, File dir, String base, String file, String suffix) throws Exception {
+        File f = new File(dir, file);
         if (!f.exists()) throw new Exception("this scan has no video");
-        return toDownloads(ctx, safeName(base) + "-video.mp4", "video/mp4", o -> {
+        return toDownloads(ctx, safeName(base) + suffix, "video/mp4", o -> {
             try (InputStream in = new FileInputStream(f)) { byte[] buf = new byte[1 << 16]; int r; while ((r = in.read(buf)) > 0) o.write(buf, 0, r); }
         });
     }

@@ -285,15 +285,20 @@ public class MainActivity extends Activity {
     private void shareMenu() {
         File dir = renderer.currentDir;
         if (dir == null) { toast("The scan saves itself a moment after Done. Try Share again in a few seconds."); return; }
-        File video = new File(dir, "recording.mp4");
-        String videoItem = video.exists() ? String.format(java.util.Locale.US, "Share scan video (large, %d MB)", video.length() / 1048576) : null;
-        String[] items = videoItem != null ? new String[]{"Send to nearby phone", "Save to device…", "Share file (.rmsc)", videoItem}
-                : new String[]{"Send to nearby phone", "Save to device…", "Share file (.rmsc)"};
+        File video = new File(dir, "recording.mp4"), screen = new File(dir, "screen.mp4");
+        java.util.List<String> items = new java.util.ArrayList<>(java.util.Arrays.asList("Send to nearby phone", "Save to device…", "Share file (.rmsc)"));
+        // the videos are never in the .rmsc: the camera video (large) and what the screen showed (small)
+        if (video.exists()) items.add(String.format(java.util.Locale.US, "Share scan video (large, %d MB)", video.length() / 1048576));
+        if (screen.exists()) items.add(String.format(java.util.Locale.US, "Share screen video (%d MB)", Math.max(1, screen.length() / 1048576)));
+        String name = renderer.currentName != null ? renderer.currentName : dir.getName();
         new android.app.AlertDialog.Builder(this).setTitle("Share room")
-                .setItems(items, (d, which) -> {
+                .setItems(items.toArray(new String[0]), (d, which) -> {
+                    String it = items.get(which);
                     if (which == 0) nearby.showSendDialog(dir); else if (which == 1) saveRmsc(); else if (which == 2) shareRmsc();
+                    else if (it.startsWith("Share screen")) shareUri("Packing the video...", "video/mp4", "Share screen video",
+                            () -> Rmsc.exportVideo(this, dir, name, "screen.mp4", "-screen.mp4"));
                     else shareUri("Packing the video...", "video/mp4", "Share scan video",
-                            () -> Rmsc.exportVideo(this, dir, renderer.currentName != null ? renderer.currentName : dir.getName()));
+                            () -> Rmsc.exportVideo(this, dir, name));
                 }).show();
     }
 
@@ -726,7 +731,7 @@ public class MainActivity extends Activity {
             testB.setOnClickListener(v -> { updateStatus("GPU self-test running…"); glView.queueEvent(renderer::runGpuSelfTest); });
             // Tracking A/B switches (rk 10 Nov: losses on detailed scenes): video recording, camera focus, 30 fps cap.
             android.content.SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
-            Button recB = new Button(this), focB = new Button(this), capB = new Button(this);
+            Button recB = new Button(this), focB = new Button(this), capB = new Button(this), scrB = new Button(this);
             recordWanted = sp.getBoolean("abRecord", true);
             ScanRenderer.FIXED_FOCUS = sp.getBoolean("abFixedFocus", true);
             renderer.fpsCap30 = sp.getBoolean("abCap30", false);
@@ -735,8 +740,11 @@ public class MainActivity extends Activity {
             capB.setText(renderer.fpsCap30 ? "Draw: 30 fps" : "Draw: 60 fps");
             recB.setOnClickListener(v -> { recordWanted = !recordWanted; sp.edit().putBoolean("abRecord", recordWanted).apply(); recB.setText(recordWanted ? "Video: on" : "Video: off"); toast("From the next scan"); });
             focB.setOnClickListener(v -> { ScanRenderer.FIXED_FOCUS = !ScanRenderer.FIXED_FOCUS; sp.edit().putBoolean("abFixedFocus", ScanRenderer.FIXED_FOCUS).apply(); focB.setText(ScanRenderer.FIXED_FOCUS ? "Focus: fixed" : "Focus: auto"); toast("From the next scan"); });
+            ScanRenderer.SCREEN_VIDEO = sp.getBoolean("abScreen", true);
+            scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
+            scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 30 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }

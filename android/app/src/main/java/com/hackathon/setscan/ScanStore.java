@@ -177,17 +177,21 @@ final class ScanStore {
         // The raw recording (big): moved, not copied, last (a failed save before this point leaves it where it was).
         File recFrom = new File(dir, "recording.mp4"), recTo = new File(tmp, "recording.mp4");
         if (recFrom.exists() && !recTo.exists() && !recFrom.renameTo(recTo)) copyTree(recFrom, recTo);
+        File scrFrom = new File(dir, "screen.mp4"), scrTo = new File(tmp, "screen.mp4");   // the screen video (ScreenVideo)
+        if (scrFrom.exists() && !scrTo.exists() && !scrFrom.renameTo(scrTo)) copyTree(scrFrom, scrTo);
         // swap in the new version
         File old = new File(dir.getParentFile(), dir.getName() + ".old");
         deleteRec(old);
         if (dir.exists() && !dir.renameTo(old)) {
             if (recTo.exists() && !recFrom.exists()) recTo.renameTo(recFrom);   // put the recording back
+            if (scrTo.exists() && !scrFrom.exists()) scrTo.renameTo(scrFrom);
             throw new Exception("could not replace the old save");
         }
         if (!tmp.renameTo(dir)) {
             old.renameTo(dir);   // keep the old save (it has the recording back only if the move above was undone)
             File r2 = new File(dir, "recording.mp4");
             if (recTo.exists() && !r2.exists()) recTo.renameTo(r2);
+            File s2 = new File(dir, "screen.mp4"); if (scrTo.exists() && !s2.exists()) scrTo.renameTo(s2);
             throw new Exception("could not write the save");
         }
         deleteRec(old);

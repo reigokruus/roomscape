@@ -2355,7 +2355,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             File dir = currentDir;
             perf.stop();
-            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
+            if (dir != null) { keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
         }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
@@ -3619,6 +3619,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void reset() {
+        screenFile = null;   // the next scan records its own screen video
         roomEdits.clear(); planningPreview = false; planningLoadError = null; planningScanKey = null;
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
@@ -4372,6 +4373,54 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     @Override
     public void onDrawFrame(GL10 gl) {
         try { onDrawFrameInner(gl); } finally { System.arraycopy(viewMvp, 0, shownMvp, 0, 16); shownW = width; shownH = height; }
+        try { screenVideoFrame(); } catch (Exception e) { logError("screen video", e); screenVideo = null; }
+    }
+
+    // ---- screen.mp4: what the user saw while scanning (ScreenVideo) ----
+    /** Debug switch "Screen video" (MainActivity). */
+    static volatile boolean SCREEN_VIDEO = true;
+    private ScreenVideo screenVideo;
+    private File screenFile, screenPending;
+    private volatile String fusionState = "";
+
+    private void screenVideoFrame() {
+        boolean scanningNow = !viewing && everTracked && width > 0;
+        if (screenVideo == null && scanningNow && SCREEN_VIDEO && screenFile == null) {
+            File dir = activity.getFilesDir();
+            File[] old = dir.listFiles((d, n) -> n.startsWith("screen-") && n.endsWith(".mp4"));
+            if (old != null) for (File f : old) if (!f.equals(screenPending)) f.delete();
+            screenFile = new File(dir, "screen-" + System.currentTimeMillis() + ".mp4");
+            ScreenVideo v = new ScreenVideo(screenFile);
+            try { v.start(width, height); screenVideo = v; log("screen video: recording what's on screen (" + ScreenVideo.WIDTH + " px wide, " + ScreenVideo.FPS + " fps, times as in this log)"); }
+            catch (Exception e) { log("screen video: could not start (" + e.getMessage() + ")"); try { v.releaseGl(); v.finish(); } catch (Throwable ignored) { } screenFile.delete(); }
+        }
+        ScreenVideo v = screenVideo;
+        if (v == null) return;
+        if (scanningNow && !v.failed()) {
+            int sec = (int) (scanMs / 1000);
+            String hint = shownHint == null ? "" : shownHint;
+            v.frame(width, height, String.format(java.util.Locale.US, "%.1fs  %s  view %s  fusion %s  scan %d:%02d\n%s",
+                    (System.currentTimeMillis() - t0) / 1000f, lastTs, heldMode == 0 ? "live" : heldMode == 1 ? "held (rotation)" : "held (ARCore)", fusionState, sec / 60, sec % 60, hint));
+            return;
+        }
+        // Done (or the GL context went away): finish the file; it moves into the scan folder once that's saved
+        screenVideo = null;
+        v.releaseGl();
+        final File file = screenFile;
+        new Thread(() -> {
+            boolean ok = v.finish();
+            log(String.format(java.util.Locale.US, "screen video: %s, %d frames, %.1f ms on the draw thread per frame", ok ? "kept" : "failed", v.frames, v.frames > 0 ? v.glMsTotal / v.frames : 0));
+            if (ok) screenPending = file; else if (file != null) file.delete();
+        }, "screen-video-close").start();
+        // (screenFile stays set: one video per scan; reset() clears it for the next scan)
+    }
+
+    /** After the save: screen.mp4 into the scan folder. */
+    void keepScreenVideo(File dir) {
+        File f = screenPending;
+        if (f == null || dir == null || !f.exists()) return;
+        File to = new File(dir, "screen.mp4");
+        if (f.renameTo(to)) { screenPending = null; log("screen video kept with the scan: screen.mp4 (" + to.length() / 1024 + " KB)"); }
     }
 
     private void onDrawFrameInner(GL10 gl) {
@@ -5881,9 +5930,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             sessionRestarted = true; recentPts.clear();
             activity.restartSession();
         }
+        String fusion = ts != TrackingState.TRACKING ? "off (lost)" : needRealign ? "off (lining up)" : nowMs < settleUntil ? "off (settling)" : "on";
+        fusionState = fusion;
         if (nowMs - stateLogAt < 1000) return;
         stateLogAt = nowMs;
-        String fusion = ts != TrackingState.TRACKING ? "off (lost)" : needRealign ? "off (lining up)" : nowMs < settleUntil ? "off (settling)" : "on";
         log(String.format(java.util.Locale.US, "state: %s, view %s, fusion %s, depth new %d stale %d not ready %d%s", ts,
                 heldMode == 0 ? "live" : heldMode == 1 ? "held (rotation sensor)" : "held (ARCore movement)", fusion,
                 newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0, walkingWhileLost ? ", walking" : ""));

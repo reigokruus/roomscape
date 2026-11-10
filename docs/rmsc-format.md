@@ -29,6 +29,8 @@ Apple UTI: `com.roomscape.rmsc`, conforming to `public.zip-archive` and `public.
 | `android/measurements.json` | no | Measurements the user kept (Measure in Enter the room): `[[x0, y0, z0, x1, y1, z1], …]`, the two ends in the scan's world (before the floor shift), metres. A shared `measurements` list in the manifest (with an optional name) is proposed, not yet in the manifest |
 | `android/diagnostics/…` | no | For fixing problems only: the scan's perf log (`perf-scan.jsonl`, `perf-scan.summary.json`), event log (`scan-log.txt`), `device.json` (model, Android, ARCore and app versions, RAM), `gpu-info.txt` (driver and limits), `gpu-selftest.txt`, `crash-last.txt`, `app-log.txt`. No location or account data. Readers ignore it |
 
+Videos are never in a `.rmsc`. On Android they stay in the scan folder and are shared separately from the Share menu: `recording.mp4` (the camera, ARCore recording; "Share scan video") and `screen.mp4` (what the screen showed while scanning: the scan view at ~480 px wide and 8 fps with the hint, tracking state, view mode, fusion state and the event log's time burnt in at the top; "Share screen video"; debug switch "Screen video", on by default).
+
 A reader must ignore files it doesn't know. A writer may leave out every optional file.
 
 ### manifest.json
