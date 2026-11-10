@@ -8,7 +8,7 @@ import simd
 /// 1.1% of it missing and 2.3% added, nothing far off.
 enum FineSurface {
     static let voxel: Float = 0.019
-    static let maxError: Float = 0.008
+    static var maxError: Float = 0.008
     /// Tile edge in voxels (~1.8 m).
     static let tile: Int32 = 96
     /// The biggest block allowed (voxels): ~240 MB on the GPU.

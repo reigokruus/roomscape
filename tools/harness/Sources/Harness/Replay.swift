@@ -335,6 +335,14 @@ enum GPUBench {
             print(String(format: "synctest: incremental %d syncs, mean %.1f ms (%.0f bricks each) vs one full copy %.0f ms; meshes %@ (%d vs %d triangles)",
                          syncs, syncTime / Double(max(1, syncs)) * 1000, Double(bricks) / Double(max(1, syncs)), fullTime * 1000, same ? "identical" : "DIFFERENT", ma.triangles.count / 3, mb.triangles.count / 3))
         }
+        // DEPTH_ROW=y: the view frame's raw depth along row y (cm), to see whether thin things stand out from what's behind.
+        if let row = ProcessInfo.processInfo.environment["DEPTH_ROW"].flatMap(Int.init), let view,
+           let i = depthFrameIndex.firstIndex(where: { $0 >= view }) {
+            for k in [i, min(depth.count - 1, i + 1)] {
+                let d = depth[k]
+                print("depth row \(row) of frame \(depthFrameIndex[k]) (\(d.w) px):", (0..<d.w).map { String(Int((d.m[row * d.w + $0] * 100).rounded())) }.joined(separator: " "))
+            }
+        }
         // PROBE=x,y: the voxels along the ray through depth pixel (x, y) of the view's frame.
         if let probe = ProcessInfo.processInfo.environment["PROBE"]?.split(separator: ",").compactMap({ Int($0) }), probe.count == 2, let view {
             if let i = depthFrameIndex.firstIndex(where: { $0 >= view }) {
@@ -362,6 +370,7 @@ enum GPUBench {
         }
         var gpuMesh = Fusion.mesh(tsdf)
         // FINE_TILES=1: the app's FineSurface extraction (tiles + simplification) instead of the whole-block copy.
+        if let e = ProcessInfo.processInfo.environment["FINE_ERR"].flatMap(Float.init) { FineSurface.maxError = e / 1000 }
         if ProcessInfo.processInfo.environment["FINE_TILES"] == "1" {
             let tf = Date()
             let m = FineSurface.extract(gpu)
@@ -553,7 +562,19 @@ enum GPUBench {
         if let view, view < frames.count {
             let f = frames[view]
             let url = URL(fileURLWithPath: "harness-out/detail-\(dir.deletingLastPathComponent().lastPathComponent)-f\(view)-\(Int((voxel * 1000).rounded()))mm\(tag)\(ProcessInfo.processInfo.environment["TAG"] ?? "")\(ProcessInfo.processInfo.environment["UNSEEN"] == "1" ? "-unseen" : "").png")
-            Images.renderFromCamera(gpuMesh.positions, gpuMesh.triangles, pose: f.pose, k: f.k, imageWidth: f.w, imageHeight: f.h, to: url)
+            // VIEW_ORBIT=deg[,metres]: the same camera swung about the vertical around the spot it looks at (default 1.1 m
+            // ahead), to see from the side whether thin things stand off what's behind them.
+            var rp = f.pose
+            if let o = ProcessInfo.processInfo.environment["VIEW_ORBIT"]?.split(separator: ",").compactMap({ Float($0) }), let deg = o.first {
+                let dist = o.count > 1 ? o[1] : 1.1
+                let c = SIMD3(f.pose.columns.3.x, f.pose.columns.3.y, f.pose.columns.3.z), fw = -SIMD3(f.pose.columns.2.x, f.pose.columns.2.y, f.pose.columns.2.z)
+                let pivot = c + fw * dist
+                var T1 = matrix_identity_float4x4; T1.columns.3 = SIMD4(pivot, 1)
+                var T2 = matrix_identity_float4x4; T2.columns.3 = SIMD4(-pivot, 1)
+                let R = simd_float4x4(simd_quatf(angle: deg * .pi / 180, axis: SIMD3(0, 1, 0)))
+                rp = T1 * R * T2 * f.pose
+            }
+            Images.renderFromCamera(gpuMesh.positions, gpuMesh.triangles, pose: rp, k: f.k, imageWidth: f.w, imageHeight: f.h, to: url)
             print("  render: \(url.path)")
         }
         if skipCPU { return }

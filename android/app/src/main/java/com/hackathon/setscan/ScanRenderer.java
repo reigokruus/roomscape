@@ -4309,7 +4309,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] clearTap = pendingClear;
             if (clearTap != null) { pendingClear = null; clearAt(clearTap[0], clearTap[1]); }
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
-            drawGuide(mvp);
+            // (no arrow to the unscanned area: rk 10 Nov 10:59 asked to remove it; the text hint stays)
             if (SHOW_OBJECTS) drawObjectHint(mvp);
             maybeAskClaudeLive(nowMs);
         }
@@ -4385,7 +4385,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (best < 0 || bw < 25) { guideTarget = null; guideText = r.floorCoverage > 0.85f ? "Room looks covered. Fill in details or tap Done." : null; return; }
         float tx = sx[best] / w[best], tz = sz[best] / w[best];
         guideTarget = new float[]{tx, r.floorY + 0.3f, tz};
-        guideText = String.format(java.util.Locale.US, "Not scanned yet: about %.1f m², follow the arrow", bw * cell * cell);
+        guideText = String.format(java.util.Locale.US, "Not scanned yet: about %.1f m², look around", bw * cell * cell);
     }
 
     private void vote(float[] w, float[] sx, float[] sz, float x, float z, float weight) {
@@ -5423,9 +5423,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             int k = p.remaining() / 4;
             for (int i = 0; i < k; i++) if (p.get(i * 4 + 3) >= 0.3f) n++;
         } catch (Exception e) { return; }
-        if (n >= 30) { fewFeaturesSince = 0; return; }
+        // Advisory only, never blocks anything (rk 10:59: it nagged every 15 s at an ordinary door while depth was
+        // fusing). Only when features stay very low for 3 s, the depth isn't filling the view either, at most once a
+        // minute.
+        boolean depthFine = depthPixelsFrame > 1500;
+        if (n >= 15 || depthFine) { fewFeaturesSince = 0; return; }
         if (fewFeaturesSince == 0) { fewFeaturesSince = nowMs; return; }
-        if (nowMs - fewFeaturesSince > 1000 && nowMs - plainHintAt > 15000) {
+        if (nowMs - fewFeaturesSince > 3000 && nowMs - plainHintAt > 60000) {
             plainHintAt = nowMs;
             log("few features (" + n + "): plain-wall hint");
             activity.toast("Plain wall: move slowly, keep some furniture or an edge in view.");
@@ -5482,7 +5486,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (f2.inliers > fit.inliers) fit = f2;
         }
         float[] F = fit.fix; float inl = fit.inliers, med = fit.median;
-        boolean good = Realign.good(fit);
+        // Part of the view may be new (a wall not scanned yet): half the samples on the scan is enough.
+        boolean good = fit.inliers >= 0.5f && fit.median < Realign.MAX_MEDIAN;
         // ARCore relocalised by itself (no restart) and the view already sits on the scan with the old correction:
         // two agreeing frames are enough (rk 10 Nov 10:15: a short loss shouldn't pause for long).
         float moved = (float) Math.sqrt((F[12] - poseFix[12]) * (F[12] - poseFix[12]) + (F[13] - poseFix[13]) * (F[13] - poseFix[13]) + (F[14] - poseFix[14]) * (F[14] - poseFix[14]));
