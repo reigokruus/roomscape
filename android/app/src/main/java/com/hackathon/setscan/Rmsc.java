@@ -74,7 +74,26 @@ final class Rmsc {
      * Everything shared is written with the floor at y = 0, like the iPhone's packages (floorY 0). How far it was moved
      * goes in android/shift.json, so this app can put its own android/ extras (marks, splats, path) back in place on import.
      */
+    /** Debug switch "Points under tiles: hidden": the points under the scan's tiles are left out of what's shared
+     *  (this in-memory copy only; the saved points.bin is never changed). */
+    static void dropUnderTiles(ScanStore.Data d, File dir) {
+        FlatTiles.Cover c = FlatTiles.Cover.read(dir);
+        if (c == null || d.n == 0) return;
+        int k = 0;
+        for (int i = 0; i < d.n; i++) {
+            if (c.under(d.pos[i * 3], d.pos[i * 3 + 1], d.pos[i * 3 + 2])) continue;
+            if (k != i) {
+                System.arraycopy(d.pos, i * 3, d.pos, k * 3, 3); System.arraycopy(d.col, i * 3, d.col, k * 3, 3);
+                if (d.seg != null) d.seg[k] = d.seg[i];
+            }
+            k++;
+        }
+        android.util.Log.i("RoomScape", "export: " + (d.n - k) + " of " + d.n + " points under tiles left out");
+        d.n = k;
+    }
+
     static void write(ZipOutputStream z, ScanStore.Data d, File dir, String appVersion, int appBuild) throws Exception {
+        if (ScanRenderer.DROP_UNDER_TILES) dropUnderTiles(d, dir);
         final float floorY = floorY(d);
         float[] mn = {Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE}, mx = {-Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE};
         for (int i = 0; i < d.n; i++) for (int a = 0; a < 3; a++) { float v = d.pos[i * 3 + a] - (a == 1 ? floorY : 0); if (v < mn[a]) mn[a] = v; if (v > mx[a]) mx[a] = v; }

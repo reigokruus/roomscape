@@ -513,6 +513,53 @@ final class FlatTiles {
         } catch (Exception e) { return null; }
     }
 
+    /** The saved tiles of a scan without any GL (export): which stored points lie under a tile (rk 10 Nov: "delete the
+     *  spots from that area and keep a simple image there"; for now only hidden from what's shown and shared, the saved
+     *  points stay in full). Same band as the offline count (tools/tile-anchor/UnderTiles): 7 cm in front, 10 cm behind. */
+    static final class Cover {
+        final float[][] planes; final java.util.HashSet<Long> set = new java.util.HashSet<>(); final float tile;
+        private Cover(float[][] p, float t) { planes = p; tile = t; }
+        static Cover read(java.io.File dir) {
+            java.io.File jf = new java.io.File(dir, "tiles.json");
+            if (!jf.exists()) return null;
+            try {
+                org.json.JSONObject o = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(jf.toPath()), "UTF-8"));
+                org.json.JSONArray pa = o.getJSONArray("planes"), ta = o.getJSONArray("tiles");
+                float[][] p = new float[pa.length()][10];
+                for (int i = 0; i < p.length; i++) for (int j = 0; j < 10; j++) p[i][j] = (float) pa.getJSONArray(i).getDouble(j);
+                Cover c = new Cover(p, (float) o.getDouble("tile"));
+                for (int i = 0; i < ta.length(); i++) { org.json.JSONArray t = ta.getJSONArray(i); c.set.add(key(t.getInt(0), t.getInt(1), t.getInt(2))); }
+                return c.set.isEmpty() ? null : c;
+            } catch (Exception e) { return null; }
+        }
+        boolean under(float x, float y, float z) {
+            for (int pi = 0; pi < planes.length; pi++) {
+                float[] p = planes[pi]; float dd = p[0] * x + p[1] * y + p[2] * z + p[3];
+                if (dd > 0.07f || dd < -0.10f) continue;
+                int iu = (int) Math.floor((p[4] * x + p[5] * y + p[6] * z) / tile), iv = (int) Math.floor((p[7] * x + p[8] * y + p[9] * z) / tile);
+                if (set.contains(key(pi, iu, iv))) return true;
+            }
+            return false;
+        }
+    }
+
+    /** Measure on tiles: where a ray (origin o, unit direction d) first meets a painted tile, or null. */
+    synchronized float[] rayHit(float ox, float oy, float oz, float dx, float dy, float dz) {
+        float best = Float.MAX_VALUE; float[] hit = null;
+        for (int pi = 0; pi < planes.size(); pi++) {
+            Plane p = planes.get(pi);
+            float den = p.nx * dx + p.ny * dy + p.nz * dz;
+            if (Math.abs(den) < 1e-4f) continue;
+            float t = -(p.nx * ox + p.ny * oy + p.nz * oz + p.d) / den;
+            if (t < 0.1f || t >= best) continue;
+            float x = ox + dx * t, y = oy + dy * t, z = oz + dz * t;
+            int iu = (int) Math.floor((p.ux * x + p.uy * y + p.uz * z) / TILE), iv = (int) Math.floor((p.vx * x + p.vy * y + p.vz * z) / TILE);
+            Tile tl = tiles.get(key(pi, iu, iv));
+            if (tl != null && tl.score > 0) { best = t; hit = new float[]{x, y, z, t}; }
+        }
+        return hit;
+    }
+
     /** GL thread: tiles saved with a scan (no appear animation). */
     synchronized boolean load(java.io.File dir) {
         java.io.File jf = new java.io.File(dir, "tiles.json"), pf = new java.io.File(dir, "tiles.png");

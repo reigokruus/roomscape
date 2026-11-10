@@ -2958,6 +2958,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (off > 0.15f * 0.15f) continue;
             if (t < best) { best = t; hit = new float[]{pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2)}; }
         }
+        // Points under tiles hidden: a tile in the way (or at most 10 cm past the nearest point) is what gets measured
+        if (DROP_UNDER_TILES && FLAT_TILES) {
+            float[] th = flatTiles.rayHit(ox, oy, oz, dx, dy, dz);
+            if (th != null && (hit == null || th[3] <= best + 0.10f)) return new float[]{th[0], th[1], th[2]};
+        }
         return hit;
     }
 
@@ -7099,6 +7104,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static volatile boolean PHOTO_SURFACE = false;
     /** Flat tiles (rk 10 Nov 16:05 trial): flat surfaces painted from the camera in 30 cm tiles. Debug switch. */
     static volatile boolean FLAT_TILES = true;
+    /** Debug switch, off by default (rk 10 Nov): points under tiles left out of the result and the export, Measure on the tile instead. */
+    static volatile boolean DROP_UNDER_TILES = false;
     final FlatTiles flatTiles = new FlatTiles();
 
     /** Twice a second while tracking well and not moving fast: tiles from the latest depth image, when it was taken
