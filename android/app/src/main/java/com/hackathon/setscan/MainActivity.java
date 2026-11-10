@@ -834,17 +834,16 @@ public class MainActivity extends Activity {
         });
         glView.setOnTouchListener((v, e) -> {
             if (!renderer.isViewing()) {
-                // While scanning, a quick tap on a thing cuts it out of the photo and stands it in the room.
-                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false; }
-                if (e.getPointerCount() > 1) multiTouch = true;
-                if (e.getActionMasked() == MotionEvent.ACTION_UP) {
-                    long held = e.getEventTime() - downTime;
-                    double moved = Math.hypot(e.getX() - downX, e.getY() - downY);
-                    // A tap clears the scan there so it can be redone (rk 9 Nov); only a quick single-finger tap.
-                    String why = multiTouch ? "more than one finger" : held >= 300 ? "held " + held + " ms" : moved >= dp(12) ? "moved " + Math.round(moved) + " px" : null;
-                    android.util.Log.i("RoomScape", "scan tap " + (why == null ? "accepted" : "rejected: " + why) + " at " + Math.round(e.getX()) + "," + Math.round(e.getY()));
-                    if (why == null) renderer.requestClear(e.getX(), e.getY());
+                // Press and hold (0.9 s, a ring fills under the finger) clears the scan there so it can be redone
+                // (rk 9 Nov; hold instead of tap since 10 Nov: a first-time user taps by instinct).
+                int act = e.getActionMasked();
+                if (act == MotionEvent.ACTION_DOWN) {
+                    downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); multiTouch = false;
+                    startHoldRing(e.getX(), e.getY());
                 }
+                if (e.getPointerCount() > 1 && !multiTouch) { multiTouch = true; cancelHoldRing(); }
+                if (act == MotionEvent.ACTION_MOVE && Math.hypot(e.getX() - downX, e.getY() - downY) >= dp(12)) cancelHoldRing();
+                if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) cancelHoldRing();
                 return true;
             }
             if (walkTouch(e)) return true;
@@ -1642,6 +1641,52 @@ public class MainActivity extends Activity {
     String claudeKey() {
         String k = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY, null);
         return k == null || k.trim().isEmpty() ? null : k.trim();
+    }
+
+    private HoldRing holdRing;
+    private final Runnable holdFire = () -> {
+        if (holdRing == null || holdRing.getVisibility() != View.VISIBLE) return;
+        float x = holdRing.cx, y = holdRing.cy;
+        holdRing.setVisibility(View.GONE);
+        glView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+        android.util.Log.i("RoomScape", "scan hold-to-clear at " + Math.round(x) + "," + Math.round(y));
+        renderer.requestClear(x, y);
+    };
+
+    private void startHoldRing(float x, float y) {
+        if (holdRing == null) {
+            holdRing = new HoldRing(this);
+            ((android.view.ViewGroup) glView.getParent()).addView(holdRing, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        }
+        holdRing.start(x, y, dp(30));
+        glView.removeCallbacks(holdFire);
+        glView.postDelayed(holdFire, HoldRing.MS);
+    }
+
+    private void cancelHoldRing() {
+        glView.removeCallbacks(holdFire);
+        if (holdRing != null) holdRing.setVisibility(View.GONE);
+    }
+
+    /** The ring that fills while a finger is held down to clear a spot. */
+    static final class HoldRing extends View {
+        static final long MS = 900;
+        float cx, cy, r; long t0;
+        final android.graphics.Paint bg = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG), fg = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        HoldRing(android.content.Context c) {
+            super(c);
+            bg.setStyle(android.graphics.Paint.Style.STROKE); bg.setStrokeWidth(10); bg.setColor(0x66000000);
+            fg.setStyle(android.graphics.Paint.Style.STROKE); fg.setStrokeWidth(10); fg.setColor(0xFFFFFFFF); fg.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            setVisibility(GONE); setClickable(false); setFocusable(false);
+        }
+        void start(float x, float y, float radius) { cx = x; cy = y; r = radius; t0 = android.os.SystemClock.uptimeMillis(); setVisibility(VISIBLE); invalidate(); }
+        @Override protected void onDraw(android.graphics.Canvas c) {
+            float f = Math.min(1f, (android.os.SystemClock.uptimeMillis() - t0) / (float) MS);
+            android.graphics.RectF o = new android.graphics.RectF(cx - r, cy - r, cx + r, cy + r);
+            c.drawCircle(cx, cy, r, bg);
+            c.drawArc(o, -90, 360 * f, false, fg);
+            if (f < 1) postInvalidateOnAnimation();
+        }
     }
 
     /** The scan lost its place 30 s ago and hasn't found it again: keep looking, or carry on as a new part. */

@@ -540,6 +540,8 @@ struct ScannerScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var confirmCancel = false
     @State private var flash: ClearFlash?
+    /// Press and hold to clear: where the finger is down and since when (nil = no hold).
+    @State private var hold: (at: CGPoint, since: Date, id: UUID)?
 
     /// `improving`: a saved scan to add a second pass to (Improve scan), instead of making a new one.
     init(improving: SavedScan? = nil, onFinished: @escaping (SavedScan) -> Void, onCancel: @escaping () -> Void) {
@@ -556,18 +558,46 @@ struct ScannerScreen: View {
             if controller.phase == .relocalizing, let view = controller.relocalizeView {
                 RelocalizeCamera(view: view).ignoresSafeArea()
             }
-            // Tap to clear: a quick single-finger tap on the camera view wipes the scan in a circle around it
-            // (11% of the screen's short side) so it can be scanned again. The card and buttons above take their own taps.
+            // Press and hold to clear (0.9 s, a ring fills under the finger; a tap did it until 10 Nov, and a first-time
+            // user taps by instinct): wipes the scan in a circle around it (11% of the screen's short side) so it can
+            // be scanned again. The card and buttons above take their own taps. The same gesture as the Android app.
             if controller.phase == .scanning {
                 GeometryReader { g in
                     Color.clear
                         .contentShape(Rectangle())
-                        .gesture(SpatialTapGesture(count: 1).onEnded { e in
-                            let r = min(g.size.width, g.size.height) * 0.11
-                            controller.clearTapped(at: e.location, radius: r)
-                            flash = ClearFlash(center: e.location, radius: r)
-                            withAnimation(.easeOut(duration: 0.7)) { flash?.visible = false }
-                        })
+                        .gesture(DragGesture(minimumDistance: 0)
+                            .onChanged { e in
+                                if hold == nil {
+                                    let id = UUID()
+                                    hold = (e.startLocation, Date(), id)
+                                    Task { @MainActor in
+                                        try? await Task.sleep(nanoseconds: 900_000_000)
+                                        guard let h = hold, h.id == id else { return }
+                                        hold = nil
+                                        let r = min(g.size.width, g.size.height) * 0.11
+                                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                        controller.clearTapped(at: h.at, radius: r)
+                                        flash = ClearFlash(center: h.at, radius: r)
+                                        withAnimation(.easeOut(duration: 0.7)) { flash?.visible = false }
+                                    }
+                                } else if let h = hold, hypot(e.location.x - h.at.x, e.location.y - h.at.y) > 12 {
+                                    hold = nil   // moved: not a hold
+                                }
+                            }
+                            .onEnded { _ in hold = nil })
+                    if let h = hold {
+                        TimelineView(.animation) { ctx in
+                            let f = min(1, ctx.date.timeIntervalSince(h.since) / 0.9)
+                            ZStack {
+                                Circle().stroke(Color.black.opacity(0.4), lineWidth: 5)
+                                Circle().trim(from: 0, to: f).stroke(Color.white, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                    .rotationEffect(.degrees(-90))
+                            }
+                            .frame(width: 60, height: 60)
+                            .position(h.at)
+                        }
+                        .allowsHitTesting(false)
+                    }
                     if let flash {
                         Circle()
                             .fill(Color.white.opacity(0.25))
