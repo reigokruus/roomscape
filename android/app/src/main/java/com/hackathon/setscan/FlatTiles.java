@@ -341,5 +341,57 @@ final class FlatTiles {
         vbo.position(0);
     }
 
+    // ---- Saved with the scan (tiles.json + tiles.png: the used part of the atlas) ----
+    static final class Saved { String json; android.graphics.Bitmap img; }
+
+    /** GL thread: the painted tiles and the atlas rows they use; null when there are none. */
+    synchronized Saved snapshot() {
+        if (atlasTex == 0 || countShown() == 0) return null;
+        int rows = (slots + PER_ROW - 1) / PER_ROW, h = rows * PX;
+        ByteBuffer px = ByteBuffer.allocateDirect(ATLAS * h * 4).order(ByteOrder.nativeOrder());
+        int[] prev = new int[1]; GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, prev, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo);
+        GLES20.glReadPixels(0, 0, ATLAS, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prev[0]);
+        android.graphics.Bitmap bm = android.graphics.Bitmap.createBitmap(ATLAS, h, android.graphics.Bitmap.Config.ARGB_8888);
+        px.position(0); bm.copyPixelsFromBuffer(px);   // row 0 = atlas row 0 (texture v = 0)
+        try {
+            org.json.JSONObject o = new org.json.JSONObject().put("tile", TILE).put("px", PX).put("atlas", ATLAS).put("rows", rows);
+            org.json.JSONArray pa = new org.json.JSONArray();
+            for (Plane p : planes) pa.put(new org.json.JSONArray(new double[]{p.nx, p.ny, p.nz, p.d, p.ux, p.uy, p.uz, p.vx, p.vy, p.vz}));
+            org.json.JSONArray ta = new org.json.JSONArray();
+            for (Tile t : tiles.values()) if (t.score > 0) ta.put(new org.json.JSONArray(new double[]{t.plane, t.iu, t.iv, t.slot, t.score}));
+            o.put("planes", pa).put("tiles", ta);
+            Saved sv = new Saved(); sv.json = o.toString(); sv.img = bm; return sv;
+        } catch (Exception e) { return null; }
+    }
+
+    /** GL thread: tiles saved with a scan (no appear animation). */
+    synchronized boolean load(java.io.File dir) {
+        java.io.File jf = new java.io.File(dir, "tiles.json"), pf = new java.io.File(dir, "tiles.png");
+        if (!jf.exists() || !pf.exists()) return false;
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(jf.toPath()), "UTF-8"));
+            if (o.getInt("px") != PX || o.getInt("atlas") != ATLAS) return false;
+            android.graphics.Bitmap bm = android.graphics.BitmapFactory.decodeFile(pf.getPath());
+            if (bm == null) return false;
+            clear(); ensureGl();
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, atlasTex);
+            android.opengl.GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bm);
+            bm.recycle();
+            org.json.JSONArray pa = o.getJSONArray("planes");
+            for (int i = 0; i < pa.length(); i++) { org.json.JSONArray a = pa.getJSONArray(i); Plane p = new Plane();
+                p.nx = (float) a.getDouble(0); p.ny = (float) a.getDouble(1); p.nz = (float) a.getDouble(2); p.d = (float) a.getDouble(3);
+                p.ux = (float) a.getDouble(4); p.uy = (float) a.getDouble(5); p.uz = (float) a.getDouble(6); p.vx = (float) a.getDouble(7); p.vy = (float) a.getDouble(8); p.vz = (float) a.getDouble(9);
+                planes.add(p); }
+            org.json.JSONArray ta = o.getJSONArray("tiles");
+            for (int i = 0; i < ta.length(); i++) { org.json.JSONArray a = ta.getJSONArray(i); Tile t = new Tile();
+                t.plane = a.getInt(0); t.iu = a.getInt(1); t.iv = a.getInt(2); t.slot = a.getInt(3); t.score = (float) a.getDouble(4); t.born = -100;
+                tiles.put(key(t.plane, t.iu, t.iv), t); slots = Math.max(slots, t.slot + 1); }
+            dirty = true;
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
     synchronized void clear() { maskN = 0; tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
 }

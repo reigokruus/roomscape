@@ -1133,6 +1133,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void loadScan(File dir, Runnable done) {
         runAfterDone();   // the last scan's logs into its own folder, not the one being opened
         reset();
+        if (flatTiles.load(dir)) log("flat tiles: " + flatTiles.countShown() + " from the save");
         loadFeatureHeights(dir);
         improveDir = null; improveT = null; contAuto = false; contBase = null;
         idle = false; viewing = true; sensors.active = false;
@@ -2392,10 +2393,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // under a minute), or at once when another scan is started or opened first (rk 10 Nov 15:04-15:06: three quick
         // scans; the first one's logs went into the second's folder and the second's were lost).
         final File dirAtDone = currentDir;
+        final FlatTiles.Saved tilesSaved = FLAT_TILES ? flatTiles.snapshot() : null;   // GL thread: read back now
         synchronized (afterDoneLock) {
             afterDoneWork = () -> {
                 File dir = dirAtDone != null ? dirAtDone : currentDir;
                 perf.stop();
+                if (dir != null && tilesSaved != null) saveTiles(dir, tilesSaved);
                 if (dir != null) { saveEvents(dir); saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
             };
         }
@@ -4513,6 +4516,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "live-mesh.bin"))))) {
             o.writeInt(vv.length / 3); o.writeFloat(lastLiveFloor); for (float v : vv) o.writeFloat(v);
         } catch (Exception e) { logError("live mesh", e); }
+    }
+
+    /** tiles.json + tiles.png in the scan folder (the flat tiles; not in the .rmsc yet). */
+    private void saveTiles(File dir, FlatTiles.Saved sv) {
+        try {
+            java.nio.file.Files.write(new File(dir, "tiles.json").toPath(), sv.json.getBytes("UTF-8"));
+            try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "tiles.png"))) { sv.img.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, o); }
+            log("flat tiles kept with the scan: " + flatTiles.countShown() + " tiles");
+        } catch (Exception e) { logError("tiles save", e); }
     }
 
     /** After the save: screen.mp4 into the scan folder. */
