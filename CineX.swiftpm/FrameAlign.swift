@@ -12,7 +12,7 @@ struct FrameAlign {
     /// Statistics of the last frame: points used, RMS distance to the surface (m).
     private(set) var lastUsed = 0
     private(set) var lastRMS: Float = 0
-    private(set) var aligned = 0, skipped = 0, tooLittle = 0
+    private(set) var aligned = 0, skipped = 0, tooLittle = 0, skippedFar = 0, skippedRMS = 0
 
     /// Fewer surface points than this: nothing to align to yet (fused as ARKit says).
     static let minPoints = 150
@@ -22,6 +22,10 @@ struct FrameAlign {
     static let maxStep: Float = 0.03, maxTurn: Float = 0.03
     /// The largest total correction (m / rad) away from ARKit.
     static let maxTotal: Float = 0.08, maxTotalTurn: Float = 0.052
+    /// Share of the correction let go back towards ARKit each frame (before the fit pulls it where the surface says).
+    static var leak: Float = 0
+    /// Frames that don't fit / ask for too big a correction: skipped (true) or fused with the last good correction.
+    static var skipUnfit = true
 
     /// Trilinear signed distance (metres) and gradient at `p`, or nil where the surface isn't well seen.
     private static func sample(_ gpu: TsdfGPU, _ sdf: UnsafeMutablePointer<Float>, _ w: UnsafeMutablePointer<UInt16>, _ p: SIMD3<Float>) -> (Float, SIMD3<Float>)? {
@@ -53,11 +57,23 @@ struct FrameAlign {
         return (s * gpu.trunc, grad / gl)
     }
 
+    /// Signed distance (m) from `p` to the fused surface, or nil where it isn't well seen (harness checks).
+    static func distance(_ gpu: TsdfGPU, _ p: SIMD3<Float>) -> Float? { sample(gpu, gpu.sdfPointer, gpu.weightPointer, p)?.0 }
+
     /// Aligns one frame: `points` in camera space (metres, ARKit axes), `pose` camera → world (ARKit). Returns the
     /// corrected pose to fuse with, or nil to skip this frame. Call after the block's `finish()`.
     mutating func align(_ gpu: TsdfGPU, points: [SIMD3<Float>], pose: simd_float4x4) -> simd_float4x4? {
         let sdf = gpu.sdfPointer, w = gpu.weightPointer
         var C = correction
+        if Self.leak > 0 {
+            let q = simd_quatf(simd_float3x3(SIMD3(C.columns.0.x, C.columns.0.y, C.columns.0.z), SIMD3(C.columns.1.x, C.columns.1.y, C.columns.1.z),
+                                             SIMD3(C.columns.2.x, C.columns.2.y, C.columns.2.z)))
+            let q2 = simd_slerp(q, simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), Self.leak)
+            var L = simd_float4x4(q2)
+            L.columns.3 = SIMD4(SIMD3(C.columns.3.x, C.columns.3.y, C.columns.3.z) * (1 - Self.leak), 1)
+            C = L
+        }
+        let start = C
         var used = 0, rms: Float = 0
         for _ in 0..<6 {
             var H = [Float](repeating: 0, count: 36), b = [Float](repeating: 0, count: 6)
@@ -92,8 +108,8 @@ struct FrameAlign {
         // A correction this big isn't drift any more: skip the frame, keep the last correction.
         let ct = SIMD3(C.columns.3.x, C.columns.3.y, C.columns.3.z)
         let turn = acos(max(-1, min(1, (C.columns.0.x + C.columns.1.y + C.columns.2.z - 1) / 2)))
-        if simd_length(ct) > Self.maxTotal || turn > Self.maxTotalTurn { skipped += 1; return nil }
-        if rms > Self.maxRMS { skipped += 1; return nil }                       // doesn't fit the model: skip
+        if simd_length(ct) > Self.maxTotal || turn > Self.maxTotalTurn { skipped += 1; skippedFar += 1; correction = start; return Self.skipUnfit ? nil : start * pose }
+        if rms > Self.maxRMS { skipped += 1; skippedRMS += 1; correction = start; return Self.skipUnfit ? nil : start * pose }                       // doesn't fit the model: skip
         correction = C
         aligned += 1
         return C * pose

@@ -268,6 +268,9 @@ enum GPUBench {
         let maxFrame = ProcessInfo.processInfo.environment["MAX_FRAME"].flatMap(Int.init)
         // ALIGN=1: each frame lined up with the surface fused so far before it's fused (FrameAlign).
         var aligner = ProcessInfo.processInfo.environment["ALIGN"] == "1" ? FrameAlign() : nil
+        var usedPoses: [(Int, simd_float4x4)] = []
+        if let k = ProcessInfo.processInfo.environment["ALIGN_LEAK"].flatMap(Float.init) { FrameAlign.leak = k }
+        if let f = ProcessInfo.processInfo.environment["ALIGN_SKIP"] { FrameAlign.skipUnfit = f == "1" }
         for (i, d) in depth.enumerated() {
             if let k = onlyNear, let view, abs(depthFrameIndex[i] - view) > k { continue }
             if let mf = maxFrame, depthFrameIndex[i] > mf { continue }
@@ -283,13 +286,32 @@ enum GPUBench {
                 pose = p
             }
             gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
+            usedPoses.append((i, pose))
         }
         if let a = aligner {
             let c = a.correction.columns.3
-            print(String(format: "align: %d aligned, %d skipped, %d with too little surface; final correction %.3f, %.3f, %.3f m", a.aligned, a.skipped, a.tooLittle, c.x, c.y, c.z))
+            print(String(format: "align: %d aligned, %d skipped (%d too far, %d not fitting), %d with too little surface; final correction %.3f, %.3f, %.3f m", a.aligned, a.skipped, a.skippedFar, a.skippedRMS, a.tooLittle, c.x, c.y, c.z))
         }
         gpu.finish()
         let gpuTime = Date().timeIntervalSince(t2)
+        // CONSIST=1: how well the frames agree with the surface they built: every 4th fused frame's depth points (with
+        // the pose it was fused with) against the final surface: median |distance| and share within 1 / 2 cm.
+        if ProcessInfo.processInfo.environment["CONSIST"] == "1" {
+            var ds: [Float] = []
+            for (k, (i, pose)) in usedPoses.enumerated() where k % 4 == 0 {
+                let d = depth[i]
+                for y in stride(from: 3, to: d.h - 3, by: 8) { for x in stride(from: 3, to: d.w - 3, by: 8) {
+                    let z = d.m[y * d.w + x]; guard z > 0.3, z < 3 else { continue }
+                    let p4 = pose * SIMD4((Float(x) + 0.5 - d.cx) * z / d.fx, -(Float(y) + 0.5 - d.cy) * z / d.fy, -z, 1)
+                    if let s = FrameAlign.distance(gpu, SIMD3(p4.x, p4.y, p4.z)) { ds.append(abs(s)) }
+                } }
+            }
+            ds.sort()
+            let n = Float(max(1, ds.count))
+            print(String(format: "consistency: %d samples, median %.2f cm, 75%% %.2f cm, within 1 cm %.1f%%, within 2 cm %.1f%%",
+                         ds.count, (ds.isEmpty ? 0 : ds[ds.count / 2]) * 100, (ds.isEmpty ? 0 : ds[ds.count * 3 / 4]) * 100,
+                         Float(ds.filter { $0 < 0.01 }.count) / n * 100, Float(ds.filter { $0 < 0.02 }.count) / n * 100))
+        }
         // SYNCTEST=1: the live scan's incremental copy (copyDirty every 5 frames, as the mesh builds) against one full
         // copy at the end: the two meshes must be the same.
         if ProcessInfo.processInfo.environment["SYNCTEST"] == "1",
@@ -530,7 +552,7 @@ enum GPUBench {
         print(String(format: "voxel %.1f cm: GPU block %d voxels (%.0f MB), %d triangles", voxel * 100, gpu.voxelCount, Double(gpu.voxelCount) * 6 / 1e6, gpuMesh.triangles.count / 3))
         if let view, view < frames.count {
             let f = frames[view]
-            let url = URL(fileURLWithPath: "harness-out/detail-\(dir.deletingLastPathComponent().lastPathComponent)-f\(view)-\(Int((voxel * 1000).rounded()))mm\(tag)\(ProcessInfo.processInfo.environment["UNSEEN"] == "1" ? "-unseen" : "").png")
+            let url = URL(fileURLWithPath: "harness-out/detail-\(dir.deletingLastPathComponent().lastPathComponent)-f\(view)-\(Int((voxel * 1000).rounded()))mm\(tag)\(ProcessInfo.processInfo.environment["TAG"] ?? "")\(ProcessInfo.processInfo.environment["UNSEEN"] == "1" ? "-unseen" : "").png")
             Images.renderFromCamera(gpuMesh.positions, gpuMesh.triangles, pose: f.pose, k: f.k, imageWidth: f.w, imageHeight: f.h, to: url)
             print("  render: \(url.path)")
         }
