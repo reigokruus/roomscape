@@ -3627,7 +3627,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        drainDepth(); gpuReady.clear(); synchronized (featLock) { featN = 0; featAt = 0; } pairN = 0; ceilingHinted = false; healthLosses = 0; healthMinFeatures = Integer.MAX_VALUE; healthMaxExposureNs = 0; doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
+        drainDepth(); gpuReady.clear(); synchronized (liveTrack) { liveTrack.clear(); } liveDoorAt = 0; synchronized (featLock) { featN = 0; featAt = 0; } pairN = 0; ceilingHinted = false; healthLosses = 0; healthMinFeatures = Integer.MAX_VALUE; healthMaxExposureNs = 0; doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
@@ -4537,7 +4537,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             recordPath(camera.getPose());
             camera.getProjectionMatrix(proj, 0, 0.05f, 100f);
             camera.getViewMatrix(view, 0);
+            // The scan lives in the corrected world (after a re-alignment): draw it from the corrected camera too, so it
+            // sits on the camera picture (rk 10 Nov 11:17: "the view seemed off from where the scanned world and real
+            // view should merge").
+            if (hasFix) { float[] fi = new float[16], v2 = new float[16]; if (Matrix.invertM(fi, 0, poseFix, 0)) { Matrix.multiplyMM(v2, 0, view, 0, fi, 0); System.arraycopy(v2, 0, view, 0, 16); } }
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
+            System.arraycopy(mvp, 0, viewMvp, 0, 16);   // the overlay (live doorway outlines) draws with it
             System.arraycopy(mvp, 0, realMvp, 0, 16);
             if (OVERVIEW) overviewCamera(ts == TrackingState.TRACKING, nowMs);
             if (!LIVE_MESH) uploadNew(); // the points aren't drawn while scanning with the mesh: upload them for the viewer only
@@ -6374,7 +6379,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // "≈": the automatic sizes are estimates (S24: room size a few %, height about ±10 cm; rk 10 Nov)
             String size = (room.floorCoverage > 0 && room.floorCoverage < 0.5f ? "scanned area " : "")
                     + String.format(java.util.Locale.US, "≈%.2f × %.2f m", Math.max(room.sizeX, room.sizeZ), Math.min(room.sizeX, room.sizeZ));
-            if (room.hasCeiling) return size + String.format(java.util.Locale.US, " · ≈%.2f m high", room.ceilingY - room.floorY);
+            // Only a ceiling ARCore saw (its points or planes) gives a height; depth alone was 15-35 cm off (rk 10 Nov)
+            if (room.hasCeiling && room.ceilingTrusted) return size + String.format(java.util.Locale.US, " · ≈%.2f m high", room.ceilingY - room.floorY);
+            if (room.hasCeiling) return size + " · height: tilt up to where the walls meet the ceiling";
             return size + (room.ceilingUnknown ? " · height not scanned" : "");
         }
         float w = boxHalfX * 2, d = boxHalfZ * 2, h = boxMaxY - boxMinY;
@@ -6565,6 +6572,58 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final java.util.List<Integer> liveGroupTex = new java.util.ArrayList<>(), liveGroupVerts = new java.util.ArrayList<>();
     private final java.util.List<java.nio.FloatBuffer> liveGroupPos = new java.util.ArrayList<>(), liveGroupUv = new java.util.ArrayList<>();
 
+    /** Live doorway outlines while scanning (rk 10 Nov): on/off, and when the last search ran. */
+    static boolean LIVE_DOORS = true;
+    private long liveDoorAt;
+    /** Doorways being tracked during the scan: each with how many searches in a row found it and missed it. */
+    private final java.util.ArrayList<float[]> liveTrack = new java.util.ArrayList<>();   // x0 z0 x1 z1 floorY width height sure hits misses shown
+
+    /** Live-mesh thread, every ~2 s: the doorway search on the mesh so far; a doorway is shown after two searches agree
+     *  (within 5 cm), moves smoothly, and goes only after 3 searches in a row miss it. */
+    private void liveDoors(Tsdf near, int nt, java.util.List<PhotoRoom.Keyframe> kfs) {
+        long t0 = System.currentTimeMillis();
+        int nv = nt * 3; float[] vv = new float[nv * 3];
+        for (int i = 0; i < vv.length; i++) vv[i] = near.meshPos.get(i);
+        float[] walls = DoorwayFinder.wallsFromSurface(vv, nv);
+        java.util.ArrayList<OutlineFill.Photo> phs = new java.util.ArrayList<>();
+        for (PhotoRoom.Keyframe k : kfs) {
+            if (k.depth == null) continue;
+            OutlineFill.Photo ph = new OutlineFill.Photo();
+            ph.pose = k.pose; ph.fx = k.fx; ph.fy = k.fy; ph.cx = k.cx; ph.cy = k.cy; ph.w = (int) k.w; ph.h = (int) k.h;
+            ph.depth = k.depth; ph.dw = k.dw; ph.dh = k.dh; ph.dfx = k.dfx; ph.dfy = k.dfy; ph.dcx = k.dcx; ph.dcy = k.dcy;
+            phs.add(ph);
+        }
+        float[][] views = new float[phs.size()][];
+        for (int i = 0; i < phs.size(); i++) views[i] = OutlineFill.invert(phs.get(i).pose);
+        float floor = planner.isReady() ? planner.floorY : walkFloorY();
+        java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, nv, walls, floor,
+                (x, y, z) -> OutlineFill.judge(phs, views, new float[]{x, y, z}, null) == 1, null);
+        synchronized (liveTrack) {
+            for (float[] t : liveTrack) t[11] = 0;   // matched this time?
+            for (DoorwayFinder.Doorway d : ds) {
+                float cx = (d.x0 + d.x1) / 2, cz = (d.z0 + d.z1) / 2; float[] best = null; float bd = 0.3f;
+                for (float[] t : liveTrack) { float dd = (float) Math.hypot((t[0] + t[2]) / 2 - cx, (t[1] + t[3]) / 2 - cz); if (dd < bd) { bd = dd; best = t; } }
+                if (best == null) { liveTrack.add(new float[]{d.x0, d.z0, d.x1, d.z1, d.floorY, d.width, d.height, d.sure ? 1 : 0, 1, 0, 0, 1}); continue; }
+                boolean agree = bd < 0.05f && Math.abs(best[5] - d.width) < 0.05f && Math.abs(best[6] - d.height) < 0.05f;
+                float a = best[10] > 0 ? 0.3f : 1f;   // shown: move smoothly; not yet: take the new one
+                float[] nw = {d.x0, d.z0, d.x1, d.z1, d.floorY, d.width, d.height};
+                for (int k = 0; k < 7; k++) best[k] += (nw[k] - best[k]) * a;
+                best[7] = d.sure ? 1 : best[7] > 0 && agree ? 1 : 0;
+                best[8] = agree || best[10] > 0 ? best[8] + 1 : 1; best[9] = 0; best[11] = 1;
+                if (best[8] >= 2) best[10] = 1;
+            }
+            for (int i = liveTrack.size() - 1; i >= 0; i--) { float[] t = liveTrack.get(i); if (t[11] == 0 && ++t[9] >= 3) liveTrack.remove(i); }
+            java.util.ArrayList<DoorwayFinder.Doorway> show = new java.util.ArrayList<>();
+            for (float[] t : liveTrack) if (t[10] > 0) {
+                DoorwayFinder.Doorway d = new DoorwayFinder.Doorway();
+                d.x0 = t[0]; d.z0 = t[1]; d.x1 = t[2]; d.z1 = t[3]; d.floorY = t[4]; d.width = t[5]; d.height = t[6]; d.sure = t[7] > 0;
+                show.add(d);
+            }
+            activity.setDoorways(show);
+        }
+        perf.note("ms: live doorway search", System.currentTimeMillis() - t0);
+    }
+
     /** GL thread: every ~1 s, copy the voxels near the phone and build their mesh on another thread. */
     private void maybeLiveMesh(Camera camera, long nowMs) {
         if (liveMeshBusy || liveMeshNew != null || nowMs - liveMeshAt < LIVE_MESH_MS || tsdf.size() < 50) return; // the last one is uploaded before its buffers are reused
@@ -6582,6 +6641,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 Tsdf near = tsdf.copyNear(px, py, pz, LIVE_MESH_RADIUS, liveScratch); // read while the GL thread keeps fusing: fine for a preview
                 liveScratch = near; near.reuseBuffers = true;
                 int nt = near.extractMesh();
+                if (LIVE_DOORS && nowMs - liveDoorAt > 2000 && nt > 2000) { liveDoorAt = nowMs; liveDoors(near, nt, kfs); }
                 LivePreview.Result r = livePreview.build(near.meshPos, near.meshConf, nt, kfs, px, py, pz, fx, fy, fz);
                 if (gen == surfGen) liveMeshNew = new Object[]{r};
             } catch (Throwable e) { logError("live mesh", new RuntimeException(e)); }

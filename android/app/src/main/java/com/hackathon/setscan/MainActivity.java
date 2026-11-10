@@ -974,7 +974,7 @@ public class MainActivity extends Activity {
 
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
     private void applyUi() {
-        if (measureOverlay != null) measureOverlay.setVisibility(renderer.isViewing() ? View.VISIBLE : View.GONE);
+        if (measureOverlay != null) measureOverlay.setVisibility(renderer.isViewing() || scanning ? View.VISIBLE : View.GONE);   // live doorway outlines while scanning
         renderer.overlays = debug;
         updateSpend();
         Button[] viewerMain = {homeButton, exportButton, objButton, saveButton, undoButton, removePersonButton, interviewButton};
@@ -1444,7 +1444,7 @@ public class MainActivity extends Activity {
         walkHint.setVisibility(state == 1 ? View.VISIBLE : View.GONE);
         walkControls.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
         if (state != 2 && measuring) setMeasuring(false);
-        if (measureOverlay != null) measureOverlay.setVisibility(renderer.isViewing() ? View.VISIBLE : View.GONE);
+        if (measureOverlay != null) measureOverlay.setVisibility(renderer.isViewing() || scanning ? View.VISIBLE : View.GONE);   // live doorway outlines while scanning
         walkTip.setVisibility(state == 2 ? View.VISIBLE : View.GONE);
         heightLabel.setText(String.format(java.util.Locale.US, "%.2f m", renderer.eyeH));
         // Standing in the room uses the whole screen; otherwise the 3D view ends above the panel.
@@ -1763,7 +1763,7 @@ public class MainActivity extends Activity {
             ((android.view.ViewGroup) glView.getParent()).addView(measureOverlay, ((android.view.ViewGroup) glView.getParent()).indexOfChild(glView) + 1,
                     new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         }
-        measureOverlay.setVisibility(renderer.isViewing() ? View.VISIBLE : View.GONE);
+        measureOverlay.setVisibility(renderer.isViewing() || scanning ? View.VISIBLE : View.GONE);   // live doorway outlines while scanning
     }
 
     private void setMeasuring(boolean on) {
