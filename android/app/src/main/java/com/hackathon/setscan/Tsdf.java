@@ -103,6 +103,41 @@ final class Tsdf {
     }
 
     /** Voxels on the surface (seen at least minW times, within half the band of it). */
+    /** A full copy (copyNear stops at 400k voxels). */
+    Tsdf copyAll() {
+        Tsdf c = new Tsdf(Math.max(16, cap), vs, trunc, carve);
+        c.minW = minW; c.minComponent = minComponent; c.carveWeight = carveWeight;
+        copyInto(c);
+        return c;
+    }
+
+    /** Replaces `into`'s voxels with this one's (into.cap must hold them). */
+    void copyInto(Tsdf into) {
+        into.clear();
+        for (int t = 0; t < keys.length; t++) {
+            long k = keys[t]; if (k == Long.MIN_VALUE) continue;
+            int i = slots[t]; if (i < 0 || i >= n || into.n >= into.cap) continue;
+            int sl = into.find(k);
+            into.keys[sl] = k; into.slots[sl] = into.n; into.at[into.n] = sl;
+            into.sdf[into.n] = sdf[i]; into.w[into.n] = w[i];
+            into.rgb[into.n * 3] = rgb[i * 3]; into.rgb[into.n * 3 + 1] = rgb[i * 3 + 1]; into.rgb[into.n * 3 + 2] = rgb[i * 3 + 2];
+            into.carvedIn[into.n] = -1; into.seen[into.n] = seen[i]; into.contra[into.n] = contra[i]; into.seenIn[into.n] = -1;
+            into.n++;
+        }
+    }
+
+    /** How many 25 cm floor-plan cells have surface in them (a coverage measure). */
+    int surfaceCells() {
+        java.util.HashSet<Long> cells = new java.util.HashSet<>();
+        for (int t = 0; t < keys.length; t++) {
+            long k = keys[t]; if (k == Long.MIN_VALUE) continue;
+            int i = slots[t]; if (i < 0 || i >= n || w[i] < minW || Math.abs(sdf[i]) >= 0.5f) continue;
+            float x = (((int) (k & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs, z = (((int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs;
+            cells.add(((long) Math.floor(x / 0.25f) << 32) ^ ((long) Math.floor(z / 0.25f) & 0xFFFFFFFFL));
+        }
+        return cells.size();
+    }
+
     int surfaceVoxels() {
         int c = 0;
         for (int i = 0; i < n; i++) if (w[i] >= minW && Math.abs(sdf[i]) < 0.5f) c++;

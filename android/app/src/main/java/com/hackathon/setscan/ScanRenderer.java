@@ -328,12 +328,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * [x0, z0, x1, z1, height] per wall, floor at 0) in the scan folder, so a .rmsc export carries them like the
      * iPhone's (see Rmsc.write). Skipped when the scan came with another phone's mesh.
      */
+    private volatile Tsdf readbackRejected;
+
     void writeSurface(File dir) {
         try {
             if (new File(dir, "rmsc-extra/mesh.ply").exists()) return;
             FloatBuffer p = meshPosAll != null ? meshPosAll : tsdf.meshPos;
             ByteBuffer c = meshPosAll != null ? meshColAll : tsdf.meshCol;
             int verts = meshPosAll != null ? meshVerts : tsdf.meshVerts;
+            writePly(dir, "surface.ply", p, c, verts);
+            Tsdf rj = readbackRejected;
+            if (rj != null) {   // the read-back that was kept out, numbered, never overwritten
+                readbackRejected = null;
+                rj.extractMesh();
+                int k = 1; while (new File(dir, "surface-readback-" + k + ".ply").exists()) k++;
+                writePly(dir, "surface-readback-" + k + ".ply", rj.meshPos, rj.meshCol, rj.meshVerts);
+            }
+            writeOutline(dir);
+        } catch (Exception e) { logError("surface save", e); }
+    }
+
+    private void writePly(File dir, String name, FloatBuffer p, ByteBuffer c, int verts) throws Exception {
+        {
             if (p != null && c != null && verts >= 3) {
                 int tris = verts / 3;
                 java.util.HashMap<Long, Integer> at = new java.util.HashMap<>();
@@ -362,9 +378,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     ByteBuffer f = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN);
                     for (int t = 0; t < tris; t++) { f.clear(); f.put((byte) 3).putInt(faces[t * 3]).putInt(faces[t * 3 + 1]).putInt(faces[t * 3 + 2]); o.write(f.array(), 0, 13); }
                 }
-                if (!tmp.renameTo(new File(dir, "surface.ply"))) tmp.delete();
-                log("surface.ply: " + nv + " vertices, " + tris + " triangles");
+                if (!tmp.renameTo(new File(dir, name))) tmp.delete();
+                log(name + ": " + nv + " vertices, " + tris + " triangles");
             }
+        }
+    }
+
+    private void writeOutline(File dir) {
+        try {
             RoomModel r = room;
             if (roomReady && r != null && r.hasLayout && r.layout != null && r.layout.size() >= 3) {
                 org.json.JSONArray w = new org.json.JSONArray();
@@ -1124,7 +1145,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             loadPlanning(dir); if (done != null) done.run();
             if (meshTris == 0) fuseSavedDepth(); // saved and imported scans keep no surface: rebuild it for Photo
-            photoThumbWanted = !new File(dir, "thumbnail-kind").exists(); // old thumbnails show points: redo once
+            photoThumbWanted = !thumbKindIs(dir, "points"); // the list picture from the Points view (rk 10 Nov 15:22: a broken photo surface gave empty ones): redo once
             if (!outlets.checked) glTasks.add(() -> findOutlets(false)); // older scans: look once
             if (AUTO_PROCESS && DEMO_FAR && !hallDone && activity.claudeKey() != null && !photos.keyframes.isEmpty()) // older scans: place the back wall once, no rescan
                 glTasks.add(() -> { if (!hallDone) { hallDone = true; estimateHall(surfGen, false); } });
@@ -2354,6 +2375,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void finishScan() {
+        style = 2;   // the result opens in Points (rk 10 Nov 15:22)
         if (roomLux() > 0) { Lighting.ROOM_LUX = Math.max(5f, roomLux()); log(String.format(java.util.Locale.US, "room light from camera exposure: %.0f lx (%d samples)", roomLux(), luxSamples.size())); }
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
@@ -2384,8 +2406,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
         try {
             long t0 = System.currentTimeMillis();
+            // Data is gold: the read-back at Done must not take away most of the room (15:09 scan: the live surface
+            // covered the whole room, the saved one 16% of it). Keep a copy; if the read-back leaves under 70% of the
+            // area, the copy is kept and the read-back result is saved beside it (surface-readback-N.ply).
+            drainFuse();
+            Tsdf before = gpuTsdf != null ? tsdf.copyAll() : null;
+            int cellsBefore = before != null ? before.surfaceCells() : 0;
             gpuSyncAll();
             drainFuse();
+            readbackRejected = null;
+            if (before != null) {
+                int cellsAfter = tsdf.surfaceCells();
+                log(String.format(java.util.Locale.US, "surface area at Done: %d cells before the read-back, %d after", cellsBefore, cellsAfter));
+                if (cellsBefore > 40 && cellsAfter < 0.7f * cellsBefore) {
+                    readbackRejected = tsdf.copyAll();
+                    synchronized (tsdf) { before.copyInto(tsdf); }
+                    log(String.format(java.util.Locale.US, "read-back kept out: it covered %.0f%% of the surface before it; the surface before is kept, the read-back saved beside it", 100f * cellsAfter / cellsBefore));
+                }
+            }
             meshTris = tsdf.extractMesh();
             log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
             if (!zones.isEmpty()) {
@@ -6619,7 +6657,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private volatile boolean splats = true;
-    private volatile int style = 0; // 0 = photo surface, 2 = dots, 3 = mesh (1 = splats: no longer offered)
+    private volatile int style = 2; // 0 = photo surface, 2 = dots, 3 = mesh (1 = splats: no longer offered); Points first (rk 10 Nov 15:22)
+
+    private static boolean thumbKindIs(File dir, String kind) {
+        try { return kind.equals(new String(java.nio.file.Files.readAllBytes(new File(dir, "thumbnail-kind").toPath()), "UTF-8").trim()); } catch (Exception e) { return false; }
+    }
 
     String cycleStyle() {
         style = (style + 1) % 4; if (style == 1) style = 2; // no splats view
@@ -6649,7 +6691,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             android.graphics.Bitmap thumb = android.graphics.Bitmap.createBitmap(full, 0, cy, cw, ch, flip, true);
             full.recycle();
             try (java.io.FileOutputStream f = new java.io.FileOutputStream(new File(dir, "thumb.jpg"))) { thumb.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, f); }
-            try (java.io.FileOutputStream f = new java.io.FileOutputStream(new File(dir, "thumbnail-kind"))) { f.write("photo".getBytes("UTF-8")); }
+            try (java.io.FileOutputStream f = new java.io.FileOutputStream(new File(dir, "thumbnail-kind"))) { f.write("points".getBytes("UTF-8")); }
             log("thumbnail: photo room");
         } catch (Throwable e) { logError("photo thumbnail", new RuntimeException(e)); } }, "photo-thumb").start();
     }
@@ -7463,7 +7505,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
         else drawPoints(mvp, roomReady ? 0.9f : 1f);
         // A thumbnail frame shows just the room: no labels, markers or props.
-        boolean clean = photoThumbWanted && photos.ready && style == 0 && !walking && meshTris > 0 && currentDir != null;
+        boolean clean = photoThumbWanted && style == 2 && !walking && count > 0 && currentDir != null;
         if (!clean) {
             objects.room(pos, col, count, roomReady ? room.floorY : planner.isReady() ? planner.floorY : boxMinY);
             objects.draw(mvp, height, proj[5] * height / 2f);

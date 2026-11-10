@@ -2152,7 +2152,7 @@ public class MainActivity extends Activity {
         viewerTitle.setText(e.name);
         nameValue.setText(e.name);
         mainButton.setText("New scan");
-        renderer.setStyle(0); // Photo first, like the iPhone app
+        renderer.setStyle(2); // Points first: the photo surface isn't reliable on big scans yet (rk 10 Nov 15:22)
         glView.queueEvent(() -> renderer.loadScan(e.dir, () -> runOnUiThread(this::viewerUi)));
     }
 
