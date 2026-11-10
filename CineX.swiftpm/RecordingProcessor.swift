@@ -220,12 +220,34 @@ enum RecordingProcessor {
         // The hole fill's block (same size); without it the scan is built as before. Not with the finer surface (a
         // second 1.9 cm block would double the memory).
         let low = fine ? nil : TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5)
+        // Each frame lined up with the surface fused so far (FrameAlign: only along directions the surface pins down,
+        // drifting back to ARKit where it doesn't; rk 10 Nov: later passes over the bars fused shifted copies). Harness:
+        // 10:34 bars median 0.75 -> 0.43 cm off their own surface, 19:00 room 0.93 -> 0.61 cm, 38 of 1944 frames
+        // left as ARKit says. Stops after 25 s of aligning (the rest fused with the last correction).
+        var aligner = FrameAlign()
+        FrameAlign.leak = 0.05; FrameAlign.skipUnfit = false
+        var alignTime = 0.0
         for n in depthFrames.indices {
             guard let (f, d) = frame(n) else { continue }
             let r = filtered(f, d, bounds: false, low: low != nil)
-            gpu.integrate(depth: r.m, width: d.w, height: d.h, pose: f.pose, fx: r.k.x, fy: r.k.y, cx: r.k.z, cy: r.k.w, step: 2)
+            var pose = f.pose
+            if alignTime < 25 {
+                let t0 = Date()
+                gpu.finish()
+                var pts: [SIMD3<Float>] = []
+                pts.reserveCapacity(800)
+                for y in stride(from: 2, to: d.h - 2, by: 6) { for x in stride(from: 2, to: d.w - 2, by: 6) {
+                    let z = r.m[y * d.w + x]; guard z > 0.3, z < 3 else { continue }
+                    pts.append(SIMD3((Float(x) + 0.5 - r.k.z) * z / r.k.x, -(Float(y) + 0.5 - r.k.w) * z / r.k.y, -z))
+                } }
+                pose = aligner.align(gpu, points: pts, pose: f.pose) ?? aligner.correction * f.pose
+                alignTime += Date().timeIntervalSince(t0)
+            } else {
+                pose = aligner.correction * f.pose
+            }
+            gpu.integrate(depth: r.m, width: d.w, height: d.h, pose: pose, fx: r.k.x, fy: r.k.y, cx: r.k.z, cy: r.k.w, step: 2)
             if let low, !r.ml.isEmpty {
-                low.integrate(depth: r.ml, width: d.w, height: d.h, pose: f.pose, fx: r.k.x, fy: r.k.y, cx: r.k.z, cy: r.k.w, step: 2)
+                low.integrate(depth: r.ml, width: d.w, height: d.h, pose: pose, fx: r.k.x, fy: r.k.y, cx: r.k.z, cy: r.k.w, step: 2)
             }
             if n % 32 == 31 {
                 gpu.finish()
@@ -235,6 +257,8 @@ enum RecordingProcessor {
                 await ThermalGovernor.paceBurst(note: note)
             }
         }
+        PerfLog.processing?.note(String(format: "frame alignment (%d aligned, %d left as ARKit, %d too little surface)",
+                                         aligner.aligned, aligner.skipped, aligner.tooLittle), ms: alignTime * 1000)
         gpu.finish()
         if gpu.failed { return nil }
         if fine {
