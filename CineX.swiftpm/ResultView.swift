@@ -54,6 +54,9 @@ struct ResultView: View {
     @State private var walk: WalkState = .off
     /// Held ▲ (+1) or ▼ (-1) while standing in the room.
     @State private var walkMove = 0
+    /// Measure (rk 10 Nov): tap two spots on the scan while standing in the room.
+    @State private var measuring = false
+    @State private var measureClear = 0
     /// Eye height above the floor when standing in the room, metres; remembered.
     @AppStorage("walkEyeHeight") private var eyeHeight = 1.5
     /// The photo room as a .glb (`PhotoRoomExport`), being written or ready to share (AirDrop, Save to Files).
@@ -119,7 +122,8 @@ struct ResultView: View {
                                   onTwist: objectsOn && selectedMovable ? objectTwisted : nil,
                                   onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove, gyroLook: walkGyro,
-                                  eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
+                                  eyeHeight: Float(min(eyeHeight, maxEyeHeight)),
+                                  measuring: measuring && walk.standingAt != nil, measureClear: measureClear)
                     // The room is drawn below the controls, never under them.
                     .padding(.top, walk == .off ? controlsHeight : 0)
                     .clipped()
@@ -958,6 +962,7 @@ struct ResultView: View {
             HStack(alignment: .bottom, spacing: 12) {
                 Button {
                     walkMove = 0
+                    measuring = false
                     walk = .off
                 } label: {
                     Label("Exit", systemImage: "arrow.uturn.backward")
@@ -968,6 +973,16 @@ struct ResultView: View {
                 }
                 .buttonStyle(.bordered)
                 .accessibilityLabel(walkGyro ? "Turn off looking around by turning the phone" : "Look around by turning the phone")
+                VStack(spacing: 6) {
+                    Button { measuring.toggle() } label: {
+                        Label(measuring ? "Measure: on" : "Measure", systemImage: "ruler")
+                    }
+                    .buttonStyle(.bordered)
+                    if measuring {
+                        Button("Clear") { measureClear += 1 }
+                            .buttonStyle(.bordered)
+                    }
+                }
                 Spacer()
                 // Eye height: taller / shorter, 10 cm a tap.
                 VStack(spacing: 4) {
@@ -988,7 +1003,8 @@ struct ResultView: View {
             }
             .frame(maxWidth: .infinity)
             .overlay(alignment: .top) {
-                Text(walkGyro ? "Turn the phone or drag to look · pinch to zoom · double-tap the floor to walk there"
+                Text(measuring ? "Tap two spots on the scan to measure · hold a label to remove it"
+                     : walkGyro ? "Turn the phone or drag to look · pinch to zoom · double-tap the floor to walk there"
                               : "Drag to look · pinch to zoom · double-tap the floor to walk there")
                     .font(.caption2)
                     .padding(.horizontal, 8).padding(.vertical, 4)
@@ -1254,6 +1270,9 @@ struct RoomSceneView: UIViewRepresentable {
     var gyroLook = true
     /// Eye height above the floor while standing, metres.
     var eyeHeight: Float = 1.5
+    /// Measure mode while standing: taps pick spots on the scan; a change of `measureClear` removes all measurements.
+    var measuring = false
+    var measureClear = 0
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1264,6 +1283,7 @@ struct RoomSceneView: UIViewRepresentable {
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
             guard let scene = renderer.scene, let pov = renderer.pointOfView else { return }
             OutletStore.screenSizes(in: scene, camera: pov, viewHeight: viewHeight > 0 ? viewHeight : 360, fov: pov.camera?.fieldOfView ?? 60)
+            scaleMeasureLabels(camera: pov.simdWorldPosition)
         }
 
         // Orbit, our own instead of SceneKit's camera control (whose two-finger pan often turned into a rotation):
@@ -1430,6 +1450,91 @@ struct RoomSceneView: UIViewRepresentable {
         private var pinchTotal: CGFloat = 1
         private func otherActive(_ g: UIGestureRecognizer) -> Bool {
             g.view?.gestureRecognizers?.contains { $0 !== g && $0.numberOfTouches >= 2 && ($0.state == .began || $0.state == .changed) } ?? false
+        }
+
+        // ---- Measure (rk 10 Nov): lines between tapped spots on the scan, a distance label that faces the camera and
+        // keeps its size on screen; one spot shows its height above the floor. View-only (not saved). Same as Android. ----
+        var measuring = false
+        var measureClearSeen = 0
+        let measureRoot = SCNNode()
+        private var measurePending: (p: SIMD3<Float>, node: SCNNode)?
+        private var measureItems: [SCNNode] = []
+        static let measureYellow = UIColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)
+
+        static func distanceText(_ m: Float) -> String { m < 1 ? "\(Int((m * 100).rounded())) cm" : String(format: "%.2f m", m) }
+
+        func clearMeasures() {
+            measureItems.forEach { $0.removeFromParentNode() }; measureItems = []
+            measurePending?.node.removeFromParentNode(); measurePending = nil
+        }
+
+        private func onTop(_ m: SCNMaterial) { m.readsFromDepthBuffer = false; m.lightingModel = .constant }
+
+        private func dot(_ p: SIMD3<Float>) -> SCNNode {
+            let s = SCNSphere(radius: 0.012); s.firstMaterial?.diffuse.contents = Self.measureYellow; onTop(s.firstMaterial!)
+            let n = SCNNode(geometry: s); n.simdPosition = p; n.renderingOrder = 100; return n
+        }
+
+        private func label(_ text: String, at p: SIMD3<Float>) -> SCNNode {
+            let font = UIFont.boldSystemFont(ofSize: 40)
+            let size = (text as NSString).size(withAttributes: [.font: font])
+            let w = size.width + 36, h = size.height + 20
+            let img = UIGraphicsImageRenderer(size: CGSize(width: w, height: h)).image { _ in
+                UIColor(white: 0.11, alpha: 0.9).setFill()
+                UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h), cornerRadius: h / 2).fill()
+                (text as NSString).draw(at: CGPoint(x: 18, y: 10), withAttributes: [.font: font, .foregroundColor: UIColor.white])
+            }
+            let plane = SCNPlane(width: CGFloat(w / h) * 0.1, height: 0.1)
+            plane.firstMaterial?.diffuse.contents = img; onTop(plane.firstMaterial!)
+            let n = SCNNode(geometry: plane); n.name = "measure-label"; n.simdPosition = p; n.renderingOrder = 101
+            n.constraints = [SCNBillboardConstraint()]
+            return n
+        }
+
+        func measureTap(_ pt: CGPoint, in view: SCNView) {
+            if measureRoot.parent == nil { view.scene?.rootNode.addChildNode(measureRoot) }
+            // The scanned surface under the finger (not our own measure nodes).
+            let hits = view.hitTest(pt, options: [.searchMode: SCNHitTestSearchMode.all.rawValue, .ignoreHiddenNodes: true])
+            guard let hit = hits.first(where: { h in var n: SCNNode? = h.node; while let x = n { if x === measureRoot { return false }; n = x.parent }; return true }) else {
+                UINotificationFeedbackGenerator().notificationOccurred(.warning); return
+            }
+            let p = SIMD3<Float>(Float(hit.worldCoordinates.x), Float(hit.worldCoordinates.y), Float(hit.worldCoordinates.z))
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if let first = measurePending {
+                first.node.removeFromParentNode(); measurePending = nil
+                let item = SCNNode()
+                item.addChildNode(dot(first.p)); item.addChildNode(dot(p))
+                let d = simd_distance(first.p, p)
+                let cyl = SCNCylinder(radius: 0.004, height: CGFloat(d)); cyl.firstMaterial?.diffuse.contents = Self.measureYellow; onTop(cyl.firstMaterial!)
+                let line = SCNNode(geometry: cyl); line.renderingOrder = 100
+                line.simdPosition = (first.p + p) / 2
+                if d > 1e-4 { line.simdOrientation = simd_quatf(from: SIMD3(0, 1, 0), to: simd_normalize(p - first.p)) }
+                item.addChildNode(line)
+                item.addChildNode(label(Self.distanceText(d), at: (first.p + p) / 2))
+                measureRoot.addChildNode(item); measureItems.append(item)
+            } else {
+                let n = SCNNode(); n.addChildNode(dot(p))
+                if let fy = walkFloorY { n.addChildNode(label(Self.distanceText(max(0, p.y - fy)) + " above the floor", at: p + SIMD3(0, 0.06, 0))) }
+                measureRoot.addChildNode(n); measurePending = (p, n)
+            }
+        }
+
+        @objc func measureLongPressed(_ g: UILongPressGestureRecognizer) {
+            guard measuring, g.state == .began, let view = g.view as? SCNView else { return }
+            let hits = view.hitTest(g.location(in: view), options: [.searchMode: SCNHitTestSearchMode.all.rawValue, .rootNode: measureRoot])
+            guard let h = hits.first(where: { $0.node.name == "measure-label" }), let item = h.node.parent,
+                  let i = measureItems.firstIndex(where: { $0 === item }) else { return }
+            item.removeFromParentNode(); measureItems.remove(at: i)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+
+        /// Labels keep about the same size on screen: scaled with their distance from the camera.
+        func scaleMeasureLabels(camera: SIMD3<Float>) {
+            for item in measureItems + [measurePending?.node].compactMap({ $0 }) {
+                for n in item.childNodes where n.name == "measure-label" {
+                    n.simdScale = SIMD3(repeating: max(0.3, simd_distance(n.simdWorldPosition, camera) * 0.45))
+                }
+            }
         }
 
         // First person ("Enter the room").
@@ -1639,6 +1744,7 @@ struct RoomSceneView: UIViewRepresentable {
         /// Intersects the tapped ray with the floor plane. (SceneKit's hit test can't see the splats: their discs
         /// are opened up in the shader, so on the CPU they have no area.)
         @objc func tapped(_ gesture: UITapGestureRecognizer) {
+            if measuring, standing != nil, let view = gesture.view as? SCNView { measureTap(gesture.location(in: view), in: view); return }
             if standing == nil, let onTapRay, let view = gesture.view as? SCNView {
                 let p = gesture.location(in: view)
                 let near = view.unprojectPoint(SCNVector3(Float(p.x), Float(p.y), 0))
@@ -1692,6 +1798,7 @@ struct RoomSceneView: UIViewRepresentable {
         c.view = view
         let doubleTap = UITapGestureRecognizer(target: c, action: #selector(Coordinator.doubleTapped(_:)))
         doubleTap.numberOfTapsRequired = 2
+        view.addGestureRecognizer(UILongPressGestureRecognizer(target: c, action: #selector(Coordinator.measureLongPressed(_:))))
         c.walkGestures = [UIPanGestureRecognizer(target: c, action: #selector(Coordinator.looked(_:))),
                           UIPinchGestureRecognizer(target: c, action: #selector(Coordinator.pinched(_:))), doubleTap]
         for g in c.walkGestures {
@@ -1755,6 +1862,8 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.setGyroLook(gyroLook)
         context.coordinator.setEyeHeight(eyeHeight)
         context.coordinator.setStanding(standAt)
+        context.coordinator.measuring = measuring
+        if context.coordinator.measureClearSeen != measureClear { context.coordinator.measureClearSeen = measureClear; context.coordinator.clearMeasures() }
         guard standAt == nil, context.coordinator.lastTop != topView else { return }
         context.coordinator.lastTop = topView
         SCNTransaction.begin()
