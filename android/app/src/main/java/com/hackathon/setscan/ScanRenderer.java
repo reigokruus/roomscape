@@ -5739,14 +5739,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             liveMeshNew = null;
             LivePreview.Result r = (LivePreview.Result) nm[0];
             if (liveMeshVbo[0] == 0) GLES20.glGenBuffers(4, liveMeshVbo, 0);
+            // Never more bytes than the buffers hold (an upload past the end throws and kills the app).
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.restVerts) * 12, r.restPos, GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.restVerts) * 12, r.restPos.capacity() * 4), r.restPos, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[1]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.restVerts), r.restConf, GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.restVerts), r.restConf.capacity()), r.restConf, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[2]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.lineVerts) * 12, r.lines, GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.lineVerts) * 12, r.lines.capacity() * 4), r.lines, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[3]);
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.max(1, r.lineVerts), r.lineConf, GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.lineVerts), r.lineConf.capacity()), r.lineConf, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
             liveMeshTriVerts = r.restVerts; liveMeshLineVerts = r.lineVerts;
             liveGroupTex.clear(); liveGroupTex.addAll(r.groupTex);

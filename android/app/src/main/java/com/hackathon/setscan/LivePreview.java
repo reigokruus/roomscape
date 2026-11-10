@@ -94,9 +94,11 @@ final class LivePreview {
         }
         Result r = new Result();
         r.restVerts = rest * 3;
-        r.restPos = fb(Math.max(1, rest * 9));
+        // At least one whole vertex each (the upload sends max(1, count) vertices): with no unpainted triangles a
+        // 1-float buffer made glBufferData throw and the app crash when a scan started (rk 10 Nov).
+        r.restPos = fb(Math.max(3, rest * 9));
         r.restConf = ByteBuffer.allocateDirect(Math.max(1, rest * 3)).order(ByteOrder.nativeOrder());
-        r.lines = fb(Math.max(1, rest * 18));
+        r.lines = fb(Math.max(3, rest * 18));
         r.lineConf = ByteBuffer.allocateDirect(Math.max(1, rest * 6)).order(ByteOrder.nativeOrder());
         r.lineVerts = rest * 6;
         FloatBuffer[] gp = new FloatBuffer[kfs.size()], gu = new FloatBuffer[kfs.size()];
