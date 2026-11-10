@@ -1304,6 +1304,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             k.fwd[0] = -np[8]; k.fwd[1] = -np[9]; k.fwd[2] = -np[10];
         }
         // the new scan's surface and cut-outs were in its own coordinates: drop them (Depth AI / Clean up rebuild)
+        drainFuse();
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshTris = 0; meshVerts = 0; cutouts.clear();
         lastPlanes = new java.util.ArrayList<>(); // ARCore planes were in the new scan's coordinates
         rebuildVoxelIndex();
@@ -1554,7 +1555,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
             rgb[0] = C[i * 3] & 255; rgb[1] = C[i * 3 + 1] & 255; rgb[2] = C[i * 3 + 2] & 255;
             float ddx = x - camX, ddy = y - camY, ddz = z - camZ;
-            if (ddx * ddx + ddy * ddy + ddz * ddz < 64f) tsdf.integrate(camX, camY, camZ, x, y, z, rgb); // far estimates: points only
+            if (ddx * ddx + ddy * ddy + ddz * ddz < 64f) { drainFuse(); tsdf.integrate(camX, camY, camZ, x, y, z, rgb); } // far estimates: points only
             long vk = key(x, y, z);
             int hit = voxels.get(vk);
             if (hit >= 0) { refine(hit, x, y, z, rgb); continue; }
@@ -1569,6 +1570,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void finishDepthAI(int gen) {
         if (gen != surfGen) return;
         try {
+            drainFuse();
             meshTris = tsdf.extractMesh();
             meshPosAll = null;
         } catch (Throwable e) { logError("depth surface", new RuntimeException(e)); }
@@ -2213,6 +2215,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
         try {
             long t0 = System.currentTimeMillis();
+            drainFuse();
             meshTris = tsdf.extractMesh();
             log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
             if (!zones.isEmpty()) {
@@ -2647,6 +2650,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             return dx * dx + dy * dy < r2;
         };
         int removed = removePointsWhere(inCone);
+        drainFuse();
         int vox = tsdf.clearWhere(inCone) + detail.clearWhere(inCone);
         liveMeshAt = 0; // the live mesh follows at once
         livePreview.forget(mx / nn, my / nn, mz / nn, 0.5f); // the photo choices there are worked out again
@@ -2695,6 +2699,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (c == null) c = nearestPointOnRay(camera, x, y);
         if (c == null) { activity.toast("Nothing scanned there yet, just point the camera at it."); return; }
         int removed = removePointsNear(c, RESCAN_R);
+        drainFuse();
         int vox = tsdf.clearSphere(c[0], c[1], c[2], RESCAN_R);
         detail.clearSphere(c[0], c[1], c[2], RESCAN_R);
         if (zones.size() < 12) zones.add(new float[]{c[0], c[1], c[2], RESCAN_R});
@@ -3456,6 +3461,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
+        drainFuse();
         tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); livePreview.reset(); liveGroupTex.clear(); liveGroupPos.clear(); liveGroupUv.clear(); liveGroupVerts.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
@@ -4484,7 +4490,6 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private void integrate(Frame frame, Camera camera) {
-        tsdf.beginFrame(); detail.beginFrame();
         if (count >= MAX_POINTS) return;
         if (!depthSupported) {
             integrateFeaturePoints(frame, camera);
@@ -4584,6 +4589,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 recs.add(r);
             }
             long pxT0 = System.nanoTime();
+            fuseN = 0;
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
@@ -4616,8 +4622,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
                     int hit = voxels.get(vk);
                     sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
-                    tsdf.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
-                    if (fine) detail.integrate(m[12], m[13], m[14], wx, wy, wz, rgb);
+                    // The surface (TSDF) part goes to the fusion thread (below), the points stay here.
+                    if (fuseN * 4 + 4 > fuseBuf.length) fuseBuf = java.util.Arrays.copyOf(fuseBuf, fuseBuf.length * 2);
+                    fuseBuf[fuseN * 4] = wx; fuseBuf[fuseN * 4 + 1] = wy; fuseBuf[fuseN * 4 + 2] = wz;
+                    fuseBuf[fuseN * 4 + 3] = Float.intBitsToFloat((rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16 | (fine ? 1 << 24 : 0));
+                    fuseN++;
                     if (weak) continue;
                     if (hit < 0 || seenStamp[hit] != depthFrames) frameHits++;
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
@@ -4626,6 +4635,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (count >= MAX_POINTS) return;
                 }
             }
+            submitFuse(m[12], m[13], m[14]);
             long cvT0 = System.nanoTime();
             perf.note("ms: depth fusion pixels", (cvT0 - pxT0) / 1e6);
             carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
@@ -4962,7 +4972,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         for (int i = 0; i < count; i++) {
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
             // one-off specks, and points in space the camera later saw straight through (mid-air noise)
-            drop[i] = (obs[i] & 0xFF) < 2 || (!inZone(x, y, z) && tsdf.seenThrough(x, y, z));
+            drop[i] = (obs[i] & 0xFF) < 2 || (!inZone(x, y, z) && seenThroughDrained(x, y, z));
             if (!drop[i]) keep++;
         }
         droppedNoise = 0;
@@ -4998,6 +5008,53 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         long iz = (long) Math.floor(z / VOXEL_FINE) + (1 << 20);
         return ((ix & 0x1FFFFF) | ((iy & 0x1FFFFF) << 21) | ((iz & 0x1FFFFF) << 42)) | Long.MIN_VALUE;
     }
+
+    // ---- surface fusion thread (rk 10 Nov: the S24's drawing thread spent 73% of its time fusing depth) ----
+    private final java.util.concurrent.ExecutorService fuseExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "tsdf-fuse"); t.setPriority(Thread.NORM_PRIORITY); return t; });
+    private java.util.concurrent.Future<?> fuseLast;
+    private float[] fuseBuf = new float[4 * 16384];
+    private int fuseN;
+    private boolean fuseDrained = true;
+
+    /** Hands this depth frame's surface samples to the fusion thread. At most one frame waits behind the running one. */
+    private void submitFuse(final float ox, final float oy, final float oz) {
+        final int n = fuseN;
+        final float[] buf = java.util.Arrays.copyOf(fuseBuf, n * 4);
+        java.util.concurrent.Future<?> prev = fuseLast;
+        if (prev != null && !prev.isDone()) {
+            long t0 = System.nanoTime();
+            try { prev.get(); } catch (Exception e) { logError("fuse wait", new RuntimeException(e)); }
+            perf.note("ms: waited for fusion", (System.nanoTime() - t0) / 1e6);
+        }
+        fuseDrained = false;
+        fuseLast = fuseExec.submit(() -> {
+            long t0 = System.nanoTime();
+            try {
+                synchronized (tsdf) {
+                    tsdf.beginFrame(); detail.beginFrame();
+                    int[] rgb = new int[3];
+                    for (int i = 0; i < n; i++) {
+                        int bits = Float.floatToRawIntBits(buf[i * 4 + 3]);
+                        rgb[0] = bits & 255; rgb[1] = (bits >> 8) & 255; rgb[2] = (bits >> 16) & 255;
+                        tsdf.integrate(ox, oy, oz, buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], rgb);
+                        if ((bits & (1 << 24)) != 0) detail.integrate(ox, oy, oz, buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], rgb);
+                    }
+                }
+            } catch (Throwable e) { logError("fuse", new RuntimeException(e)); }
+            perf.note("ms: surface fusion (thread)", (System.nanoTime() - t0) / 1e6);
+        });
+    }
+
+    /** Waits until the fusion thread has fused everything handed to it (before anything else reads or changes the surface). */
+    private void drainFuse() {
+        java.util.concurrent.Future<?> f = fuseLast;
+        if (f == null || fuseDrained) return;
+        try { f.get(); } catch (Exception e) { logError("fuse drain", new RuntimeException(e)); }
+        fuseDrained = true;
+    }
+
+    private boolean seenThroughDrained(float x, float y, float z) { drainFuse(); return tsdf.seenThrough(x, y, z); }
 
     // Re-alignment after a tracking loss (see integrate).
     private volatile boolean needRealign;
