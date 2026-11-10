@@ -913,6 +913,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 final byte[] ca = new byte[cn * 4];
                 ByteBuffer cd = col.duplicate(); cd.position(0); cd.get(ca, 0, cn * 4);
                 final byte[] oa = java.util.Arrays.copyOf(obs, cn);
+                final byte[] sga = seg == null ? null : java.util.Arrays.copyOf(seg, cn);
                 final java.util.List<Object> jpgs = ScanExport.readKeyframesRaw(photos, width, height);
                 final java.util.List<Runnable> encode = new java.util.ArrayList<>();
                 for (int i = 0; i < photos.keyframes.size() && i < jpgs.size(); i++) {
@@ -947,8 +948,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         int live = 0;
                         for (int i = 0; i < cn; i++) if (oa[i] != 0) live++;
                         d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
+                        d.seg = sga == null ? null : new byte[live];
                         for (int i = 0, j = 0; i < cn; i++) {
                             if (oa[i] == 0) continue; // cleared by see-through
+                            if (d.seg != null) d.seg[j] = sga[i];
                             d.pos[j * 3] = pa[i * 3]; d.pos[j * 3 + 1] = pa[i * 3 + 1]; d.pos[j * 3 + 2] = pa[i * 3 + 2];
                             d.col[j * 3] = ca[i * 4]; d.col[j * 3 + 1] = ca[i * 4 + 1]; d.col[j * 3 + 2] = ca[i * 4 + 2];
                             j++;
@@ -1011,6 +1014,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         voxels.put(vk, count);
                         addPoint(x, y, z, rgb);
                         obs[count - 1] = 2;
+                        if (d.seg != null && i < d.seg.length) seg[count - 1] = d.seg[i];
                     }
                     uploaded = 0;
                     for (int i = 0; i + 2 < d.path.length && pathCount < MAX_PATH; i += 3) {
@@ -2345,8 +2349,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void prepareTap(Frame frame, Camera camera, float x, float y) {
         float[] h6 = hitAny(frame, camera, x, y);
         float[] hit = h6 == null ? null : new float[]{h6[0], h6[1], h6[2]};
+        if (hit != null) fixPoint(hit);
         float[] pose = new float[16];
         camera.getPose().toMatrix(pose, 0);
+        applyFix(pose);
         CameraIntrinsics ti = camera.getTextureIntrinsics();
         int[] td = ti.getImageDimensions();
         float[] k = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
@@ -3442,7 +3448,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
         count = 0; uploaded = 0; pathCount = 0; lastPx = 1e9f;
         depthRunning = false; cleaning = false; glTasks.clear();
-        needRealign = false; realignOk = 0;
+        needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
@@ -4161,6 +4167,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 lostSince = nowMs;
                 if (count > 2000 && !needRealign) {
                     needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs;
+                    snapshotForRealign();
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
                     activity.toast("Lost track. Point at a part you already scanned.");
                 }
@@ -4185,6 +4192,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         lastTrackState = ts;
         if (ts == TrackingState.TRACKING) {
             camera.getPose().toMatrix(curPose, 0);
+            applyFix(curPose);
             long frameNs = frame.getTimestamp();
             float frameDt = havePrevPose && prevFrameNs > 0 ? Math.max(0f, (frameNs - prevFrameNs) / 1e9f) : 0f;
             prevFrameNs = frameNs;
@@ -4529,6 +4537,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // After tracking was lost mid-scan: nothing is fused until the depth lines up with what's already there
             // (rk 10 Nov: after a loss and an AR restart a second, shifted layer was fused over the first).
             if (needRealign && !realigned(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m, nowMsFrame)) return;
+            applyFix(m);
             int[] rgb = new int[3];
             frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
@@ -4879,6 +4888,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int j = count * 4;
         col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) seenAlpha(1));
         obs[count] = 1; seenStamp[count] = depthFrames; thru[count] = 0;
+        if (seg == null || seg.length < pos.capacity() / 3) seg = new byte[pos.capacity() / 3];
+        seg[count] = segment;
         count++;
     }
 
@@ -4993,34 +5004,76 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private int realignOk;
     private long realignSince, realignHintAt, nowMsFrame;
 
-    /** Whether this depth frame lines up with the points already scanned: at least 40% of its depth samples
-     *  (0.3–3 m) land within 2 cm cells of existing points, three frames in a row. Until then nothing is fused. */
+    /** Correction for every camera pose after a tracking loss (ARCore came back in a shifted frame): world ← ARCore. */
+    private final float[] poseFix = new float[16];
+    { android.opengl.Matrix.setIdentityM(poseFix, 0); }
+    private boolean hasFix;
+    /** Which stretch of tracking each point was captured in (0, then +1 after every loss): saved as segments.bin so
+     *  layers can be told apart later. */
+    private byte segment;
+    private byte[] seg;
+    private float[] fixTry = new float[16];
+    private final float[] fixPrev = new float[16];
+
+    private void applyFix(float[] m) {
+        if (!hasFix) return;
+        float[] r = new float[16];
+        android.opengl.Matrix.multiplyMM(r, 0, poseFix, 0, m, 0);
+        System.arraycopy(r, 0, m, 0, 16);
+    }
+
+    private void fixPoint(float[] p) {
+        if (!hasFix) return;
+        float x = p[0], y = p[1], z = p[2];
+        p[0] = poseFix[0] * x + poseFix[4] * y + poseFix[8] * z + poseFix[12];
+        p[1] = poseFix[1] * x + poseFix[5] * y + poseFix[9] * z + poseFix[13];
+        p[2] = poseFix[2] * x + poseFix[6] * y + poseFix[10] * z + poseFix[14];
+    }
+
+    /** The scan so far as point centroids (taken when tracking is lost), for the re-alignment (Realign). */
+    private Realign realign;
+
+    private void snapshotForRealign() {
+        long t0 = System.currentTimeMillis();
+        float[] xyz = new float[count * 3];
+        for (int i = 0; i < count * 3; i++) xyz[i] = pos.get(i);
+        realign = new Realign(xyz, count);
+        fixTry = poseFix.clone();
+        log("realign snapshot: " + realign.coarse.size() + " / " + realign.fine.size() + " cells in " + (System.currentTimeMillis() - t0) + " ms");
+    }
+
+    /** After a tracking loss: finds the rigid correction (shift + turn about the vertical; ARCore keeps gravity) that
+     *  puts this depth frame onto the scan so far (Realign: ICP, coarse then fine), and resumes fusing only when three
+     *  frames in a row agree with a small residual. Until then nothing is fused. */
     private boolean realigned(ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m, long nowMs) {
-        int valid = 0, hits = 0;
-        for (int v = 3; v < dh - 3; v += 6) for (int u = 3; u < dw - 3; u += 6) {
+        if (realign == null) { needRealign = false; return true; }
+        java.util.ArrayList<float[]> pts = new java.util.ArrayList<>();
+        for (int v = 3; v < dh - 3; v += 5) for (int u = 3; u < dw - 3; u += 5) {
             int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
-            if (mm < 300 || mm > 3000) continue;
+            if (mm < 300 || mm > 3500) continue;
             float d = mm * 0.001f, xc = (u + 0.5f - cx) * d / fx, yc = (cy - (v + 0.5f)) * d / fy, zc = -d;
-            float wx = m[0] * xc + m[4] * yc + m[8] * zc + m[12];
-            float wy = m[1] * xc + m[5] * yc + m[9] * zc + m[13];
-            float wz = m[2] * xc + m[6] * yc + m[10] * zc + m[14];
-            valid++;
-            search:
-            for (int a = -1; a <= 1; a++) for (int b = -1; b <= 1; b++) for (int c = -1; c <= 1; c++)
-                if (voxels.get(key(wx + a * VOXEL, wy + b * VOXEL, wz + c * VOXEL)) >= 0) { hits++; break search; }
+            pts.add(new float[]{m[0] * xc + m[4] * yc + m[8] * zc + m[12], m[1] * xc + m[5] * yc + m[9] * zc + m[13], m[2] * xc + m[6] * yc + m[10] * zc + m[14]});
         }
-        boolean ok = valid >= 50 && hits * 10 >= valid * 4;
-        realignOk = ok ? realignOk + 1 : 0;
+        if (pts.size() < 60) { realignOk = 0; return false; }
+        Realign.Fit fit = realign.solve(pts, fixTry);   // ~5 ICP runs: only while re-aligning
+        float[] F = fit.fix; float inl = fit.inliers, med = fit.median;
+        boolean good = Realign.good(fit);
+        float drift = (float) Math.sqrt((F[12] - fixPrev[12]) * (F[12] - fixPrev[12]) + (F[13] - fixPrev[13]) * (F[13] - fixPrev[13]) + (F[14] - fixPrev[14]) * (F[14] - fixPrev[14]));
+        realignOk = good && (realignOk == 0 || drift < 0.02f) ? realignOk + 1 : (good ? 1 : 0);
+        System.arraycopy(F, 0, fixPrev, 0, 16);
+        if (good) fixTry = F;
         if (realignOk >= 3) {
-            needRealign = false;
-            log(String.format(java.util.Locale.US, "back on track after %.1f s (%d%% of the view on the scan)", (nowMs - realignSince) / 1000f, valid > 0 ? hits * 100 / valid : 0));
+            System.arraycopy(F, 0, poseFix, 0, 16);
+            hasFix = true; needRealign = false; realign = null;
+            segment++;
+            log(String.format(java.util.Locale.US, "back on track after %.1f s: correction %.3f, %.3f, %.3f m, %.1f deg; %d%% of the view on the scan, median %.1f cm; segment %d",
+                    (nowMs - realignSince) / 1000f, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])), Math.round(inl * 100), med * 100, segment));
             activity.toast("Back on track, scanning again.");
             return true;
         }
         if (nowMs - realignHintAt > 8000) { realignHintAt = nowMs; activity.toast("Still lost. Go back to where you were and point at what you scanned."); }
         return false;
     }
-
     private static long key(float x, float y, float z) {
         long ix = (long) Math.floor(x / VOXEL) + (1 << 20);
         long iy = (long) Math.floor(y / VOXEL) + (1 << 20);

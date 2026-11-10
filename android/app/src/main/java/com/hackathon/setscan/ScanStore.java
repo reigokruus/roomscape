@@ -39,6 +39,7 @@ final class ScanStore {
         String name = "";
         long created;
         float[] pos; byte[] col; int n;
+        byte[] seg; // per point: which stretch of tracking it came from (0, +1 after each loss); null = all 0
         List<Kf> kfs = new ArrayList<>();
         float[] path = new float[0];
         List<float[]> corners = new ArrayList<>(), walls = new ArrayList<>();
@@ -105,6 +106,11 @@ final class ScanStore {
                 o.writeFloat(d.pos[i * 3]); o.writeFloat(d.pos[i * 3 + 1]); o.writeFloat(d.pos[i * 3 + 2]);
                 o.writeByte(d.col[i * 3]); o.writeByte(d.col[i * 3 + 1]); o.writeByte(d.col[i * 3 + 2]);
             }
+        }
+        // Which tracking stretch each point came from (rk 10 Nov: layers after a tracking loss can be told apart).
+        if (d.seg != null && d.seg.length >= d.n) {
+            boolean any = false; for (int i = 0; i < d.n; i++) if (d.seg[i] != 0) { any = true; break; }
+            if (any) try (DataOutputStream o = out(new File(tmp, "segments.bin"))) { o.writeInt(d.n); o.write(d.seg, 0, d.n); }
         }
         try (DataOutputStream o = out(new File(tmp, "kf.bin"))) {
             o.writeInt(d.kfs.size());
@@ -219,6 +225,11 @@ final class ScanStore {
                 d.col[i * 3] = in.readByte(); d.col[i * 3 + 1] = in.readByte(); d.col[i * 3 + 2] = in.readByte();
             }
         }
+        File segf = new File(dir, "segments.bin");
+        if (segf.exists()) try (DataInputStream in = in(segf)) {
+            int n = in.readInt();
+            if (n == d.n) { d.seg = new byte[n]; in.readFully(d.seg); }
+        } catch (Exception ignored) { }
         try (DataInputStream in = in(new File(dir, "kf.bin"))) {
             int nk = in.readInt();
             for (int i = 0; i < nk; i++) {
@@ -238,7 +249,7 @@ final class ScanStore {
         File pf = new File(dir, "path.bin");
         if (pf.exists()) try (DataInputStream in = in(pf)) { int n = in.readInt(); d.path = new float[n]; for (int i = 0; i < n; i++) d.path[i] = in.readFloat(); }
         File sf = new File(dir, "splats.bin");
-        if (sf.exists()) try (DataInputStream in = in(sf)) {
+        if (segf.exists()) try (DataInputStream in = in(segf)) {
             int n = in.readInt(); float[] p = new float[n * 3], q = new float[n * 4]; byte[] c = new byte[n * 4];
             for (int i = 0; i < n * 3; i++) p[i] = in.readFloat();
             for (int i = 0; i < n * 4; i++) q[i] = in.readFloat();
