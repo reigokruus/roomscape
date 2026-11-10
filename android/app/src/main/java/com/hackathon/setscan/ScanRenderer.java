@@ -4674,6 +4674,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     snapshotForRealign();
                     healthLosses++;
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again"); evMark();
+                    postHud(ts);   // at once, not at the next 5th frame
                     // (no toast: the card at the top says what to do; rk 10 Nov 15:53 got two different messages at once)
                 }
             }
@@ -7572,8 +7573,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (ts != TrackingState.TRACKING && everTracked) {
             // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
             // A quiet pause (rk 10 Nov 15:58: never "lost", no red, the scan stays in view): one calm hint.
-            level = 1;
-            hint = "Nothing to scan here. Point back at where you were" + backToSuffix();
+            // rk 10 Nov 16:45: an immediate, clear notice so the user knows exactly when to stop moving
+            level = 2;
+            hint = "Lost track: stop moving, then point back at where you were" + backToSuffix();
         }
         else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
             // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said)
