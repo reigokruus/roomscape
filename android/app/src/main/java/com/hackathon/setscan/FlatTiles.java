@@ -22,10 +22,11 @@ final class FlatTiles {
     static final float TILE = 0.30f;          // tile size, metres
     static final int PX = 96;                  // texture pixels per tile side (~3 mm per pixel)
     static final int ATLAS = 4096, PER_ROW = ATLAS / PX, MAX_TILES = PER_ROW * PER_ROW;
-    static final float INLIER = 0.02f, FRONT = 0.04f;
+    // S24 depth noise is 3-4 cm at 2 m (today's measurements): 2 cm inliers / 4 cm 'in front' rejected most tiles
+    static final float INLIER = 0.035f, FRONT = 0.07f;
 
     static final class Plane { float nx, ny, nz, d, ux, uy, uz, vx, vy, vz; }
-    static final class Tile { int plane, iu, iv, slot; float score; int contra; }
+    static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; }
 
     final ArrayList<Plane> planes = new ArrayList<>();
     final HashMap<Long, Tile> tiles = new HashMap<>();
@@ -39,8 +40,13 @@ final class FlatTiles {
      * taken; texture intrinsics (fx, fy, cx, cy, w, h) of the camera picture now (same pose: caller checks);
      * texToNorm: converts texture pixel coordinates to the camera texture's normalized coordinates (frame transform).
      */
-    void update(short[] depth, int dw, int dh, float[] di, float[] pose, float[] ti, int cameraTex, Norm texToNorm, long nowMs) {
-        lastMs = nowMs;
+    /** Counts for the log: attempts, no plane, tiles looked at, painted, and why tiles weren't. */
+    int attempts, noPlane, looked, lowCover, blocked, opening, tooSlanted, notBetter;
+    static final class Job { int plane; ArrayList<Tile> paint = new ArrayList<>(); float[] pose; }
+
+    /** The CPU part (a background thread): plane, tiles to paint. Returns null when there's nothing to paint. */
+    synchronized Job analyse(short[] depth, int dw, int dh, float[] di, float[] pose, long nowMs) {
+        lastMs = nowMs; attempts++;
         // 1) the depth image's points in the world (every 2nd pixel), with which pixel they came from
         int n = 0; float[] wp = new float[(dw / 2 + 1) * (dh / 2 + 1) * 3];
         float camx = pose[12], camy = pose[13], camz = pose[14];
@@ -52,7 +58,7 @@ final class FlatTiles {
             wp[n * 3 + 2] = pose[2] * xc + pose[6] * yc + pose[10] * zc + pose[14];
             n++;
         }
-        if (n < 400) return;
+        if (n < 400) { noPlane++; return null; }
         // 2) the dominant plane (RANSAC), then refined by least squares on its inliers
         java.util.Random rnd = new java.util.Random(nowMs);
         float bnx = 0, bny = 0, bnz = 0, bd = 0; int bestIn = 0;
@@ -68,13 +74,13 @@ final class FlatTiles {
             for (int i = 0; i < n; i += 3) if (Math.abs(nx * wp[i * 3] + ny * wp[i * 3 + 1] + nz * wp[i * 3 + 2] + d) < INLIER) in++;
             if (in > bestIn) { bestIn = in; bnx = nx; bny = ny; bnz = nz; bd = d; }
         }
-        if (bestIn * 3 < n * 0.3f) return;   // under 30% of the view on one plane: nothing flat enough here
+        if (bestIn * 3 < n * 0.25f) { noPlane++; return null; }   // under 25% of the view on one plane: nothing flat enough here
         if (bnx * camx + bny * camy + bnz * camz + bd < 0) { bnx = -bnx; bny = -bny; bnz = -bnz; bd = -bd; }   // normal towards the camera
         // 3) the same plane as before (within 8 deg and 4 cm), so tiles stay put; else a new one
         int pi = -1;
         for (int i = 0; i < planes.size(); i++) {
             Plane p = planes.get(i);
-            if (p.nx * bnx + p.ny * bny + p.nz * bnz > 0.99f && Math.abs(p.d - bd) < 0.04f) { pi = i; break; }
+            if (p.nx * bnx + p.ny * bny + p.nz * bnz > 0.985f && Math.abs(p.d - bd) < 0.06f) { pi = i; break; }   // (noise: was 8 deg / 4 cm, a new plane nearly every time)
         }
         if (pi < 0) {
             Plane p = new Plane(); p.nx = bnx; p.ny = bny; p.nz = bnz; p.d = bd;
@@ -117,17 +123,36 @@ final class FlatTiles {
             if (t != null) t.contra = 0;
             // most of the tile seen, on the plane, nothing in front: a 30 cm tile at 2 m is ~17x17 depth pixels, ~70 samples
             float expected = (float) Math.pow(TILE * di[0] / Math.max(0.3f, vdist) / 2, 2) * head;
-            if (c[0] < 0.6f * expected || c[1] > 2 || c[2] > 0.2f * tot) continue;
+            looked++;
+            // raw depth leaves many pixels empty on plain walls: a third of the tile is enough
+            if (c[0] < 0.3f * expected) { lowCover++; continue; }
+            if (c[1] > Math.max(3, 0.08f * tot)) { blocked++; continue; }   // something stands in front
+            if (c[2] > 0.2f * tot) { opening++; continue; }                  // the depth went through: an opening
             float score = head / Math.max(0.3f, vdist);
             if (t == null) {
                 if (slots >= MAX_TILES) continue;
                 t = new Tile(); t.plane = pi; t.iu = (int) (k >>> 20 & 0xFFFFF) - (1 << 19); t.iv = (int) (k & 0xFFFFF) - (1 << 19); t.slot = slots++; t.score = -1;
                 tiles.put(k, t);
             }
-            if (score > t.score * 1.25f && head > 0.5f) { t.score = score; toPaint.add(t); }
+            if (head <= 0.5f) { tooSlanted++; continue; }
+            if (score > t.score * 1.25f) { t.pending = score; toPaint.add(t); } else notBetter++;
         }
-        if (!toPaint.isEmpty()) paint(toPaint, p, pose, ti, cameraTex, texToNorm);
+        if (toPaint.isEmpty()) return null;
+        Job j = new Job(); j.plane = pi; j.paint = toPaint; j.pose = pose; return j;
     }
+
+    /** GL thread: paints a job's tiles from the camera picture now (taken from where the depth was). */
+    synchronized void paint(Job j, float[] ti, int cameraTex, Norm texToNorm) {
+        for (Tile t : j.paint) t.score = t.pending;
+        paint(j.paint, planes.get(j.plane), j.pose, ti, cameraTex, texToNorm);
+    }
+
+    String stats() {
+        return String.format(java.util.Locale.US, "flat tiles: %d shown on %d planes; %d attempts (%d no flat surface), %d tiles looked at: %d painted, %d too little depth, %d something in front, %d opening, %d too slanted, %d not a better view; %d taken back",
+                countShown(), planes.size(), attempts, noPlane, looked, painted, lowCover, blocked, opening, tooSlanted, notBetter, removed);
+    }
+
+    int countShown() { int c = 0; for (Tile t : tiles.values()) if (t.score > 0) c++; return c; }
 
     interface Norm { void apply(float[] texPx, float[] outNorm); }
 
@@ -202,7 +227,7 @@ final class FlatTiles {
     }
 
     /** The painted tiles as textured quads, 5 mm in front of their plane. */
-    void draw(float[] mvp) {
+    synchronized void draw(float[] mvp) {
         if (tiles.isEmpty() || atlasTex == 0) return;
         if (dirty) rebuild();
         if (vboVerts == 0) return;
@@ -241,5 +266,5 @@ final class FlatTiles {
         vbo.position(0);
     }
 
-    void clear() { tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
+    synchronized void clear() { tiles.clear(); planes.clear(); slots = 0; vboVerts = 0; painted = 0; removed = 0; dirty = true; }
 }

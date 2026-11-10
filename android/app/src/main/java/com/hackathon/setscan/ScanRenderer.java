@@ -3683,7 +3683,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void reset() {
-        flatTiles.clear();
+        flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
         screenFile = null;   // the next scan records its own screen video
@@ -7041,21 +7041,41 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Twice a second while tracking well and not moving fast: tiles from the latest depth image, when it was taken
      *  from where the camera is now (so the picture and the depth agree). */
+    private volatile FlatTiles.Job tilesJob; private volatile boolean tilesBusy; private long tilesLogAt;
+
+    /** Twice a second while tracking well and not moving fast: the flat surface and its tiles from the latest depth
+     *  image on a background thread (it took 15 ms on the drawing thread); painting here, when the camera is still
+     *  where that depth was taken (so picture and depth agree). */
     private void maybeTiles(Frame frame, Camera camera, long nowMs) {
-        if (nowMs - flatTiles.lastMs < 500 || camera.getTrackingState() != TrackingState.TRACKING || needRealign || tooFast || lastDepth == null) return;
+        boolean good = camera.getTrackingState() == TrackingState.TRACKING && !needRealign && !tooFast;
+        FlatTiles.Job j = tilesJob;
+        if (j != null) {
+            tilesJob = null;
+            float dx = curPose[12] - j.pose[12], dy = curPose[13] - j.pose[13], dz = curPose[14] - j.pose[14];
+            float dot = curPose[8] * j.pose[8] + curPose[9] * j.pose[9] + curPose[10] * j.pose[10];
+            if (good && dx * dx + dy * dy + dz * dz < 0.03f * 0.03f && dot > 0.999f) {
+                long t0 = System.nanoTime();
+                CameraIntrinsics ti = camera.getTextureIntrinsics(); int[] td = ti.getImageDimensions();
+                final float[] tin = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
+                try { flatTiles.paint(j, tin, bgTex, (px, out) -> { for (int i = 0; i < px.length; i += 2) { out[i] = px[i] / tin[4]; out[i + 1] = px[i + 1] / tin[5]; } }); }   // texture pixels -> ARCore's TEXTURE_NORMALIZED (0,0 top left)
+                catch (Exception e) { logError("flat tiles", e); }
+                perf.note("ms: flat tiles paint", (System.nanoTime() - t0) / 1e6);
+            }
+        }
+        if (nowMs - tilesLogAt > 10000 && flatTiles.attempts > 0) { tilesLogAt = nowMs; log(flatTiles.stats()); }
+        if (tilesBusy || nowMs - flatTiles.lastMs < 500 || !good || lastDepth == null) return;
         float dx = curPose[12] - lastDPose[12], dy = curPose[13] - lastDPose[13], dz = curPose[14] - lastDPose[14];
         float dot = curPose[8] * lastDPose[8] + curPose[9] * lastDPose[9] + curPose[10] * lastDPose[10];
         if (dx * dx + dy * dy + dz * dz > 0.03f * 0.03f || dot < 0.999f) return;
-        long t0 = System.nanoTime();
-        CameraIntrinsics ti = camera.getTextureIntrinsics(); int[] td = ti.getImageDimensions();
-        float[] tin = {ti.getFocalLength()[0], ti.getFocalLength()[1], ti.getPrincipalPoint()[0], ti.getPrincipalPoint()[1], td[0], td[1]};
-        int before = flatTiles.tiles.size();
-        try {
-            flatTiles.update(lastDepth, lastDw, lastDh, lastDIntr, lastDPose.clone(), tin, bgTex,
-                    (px, out) -> { for (int i = 0; i < px.length; i += 2) { out[i] = px[i] / tin[4]; out[i + 1] = px[i + 1] / tin[5]; } }, nowMs);   // texture pixels -> ARCore's TEXTURE_NORMALIZED (0,0 top left), what the background shader samples
-        } catch (Exception e) { logError("flat tiles", e); }
-        perf.note("ms: flat tiles", (System.nanoTime() - t0) / 1e6);
-        if (flatTiles.tiles.size() / 25 != before / 25) log(String.format(java.util.Locale.US, "flat tiles: %d on %d planes, %d paints, %d taken back", flatTiles.tiles.size(), flatTiles.planes.size(), flatTiles.painted, flatTiles.removed));
+        final short[] d = lastDepth; final int dw = lastDw, dh = lastDh; final float[] di = lastDIntr, pose = lastDPose.clone();
+        tilesBusy = true; flatTiles.lastMs = nowMs;
+        Thread th = new Thread(() -> {
+            long t0 = System.nanoTime();
+            try { tilesJob = flatTiles.analyse(d, dw, dh, di, pose, nowMs); } catch (Exception e) { logError("flat tiles", e); }
+            perf.note("ms: flat tiles analyse (thread)", (System.nanoTime() - t0) / 1e6);
+            tilesBusy = false;
+        }, "flat-tiles");
+        th.setPriority(Thread.MIN_PRIORITY); th.start();
     }
 
     /** Points live view: the finished live mesh isn't drawn; take it so the next one gets built (for the doorways). */
