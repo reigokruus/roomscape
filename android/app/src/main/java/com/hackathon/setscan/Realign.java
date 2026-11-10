@@ -35,6 +35,43 @@ final class Realign {
         for (float[] c : coarse.values()) { c[0] /= c[3]; c[1] /= c[3]; c[2] /= c[3]; }
         for (float[] c : mid.values()) { c[0] /= c[3]; c[1] /= c[3]; c[2] /= c[3]; }
         for (float[] c : fine.values()) { c[0] /= c[3]; c[1] /= c[3]; c[2] /= c[3]; }
+        tCoarse = new Cells(coarse); tMid = new Cells(mid); tFine = new Cells(fine);
+    }
+
+    /** The cells again as flat arrays (open addressing on the cell key): the matching looks up ~10 million cells per
+     *  try, and HashMap<Long> boxing made a try take 6-12 s on the S24 (rk 10 Nov 14:58 scan). */
+    static final class Cells {
+        final long[] keys; final float[] xyz; final int mask;
+        static final long EMPTY = Long.MIN_VALUE;
+        Cells(HashMap<Long, float[]> m) {
+            int cap = Integer.highestOneBit(Math.max(16, m.size() * 2)) * 2; mask = cap - 1;
+            keys = new long[cap]; xyz = new float[cap * 3]; Arrays.fill(keys, EMPTY);
+            for (java.util.Map.Entry<Long, float[]> e : m.entrySet()) {
+                long k = e.getKey(); int i = slot(k);
+                while (keys[i] != EMPTY) i = (i + 1) & mask;
+                keys[i] = k; float[] c = e.getValue(); xyz[i * 3] = c[0]; xyz[i * 3 + 1] = c[1]; xyz[i * 3 + 2] = c[2];
+            }
+        }
+        int slot(long k) { long h = k * 0x9E3779B97F4A7C15L; return (int) (h >>> 40) & mask; }
+        /** Index of the cell with this key, or -1. */
+        int find(long k) { int i = slot(k); while (true) { long q = keys[i]; if (q == k) return i; if (q == EMPTY) return -1; i = (i + 1) & mask; } }
+    }
+    Cells tCoarse, tMid, tFine;
+    private final float[] near = new float[3];
+
+    /** Like nearest(), on the flat cells; the result in `near` (false: none within reach). Not thread-safe per Realign. */
+    private boolean nearestFast(Cells t, float s, int reach, float x, float y, float z) {
+        long ix = (long) Math.floor(x / s) + (1 << 20), iy = (long) Math.floor(y / s) + (1 << 20), iz = (long) Math.floor(z / s) + (1 << 20);
+        float bd = Float.MAX_VALUE; int best = -1;
+        for (int a = -reach; a <= reach; a++) for (int b = -reach; b <= reach; b++) for (int c = -reach; c <= reach; c++) {
+            long k = ((ix + a) & 0x1FFFFF) | (((iy + b) & 0x1FFFFF) << 21) | (((iz + c) & 0x1FFFFF) << 42);
+            int i = t.find(k); if (i < 0) continue;
+            float dx = t.xyz[i * 3] - x, dy = t.xyz[i * 3 + 1] - y, dz = t.xyz[i * 3 + 2] - z, d = dx * dx + dy * dy + dz * dz;
+            if (d < bd) { bd = d; best = i; }
+        }
+        if (best < 0) return false;
+        near[0] = t.xyz[best * 3]; near[1] = t.xyz[best * 3 + 1]; near[2] = t.xyz[best * 3 + 2];
+        return true;
     }
 
     static long key(float x, float y, float z, float s) {
@@ -231,8 +268,15 @@ final class Realign {
             float[] res = new float[pts.size()]; int nres = 0;
             for (float[] p : pts) {
                 float x = F[0] * p[0] + F[4] * p[1] + F[8] * p[2] + F[12], y = F[1] * p[0] + F[5] * p[1] + F[9] * p[2] + F[13], z = F[2] * p[0] + F[6] * p[1] + F[10] * p[2] + F[14];
-                float[] q = stage == 0 ? nearest(coarse, COARSE, 2, x, y, z) : stage == 1 ? nearest(mid, MID, 1, x, y, z) : nearest(fine, FINE, 2, x, y, z);
-                if (q == null) continue;
+                float[] q;
+                if (tCoarse != null) {
+                    boolean found = stage == 0 ? nearestFast(tCoarse, COARSE, 2, x, y, z) : stage == 1 ? nearestFast(tMid, MID, 1, x, y, z) : nearestFast(tFine, FINE, 2, x, y, z);
+                    if (!found) continue;
+                    q = near;
+                } else {
+                    q = stage == 0 ? nearest(coarse, COARSE, 2, x, y, z) : stage == 1 ? nearest(mid, MID, 1, x, y, z) : nearest(fine, FINE, 2, x, y, z);
+                    if (q == null) continue;
+                }
                 float dd = (float) Math.sqrt((q[0] - x) * (q[0] - x) + (q[1] - y) * (q[1] - y) + (q[2] - z) * (q[2] - z));
                 if (dd > maxD) continue;
                 res[nres++] = dd;
