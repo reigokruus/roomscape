@@ -2673,7 +2673,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
             }
             k++;
         }
@@ -2753,7 +2753,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
             }
             k++;
         }
@@ -3457,7 +3457,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthRunning = false; cleaning = false; glTasks.clear();
         gpuSurfaceReset();
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
-        needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null;
+        needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
         depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
@@ -4216,6 +4216,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             everTracked = true;
             notTrackingSince = 0;
             lostSince = 0;
+            if (!viewing && count > 2000 && frameNo % 10 == 0) plainWallHint(frame, nowMs);
         } else if (everTracked) {
             // Lost tracking after it worked. ARCore usually recovers by itself once it sees something textured again;
             // restarting only helps the S24's "paused for no reason" case, and a restart can shift the whole map.
@@ -4225,7 +4226,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0;
                     snapshotForRealign();
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
-                    activity.toast("Lost track. Point at a part you already scanned.");
+                    activity.toast("Lost position. Point back at an area you already scanned.");
                 }
             }
             else if (camera.getTrackingFailureReason() == com.google.ar.core.TrackingFailureReason.NONE
@@ -4594,6 +4595,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // (rk 10 Nov: after a loss and an AR restart a second, shifted layer was fused over the first).
             if (needRealign && !realigned(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m, nowMsFrame)) return;
             applyFix(m);
+            System.arraycopy(m, 0, lastGoodCam, 0, 16); haveGoodCam = true;   // where the phone was, for a re-alignment guess
             int[] rgb = new int[3];
             frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
@@ -5048,7 +5050,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
             }
             k++;
         }
@@ -5074,7 +5076,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
             }
             k++;
         }
@@ -5390,35 +5392,81 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** The scan so far as point centroids (taken when tracking is lost), for the re-alignment (Realign). */
-    private Realign realign;
+    private volatile Realign realign;
     private boolean sessionRestarted;
     private int realignTick;
 
     private void snapshotForRealign() {
         long t0 = System.currentTimeMillis();
-        float[] xyz = new float[count * 3];
-        for (int i = 0; i < count * 3; i++) xyz[i] = pos.get(i);
-        realign = new Realign(xyz, count);
+        final int n = count;
+        final float[] xyz = new float[n * 3];
+        pos.position(0); pos.get(xyz, 0, n * 3); pos.position(0);
         fixTry = poseFix.clone();
-        log("realign snapshot: " + realign.coarse.size() + " / " + realign.fine.size() + " cells in " + (System.currentTimeMillis() - t0) + " ms");
+        stayGuess = null;
+        realign = null; realignBuilding = true;
+        // The cells take ~3 s for a big scan (10:44 scan: 2.8 s on the drawing thread): built aside; nothing is fused
+        // meanwhile (realigned() waits for them).
+        new Thread(() -> {
+            Realign r = new Realign(xyz, n);
+            realign = r; realignBuilding = false;
+            log("realign snapshot: " + r.coarse.size() + " / " + r.fine.size() + " cells in " + (System.currentTimeMillis() - t0) + " ms");
+        }, "realign-snapshot").start();
+    }
+
+    private long fewFeaturesSince, plainHintAt;
+
+    /** Early warning before a loss (rk 10 Nov 10:44: lost on a plain wall): ARCore tracks few features for a second. */
+    private void plainWallHint(Frame frame, long nowMs) {
+        int n = 0;
+        try (PointCloud pc = frame.acquirePointCloud()) {
+            FloatBuffer p = pc.getPoints();
+            int k = p.remaining() / 4;
+            for (int i = 0; i < k; i++) if (p.get(i * 4 + 3) >= 0.3f) n++;
+        } catch (Exception e) { return; }
+        if (n >= 30) { fewFeaturesSince = 0; return; }
+        if (fewFeaturesSince == 0) { fewFeaturesSince = nowMs; return; }
+        if (nowMs - fewFeaturesSince > 1000 && nowMs - plainHintAt > 15000) {
+            plainHintAt = nowMs;
+            log("few features (" + n + "): plain-wall hint");
+            activity.toast("Plain wall: move slowly, keep some furniture or an edge in view.");
+        }
+    }
+
+    private final float[] lastGoodCam = new float[16];
+    private boolean haveGoodCam;
+    private volatile boolean realignBuilding;
+    /** Second start for the re-alignment: the phone hasn't moved since the loss (its last good place, turned only
+     *  about the vertical), for when the AR restart came back in a different frame. */
+    private float[] stayGuess;
+
+    private float[] stayGuessFor(float[] m) {
+        if (!haveGoodCam) return null;
+        float[] inv = new float[16], g = new float[16];
+        if (!android.opengl.Matrix.invertM(inv, 0, m, 0)) return null;
+        android.opengl.Matrix.multiplyMM(g, 0, lastGoodCam, 0, inv, 0);
+        float c = g[0], sn = g[2], l = (float) Math.sqrt(c * c + sn * sn);
+        if (l < 1e-4f) return null;
+        c /= l; sn /= l;
+        // Keep gravity: the turn about the vertical only, placed so the camera lands where it was.
+        float[] r = Realign.identity();
+        r[0] = c; r[8] = -sn; r[2] = sn; r[10] = c;
+        float px = m[12], py = m[13], pz = m[14];
+        r[12] = lastGoodCam[12] - (c * px - sn * pz); r[13] = lastGoodCam[13] - py; r[14] = lastGoodCam[14] - (sn * px + c * pz);
+        return r;
     }
 
     /** After a tracking loss: finds the rigid correction (shift + turn about the vertical; ARCore keeps gravity) that
      *  puts this depth frame onto the scan so far (Realign: ICP, coarse then fine), and resumes fusing only when three
      *  frames in a row agree with a small residual. Until then nothing is fused. */
     private boolean realigned(ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m, long nowMs) {
-        if (realign == null) { needRealign = false; return true; }
-        // ARCore recovered by itself (no session restart): its own relocalisation keeps the frame; go on at once
-        // (rk 10 Nov 10:15: a 1.5 s loss then a whole minute paused because the noisy depth never passed the check).
-        // After a restart: wait for the re-alignment, but at most 5 s; then go on anyway as a new segment, so nothing
-        // is lost and the layer can be told apart later.
-        if (!sessionRestarted || nowMs - realignSince > 5000) {
-            needRealign = false; realign = null; segment++;
-            log(String.format(java.util.Locale.US, "fusing again after %.1f s (%s); segment %d",
-                    (nowMs - realignSince) / 1000f, sessionRestarted ? "re-alignment didn't settle, ARCore's pose" : "ARCore recovered by itself", segment));
-            activity.toast("Back on track, scanning again.");
-            return true;
+        // Nothing is fused from a pose that hasn't been checked against the scan (rk 10 Nov 10:44: lost on a plain wall,
+        // moved before it recovered; the old 5 s timeout then fused 8 s from ARCore's wrong pose as a new layer). No
+        // timeout: until the view lines up, fusion stays paused and the hint says where to point.
+        if (realign == null) {
+            if (realignBuilding) return false;
+            needRealign = false; return true;
         }
+        if (stayGuess == null) stayGuess = stayGuessFor(m);
         if (realignTick++ % 3 != 0) return false;   // the ICP every 3rd depth frame (it's heavy for the drawing thread)
         java.util.ArrayList<float[]> pts = new java.util.ArrayList<>();
         for (int v = 3; v < dh - 3; v += 5) for (int u = 3; u < dw - 3; u += 5) {
@@ -5429,13 +5477,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         if (pts.size() < 60) { realignOk = 0; return false; }
         Realign.Fit fit = realign.solve(pts, fixTry);   // ~5 ICP runs: only while re-aligning
+        if (!Realign.good(fit) && stayGuess != null && realignOk == 0) {
+            Realign.Fit f2 = realign.solve(pts, stayGuess);
+            if (f2.inliers > fit.inliers) fit = f2;
+        }
         float[] F = fit.fix; float inl = fit.inliers, med = fit.median;
         boolean good = Realign.good(fit);
+        // ARCore relocalised by itself (no restart) and the view already sits on the scan with the old correction:
+        // two agreeing frames are enough (rk 10 Nov 10:15: a short loss shouldn't pause for long).
+        float moved = (float) Math.sqrt((F[12] - poseFix[12]) * (F[12] - poseFix[12]) + (F[13] - poseFix[13]) * (F[13] - poseFix[13]) + (F[14] - poseFix[14]) * (F[14] - poseFix[14]));
+        boolean quick = !sessionRestarted && fit.inliers >= 0.55f && fit.median < 0.03f && moved < 0.05f;
         float drift = (float) Math.sqrt((F[12] - fixPrev[12]) * (F[12] - fixPrev[12]) + (F[13] - fixPrev[13]) * (F[13] - fixPrev[13]) + (F[14] - fixPrev[14]) * (F[14] - fixPrev[14]));
-        realignOk = good && (realignOk == 0 || drift < 0.02f) ? realignOk + 1 : (good ? 1 : 0);
+        boolean ok = good || quick;
+        realignOk = ok && (realignOk == 0 || drift < 0.02f) ? realignOk + 1 : (ok ? 1 : 0);
         System.arraycopy(F, 0, fixPrev, 0, 16);
         if (good) fixTry = F;
-        if (realignOk >= 3) {
+        if (realignOk >= (quick ? 2 : 3)) {
             System.arraycopy(F, 0, poseFix, 0, 16);
             hasFix = true; needRealign = false; realign = null;
             segment++;
@@ -5444,7 +5501,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             activity.toast("Back on track, scanning again.");
             return true;
         }
-        if (nowMs - realignHintAt > 8000) { realignHintAt = nowMs; activity.toast("Still lost. Go back to where you were and point at what you scanned."); }
+        if (nowMs - realignHintAt > 6000) { realignHintAt = nowMs; activity.toast("Lost position. Point back at an area you already scanned."); }
         return false;
     }
     private static long key(float x, float y, float z) {

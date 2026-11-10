@@ -249,7 +249,7 @@ final class ScanStore {
         File pf = new File(dir, "path.bin");
         if (pf.exists()) try (DataInputStream in = in(pf)) { int n = in.readInt(); d.path = new float[n]; for (int i = 0; i < n; i++) d.path[i] = in.readFloat(); }
         File sf = new File(dir, "splats.bin");
-        if (segf.exists()) try (DataInputStream in = in(segf)) {
+        if (sf.exists()) try (DataInputStream in = in(sf)) {
             int n = in.readInt(); float[] p = new float[n * 3], q = new float[n * 4]; byte[] c = new byte[n * 4];
             for (int i = 0; i < n * 3; i++) p[i] = in.readFloat();
             for (int i = 0; i < n * 4; i++) q[i] = in.readFloat();
