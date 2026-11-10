@@ -6963,10 +6963,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private String roomLine(int i) {
         FloorArea.Result fa = floorArea; FloorArea.Room r = fa.rooms.get(i);
         if (!edited(i)) return r.text(i);
-        float[] o = r.rect, e = editedRect(i);
-        float area = r.shown() + (e[1] - e[0]) * (e[3] - e[2]) - (o[1] - o[0]) * (o[3] - o[2]);
-        float a = Math.max(e[1] - e[0], e[3] - e[2]), b = Math.min(e[1] - e[0], e[3] - e[2]);
-        return String.format(java.util.Locale.US, "Room %d: ≈%s m², %.2f × %.2f m (walls adjusted by hand)", i + 1, FloorArea.Room.m2(area), a, b);
+        float[] sz = r.editedSize(wallEdits[i]);
+        return String.format(java.util.Locale.US, "Room %d: %s m², %.2f × %.2f m (walls set by hand)", i + 1, FloorArea.Room.m2(r.editedArea(wallEdits[i])), sz[0], sz[1]);
     }
     private float[] worldOf(FloorArea.Result fa, float deg, float u, float v) {
         double t = Math.toRadians(deg); float ca = (float) Math.cos(t), sa = (float) Math.sin(t);
@@ -7013,7 +7011,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float out = (sd % 2 == 0 ? auto - at : at - auto);
         out = Math.round(Math.max(-1.5f, Math.min(1.5f, out)) * 100) / 100f;
         wallEdits[i][sd] = out;
-        activity.setRoomSize(roomLine(i));
+        activity.setRoomSize(roomSizeText());
     }
     void wallDragEnd() { if (dragSide >= 0) { saveWallEdits(); dragRoom = -1; dragSide = -1; activity.setRoomSize(roomSizeText()); } }
 
@@ -7038,8 +7036,32 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         FloorArea.Result fa = viewing ? floorArea : null;
         if (fa == null || fa.text() == null) return base;
         if (selectedRoom > 0 && selectedRoom <= fa.rooms.size()) return roomLine(selectedRoom - 1);
-        if (fa.rooms.size() == 1 && edited(0)) return (base == null ? "" : base + " · ") + roomLine(0);
+        if (fa.rooms.size() == 1 && edited(0)) {
+            // walls set by hand (rk 10 Nov 22:57: the size and area stayed the scan's own): the size line is the edited
+            // room's, no "about"; the height stays the scan's
+            FloorArea.Room r = fa.rooms.get(0); float[] sz = r.editedSize(wallEdits[0]);
+            String height = base != null && base.contains(" · ") ? base.substring(base.indexOf(" · ")) : "";
+            if (height.contains("floor")) height = "";
+            return String.format(java.util.Locale.US, "%.2f × %.2f m", sz[0], sz[1]) + height + " · floor " + FloorArea.Room.m2(r.editedArea(wallEdits[0])) + " m² (walls set by hand)";
+        }
+        if (fa.rooms.size() >= 2 && wallsEdited()) {
+            float all = 0; for (int i = 0; i < fa.rooms.size(); i++) all += edited(i) ? fa.rooms.get(i).editedArea(wallEdits[i]) : fa.rooms.get(i).shown();
+            return (base == null ? "" : base + " · ") + String.format(java.util.Locale.US, "%d rooms, floor ≈%.0f m² in all (tap a room)", fa.rooms.size(), all);
+        }
         return base == null ? fa.text() : base + " · " + fa.text();
+    }
+
+    /** The short form for the title (it must fit on one line): size and floor area only. */
+    String roomTitleText() {
+        String full = roomSizeText(); if (full == null) return null;
+        FloorArea.Result fa = viewing ? floorArea : null;
+        if (fa != null && fa.rooms.size() == 1) {
+            FloorArea.Room r = fa.rooms.get(0); boolean ed = edited(0);
+            float[] sz = ed ? r.editedSize(wallEdits[0]) : new float[]{r.w, r.l};
+            return String.format(java.util.Locale.US, "%s%.2f × %.2f m · %s m²", ed ? "" : "≈", sz[0], sz[1], FloorArea.Room.m2(ed ? r.editedArea(wallEdits[0]) : r.shown()));
+        }
+        int dot = full.indexOf(" · ");
+        return dot > 0 && full.length() > 34 ? full.substring(0, dot) : full;
     }
 
     /** Viewer tap with more than one room: the room under the finger (on the floor), or none again. True if handled. */

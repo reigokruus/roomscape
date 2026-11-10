@@ -45,6 +45,20 @@ final class FloorArea {
         /** The wall rectangle (walled rooms): sides u0, u1, v0, v1 in the room's own directions (deg), metres from the
          *  grid's corner (x0, z0 of the Result); x = x0 + u cos - v sin, z = z0 + u sin + v cos. */
         float[] rect; float deg;
+
+        /** With its sides moved by hand (outwards metres for u0, u1, v0, v1): the area changes by exactly the wall
+         *  rectangle's change (moving one side out by d adds d × that side's length). */
+        float editedArea(float[] out) {
+            if (rect == null) return shown();
+            float w0 = rect[1] - rect[0], l0 = rect[3] - rect[2], w1 = w0 + out[0] + out[1], l1 = l0 + out[2] + out[3];
+            return Math.max(0, shown() + w1 * l1 - w0 * l0);
+        }
+        /** Width and length (longer first) with the sides moved. */
+        float[] editedSize(float[] out) {
+            if (rect == null) return new float[]{w, l};
+            float a = rect[1] - rect[0] + out[0] + out[1], b = rect[3] - rect[2] + out[2] + out[3];
+            return new float[]{Math.max(a, b), Math.min(a, b)};
+        }
         int cells;
         /** The floor to show: within its convex outline when the seen floor fills most of it (the floor along the walls
          *  is often not seen: 20:25 scan, 8.7 m² seen of 10.8, outline 9.9), else what was seen. */

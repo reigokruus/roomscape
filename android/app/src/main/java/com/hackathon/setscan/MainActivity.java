@@ -1121,8 +1121,10 @@ public class MainActivity extends Activity {
 
     private void setViewerTitle() {
         if (viewerTitle == null) return;
-        String name = renderer.currentName != null ? renderer.currentName : "Scan", size = roomSizeText;
+        String name = renderer.currentName != null ? renderer.currentName : "Scan", size = roomSizeText != null ? renderer.roomTitleText() : null;
         if (resetWalls != null) resetWalls.setVisibility(renderer.wallsEdited() ? View.VISIBLE : View.GONE);
+        // the ROOM card's size row follows every change too (it was only set when the scan opened: stale after a drag)
+        if (sizeValue != null) { String full = renderer.roomSizeText(); if (full != null && full.startsWith("scanned area ")) full = full.substring(13) + " (scanned area)"; sizeValue.setText(full != null ? full : "—"); }
         if (size == null) { viewerTitle.setText(name); return; }
         // "scanned area" on a line of its own, so the size itself never gets cut off (rk 10 Nov 12:07)
         if (size.startsWith("scanned area ")) size = "scanned area\n" + size.substring(13);
