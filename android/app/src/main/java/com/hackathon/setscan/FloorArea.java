@@ -31,17 +31,21 @@ final class FloorArea {
                 float all = 0; for (Room rm : rooms) all += rm.shown();
                 return String.format(java.util.Locale.US, "%d rooms, floor ≈%.0f m² in all (tap a room)", rooms.size(), all);
             }
-            return (enclosed < 0.6f ? "floor area about " : "floor area ≈") + a + " m²";
+            Room r0 = rooms.get(0);
+            boolean open = r0.walled > 0 ? r0.wallSides < 4 : enclosed < 0.6f;
+            return (open ? "floor area about " : "floor area ≈") + a + " m²";
         }
     }
 
     static final class Room {
         float area, w, l;    // m², and the size along its own walls (the smallest rectangle around it), metres
         float hull;          // m² inside its outline along its own walls (unseen floor by straight walls filled; an L stays an L)
+        float walled;        // m² bounded by its walls (wallRoom); 0 when no wall was found
+        int wallSides;       // how many of the 4 sides have a wall (fewer: that side is the seen floor, "about")
         int cells;
         /** The floor to show: within its convex outline when the seen floor fills most of it (the floor along the walls
          *  is often not seen: 20:25 scan, 8.7 m² seen of 10.8, outline 9.9), else what was seen. */
-        float shown() { return hull > 0 && area / hull >= 0.8f ? hull : area; }
+        float shown() { return walled > 0 ? walled : hull > 0 && area / hull >= 0.8f ? hull : area; }
         static String m2(float a) { return a < 10 ? String.format(java.util.Locale.US, "%.1f", a) : String.format(java.util.Locale.US, "%.0f", a); }
         String text(int i) { return String.format(java.util.Locale.US, "Room %d: ≈%s m², %.1f × %.1f m", i + 1, m2(shown()), w, l); }
     }
@@ -130,6 +134,7 @@ final class FloorArea {
             Room room = new Room(); room.cells = count2[order.get(i)]; room.area = room.cells * CELL * CELL;
             float[] wl = minRect(r.roomOf, i + 1, nx, nz); room.w = Math.max(wl[0], wl[1]); room.l = Math.min(wl[0], wl[1]);
             room.hull = orthoHullArea(r.roomOf, i + 1, nx, nz, wl[2]);
+            wallRoom(room, r.roomOf, i + 1, g, nx, nz, wl[2]);
             r.rooms.add(room);
         }
         boolean[] main = new boolean[n];
@@ -153,6 +158,88 @@ final class FloorArea {
         r.area = cells * CELL * CELL; r.other = otherCells * CELL * CELL; r.enclosed = edge == 0 ? 0 : (float) edgeWall / edge;
         r.nx = nx; r.nz = nz; r.x0 = x0; r.z0 = z0; r.grid = g;
         return r;
+    }
+
+    /** The room bounded by its walls (rk 10 Nov: "the area is the walls, not how much floor was seen"): in the room's own
+     *  directions, each side's wall is the strongest line of wall cells near the edge of its floor (a wall doubled by a
+     *  pose jump: the layer with more points); a side without one keeps the floor's edge. Inside that rectangle the
+     *  cells within 60 cm of the room's floor count (an L-shaped room keeps its notch, a doorway is closed straight). */
+    private static void wallRoom(Room room, int[] roomOf, int id, byte[] g, int nx, int nz, float deg) {
+        double a = Math.toRadians(deg); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+        java.util.ArrayList<float[]> fl = new java.util.ArrayList<>(), wa = new java.util.ArrayList<>();
+        int bx0 = nx, bx1 = 0, bz0 = nz, bz1 = 0;
+        for (int c = 0; c < roomOf.length; c++) if (roomOf[c] == id) { int x = c % nx, z = c / nx; bx0 = Math.min(bx0, x); bx1 = Math.max(bx1, x); bz0 = Math.min(bz0, z); bz1 = Math.max(bz1, z); }
+        int pad = 20;
+        for (int z = Math.max(0, bz0 - pad); z <= Math.min(nz - 1, bz1 + pad); z++) for (int x = Math.max(0, bx0 - pad); x <= Math.min(nx - 1, bx1 + pad); x++) {
+            int c = z * nx + x; float px = x * CELL, pz = z * CELL, u = px * ca + pz * sa, v = -px * sa + pz * ca;
+            if (roomOf[c] == id) fl.add(new float[]{u, v});
+            else if ((g[c] & 7) == 3) wa.add(new float[]{u, v});
+        }
+        if (fl.size() < 50) return;
+        float[] us = new float[fl.size()], vs = new float[fl.size()];
+        for (int i = 0; i < fl.size(); i++) { us[i] = fl.get(i)[0]; vs[i] = fl.get(i)[1]; }
+        java.util.Arrays.sort(us); java.util.Arrays.sort(vs);
+        float fu0 = us[(int) (us.length * 0.02)], fu1 = us[(int) (us.length * 0.98)], fv0 = vs[(int) (vs.length * 0.02)], fv1 = vs[(int) (vs.length * 0.98)];
+        float[] side = new float[4]; int found = 0;
+        for (int sd = 0; sd < 4; sd++) {
+            boolean alongU = sd < 2;   // sides 0, 1: walls across u (at u = const); 2, 3: across v
+            float edge = sd == 0 ? fu0 : sd == 1 ? fu1 : sd == 2 ? fv0 : fv1;
+            float lo = alongU ? fv0 + 0.2f : fu0 + 0.2f, hi = alongU ? fv1 - 0.2f : fu1 - 0.2f;
+            float inward = sd % 2 == 0 ? 1 : -1;
+            int[] hist = new int[40];   // 5 cm bins from 60 cm inside the floor's edge to 1.4 m beyond it
+            for (float[] w : wa) {
+                float along = alongU ? w[1] : w[0], across = alongU ? w[0] : w[1];
+                if (along < lo || along > hi) continue;
+                int b = (int) Math.floor(((edge - across) * inward + 1.4f) / 0.05f);   // 0 = 1.4 m outside, 28 = the edge
+                if (b >= 0 && b < 40) hist[b]++;
+            }
+            // a wall stands at or beyond the floor's edge (30 cm leeway): a cupboard front well inside the seen floor isn't
+            // the room's wall (16:40 scan: kitchen fronts cut 24 m² of seen floor to 16)
+            int best = -1; for (int b = 0; b < 34; b++) if (best < 0 || hist[b] > hist[best]) best = b;
+            int need = (int) Math.max(8, 0.15f * (hi - lo) / CELL);
+            if (best >= 0 && hist[best] >= need) { side[sd] = edge - inward * ((best + 0.5f) * 0.05f - 1.4f); found++; }
+            else side[sd] = edge;
+        }
+        // a "wall" with lots of this room's floor beyond it (over 0.5 m²) isn't the room's wall: a cupboard front, a
+        // kitchen island (16:40 scan): that side keeps the floor's edge
+        for (int sd = 0; sd < 4; sd++) {
+            float edge = sd == 0 ? fu0 : sd == 1 ? fu1 : sd == 2 ? fv0 : fv1;
+            if (side[sd] == edge) continue;
+            int beyond = 0;
+            for (float[] f : fl) {
+                float c = sd < 2 ? f[0] : f[1];
+                if (sd % 2 == 0 ? c < side[sd] - 0.1f : c > side[sd] + 0.1f) beyond++;
+            }
+            if (beyond * CELL * CELL > 0.5f) { side[sd] = sd < 2 ? (sd == 0 ? Math.min(edge, us[0]) : Math.max(edge, us[us.length - 1])) : (sd == 2 ? Math.min(edge, vs[0]) : Math.max(edge, vs[vs.length - 1])); found--; }
+        }
+        room.wallSides = found;
+        if (found < 2) return;   // hardly any walls: the seen floor is the better answer ("about")
+        float u0 = side[0], u1 = side[1], v0 = side[2], v1 = side[3];
+        if (u1 - u0 < 0.5f || v1 - v0 < 0.5f) return;
+        // cells of that rectangle within 60 cm of the room's floor
+        int mu = (int) Math.ceil((u1 - u0) / CELL), mv = (int) Math.ceil((v1 - v0) / CELL);
+        int[] d = new int[mu * mv]; java.util.Arrays.fill(d, Integer.MAX_VALUE);
+        java.util.ArrayDeque<Integer> q = new java.util.ArrayDeque<>();
+        for (float[] f : fl) { int iu = (int) ((f[0] - u0) / CELL), iv = (int) ((f[1] - v0) / CELL); if (iu >= 0 && iv >= 0 && iu < mu && iv < mv && d[iv * mu + iu] != 0) { d[iv * mu + iu] = 0; q.add(iv * mu + iu); } }
+        int cells = 0;
+        while (!q.isEmpty()) { int c = q.poll(); cells++; int iu = c % mu, iv = c / mu;
+            if (d[c] >= 12) continue;
+            for (int dv = -1; dv <= 1; dv++) for (int du = -1; du <= 1; du++) { int ju = iu + du, jv = iv + dv; if (ju < 0 || jv < 0 || ju >= mu || jv >= mv) continue;
+                int e = jv * mu + ju; if (d[e] == Integer.MAX_VALUE) { d[e] = d[c] + 1; q.add(e); } } }
+        // plus seen floor outside that rectangle on a side without a wall (an L's arm, the floor's 2% tails); floor beyond
+        // a found wall is the next room's, it doesn't count
+        boolean[] hasWall = new boolean[4];
+        for (int sd = 0; sd < 4; sd++) { float e = sd == 0 ? fu0 : sd == 1 ? fu1 : sd == 2 ? fv0 : fv1; hasWall[sd] = side[sd] != e && side[sd] != (sd == 0 ? us[0] : sd == 1 ? us[us.length - 1] : sd == 2 ? vs[0] : vs[vs.length - 1]); }
+        int extra = 0;
+        for (float[] f : fl) {
+            boolean inside = f[0] >= u0 && f[0] < u1 && f[1] >= v0 && f[1] < v1;
+            if (inside) continue;
+            if ((f[0] < u0 && hasWall[0]) || (f[0] >= u1 && hasWall[1]) || (f[1] < v0 && hasWall[2]) || (f[1] >= v1 && hasWall[3])) continue;
+            extra++;
+        }
+        cells += extra;
+        room.walled = cells * CELL * CELL; room.wallSides = found;
+        room.w = Math.max(u1 - u0, v1 - v0); room.l = Math.min(u1 - u0, v1 - v0);
     }
 
     /** Area inside the room's outline along its own wall directions (orthogonally convex hull: a cell counts when
@@ -261,7 +348,7 @@ final class FloorArea {
         Result r = compute(p, n, floorY);
         System.out.printf(java.util.Locale.US, "%s: floor y %.2f; %s (main %.1f m², other %.1f m², outline %.0f%% walls) in %d ms%n",
                 dir.getName(), floorY, r.text(), r.area, r.other, r.enclosed * 100, System.currentTimeMillis() - t0);
-        for (int i = 0; i < r.rooms.size(); i++) System.out.println("  " + r.rooms.get(i).text(i) + String.format(java.util.Locale.US, " (wall-aligned outline %.1f m², rectangle %.1f m²)", r.rooms.get(i).hull, r.rooms.get(i).w * r.rooms.get(i).l));
+        for (int i = 0; i < r.rooms.size(); i++) System.out.println("  " + r.rooms.get(i).text(i) + String.format(java.util.Locale.US, " (walls on %d sides: %.1f m²; seen floor %.1f, wall-aligned outline %.1f m²)", r.rooms.get(i).wallSides, r.rooms.get(i).walled, r.rooms.get(i).area, r.rooms.get(i).hull));
         if (args.length > 2) {
             // a top-down picture as PPM (no java.awt on Android): sips -s format png out.ppm --out out.png
             int S = 4, W = r.nx * S, H = r.nz * S; byte[] rgb = new byte[W * H * 3];
