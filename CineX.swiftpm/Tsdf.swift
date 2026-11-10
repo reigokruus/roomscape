@@ -129,6 +129,12 @@ final class Tsdf {
         SIMD3<Int32>((p / vs).rounded(.down))
     }
 
+    /// Whether a voxel is near the surface (seen enough, its distance within half the band).
+    func isSurface(_ v: SIMD3<Int32>) -> Bool {
+        let i = index(v)
+        return i >= 0 && w[i] >= minW && abs(sdf[i]) < 0.5
+    }
+
     /// Sets one voxel (TsdfGPU copies its result in here for the mesh extraction).
     func set(_ v: SIMD3<Int32>, sdf value: Float, weight: Int16) {
         let i = indexOrCreate(v)

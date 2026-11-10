@@ -78,6 +78,22 @@ its first 11 cm near the wall is off the surface; diameters come out at the 5 cm
 (drop coarse triangles inside a rod's tube), fit radius from both sides, speed.
 Pictures: recordings/overnight-pictures/rods/.
 
+## S24 vs iPhone: chair / cupboards, and the hole fill (04:00–05:10)
+Side by side from the same cameras (harness `align` with ALIGN_LOOK at RoomPlan's chair and storage objects): the S24
+surface is blurrier but continuous; the iPhone's is sharper with holes on the floor and on box sides seen at a glancing
+angle, which is where its LiDAR marks depth low-confidence (the iPhone drops it; the S24 fuses everything).
+Hole fill from the iPhone's low-confidence depth (LowConfidenceFill, in the app's rebuild from recording):
+| round | 22:39 surface added | far from any old surface | S24-only (lower = iPhone has more) | problem |
+|---|---|---|---|---|
+| before | – | – | 16.6% | holes |
+| 1: all low-confidence, only into empty voxels | +27% corners | 3.2% | 10.3% | shards at thin things |
+| 2: + within 3 voxels of seen surface | | 1.5% | | |
+| 3: + smooth 5×5 only | +16% | 1.3% | 10.9% | 20:33: a sheet by the ladder |
+| 4: + 0.4–3 m, weight ≥ 6 | +11% | 0.6% | | the ladder sheet stays |
+| 5: + glancing angle only (> 60°) | +2.4% | 0.2% (20:33: 0) | 11.7% | (shipped) |
+App check (Simulator, 20:33 recording through the real rebuild): 4.3k voxels filled (harness: 4.4k), surface 11 s, memory
+peak 293 MB (was ~300). Pictures: recordings/overnight-pictures/hole-fill/ (view*-before/after/s24, bars-*).
+
 ## S24 room size (fixed, b7d0e68)
 - Viewer size now from the room model (5.4 × 3.8 m for 22:37, was the points' bounding box 6.8 × 5.6 m, 3.6 m);
   height "not scanned" when fewer than 20 columns reach 1.8 m above the floor.

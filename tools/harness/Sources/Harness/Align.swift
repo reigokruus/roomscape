@@ -116,6 +116,60 @@ enum Align {
         for p in onlyS24 where p.y < 2.2 { put(p, (220, 40, 40)) }
         Images.png(px, width: w, height: h, to: out)
         print("top view: \(out.path)")
+        // ALIGN_LOOK="x,y,z;x,y,z": the two surfaces from the same camera, looking at each spot (iPhone coordinates)
+        // from 1.6 m towards the room's middle, 1.5 m above the floor: harness-out/look-<n>-iphone.png / -s24.png.
+        guard let looks = ProcessInfo.processInfo.environment["ALIGN_LOOK"] else { return }
+        let am = readMeshTriangles(iphone.appendingPathComponent("mesh.bin")), bf = readPlyFaces(s24.appendingPathComponent("surface.ply"))
+        let aPos = am.positions.map { $0 - SIMD3(0, fa, 0) }
+        let bPos = b.map(transform).map { $0 + (bt.first.map { _ in SIMD3<Float>.zero } ?? .zero) }
+        // The ICP shift: the same as bt minus the plain transform (bt was shifted as a whole).
+        let shift = bt.isEmpty ? SIMD3<Float>.zero : bt[0] - transform(b[0])
+        let bAligned = bPos.map { $0 + shift }
+        let k = simd_float3x3(SIMD3(500, 0, 0), SIMD3(0, 500, 0), SIMD3(320, 240, 1))
+        for (n, spec) in looks.split(separator: ";").enumerated() {
+            let v = spec.split(separator: ",").compactMap { Float($0) }
+            guard v.count == 3 else { continue }
+            let target = SIMD3(v[0], v[1] - fa, v[2])
+            var away = SIMD3(ca.x - target.x, 0, ca.z - target.z)
+            away = simd_length(away) > 0.01 ? simd_normalize(away) : SIMD3(0, 0, 1)
+            let eye = SIMD3(target.x, 1.5, target.z) + away * 1.6
+            let f = simd_normalize(target - eye), z = -f
+            let x = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), z)), y = simd_cross(z, x)
+            let pose = simd_float4x4(SIMD4(x, 0), SIMD4(y, 0), SIMD4(z, 0), SIMD4(eye, 1))
+            Images.renderFromCamera(aPos, am.triangles, pose: pose, k: k, imageWidth: 640, imageHeight: 480, to: URL(fileURLWithPath: "harness-out/look-\(n)-iphone.png"))
+            Images.renderFromCamera(bAligned, bf, pose: pose, k: k, imageWidth: 640, imageHeight: 480, to: URL(fileURLWithPath: "harness-out/look-\(n)-s24.png"))
+            print(String(format: "look %d at (%.2f, %.2f, %.2f): harness-out/look-%d-iphone.png / -s24.png", n, v[0], v[1], v[2], n))
+        }
+    }
+
+    static func readMeshTriangles(_ url: URL) -> (positions: [SIMD3<Float>], triangles: [UInt32]) {
+        guard let data = try? Data(contentsOf: url), data.count >= 12, data.prefix(4) == Data("MSH1".utf8) else { return ([], []) }
+        return data.withUnsafeBytes { raw in
+            let nv = Int(raw.loadUnaligned(fromByteOffset: 4, as: UInt32.self)), ni = Int(raw.loadUnaligned(fromByteOffset: 8, as: UInt32.self))
+            let pos = (0..<nv).map { i in SIMD3(raw.loadUnaligned(fromByteOffset: 12 + i * 12, as: Float.self), raw.loadUnaligned(fromByteOffset: 16 + i * 12, as: Float.self), raw.loadUnaligned(fromByteOffset: 20 + i * 12, as: Float.self)) }
+            let base = 12 + nv * 12
+            return (pos, (0..<ni).map { raw.loadUnaligned(fromByteOffset: base + $0 * 4, as: UInt32.self) })
+        }
+    }
+
+    /// The faces of an Android surface.ply (triangles: a uchar 3 and three ints each).
+    static func readPlyFaces(_ url: URL) -> [UInt32] {
+        guard let data = try? Data(contentsOf: url), let end = data.range(of: Data("end_header\n".utf8)) else { return [] }
+        let header = String(decoding: data[..<end.lowerBound], as: UTF8.self)
+        func count(_ name: String) -> Int { header.split(separator: "\n").first(where: { $0.hasPrefix("element \(name)") }).flatMap { Int($0.split(separator: " ")[2]) } ?? 0 }
+        let nv = count("vertex"), nf = count("face")
+        var out: [UInt32] = []
+        out.reserveCapacity(nf * 3)
+        data.withUnsafeBytes { raw in
+            var o = end.upperBound + nv * 15
+            for _ in 0..<nf {
+                guard o < raw.count else { break }
+                let c = Int(raw.load(fromByteOffset: o, as: UInt8.self)); o += 1
+                let idx = (0..<c).map { raw.loadUnaligned(fromByteOffset: o + $0 * 4, as: Int32.self) }; o += c * 4
+                if c == 3 { out += idx.map { UInt32($0) } }
+            }
+        }
+        return out
     }
 }
 

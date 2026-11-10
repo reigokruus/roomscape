@@ -167,18 +167,29 @@ enum RecordingProcessor {
             return (f, d)
         }
         // Each depth frame filtered as for the CPU fusion (medium+ confidence, no flying pixels, 0.2-4 m, not cleared).
-        func filtered(_ f: FrameRecord, _ d: DepthFrame, bounds: Bool) -> (m: [Float], lo: SIMD3<Float>, hi: SIMD3<Float>, k: SIMD4<Float>) {
+        // With `low`, also the low-confidence pixels for the hole fill (LowConfidenceFill), in `ml`.
+        func filtered(_ f: FrameRecord, _ d: DepthFrame, bounds: Bool, low: Bool = false) -> (m: [Float], lo: SIMD3<Float>, hi: SIMD3<Float>, k: SIMD4<Float>, ml: [Float]) {
             let sx = Float(d.w) / Float(f.width), sy = Float(d.h) / Float(f.height)
             let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
             var m = [Float](repeating: 0, count: bounds ? 0 : d.w * d.h)
+            var ml = [Float](repeating: 0, count: low && !bounds && !d.conf.isEmpty ? d.w * d.h : 0)
             var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
             func depth(_ x: Int, _ y: Int) -> Float { Float(d.mm[y * d.w + x]) / 1000 }
             for y in stride(from: 1, to: d.h - 1, by: bounds ? 8 : 1) {
                 for x in stride(from: 1, to: d.w - 1, by: bounds ? 8 : 1) {
                     let z = depth(x, y)
-                    guard z > 0.2, z < 4, d.conf.isEmpty || d.conf[y * d.w + x] >= 1 else { continue }
+                    guard z > 0.2, z < 4 else { continue }
                     let tol = z * 0.04 + 0.02
                     if abs(depth(x - 1, y) - z) > tol || abs(depth(x + 1, y) - z) > tol || abs(depth(x, y - 1) - z) > tol || abs(depth(x, y + 1) - z) > tol { continue }
+                    if !d.conf.isEmpty, d.conf[y * d.w + x] < 1 {
+                        guard !ml.isEmpty, LowConfidenceFill.use(x, y, width: d.w, height: d.h, fx: fx, fy: fy, cx: cx, cy: cy, z: { depth($0, $1) }) else { continue }
+                        if !clears.isEmpty {
+                            let p4 = f.pose * SIMD4((Float(x) - cx) * z / fx, -(Float(y) - cy) * z / fy, -z, 1)
+                            if clears.contains(where: { $0.covers(SIMD3(p4.x, p4.y, p4.z), at: d.time) }) { continue }
+                        }
+                        ml[y * d.w + x] = z
+                        continue
+                    }
                     if bounds || !clears.isEmpty {
                         let p4 = f.pose * SIMD4((Float(x) - cx) * z / fx, -(Float(y) - cy) * z / fy, -z, 1)
                         let pw = SIMD3(p4.x, p4.y, p4.z)
@@ -188,7 +199,7 @@ enum RecordingProcessor {
                     m[y * d.w + x] = z
                 }
             }
-            return (m, lo, hi, SIMD4(fx, fy, cx, cy))
+            return (m, lo, hi, SIMD4(fx, fy, cx, cy), ml)
         }
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
         for n in depthFrames.indices where n % 2 == 0 {
@@ -202,10 +213,15 @@ enum RecordingProcessor {
         let size = (hi - lo + 0.4) / 0.04
         guard size.x * size.y * size.z < 12_000_000,
               let gpu = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5) else { return nil }
+        // The hole fill's block (same size); without it the scan is built as before.
+        let low = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: 0.04, truncation: 0.08, carve: 1.5)
         for n in depthFrames.indices {
             guard let (f, d) = frame(n) else { continue }
-            let r = filtered(f, d, bounds: false)
+            let r = filtered(f, d, bounds: false, low: low != nil)
             gpu.integrate(depth: r.m, width: d.w, height: d.h, pose: f.pose, fx: r.k.x, fy: r.k.y, cx: r.k.z, cy: r.k.w, step: 2)
+            if let low, !r.ml.isEmpty {
+                low.integrate(depth: r.ml, width: d.w, height: d.h, pose: f.pose, fx: r.k.x, fy: r.k.y, cx: r.k.z, cy: r.k.w, step: 2)
+            }
             if n % 32 == 31 {
                 gpu.finish()
                 if gpu.failed { return nil } // e.g. the app went to the background mid-way: the CPU starts over
@@ -218,6 +234,14 @@ enum RecordingProcessor {
         if gpu.failed { return nil }
         let tsdf = Tsdf(capacity: max(700_000, gpu.voxelCount / 4), voxel: 0.04, truncation: 0.08, carve: 1.5)
         gpu.copy(into: tsdf)
+        if let low {
+            low.finish()
+            if !low.failed {
+                let before = tsdf.count
+                low.copy(into: tsdf, onlyUnseen: true, nearSeen: LowConfidenceFill.nearSeen, minWeight: LowConfidenceFill.minWeight)
+                PerfLog.processing?.mark("hole fill from low-confidence depth", sizes: ["voxels (k)": Double(tsdf.count - before) / 1000])
+            }
+        }
         let scratch = Tsdf.MeshScratch()
         _ = tsdf.extractMesh(near: .zero, radius: 10_000, solidWeight: 20, into: scratch)
         progress(1)

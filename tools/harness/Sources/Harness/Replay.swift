@@ -193,6 +193,9 @@ enum GPUBench {
         }
         let dd = try Data(contentsOf: dir.appendingPathComponent("depth.bin"))
         var depth: [(pose: simd_float4x4, fx: Float, fy: Float, cx: Float, cy: Float, w: Int, h: Int, m: [Float])] = []
+        // LOWCONF=1: the low-confidence depth the normal pass leaves out, kept for a hole-only second pass.
+        let lowConf = ProcessInfo.processInfo.environment["LOWCONF"] == "1"
+        var lowDepth: [[Float]] = []
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
         var depthFrameIndex: [Int] = []
         var at = 0, fi = 0
@@ -209,14 +212,19 @@ enum GPUBench {
             let sx = Float(w) / Float(f.w), sy = Float(h) / Float(f.h)
             let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
             var m = [Float](repeating: 0, count: w * h)
+            var ml = lowConf ? [Float](repeating: 0, count: w * h) : []
             raw.withUnsafeBytes { b in
                 func z(_ x: Int, _ y: Int) -> Float { Float(b.loadUnaligned(fromByteOffset: 4 + (y * w + x) * 2, as: UInt16.self)) / 1000 }
                 for y in 1..<(h - 1) { for x in 1..<(w - 1) {
                     let d = z(x, y)
                     let c = b.loadUnaligned(fromByteOffset: 4 + w * h * 2 + y * w + x, as: UInt8.self)
-                    guard d > 0.2, d < 4, c >= 1 else { continue }
+                    guard d > 0.2, d < 4 else { continue }
                     let tol = d * 0.04 + 0.02
                     if abs(z(x - 1, y) - d) > tol || abs(z(x + 1, y) - d) > tol || abs(z(x, y - 1) - d) > tol || abs(z(x, y + 1) - d) > tol { continue }
+                    if c < 1 {
+                        if lowConf, LowConfidenceFill.use(x, y, width: w, height: h, fx: fx, fy: fy, cx: cx, cy: cy, z: { z($0, $1) }) { ml[y * w + x] = d }
+                        continue
+                    }
                     m[y * w + x] = d
                     if x % 8 == 1, y % 8 == 1 {
                         let p4 = f.pose * SIMD4((Float(x) + 0.5 - cx) * d / fx, -(Float(y) + 0.5 - cy) * d / fy, -d, 1)
@@ -225,6 +233,7 @@ enum GPUBench {
                 } }
             }
             depth.append((f.pose, fx, fy, cx, cy, w, h, m))
+            if lowConf { lowDepth.append(ml) }
             depthFrameIndex.append(fi)
         }
         let prepTime = Date().timeIntervalSince(t1)
@@ -261,6 +270,13 @@ enum GPUBench {
         let tsdf = Tsdf(capacity: 12_000_000, voxel: voxel, truncation: max(0.03, voxel * 2), carve: 1.5)
         if let u = ProcessInfo.processInfo.environment["UNSEEN"] { tsdf.unseenAsEmpty = u == "1" }
         gpu.copy(into: tsdf)
+        if lowConf, let low = TsdfGPU(min: lo - 0.2, max: hi + 0.2, voxel: voxel, truncation: max(0.03, voxel * 2), carve: carve) {
+            let tl = Date()
+            for (i, d) in depth.enumerated() { low.integrate(depth: lowDepth[i], width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2) }
+            let before = tsdf.count
+            low.copy(into: tsdf, onlyUnseen: true, nearSeen: LowConfidenceFill.nearSeen, minWeight: LowConfidenceFill.minWeight)
+            print(String(format: "low-confidence hole fill: %d voxels added (%.1f%%), %.2f s", tsdf.count - before, Double(tsdf.count - before) * 100 / Double(max(1, before)), Date().timeIntervalSince(tl)))
+        }
         var gpuMesh = Fusion.mesh(tsdf)
         // ZONES=1: close-up detail zones (DetailZones) fused again at 1.5 cm, their fine surface replacing the coarse.
         if ProcessInfo.processInfo.environment["ZONES"] == "1" {
@@ -410,6 +426,16 @@ enum GPUBench {
                 let r = ring.isEmpty ? 0 : ring[min(ring.count - 1, ring.count * 9 / 10)]
                 print(String(format: "bar at (%d, %d), %.2f m from the camera: %d mesh corners within 12 cm; thickness (2 x 90th-percentile distance from the axis) %.1f cm", bar[0], bar[1], z, near.count, r * 200))
             } else { print("bar: only \(near.count) mesh corners near it") }
+        }
+        // MESH_OUT=folder: the mesh as <folder>/mesh.bin (MSH1), e.g. for `harness align` views.
+        if let outDir = ProcessInfo.processInfo.environment["MESH_OUT"] {
+            try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+            var data = Data("MSH1".utf8)
+            withUnsafeBytes(of: UInt32(gpuMesh.positions.count)) { data.append(contentsOf: $0) }
+            withUnsafeBytes(of: UInt32(gpuMesh.triangles.count)) { data.append(contentsOf: $0) }
+            for p in gpuMesh.positions { withUnsafeBytes(of: p.x) { data.append(contentsOf: $0) }; withUnsafeBytes(of: p.y) { data.append(contentsOf: $0) }; withUnsafeBytes(of: p.z) { data.append(contentsOf: $0) } }
+            for t in gpuMesh.triangles { withUnsafeBytes(of: t) { data.append(contentsOf: $0) } }
+            try? data.write(to: URL(fileURLWithPath: outDir).appendingPathComponent("mesh.bin"))
         }
         let extractTime = Date().timeIntervalSince(t3)
         print(String(format: "voxel %.1f cm: GPU block %d voxels (%.0f MB), %d triangles", voxel * 100, gpu.voxelCount, Double(gpu.voxelCount) * 6 / 1e6, gpuMesh.triangles.count / 3))

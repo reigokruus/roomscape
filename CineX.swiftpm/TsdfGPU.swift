@@ -105,14 +105,25 @@ final class TsdfGPU {
     }
 
     /// Every voxel that was seen goes into `tsdf` (same voxel coordinates), for mesh extraction.
-    func copy(into tsdf: Tsdf) {
+    /// `onlyUnseen`: only into voxels `tsdf` doesn't have yet (a second, less sure pass fills holes, never overrides);
+    /// `nearSeen` > 0: and only within that many voxels of its surface (holes in what was seen, not new far-off areas).
+    func copy(into tsdf: Tsdf, onlyUnseen: Bool = false, nearSeen: Int32 = 0, minWeight: UInt16 = 1) {
         finish()
         let s = sdf.contents().bindMemory(to: Float.self, capacity: voxelCount)
         let w = weight.contents().bindMemory(to: UInt16.self, capacity: voxelCount)
         let nx = Int(dims.x), ny = Int(dims.y)
-        for i in 0..<voxelCount where w[i] > 0 {
+        for i in 0..<voxelCount where w[i] >= max(1, minWeight) {
             let x = i % nx, y = (i / nx) % ny, z = i / (nx * ny)
-            tsdf.set(origin &+ SIMD3(Int32(x), Int32(y), Int32(z)), sdf: s[i], weight: Int16(clamping: Int(w[i])))
+            let v = origin &+ SIMD3(Int32(x), Int32(y), Int32(z))
+            if onlyUnseen, tsdf.index(v) >= 0 { continue }
+            if nearSeen > 0 {
+                var found = false
+                search: for dz in -nearSeen...nearSeen { for dy in -nearSeen...nearSeen { for dx in -nearSeen...nearSeen where tsdf.isSurface(v &+ SIMD3(dx, dy, dz)) {
+                    found = true; break search
+                } } }
+                if !found { continue }
+            }
+            tsdf.set(v, sdf: s[i], weight: Int16(clamping: Int(w[i])))
         }
     }
 
@@ -194,3 +205,34 @@ final class TsdfGPU {
     }
     """
 }
+
+/// Holes filled from low-confidence depth (rk 9 Nov: the S24 filled spots the iPhone left open, e.g. floor around the
+/// chair; it fuses depth the iPhone throws away). After the normal pass, a second block is fused from the iPhone's
+/// low-confidence depth, but only from pixels on a smooth surface seen at a glancing angle (floors and box sides go
+/// low-confidence that way; the edges of thin things are low-confidence head-on and would bridge a ladder into a sheet),
+/// 0.4–3 m away; its voxels only go where the normal pass has nothing, within 3 voxels of its surface, and only where
+/// several frames agreed. Checked on rk's 20:33 and 22:39 recordings (harness LOWCONF=1): +1–2% surface, nothing new
+/// far from the room, no sheets at the ladder; S24-only surface 16.6% → 11.7%.
+enum LowConfidenceFill {
+    static let nearSeen: Int32 = 3
+    static let minWeight: UInt16 = 6
+    /// Glancing: the surface normal at more than 60° from the view ray.
+    static let maxCos: Float = 0.5
+
+    /// Whether the low-confidence depth pixel (x, y) is used. `z(x, y)` is the depth in metres (0 = none).
+    @inline(__always)
+    static func use(_ x: Int, _ y: Int, width: Int, height: Int, fx: Float, fy: Float, cx: Float, cy: Float, z: (Int, Int) -> Float) -> Bool {
+        let d = z(x, y)
+        guard d > 0.4, d < 3, x >= 2, y >= 2, x < width - 2, y < height - 2 else { return false }
+        let tol = d * 0.02 + 0.01
+        for dy in -2...2 { for dx in -2...2 where abs(z(x + dx, y + dy) - d) > tol { return false } }
+        func pt(_ px: Int, _ py: Int) -> SIMD3<Float> {
+            let zz = z(px, py)
+            return SIMD3((Float(px) + 0.5 - cx) * zz / fx, -(Float(py) + 0.5 - cy) * zz / fy, -zz)
+        }
+        let n = simd_cross(pt(x + 2, y) - pt(x - 2, y), pt(x, y - 2) - pt(x, y + 2))
+        guard simd_length(n) > 1e-9 else { return false }
+        return abs(simd_dot(simd_normalize(n), simd_normalize(pt(x, y)))) < maxCos
+    }
+}
+
