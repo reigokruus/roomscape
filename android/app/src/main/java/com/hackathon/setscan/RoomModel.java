@@ -246,8 +246,12 @@ final class RoomModel {
         // for a ceiling plane: 12:21 had one at 1.99 m), never overshoot it: the highest supported one wins.
         // (the depth's own estimate, set below as maxY, is a candidate too: compared against it, never replaced by a
         // lower one; anything under 2 m above the floor isn't a room's ceiling)
-        if (!Float.isNaN(fc) && fc - floorY > 2.0f && fc > Math.max(hasCeiling ? ceilingY : -Float.MAX_VALUE, maxY - 0.15f)) { ceilingY = fc; hasCeiling = true; ceilingTrusted = true; }
-        for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING && s.cy - floorY > 2.2f && (!hasCeiling || s.cy > ceilingY)) { ceilingY = s.cy; hasCeiling = true; ceilingTrusted = true; }
+        // ARCore's tracked points first: they came within 2.5-3 cm of rk's 2.88 m on the 13:03 and 13:18 scans where the
+        // depth read 2.97 and 3.23 m (a plain ceiling has no texture for this phone's depth). The depth only without them.
+        if (!Float.isNaN(fc) && fc - floorY > 2.2f) { ceilingY = fc; hasCeiling = true; ceilingTrusted = true; }
+        // ARCore's own ceiling planes only without its points (13:03: a plane at 2.97 m, the points 2.905, truth 2.88)
+        if (Float.isNaN(featureCeilingY) || featureCeilingY - floorY <= 2.2f)
+            for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING && s.cy - floorY > 2.2f && (!hasCeiling || s.cy > ceilingY)) { ceilingY = s.cy; hasCeiling = true; ceilingTrusted = true; }
         if (!hasCeiling && maxY - floorY > 2.0f && maxY - floorY < 4f) hasCeiling = true;
 
         if (!Float.isNaN(userCeilingY) && userCeilingY > floorY + 1.2f) { ceilingY = userCeilingY; hasCeiling = true; }

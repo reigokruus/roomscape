@@ -383,6 +383,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     volatile boolean fpsCap30;
     /** Tracking health for the scan log's summary line. */
     private int healthLosses, healthMinFeatures = Integer.MAX_VALUE; private long healthMaxExposureNs;
+    static boolean PHOTO_LINTEL = false;
     /** Doorway marks (DoorwayFinder) after the scan. */
     static boolean DOORWAYS = true;
     volatile java.util.List<DoorwayFinder.Doorway> doorways = new java.util.ArrayList<>();
@@ -502,7 +503,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 log("doorways: " + ds.size() + " from " + walls.length / 4 + " wall planes, " + phs.size() + " photos with depth (" + (System.currentTimeMillis() - td) + " ms)");
                 // The lintel from the photos (EdgeRefine): offline on rk's 80 x 204 door it read 2.00-2.05 m where the
                 // surface gave 2.06-2.17. The jambs stay as found (the photo edges weren't reliable there yet).
-                if (!ds.isEmpty()) try {
+                // (off: on the 13:18 scan the photo edge moved both lintels from 2.02/2.04 m, right, to 2.14 m, the
+                // architrave's top; offline it had helped on other scans)
+                if (PHOTO_LINTEL && !ds.isEmpty()) try {
                     long te = System.currentTimeMillis();
                     java.util.List<EdgeRefine.Photo> eph = edgePhotos();
                     for (DoorwayFinder.Doorway d : ds) {

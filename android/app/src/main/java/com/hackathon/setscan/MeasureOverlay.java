@@ -147,7 +147,7 @@ final class MeasureOverlay extends View {
             float[] seg = {a[0], a[1], dd[0], dd[1], dd[0], dd[1], cc[0], cc[1], cc[0], cc[1], b[0], b[1]};
             Paint lp = d.sure ? line : dashed;   // dashed while a side or the top wasn't seen
             for (int k = 0; k < seg.length; k += 4) { c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], halo); c.drawLine(seg[k], seg[k + 1], seg[k + 2], seg[k + 3], lp); }
-            String t = d.sure ? String.format(java.util.Locale.US, "Doorway ≈%.2f × %.2f m", d.width, d.height) : "Doorway (scan around the frame for its size)";
+            String t = d.sure ? String.format(java.util.Locale.US, "Doorway ≈%.2f × %.2f m", d.width, d.height) : "Doorway";
             float lx = (dd[0] + cc[0]) / 2, ly = (dd[1] + cc[1]) / 2 - 18 * dp;
             // never on top of another doorway's label (two doors at a corner)
             for (RectF o : doorLabels) if (Math.abs(o.centerX() - lx) < o.width() && Math.abs(o.centerY() - ly) < o.height() + 4 * dp) ly = o.top - o.height() / 2 - 6 * dp;
@@ -184,6 +184,8 @@ final class MeasureOverlay extends View {
 
     private RectF label(Canvas c, String s, float x, float y) {
         float tw = text.measureText(s), pad = 8 * dp, th = 15 * dp;
+        // kept on the screen
+        x = Math.max(tw / 2 + pad + 4 * dp, Math.min(getWidth() - tw / 2 - pad - 4 * dp, x));
         RectF rr = new RectF(x - tw / 2 - pad, y - th / 2 - pad * 0.7f, x + tw / 2 + pad, y + th / 2 + pad * 0.7f);
         c.drawRoundRect(rr, 10 * dp, 10 * dp, bg);
         c.drawText(s, x - tw / 2, y + th * 0.35f, text);

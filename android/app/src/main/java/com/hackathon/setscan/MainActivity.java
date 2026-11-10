@@ -1204,7 +1204,7 @@ public class MainActivity extends Activity {
         sizeRow.addView(sizeValue, svp);
         roomCard = (LinearLayout) Ios.card(this, nameRow, sizeRow);
         viewerBottom.addView(roomCard);
-        viewerBottom.addView(Ios.footer(this, "≈ estimate. Use Measure in Enter the room for exact sizes."));
+        viewerBottom.addView(Ios.footer(this, "≈ estimate. Use Measure in Enter the room for exact sizes. A dashed doorway: scan around its frame for its size."));
         viewerBottom.addView(Ios.header(this, "Capture"));
         captureCard = new LinearLayout(this);
         captureCard.setOrientation(LinearLayout.VERTICAL);
