@@ -23,6 +23,9 @@ final class LiveMesh: @unchecked Sendable {
     /// so surface that's only re-extracted doesn't animate again.
     static let appear = true
     static let appearFromBelow = true   // false: fade only
+    /// Each new triangle starts within this window (s) of its build, so they arrive one by one; flight time and height.
+    static let stagger: Float = 0.6
+    static let flightTime: Float = 0.35, flightHeight: Float = 0.2
     private var bornAt: [SIMD3<Int32>: Float] = [:]
     static let start = CACurrentMediaTime()
     static var clock: Float { Float(CACurrentMediaTime() - start) }
@@ -194,7 +197,11 @@ final class LiveMesh: @unchecked Sendable {
     }
 
     private func publish() {
-        let vertexCount = scratch.positions.count
+        let sharedCount = scratch.positions.count
+        let triCount = scratch.triangles.count / 3
+        // Each triangle gets its own three corners (so it can fly in by itself, rk 10 Nov), then the shared corners
+        // for the wireframe.
+        let vertexCount = triCount * 3 + sharedCount
         // The set the renderer used two builds ago (a second or more back), long done on the GPU.
         var set = sets[nextSet]
         guard let vertices = buffer(set.vertices, bytes: vertexCount * MemoryLayout<Vertex>.stride),
@@ -206,15 +213,30 @@ final class LiveMesh: @unchecked Sendable {
         nextSet = (nextSet + 1) % sets.count
         let v = vertices.contents().bindMemory(to: Vertex.self, capacity: vertexCount)
         // The first build shows at once (no fly-in for the whole room on Continue scan).
-        let now = bornAt.isEmpty && vertexCount > 3000 ? Self.clock - 10 : Self.clock
-        for i in 0..<vertexCount {
-            let p = scratch.positions[i]
-            let cell = SIMD3<Int32>((p / tsdf.vs).rounded(.down))
+        let now = bornAt.isEmpty && sharedCount > 3000 ? Self.clock - 10 : Self.clock
+        let tri = triangles.contents().bindMemory(to: UInt32.self, capacity: max(1, triCount * 3))
+        for t in 0..<triCount {
+            let ia = Int(scratch.triangles[t * 3]), ib = Int(scratch.triangles[t * 3 + 1]), ic = Int(scratch.triangles[t * 3 + 2])
+            let pa = scratch.positions[ia], pb = scratch.positions[ib], pc = scratch.positions[ic]
+            // One start time per triangle, keyed by its centre (2 cm), with its own delay within the stagger window.
+            let cell = SIMD3<Int32>(((pa + pb + pc) / 3 / 0.02).rounded(.down))
             let born: Float
-            if let b = bornAt[cell] { born = b } else { born = now; bornAt[cell] = now }
-            v[i] = Vertex(x: p.x, y: p.y, z: p.z, confidence: scratch.confidence[i], born: born)
+            if let b = bornAt[cell] { born = b } else {
+                let h = UInt64(bitPattern: Int64(cell.x) &* 73856093 ^ Int64(cell.y) &* 19349663 ^ Int64(cell.z) &* 83492791) &* 0x9E3779B97F4A7C15
+                born = now + Float((h >> 40) & 0xFFFF) / 65535 * Self.stagger
+                bornAt[cell] = born
+            }
+            for (k, i) in [ia, ib, ic].enumerated() {
+                let p = scratch.positions[i]
+                v[t * 3 + k] = Vertex(x: p.x, y: p.y, z: p.z, confidence: scratch.confidence[i], born: born)
+                tri[t * 3 + k] = UInt32(t * 3 + k)
+            }
         }
-        scratch.triangles.withUnsafeBytes { triangles.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        // Shared corners (wireframe): no flight of their own (they follow the faces' timing closely enough).
+        for i in 0..<sharedCount {
+            let p = scratch.positions[i]
+            v[triCount * 3 + i] = Vertex(x: p.x, y: p.y, z: p.z, confidence: scratch.confidence[i], born: now - 10)
+        }
         let slotPointer = slots.contents().bindMemory(to: Int32.self, capacity: max(scratch.triangles.count / 3, 1))
         if let photos {
             let ta = CACurrentMediaTime()
@@ -239,7 +261,9 @@ final class LiveMesh: @unchecked Sendable {
             }
         }
         if !edgeList.isEmpty {
-            edgeList.withUnsafeBytes { edges.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+            let base = UInt32(triCount * 3)
+            let ep = edges.contents().bindMemory(to: UInt32.self, capacity: edgeList.count)
+            for i in 0..<edgeList.count { ep[i] = edgeList[i] + base }
         }
         let result = Buffers(vertices: vertices, triangles: triangles, triangleIndexCount: scratch.triangles.count,
                              edges: edges, edgeIndexCount: edgeList.count, photoSlots: slots)
@@ -275,7 +299,7 @@ final class LiveMeshRenderer {
     init?(device: MTLDevice, mesh: LiveMesh) {
         let options = MTLCompileOptions()
         options.preserveInvariance = true
-        guard let library = try? device.makeLibrary(source: Self.shaderSource, options: options),
+        guard let library = try? device.makeLibrary(source: Self.shaderSource.replacingOccurrences(of: "FLIGHT_HEIGHT", with: String(format: "%.3f", LiveMesh.flightHeight)), options: options),
               let vertex = library.makeFunction(name: "meshVertex"),
               let face = library.makeFunction(name: "meshFace"),
               let edge = library.makeFunction(name: "meshEdge"),
@@ -343,7 +367,7 @@ final class LiveMeshRenderer {
     func encode(_ encoder: MTLRenderCommandEncoder, viewProjection: simd_float4x4, live: LiveCamera? = nil) -> Bool {
         guard let buffers = mesh.buffers else { return false }
         var uniforms = Uniforms(viewProjection: viewProjection,
-                                appear: SIMD4(LiveMesh.clock, LiveMesh.appear ? 1 : 0, LiveMesh.appearFromBelow ? 1 : 0, 0))
+                                appear: SIMD4(LiveMesh.clock, LiveMesh.appear ? 1 : 0, LiveMesh.appearFromBelow ? 1 : 0, LiveMesh.flightTime))
         encoder.setCullMode(.none)
         encoder.setVertexBuffer(buffers.vertices, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
@@ -408,9 +432,9 @@ final class LiveMeshRenderer {
         out.fade = 1.0;
         if (u.appear.y > 0.5) {
             // Fly-in: 0.4 s, easing out; from 25 cm below, fading in (rk: from below looks best).
-            float t = saturate((u.appear.x - v.born) / 0.4);
+            float t = saturate((u.appear.x - v.born) / u.appear.w);
             float e = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
-            if (u.appear.z > 0.5) p.y -= 0.25 * (1.0 - e);
+            if (u.appear.z > 0.5) p.y -= FLIGHT_HEIGHT * (1.0 - e);
             out.fade = e;
         }
         out.position = u.viewProjection * float4(p, 1.0);

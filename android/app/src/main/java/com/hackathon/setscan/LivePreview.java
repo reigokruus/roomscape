@@ -56,11 +56,21 @@ final class LivePreview {
     private final HashMap<Long, Float> born = new HashMap<>();
     private float bornNow;
 
+    /** Each new triangle starts its flight at its own moment within this window (s), so they arrive one by one, not in
+     *  chunks per mesh build (rk 10 Nov). Fixed per spot, so a re-extracted triangle keeps its time. */
+    static final float STAGGER = 0.6f;
+
+    /** When the triangle around (x, y, z) (its centre) first appeared, plus its own delay. */
     private float bornOf(float x, float y, float z) {
-        long k = (((long) Math.floor(x / 0.04f) + (1 << 20)) & 0x1FFFFF) | ((((long) Math.floor(y / 0.04f) + (1 << 20)) & 0x1FFFFF) << 21)
-                | ((((long) Math.floor(z / 0.04f) + (1 << 20)) & 0x1FFFFF) << 42);
+        long k = (((long) Math.floor(x / 0.02f) + (1 << 20)) & 0x1FFFFF) | ((((long) Math.floor(y / 0.02f) + (1 << 20)) & 0x1FFFFF) << 21)
+                | ((((long) Math.floor(z / 0.02f) + (1 << 20)) & 0x1FFFFF) << 42);
         Float b = born.get(k);
-        if (b == null) { b = bornNow; born.put(k, b); }
+        if (b == null) {
+            long h = k * 0x9E3779B97F4A7C15L;
+            float jitter = ((h >>> 40) & 0xFFFF) / 65535f;
+            b = bornNow + jitter * STAGGER;
+            born.put(k, b);
+        }
         return b;
     }
 
@@ -132,7 +142,8 @@ final class LivePreview {
         for (int t = 0; t < nt; t++) {
             for (int i = 0; i < 9; i++) v[i] = meshPos.get(t * 9 + i);
             int k = pick[t];
-            float b0 = bornOf(v[0], v[1], v[2]), b1 = bornOf(v[3], v[4], v[5]), b2 = bornOf(v[6], v[7], v[8]);
+            // One time per triangle (its centre): the whole triangle flies in as a piece.
+            float b0 = bornOf((v[0] + v[3] + v[6]) / 3, (v[1] + v[4] + v[7]) / 3, (v[2] + v[5] + v[8]) / 3), b1 = b0, b2 = b0;
             if (k >= 0 && PhotoRoom.project(kfs.get(k), v, uv)) { gp[k].put(v); gu[k].put(uv); gb[k].put(b0).put(b1).put(b2); continue; }
             if (k >= 0) { gp[k].put(v); gu[k].put(new float[6]); gb[k].put(b0).put(b1).put(b2); continue; } // keeps the group's count (not reached)
             r.restBorn.put(b0).put(b1).put(b2);

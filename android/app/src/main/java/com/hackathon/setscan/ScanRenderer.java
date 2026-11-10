@@ -5966,7 +5966,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (!flyIn) throw new RuntimeException("fly-in off");
                     livePhotoProg = program(
                         "uniform mat4 uMvp; uniform float uNow; attribute vec3 aPos; attribute vec2 aUv; attribute float aBorn; varying vec2 vUv;" +
-                        FLY_GLSL + "void main(){ vec3 p = aPos; p.y -= 0.25 * (1.0 - flyEase(aBorn)); gl_Position = uMvp * vec4(p, 1.0); vUv = aUv; }", fs);
+                        FLY_GLSL + "void main(){ vec3 p = aPos; p.y -= 0.2 * (1.0 - flyEase(aBorn)); gl_Position = uMvp * vec4(p, 1.0); vUv = aUv; }", fs);
                 } catch (RuntimeException e) {
                     if (flyIn) { log("fly-in shader failed, no animation: " + e.getMessage()); flyIn = false; }
                     livePhotoProg = program(
@@ -6000,7 +6000,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (!flyIn) throw new RuntimeException("fly-in off");
                 liveMeshProg = program(
                     "uniform mat4 uMvp; uniform float uNow; attribute vec3 aPos; attribute float aConf; attribute float aBorn; varying float vConf; varying float vFade;" +
-                    FLY_GLSL + "void main(){ float e = flyEase(aBorn); vec3 p = aPos; p.y -= 0.25 * (1.0 - e); gl_Position = uMvp * vec4(p, 1.0); vConf = aConf; vFade = e; }",
+                    FLY_GLSL + "void main(){ float e = flyEase(aBorn); vec3 p = aPos; p.y -= 0.2 * (1.0 - e); gl_Position = uMvp * vec4(p, 1.0); vConf = aConf; vFade = e; }",
                     "precision mediump float; uniform vec4 uCol; uniform vec4 uNew; uniform float uConfirmed; varying float vConf; varying float vFade;" +
                     "void main(){ vec4 c = mix(uNew, uCol, smoothstep(0.15, uConfirmed, vConf)); gl_FragColor = vec4(c.rgb, c.a * vFade); }");
             } catch (RuntimeException e) {
@@ -6050,7 +6050,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** The fly-in's easing (rk 10 Nov): 0 when the surface appears, 1 after 0.4 s, easing out. */
-    private static final String FLY_GLSL = "float flyEase(float born){ float t = clamp((uNow - born) / 0.4, 0.0, 1.0); return 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t); }";
+    private static final String FLY_GLSL = "float flyEase(float born){ float t = clamp((uNow - born) / 0.35, 0.0, 1.0); return 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t); }";
 
     /** Screen corners (-1,-1), (1,-1), (-1,1) of the real camera's view in the camera texture, for the overview. */
     private final float[] ovCamUv = new float[6];
