@@ -2333,7 +2333,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             File dir = currentDir;
             perf.stop();
-            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); }
+            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); }
         }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
@@ -3594,7 +3594,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        drainDepth(); gpuReady.clear(); synchronized (featLock) { featN = 0; featAt = 0; } ceilingHinted = false; healthLosses = 0; healthMinFeatures = Integer.MAX_VALUE; healthMaxExposureNs = 0; doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
+        drainDepth(); gpuReady.clear(); synchronized (featLock) { featN = 0; featAt = 0; } pairN = 0; ceilingHinted = false; healthLosses = 0; healthMinFeatures = Integer.MAX_VALUE; healthMaxExposureNs = 0; doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
@@ -5619,6 +5619,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final boolean DEPTH_FIX_APPLY = false;
     private volatile float depthK = 1f, depthC = 0f;
     private final Object featLock = new Object();
+    /** depth-pairs.bin: (feature distance, raw depth, u, v, feature height) for the offline depth-correction fit. */
+    private final float[] pairBuf = new float[5 * 200000]; private int pairN;
     private final float[] featY = new float[60000]; private int featN, featAt;
     private final float[] dfTrue = new float[6000], dfRaw = new float[6000];
     private int dfN, dfAt;
@@ -5658,6 +5660,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float r = s9[n / 2] * 0.001f;
                 if (Math.abs(r - dz) > 0.5f * dz) continue;   // a different surface there (edge, occlusion)
                 dfTrue[dfAt] = dz; dfRaw[dfAt] = r; dfAt = (dfAt + 1) % dfTrue.length; if (dfN < dfTrue.length) dfN++;
+                // every pair kept for the offline fit (rk 10 Nov: ceilings read 1-10 cm low): feature distance, depth,
+                // the pixel's place in the image (where in the view: up/down tilt) and the feature's height
+                if (pairN < pairBuf.length / 5) { int o = pairN * 5; pairBuf[o] = dz; pairBuf[o + 1] = r; pairBuf[o + 2] = (float) u / dw; pairBuf[o + 3] = (float) v / dh;
+                    pairBuf[o + 4] = hasFix ? poseFix[1] * x + poseFix[5] * y + poseFix[9] * z + poseFix[13] : y; pairN++; }
             }
         } catch (Throwable ignored) { }
         long now = System.currentTimeMillis();
@@ -5749,6 +5755,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean ceilingHinted;
 
     /** feature-heights.bin: ARCore's feature point heights from the scan (for the ceiling when it's opened again). */
+    private void saveDepthPairs(File dir) {
+        if (pairN == 0) return;
+        try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "depth-pairs.bin"))))) {
+            o.writeInt(pairN); for (int i = 0; i < pairN * 5; i++) o.writeFloat(pairBuf[i]);
+        } catch (Exception e) { logError("depth pairs", e); }
+    }
+
     private void saveFeatureHeights(File dir) {
         float[] ys; synchronized (featLock) { ys = java.util.Arrays.copyOf(featY, featN); }
         if (ys.length == 0) return;
