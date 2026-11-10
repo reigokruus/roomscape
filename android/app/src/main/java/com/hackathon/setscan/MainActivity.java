@@ -1678,7 +1678,10 @@ public class MainActivity extends Activity {
 
     private LinearLayout scanRow;
     /** Hint colours by level: white, white, red for warnings (the same on the iPhone). */
-    private static final int[] HINT_COLORS = {Color.WHITE, Color.WHITE, 0xFFFF6B5B};
+    private static final int[] HINT_COLORS = {Color.WHITE, Color.WHITE, 0xFFFF6B5B, 0xFFFFB020};   // 3 = amber: lost track (rk 10 Nov 16:45)
+
+    /** One short haptic pulse (lost track) or a lighter tick (scanning again). */
+    void haptic(boolean strong) { runOnUiThread(() -> glView.performHapticFeedback(strong ? android.view.HapticFeedbackConstants.LONG_PRESS : android.view.HapticFeedbackConstants.CLOCK_TICK)); }
 
     void planningModeChanged() {
         runOnUiThread(() -> {
@@ -1729,7 +1732,7 @@ public class MainActivity extends Activity {
                 if (!want.contentEquals(recordButton.getText())) recordButton.setText(want);
             }
             hudHint.setText(hint);
-            hudHint.setTextColor(HINT_COLORS[Math.max(0, Math.min(2, level))]);
+            hudHint.setTextColor(HINT_COLORS[Math.max(0, Math.min(3, level))]);
             hudSub.setText(sub == null ? "" : sub);
             hudSub.setVisibility(sub == null ? View.GONE : View.VISIBLE);
             // the bars only while scanning normally: hidden while the position is lost (detail < 0)

@@ -4674,7 +4674,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     snapshotForRealign();
                     healthLosses++;
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again"); evMark();
-                    postHud(ts);   // at once, not at the next 5th frame
+                    notAddingSince = nowMs; postHud(ts);   // at once, not at the next 5th frame
                     // (no toast: the card at the top says what to do; rk 10 Nov 15:53 got two different messages at once)
                 }
             }
@@ -4719,6 +4719,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // has simply walked further. Up to 2 m/s counts as walking, not as ARCore moving its map.
             if (havePrevPose && frameMove > Math.max(0.15f, 2f * frameDt)) {
                 settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); evMark();
+                notAddingSince = nowMs;
                 relAnchored = false;   // the held view doesn't follow the jump (14:01 scan: 0.29 and 0.33 m jumps while held showed as twitches)
                 // ARCore moved its map without saying it lost track (11:47:09: 0.5 m): the scan, not ARCore, decides
                 // where the view is; nothing is fused until it lines up again (the quick path after a loss).
@@ -7564,6 +7565,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return h + (behind ? " (it's behind you)" : "") + ", back to where you last scanned";
     }
 
+    private boolean notAdding; private long notAddingSince;
+
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
         float d = detailHere;
@@ -7574,20 +7577,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
             // A quiet pause (rk 10 Nov 15:58: never "lost", no red, the scan stays in view): one calm hint.
             // rk 10 Nov 16:45: an immediate, clear notice so the user knows exactly when to stop moving
-            level = 2;
-            hint = "Lost track: stop moving, then point back at where you were" + backToSuffix();
+            level = 3;   // amber
+            hint = "Lost track. Stop and point back at where you were" + backToSuffix();
         }
         else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
             // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said)
-            level = 1;
-            hint = featuresNow >= 0 && featuresNow < 20 ? "Nothing to scan here. Point back at where you were" + backToSuffix()
-                    : "Hold still a moment, then point at the room from 1-3 m";
+            level = 3;
+            hint = "Lost track. Stop and point back at where you were" + backToSuffix();
         }
         else if (needRealign && everTracked) {
             // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed
             // for 24 s while nothing was being scanned)
-            level = 1;
-            hint = "Point back at where you were, hold a moment" + backToSuffix();
+            level = 3;   // still not adding: the same notice until data is fused again
+            hint = "Lost track. Stop and point back at where you were" + backToSuffix();
         }
         else if (ts != TrackingState.TRACKING) {
             level = 2;
@@ -7613,7 +7615,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // keep a hint up for 1.5 s, unless something more urgent replaces it
         long now = System.currentTimeMillis();
         boolean photoHint = photoWanted || "Hold still a moment… taking a photo".equals(shownHint);
-        if (shownHint != null && !photoHint && !hint.equals(shownHint) && now - shownAt < 1500 && !(level == 2 && shownLevel < 2)) { hint = shownHint; level = shownLevel; }
+        if (shownHint != null && !photoHint && !hint.equals(shownHint) && now - shownAt < 1500 && !(level >= 2 && shownLevel < level) && shownLevel != 3) { hint = shownHint; level = shownLevel; }   // (the lost notice comes and goes at once)
         else if (!hint.equals(shownHint)) { shownHint = hint; shownLevel = level; shownAt = now; }
         if (++hudCalls % 12 == 1) { // recount every ~2 s (points get merged, dropped and loaded in other places)
             int n = count, sc = 0;
@@ -7625,6 +7627,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (LIVE_MESH && (livePreview.filledRoom > 0 || livePreview.filledInView > 0)) room *= livePreview.filledRoom;
         roomShown = Math.max(roomShown, room);
         boolean lostNow = everTracked && (ts != TrackingState.TRACKING || needRealign);
+        boolean stalled = everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000;
+        if ((lostNow || stalled) != notAdding) {
+            notAdding = lostNow || stalled;
+            if (notAdding && !lostNow) notAddingSince = lastNewDepthMs + 3000;   // a depth stall: the change is when 3 s ran out
+            activity.haptic(notAdding);
+            log(notAdding ? String.format(java.util.Locale.US, "lost-track notice shown %d ms after the change", System.currentTimeMillis() - notAddingSince) : "scanning again: notice off");
+        }
         activity.updateHud(hint, sub, level, lostNow ? -1f : Math.max(0f, d), roomShown, count, (int) (scanMs / 1000));
     }
 
