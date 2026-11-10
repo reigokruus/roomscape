@@ -38,8 +38,8 @@ final class FlatTiles {
     static final String MASK_TEST =
             "  for (int i = 0; i < 16; i++) { if (float(i) >= uTN) break;" +
             "    float dd = dot(uTP[i].xyz, aPos.xyz) + uTP[i].w;" +
-            "    if (dd < 0.20 && dd > -uTU[i].w) { float a = floor(dot(uTU[i].xyz, aPos.xyz) / 0.30) + 128.0, b = floor(dot(uTV[i].xyz, aPos.xyz) / 0.30) + 128.0;" +
-            "      if (a >= 0.0 && a < 256.0 && b >= 0.0 && b < 256.0 && texture2DLod(uTMask, vec2((a + 0.5) / 256.0, (b + 256.0 * float(i) + 0.5) / 4096.0), 0.0).r > 0.5) hh = 1.0; } }";
+            "    if (dd < 0.35 && dd > -uTU[i].w) { float a = floor(dot(uTU[i].xyz, aPos.xyz) / 0.30) + 128.0, b = floor(dot(uTV[i].xyz, aPos.xyz) / 0.30) + 128.0;" +
+            "      if (a >= 0.0 && a < 256.0 && b >= 0.0 && b < 256.0 && texture2DLod(uTMask, vec2((a + 0.5) / 256.0, (b + 256.0 * float(i) + 0.5) / 4096.0), 0.0).r > (dd > 0.20 ? 0.75 : 0.25)) hh = 1.0; } }";
     private int maskTex; private final byte[] mask = new byte[MG * MG * MP]; private boolean maskDirty = true; private int maskN; private final int[] maskPlane = new int[MP];
 
     /** Before drawing points: the mask and planes for the shader (off: nothing hidden). Texture unit 3. */
@@ -75,7 +75,7 @@ final class FlatTiles {
         GLES20.glUniform1i(GLES20.glGetUniformLocation(prog, "uTMask"), 3);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
     }
-    static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; float born = -1, repainted = -1; int ring; boolean inferred; }
+    static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; float born = -1, repainted = -1; int ring; boolean inferred; int seen; }
     static final int GROW = 2;   // inferred tiles at most this many tiles from a depth-confirmed one
     int grown;
     private final long base = System.currentTimeMillis();
@@ -198,6 +198,7 @@ final class FlatTiles {
                 t = new Tile(); t.plane = pi; t.iu = (int) (k >>> 20 & 0xFFFFF) - (1 << 19); t.iv = (int) (k & 0xFFFFF) - (1 << 19); t.slot = slots++; t.score = -1;
                 tiles.put(k, t);
             }
+            if (t != null) t.seen++;   // depth agreed with this tile again
             if (head <= 0.5f) { tooSlanted++; continue; }
             if (score > t.score * 1.25f) { t.pending = score; toPaint.add(t); } else notBetter++;
         }
@@ -413,7 +414,9 @@ final class FlatTiles {
         for (int i = 0; i < maskN; i++) { maskPlane[i] = order.get(i); layer.put(order.get(i), i); }
         for (Tile t : live) {
             Integer L = layer.get(t.plane); int a = t.iu + 128, b = t.iv + 128;
-            if (L != null && a >= 0 && a < MG && b >= 0 && b < MG) mask[(L * MG + b) * MG + a] = (byte) 255;
+            // a tile the depth confirmed 4+ times hides up to 35 cm in front (a stale copy of the wall from before a map
+            // jump sat 10-35 cm out, 16:37 scan); others 20 cm
+            if (L != null && a >= 0 && a < MG && b >= 0 && b < MG) mask[(L * MG + b) * MG + a] = (byte) (t.seen >= 4 ? 255 : 128);
         }
         maskDirty = true;
         vboVerts = live.size() * 6;
