@@ -1728,7 +1728,10 @@ public class MainActivity extends Activity {
             hudHint.setTextColor(HINT_COLORS[Math.max(0, Math.min(2, level))]);
             hudSub.setText(sub == null ? "" : sub);
             hudSub.setVisibility(sub == null ? View.GONE : View.VISIBLE);
-            hudDetail.setProgress(Math.round(detail * 1000));
+            // the bars only while scanning normally: hidden while the position is lost (detail < 0)
+            int bars = detail < 0 ? View.GONE : View.VISIBLE;
+            ((View) hudDetail.getParent()).setVisibility(bars); ((View) hudRoom.getParent()).setVisibility(bars);
+                        hudDetail.setProgress(Math.round(detail * 1000));
             hudDetail.setProgressTintList(android.content.res.ColorStateList.valueOf(detail >= ScanRenderer.SPOT_DONE ? 0xFF33D17A : Ios.ACCENT));
             hudDetailPct.setText(Math.round(detail * 100) + "%");
             hudRoom.setProgress(Math.round(room * 1000));

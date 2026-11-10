@@ -4605,14 +4605,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // was lost): carry on with the same correction, no lining up, no search. Today the short losses came back
             // in ARCore's own frame (the final corrections were 0-4 cm); the 15:31 scan's 0.5 s loss instead ran a
             // search that put the scan 3.9 m off.
-            if (lostSince > 0 && needRealign && jumpGuess == null && !sessionRestarted && nowMs - lostSince < 2000 && havePrevPose) {
+            // rk 10 Nov 15:58: on a plain corner the gyro still works: just carry on. Any length of pause: if ARCore comes
+            // back where the phone was held (within 30 cm) and facing where the gyro says (within 8 deg), it simply goes on.
+            if (lostSince > 0 && needRealign && jumpGuess == null && !sessionRestarted && havePrevPose) {
                 float[] cp = new float[16]; camera.getPose().toMatrix(cp, 0); applyFix(cp);
                 float dd = (float) Math.sqrt((cp[12] - prevPose[12]) * (cp[12] - prevPose[12]) + (cp[13] - prevPose[13]) * (cp[13] - prevPose[13]) + (cp[14] - prevPose[14]) * (cp[14] - prevPose[14]));
-                if (dd < 0.3f) {
+                float[] v = lastShownView;   // the view shown (gyro-turned): its camera axis in the world
+                float gx = v[2], gy = v[6], gz = v[10], ax = cp[8], ay = cp[9], az = cp[10];
+                float cos = (gx * ax + gy * ay + gz * az) / (float) Math.max(1e-6, Math.sqrt((gx * gx + gy * gy + gz * gz) * (ax * ax + ay * ay + az * az)));
+                float ang = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, cos))));
+                if (dd < 0.3f && ang < 8f) {
                     needRealign = false; realign = null; recentPts.clear(); realignResult = null;
-                    log(String.format(java.util.Locale.US, "brief loss (%.1f s, ARCore back %.2f m from where it was lost): carrying on with the same correction", (nowMs - lostSince) / 1000f, dd));
+                    log(String.format(java.util.Locale.US, "pause %.1f s: silent continue (ARCore back %.2f m and %.1f deg from the held view)", (nowMs - lostSince) / 1000f, dd, ang));
                     evMark();
-                } else log(String.format(java.util.Locale.US, "brief loss (%.1f s) but ARCore came back %.2f m away: lining up", (nowMs - lostSince) / 1000f, dd));
+                } else log(String.format(java.util.Locale.US, "pause %.1f s: ARCore back %.2f m and %.1f deg from the held view: quiet re-align", (nowMs - lostSince) / 1000f, dd, ang));
             }
             lostSince = 0;
             if (!viewing && count > 2000 && frameNo % 10 == 0) plainWallHint(frame, nowMs);
@@ -4627,7 +4633,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     snapshotForRealign();
                     healthLosses++;
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again"); evMark();
-                    activity.toast("Lost position. Stand still and turn the phone back to the scanned area.");
+                    // (no toast: the card at the top says what to do; rk 10 Nov 15:53 got two different messages at once)
                 }
             }
             else if (camera.getTrackingFailureReason() == com.google.ar.core.TrackingFailureReason.NONE
@@ -4769,7 +4775,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (LIVE_MESH) {
                 long lmT0 = System.nanoTime();
                 if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
-                if (LIVE_POINTS) { consumeLiveMesh(); drawPoints(mvp, 1f); }   // rk 10 Nov 15:20: "only points, no triangles no photo"
+                if (LIVE_POINTS) { consumeLiveMesh(); drawPoints(mvp, 0.6f); }   // smaller: close up they were big soft blobs   // rk 10 Nov 15:20: "only points, no triangles no photo"
                 else drawLiveMesh(mvp);
                 perf.note(LIVE_POINTS ? "ms: live points draw" : "ms: live mesh draw", (System.nanoTime() - lmT0) / 1e6);
             }
@@ -4778,11 +4784,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float[] tap = pendingTap;
             if (tap != null && trackingNow) { pendingTap = null; prepareTap(frame, camera, tap[0], tap[1]); }
             if (trackingNow) maybeStartLiveRoom(nowMs);
-            drawLiveRoom(mvp);
+            // (no live room outline while scanning: unexplained teal lines on screen, rk 10 Nov 15:53)
             cutouts.draw(mvp);
             drawMarks(mvp, true);
             if (trackingNow) drawRescanTarget(mvp, camera);
-            if (holding) drawDim(0.18f);   // held view: slightly darker, so it reads as "not live"
+            // (no darkening while paused: the scan stays fully in view, rk 10 Nov 15:58)
             if (overviewBlend > 0.001f) drawOverviewWindow();
             float[] clearTap = pendingClear;
             if (clearTap != null) { pendingClear = null; clearAt(clearTap[0], clearTap[1]); }
@@ -6059,7 +6065,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }, "realign-snapshot").start();
     }
 
-    private long fewFeaturesSince, plainHintAt;
+    private long fewFeaturesSince, plainHintAt; private volatile long plainHintUntil; private volatile int featuresNow = -1;
 
     // ---- the held view while lost ----
     private final float[] heldView = new float[16], heldRot = new float[9];
@@ -6094,7 +6100,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  the first 10 s after tracking returns (14:01 scan: at 4 s it restarted twice; the second restart cost 15 s). */
     private void logState(TrackingState ts, long nowMs) {
         if (viewing || !everTracked) return;
-        if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > 8000 && nowMs - trackingBackMs > 10000 && depthSupported && recoveries < 10 && count > 2000) {
+        if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > 8000 && nowMs - trackingBackMs > 10000 && featuresNow >= 50 && depthSupported && recoveries < 10 && count > 2000) {   // (not on a plain view: there depth just has nothing to see, and a restart loses the map; 15:56 scan)
             recoveries++;
             log(String.format(java.util.Locale.US, "no new depth for %.1f s while tracking (%d old images repeated): restarting AR session (attempt %d)", (nowMs - lastNewDepthMs) / 1000f, depthStale - staleSince0, recoveries));
             lastNewDepthMs = nowMs;
@@ -6115,7 +6121,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0,
                 vk0 + vn0 > 0 ? Math.round(100f * vk0 / (vk0 + vn0)) + "% scanned surface" : "-", walkingWhileLost ? ", walking" : "")
                 + (gpuTsdf != null ? ", GPU bricks read back " + syncedBricks + (syncFull > 0 ? " (" + syncFull + " full)" : "") : "")
-                + String.format(java.util.Locale.US, ", heap %d MB", (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20));
+                + String.format(java.util.Locale.US, ", heap %d MB, ARCore features %d", (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20, featuresNow));
         syncedBricks = 0; syncFull = 0;
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
     }
@@ -6326,14 +6332,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // Advisory only, never blocks anything (rk 10:59: it nagged every 15 s at an ordinary door while depth was
         // fusing). Only when features stay very low for 3 s, the depth isn't filling the view either, at most once a
         // minute.
-        boolean depthFine = depthPixelsFrame > 1500;
         healthMinFeatures = Math.min(healthMinFeatures, n);
-        if (n >= 15 || depthFine) { fewFeaturesSince = 0; return; }
+        featuresNow = n;
+        // Before ARCore loses its place on a plain wall or corner (rk 10 Nov 15:58; 11 of today's 12 losses were "not
+        // enough features"): under 20 sure features for 1 s shows the calm plain-wall hint on the card (no toast).
+        if (n >= 20) { fewFeaturesSince = 0; return; }
         if (fewFeaturesSince == 0) { fewFeaturesSince = nowMs; return; }
-        if (nowMs - fewFeaturesSince > 2000 && nowMs - plainHintAt > 30000) {   // (most losses today were plain walls/ceiling)
-            plainHintAt = nowMs;
-            log("few features (" + n + "): plain-wall hint");
-            activity.toast("Plain wall: keep an edge or some detail in view.");
+        if (nowMs - fewFeaturesSince > 1000) {
+            if (plainHintUntil < nowMs) log("few features (" + n + "): plain-wall hint");
+            plainHintUntil = nowMs + 2500;
         }
     }
 
@@ -6411,7 +6418,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // look-alike part of the room (15:31 scan: lost 0.5 s, the search found a spot 3.7 m and 40 deg away, the
             // next tries grew it to 87% and it resumed 3.9 m / 53 deg off). Today's 19 other resumes all pass.
             String implausible = "";
-            if (ok && Math.abs(F[13] - poseFix[13]) > 0.10f) {   // gravity is known: never a big vertical shift
+            if (ok && !sessionRestarted && Math.abs(F[13] - poseFix[13]) > 0.10f) {   // gravity is known: no big vertical shift (a restarted session can start at another height)
                 ok = false; implausible = String.format(java.util.Locale.US, " (implausible: %.2f m up/down)", F[13] - poseFix[13]);
             }
             if (ok && jumpGuess == null && !sessionRestarted) {
@@ -6451,7 +6458,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 segment++;
                 log(String.format(java.util.Locale.US, "back on track after %.1f s: correction %.3f, %.3f, %.3f m, %.1f deg; %d%% of the view on the scan, median %.1f cm; segment %d",
                         (nowMs - realignSince) / 1000f, F[12], F[13], F[14], Math.toDegrees(Math.atan2(F[2], F[0])), Math.round(res.fit.inliers * 100), res.fit.median * 100, segment));
-                activity.toast("Back on track, scanning again.");
+                // (silent: scanning simply goes on, rk 10 Nov 15:58)
                 return true;
             }
         }
@@ -6491,7 +6498,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 realignRunning = false;
             }, "realign").start();
         }
-        if (nowMs - realignHintAt > 6000) { realignHintAt = nowMs; activity.toast("Lost position. Stand still and turn the phone back to the scanned area."); }
+        // (no repeated toast: the card at the top carries the instruction)
         return false;
     }
     private static long key(float x, float y, float z) {
@@ -6642,8 +6649,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int lp = GLES20.glGetAttribLocation(ovLineProg, "aPos");
         GLES20.glVertexAttribPointer(lp, 4, GLES20.GL_FLOAT, false, 0, fb(o));
         GLES20.glEnableVertexAttribArray(lp);
-        GLES20.glLineWidth(2f);
-        GLES20.glDrawArrays(GLES20.GL_LINE_STRIP, 0, 5);
+        // (no frame line around the camera window: an unexplained white box on the scan screen, rk 10 Nov 15:53)
         GLES20.glDisableVertexAttribArray(lp);
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glDepthFunc(GLES20.GL_LESS);
@@ -7439,6 +7445,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final float SPOT_DONE = 0.85f; // "done" only when the middle of the screen is (nearly) all green
     /** Which way to turn to look where the phone last looked while it was lined up (rk 10 Nov 15:42: after a loss the
      *  matches only work on well-scanned surface, 80-94% there against 31-60% elsewhere): from the view shown now. */
+    /** "" when the place is in view, else ": it's to your left" etc. */
+    private String backToSuffix() {
+        String b = backTo();
+        if (b.startsWith("hold still") || b.startsWith("point at")) return "";
+        if (b.contains("behind")) return ": it's behind you";
+        if (b.startsWith("turn left")) return ": it's to your left";
+        if (b.startsWith("turn right")) return ": it's to your right";
+        if (b.startsWith("tilt up")) return ": it's above";
+        return ": it's below";
+    }
+
     private String backTo() {
         if (!haveGoodCam) return "point at an area you already scanned";
         float[] g = lastGoodCam;
@@ -7446,7 +7463,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float[] c = new float[4]; Matrix.multiplyMV(c, 0, viewMvp, 0, new float[]{tx, ty, tz, 1}, 0);
         boolean behind = c[3] <= 0.05f;
         float nx = behind ? -Math.signum(c[0] == 0 ? 1 : c[0]) * 2 : c[0] / c[3], ny = behind ? 0 : c[1] / c[3];
-        if (!behind && Math.abs(nx) < 0.35f && Math.abs(ny) < 0.35f) return "hold the phone on the area in the middle of the screen";
+        if (!behind && Math.abs(nx) < 0.35f && Math.abs(ny) < 0.35f) return "hold still here a moment";
         String h = Math.abs(nx) >= Math.abs(ny) || behind ? (nx < 0 ? "turn left" : "turn right") : (ny > 0 ? "tilt up" : "tilt down");
         return h + (behind ? " (it's behind you)" : "") + ", back to where you last scanned";
     }
@@ -7459,19 +7476,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         tooFar = !DEMO_FAR && farShare > (tooFar ? 0.45f : 0.6f); // demo: looking out over a hall is the point
         if (ts != TrackingState.TRACKING && everTracked) {
             // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
-            level = 2;
-            hint = (walkingWhileLost ? "Lost position. Stand still, " : "Lost position: ") + backTo();
+            // A quiet pause (rk 10 Nov 15:58: never "lost", no red, the scan stays in view): one calm hint.
+            level = 1;
+            hint = "Nothing to scan here. Point back at where you were" + backToSuffix();
         }
         else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
             // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said)
-            level = 2;
-            hint = "No depth for a moment, nothing is being added: hold still, then point at the room from 1-3 m";
+            level = 1;
+            hint = featuresNow >= 0 && featuresNow < 20 ? "Nothing to scan here. Point back at where you were" + backToSuffix()
+                    : "Hold still a moment, then point at the room from 1-3 m";
         }
         else if (needRealign && everTracked) {
             // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed
             // for 24 s while nothing was being scanned)
-            level = 2;
-            hint = "Finding your place: " + backTo();
+            level = 1;
+            hint = "Point back at where you were, hold a moment" + backToSuffix();
         }
         else if (ts != TrackingState.TRACKING) {
             level = 2;
@@ -7483,7 +7502,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (d < 0 || count < 3000) { level = 1; hint = LIVE_MESH ? "Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas" : "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
         else if (photoWanted && d >= 0.35f) { level = 1; hint = "Hold still a moment… taking a photo"; }
         else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
-        else if (tooFast) { level = 2; hint = "Too fast: slow down, or the phone loses its place"; }   // (was only on unfinished spots; rk 10 Nov 15:39: lost track after a fast scan)
+        else if (tooFast) { level = 2; hint = "Too fast: slow down, or the phone loses its place"; }
+        else if (System.currentTimeMillis() < plainHintUntil) { level = 1; hint = "Plain wall: keep an edge or some detail in view"; }   // (was only on unfinished spots; rk 10 Nov 15:39: lost track after a fast scan)
         else if (d < 0.35f) { level = 2; hint = LIVE_MESH ? "Sway the phone slowly over this spot until the mesh covers it in white" : "Sway the phone slowly over this spot until the dots turn green"; }
         else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = LIVE_MESH ? "This spot is done. Move on to the next orange area" : "This spot is done. Move on to the next red area"; }
@@ -7507,7 +7527,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // What you get is what you see (LivePreview): the bars count surface that has its photo, not only its shape.
         if (LIVE_MESH && (livePreview.filledRoom > 0 || livePreview.filledInView > 0)) room *= livePreview.filledRoom;
         roomShown = Math.max(roomShown, room);
-        activity.updateHud(hint, sub, level, Math.max(0f, d), roomShown, count, (int) (scanMs / 1000));
+        boolean lostNow = everTracked && (ts != TrackingState.TRACKING || needRealign);
+        activity.updateHud(hint, sub, level, lostNow ? -1f : Math.max(0f, d), roomShown, count, (int) (scanMs / 1000));
     }
 
     private String detailLine() {
