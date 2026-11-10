@@ -98,6 +98,24 @@ final class DoorwayFinder {
                     if (k >= LINTEL_SHARE * (me - ms)) { lintelRow = r; break; }
                 }
                 if (lintelRow < 0) { if (why != null) why.append(String.format(java.util.Locale.US, " wall %d: gap %.2f m with no wall above it", w / 4, width)); continue; }
+                // The opening's real top is where the free space ends (the depth stops seeing through), which is the
+                // lintel's underside; the surface found above can be the architrave's top (rk 10 Nov 11:52: 2.17 m
+                // read for a 2.04 m opening, the outline on the frame's top).
+                if (seen != null) {
+                    // only where the opening was clearly seen through below (else a thinly seen opening would end at 1.6 m)
+                    float[] share = new float[gh];
+                    for (int r = (int) ((0.2f + 1.5f) / CELL); r < lintelRow; r++) {
+                        int through = 0, tests = 0;
+                        for (int j = ms; j < me; j += 2) {
+                            float u = (j + 0.5f) * CELL, xx = ax + ux * u + nx * off, zz = az + uz * u + nz * off;
+                            tests++; if (seen.test(xx, floorY - 0.2f + (r + 0.5f) * CELL, zz)) through++;
+                        }
+                        share[r] = tests > 0 ? (float) through / tests : 0;
+                    }
+                    int r0b = (int) ((0.2f + 1.5f) / CELL), r1b = (int) ((0.2f + 1.6f) / CELL);
+                    float below = 0; for (int r = r0b; r < r1b; r++) below = Math.max(below, share[r]);
+                    if (below >= 0.5f) for (int r = r1b; r < lintelRow; r++) if (share[r] < 0.3f * below) { lintelRow = r; break; }
+                }
                 // the floor in front of the opening: points within 60 cm of it, within 15 cm of the floor estimate
                 float cxm = ax + ux * (s + e) * CELL / 2 + nx * off, czm = az + uz * (s + e) * CELL / 2 + nz * off;
                 float[] fy = new float[n]; int fn = 0;

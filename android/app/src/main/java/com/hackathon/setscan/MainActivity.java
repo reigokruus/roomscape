@@ -42,10 +42,13 @@ public class MainActivity extends Activity {
 
     /** Every scan records itself (rk 9 Nov): ARCore's recorder, from the scan's start to Done; kept with the scan. */
     static final boolean AUTO_RECORD = true;
+    /** Debug A/B: the ARCore session recording (video + depth) on; read at the next scan. */
+    static boolean recordWanted = true;
     /** The recording of the scan in progress, and a finished one waiting to move into its scan's folder. */
     private File recordingFile, finishedRecording;
 
     private void startRecordingIfNeeded() {
+        if (!recordWanted) return;
         try {
             if (session == null || session.getRecordingStatus() == com.google.ar.core.RecordingStatus.OK) return;
             File dir = new File(getExternalFilesDir(null), "recordings");
@@ -721,7 +724,19 @@ public class MainActivity extends Activity {
             });
             testB.setText("GPU self-test");
             testB.setOnClickListener(v -> { updateStatus("GPU self-test running…"); glView.queueEvent(renderer::runGpuSelfTest); });
-            for (Button bt : new Button[]{gpuB, testB}) {
+            // Tracking A/B switches (rk 10 Nov: losses on detailed scenes): video recording, camera focus, 30 fps cap.
+            android.content.SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+            Button recB = new Button(this), focB = new Button(this), capB = new Button(this);
+            recordWanted = sp.getBoolean("abRecord", true);
+            ScanRenderer.FIXED_FOCUS = sp.getBoolean("abFixedFocus", true);
+            renderer.fpsCap30 = sp.getBoolean("abCap30", false);
+            recB.setText(recordWanted ? "Video: on" : "Video: off");
+            focB.setText(ScanRenderer.FIXED_FOCUS ? "Focus: fixed" : "Focus: auto");
+            capB.setText(renderer.fpsCap30 ? "Draw: 30 fps" : "Draw: 60 fps");
+            recB.setOnClickListener(v -> { recordWanted = !recordWanted; sp.edit().putBoolean("abRecord", recordWanted).apply(); recB.setText(recordWanted ? "Video: on" : "Video: off"); toast("From the next scan"); });
+            focB.setOnClickListener(v -> { ScanRenderer.FIXED_FOCUS = !ScanRenderer.FIXED_FOCUS; sp.edit().putBoolean("abFixedFocus", ScanRenderer.FIXED_FOCUS).apply(); focB.setText(ScanRenderer.FIXED_FOCUS ? "Focus: fixed" : "Focus: auto"); toast("From the next scan"); });
+            capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 30 fps" : "Draw: 60 fps"); });
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }
@@ -2583,7 +2598,7 @@ public class MainActivity extends Activity {
         if (session == null) return;
         try {
             session.resume();
-            if (scanning && AUTO_RECORD) startRecordingIfNeeded();
+            if (scanning && AUTO_RECORD && recordWanted) startRecordingIfNeeded();
         } catch (CameraNotAvailableException e) {
             updateStatus("Camera not available, try reopening the app.");
         }

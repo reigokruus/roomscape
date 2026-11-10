@@ -379,6 +379,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static boolean FLAT_WALLS = true;
     /** Camera focus for tracking: fixed (true) or auto (false, the photos' sharpness up close). */
     static boolean FIXED_FOCUS = true;
+    /** Debug A/B: draw at most 30 fps. */
+    volatile boolean fpsCap30;
+    /** Tracking health for the scan log's summary line. */
+    private int healthLosses, healthMinFeatures = Integer.MAX_VALUE; private long healthMaxExposureNs;
     /** Doorway marks (DoorwayFinder) after the scan. */
     static boolean DOORWAYS = true;
     volatile java.util.List<DoorwayFinder.Doorway> doorways = new java.util.ArrayList<>();
@@ -2302,7 +2306,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
         viewing = true;
         sensors.active = false;
-        log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
+        log(String.format(java.util.Locale.US, "tracking health: %d losses, %d pose jumps, fewest features %s, longest exposure %.0f ms; video %s, focus %s, draw %s",
+                    healthLosses, poseJumps, healthMinFeatures == Integer.MAX_VALUE ? "-" : String.valueOf(healthMinFeatures), healthMaxExposureNs / 1e6,
+                    MainActivity.recordWanted ? "on" : "off", FIXED_FOCUS ? "fixed" : "auto", fpsCap30 ? "30 fps" : "60 fps"));
+            log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
         perf.stage("after Done");
         new Thread(() -> { // the after-Done steps (surface, photos, splats) take well under a minute
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
@@ -3565,7 +3572,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        drainDepth(); gpuReady.clear(); doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
+        drainDepth(); gpuReady.clear(); healthLosses = 0; healthMinFeatures = Integer.MAX_VALUE; healthMaxExposureNs = 0; doorways = new java.util.ArrayList<>(); activity.setDoorways(null); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
@@ -4314,6 +4321,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private void onDrawFrameInner(GL10 gl) {
         long drawStartNs = System.nanoTime();
+        // Debug A/B: draw at most 30 fps (the camera's own rate) to leave the GPU and CPU to ARCore.
+        if (fpsCap30 && lastFrameNs > 0 && drawStartNs - lastFrameNs < 30_000_000L) {
+            try { Thread.sleep((33_000_000L - (drawStartNs - lastFrameNs)) / 1_000_000L); } catch (InterruptedException ignored) { }
+            drawStartNs = System.nanoTime();
+        }
         if (lastFrameNs > 0) perf.frame((drawStartNs - lastFrameNs) / 1e6); // frame interval
         lastFrameNs = drawStartNs;
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
@@ -4385,6 +4397,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (count > 2000 && !needRealign) {
                     needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null;
                     snapshotForRealign();
+                    healthLosses++;
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
                     activity.toast("Lost position. Point back at an area you already scanned.");
                 }
@@ -4427,7 +4440,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // A sudden jump means ARCore just corrected its map: the next moment's poses can't be trusted yet.
             // Measured against the time since the last frame we saw: after a pause (a save, a slow frame) the phone
             // has simply walked further. Up to 2 m/s counts as walking, not as ARCore moving its map.
-            if (havePrevPose && frameMove > Math.max(0.15f, 2f * frameDt)) { settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); }
+            if (havePrevPose && frameMove > Math.max(0.15f, 2f * frameDt)) {
+                settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove));
+                // ARCore moved its map without saying it lost track (11:47:09: 0.5 m): the scan, not ARCore, decides
+                // where the view is; nothing is fused until it lines up again (the quick path after a loss).
+                if (count > 2000 && !needRealign && realign == null && !realignBuilding) {
+                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null;
+                    snapshotForRealign();
+                    log("pose jump: fusion paused until the view lines up with the scan again");
+                }
+            }
             System.arraycopy(curPose, 0, prevPose, 0, 16);
             havePrevPose = true;
             if (nowMs >= settleUntil) {
@@ -4795,6 +4817,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 try {
                     com.google.ar.core.ImageMetadata md = frame.getImageMetadata();
                     r.exposureNs = md.getLong(com.google.ar.core.ImageMetadata.SENSOR_EXPOSURE_TIME);
+                    healthMaxExposureNs = Math.max(healthMaxExposureNs, r.exposureNs);
                     r.iso = md.getInt(com.google.ar.core.ImageMetadata.SENSOR_SENSITIVITY);
                 } catch (Throwable ignored) { }
                 r.lux = sensors.lastLux; r.heading = sensors.lastHeadingDeg;
@@ -5709,6 +5732,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // fusing). Only when features stay very low for 3 s, the depth isn't filling the view either, at most once a
         // minute.
         boolean depthFine = depthPixelsFrame > 1500;
+        healthMinFeatures = Math.min(healthMinFeatures, n);
         if (n >= 15 || depthFine) { fewFeaturesSince = 0; return; }
         if (fewFeaturesSince == 0) { fewFeaturesSince = nowMs; return; }
         if (nowMs - fewFeaturesSince > 3000 && nowMs - plainHintAt > 60000) {
