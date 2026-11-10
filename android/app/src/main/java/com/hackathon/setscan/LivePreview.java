@@ -41,9 +41,28 @@ final class LivePreview {
         final List<Integer> groupTex = new ArrayList<>();                 // per photo: its texture,
         final List<FloatBuffer> groupPos = new ArrayList<>(), groupUv = new ArrayList<>(); // its triangles and uvs
         final List<Integer> groupVerts = new ArrayList<>();
+        // When each vertex's bit of surface first appeared (seconds, clock()), for the fly-in.
+        FloatBuffer restBorn, lineBorn;
+        final List<FloatBuffer> groupBorn = new ArrayList<>();
     }
 
-    synchronized void reset() { cache.clear(); filledInView = 0; filledRoom = 0; }
+    synchronized void reset() { cache.clear(); born.clear(); filledInView = 0; filledRoom = 0; }
+
+    // ---- fly-in (rk 10 Nov): new surface rises into place from below, ~0.4 s; keyed by the vertex's 4 cm cell so
+    // surface that's only re-extracted doesn't animate again ----
+    static final boolean FLY_IN = true;
+    private static final long START = System.nanoTime();
+    static float clock() { return (System.nanoTime() - START) / 1e9f; }
+    private final HashMap<Long, Float> born = new HashMap<>();
+    private float bornNow;
+
+    private float bornOf(float x, float y, float z) {
+        long k = (((long) Math.floor(x / 0.04f) + (1 << 20)) & 0x1FFFFF) | ((((long) Math.floor(y / 0.04f) + (1 << 20)) & 0x1FFFFF) << 21)
+                | ((((long) Math.floor(z / 0.04f) + (1 << 20)) & 0x1FFFFF) << 42);
+        Float b = born.get(k);
+        if (b == null) { b = bornNow; born.put(k, b); }
+        return b;
+    }
 
     /** Tap to clear: the spots near here pick their photos again. */
     synchronized void forget(float x, float y, float z, float r) {
@@ -101,14 +120,23 @@ final class LivePreview {
         r.lines = fb(Math.max(3, rest * 18));
         r.lineConf = ByteBuffer.allocateDirect(Math.max(1, rest * 6)).order(ByteOrder.nativeOrder());
         r.lineVerts = rest * 6;
+        // The first build (a reopened scan, Continue scan) shows at once; later new surface flies in.
+        bornNow = born.isEmpty() && nt > 3000 ? clock() - 10 : clock();
+        r.restBorn = fb(Math.max(1, rest * 3));
+        r.lineBorn = fb(Math.max(1, rest * 6));
+        FloatBuffer[] gb = new FloatBuffer[kfs.size()];
+        for (int k = 0; k < kfs.size(); k++) if (perKf[k] > 0) gb[k] = fb(perKf[k] * 3);
         FloatBuffer[] gp = new FloatBuffer[kfs.size()], gu = new FloatBuffer[kfs.size()];
         for (int k = 0; k < kfs.size(); k++) if (perKf[k] > 0) { gp[k] = fb(perKf[k] * 9); gu[k] = fb(perKf[k] * 6); }
         byte[] c = new byte[3];
         for (int t = 0; t < nt; t++) {
             for (int i = 0; i < 9; i++) v[i] = meshPos.get(t * 9 + i);
             int k = pick[t];
-            if (k >= 0 && PhotoRoom.project(kfs.get(k), v, uv)) { gp[k].put(v); gu[k].put(uv); continue; }
-            if (k >= 0) { gp[k].put(v); gu[k].put(new float[6]); continue; } // keeps the group's count (not reached)
+            float b0 = bornOf(v[0], v[1], v[2]), b1 = bornOf(v[3], v[4], v[5]), b2 = bornOf(v[6], v[7], v[8]);
+            if (k >= 0 && PhotoRoom.project(kfs.get(k), v, uv)) { gp[k].put(v); gu[k].put(uv); gb[k].put(b0).put(b1).put(b2); continue; }
+            if (k >= 0) { gp[k].put(v); gu[k].put(new float[6]); gb[k].put(b0).put(b1).put(b2); continue; } // keeps the group's count (not reached)
+            r.restBorn.put(b0).put(b1).put(b2);
+            r.lineBorn.put(b0).put(b1).put(b1).put(b2).put(b2).put(b0);
             for (int i = 0; i < 3; i++) c[i] = meshConf.get(t * 3 + i);
             r.restPos.put(v); r.restConf.put(c);
             for (int e = 0; e < 3; e++) {
@@ -118,10 +146,11 @@ final class LivePreview {
             }
         }
         r.restPos.position(0); r.restConf.position(0); r.lines.position(0); r.lineConf.position(0);
+        r.restBorn.position(0); r.lineBorn.position(0);
         for (int k = 0; k < kfs.size(); k++) {
             if (gp[k] == null) continue;
-            gp[k].position(0); gu[k].position(0);
-            r.groupTex.add(kfs.get(k).tex); r.groupPos.add(gp[k]); r.groupUv.add(gu[k]); r.groupVerts.add(perKf[k] * 3);
+            gp[k].position(0); gu[k].position(0); gb[k].position(0);
+            r.groupTex.add(kfs.get(k).tex); r.groupPos.add(gp[k]); r.groupUv.add(gu[k]); r.groupVerts.add(perKf[k] * 3); r.groupBorn.add(gb[k]);
         }
         filledInView = inView == 0 ? 0 : (float) inViewFilled / inView;
         int filled = 0;

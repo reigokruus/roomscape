@@ -29,6 +29,13 @@ final class Tsdf {
     private final byte[] rgb;
     private final int[] at; // voxel -> its slot in the hash table (to walk the voxels without scanning the whole table)
     private final int[] carvedIn; // the depth frame that last carved each voxel (solid ones: at most once a frame)
+    /** Finished surface (rk 10 Nov: looking again reshuffled the bars instead of finishing them): frames that saw a voxel
+     *  as surface, and clear see-throughs in a row since. LOCK_FRAMES of the first finish it (no more averaging);
+     *  UNLOCK_FRAMES of the second (it really moved), tap to clear or a rescan undo it. As on the iPhone. */
+    static final int LOCK_FRAMES = 20, UNLOCK_FRAMES = 250;
+    private final byte[] seen;
+    private final short[] contra;
+    private final int[] seenIn;
     private int frame;
     /** Surface seen this often counts as solid: free space in front only nudges it, once per depth frame (rk 9 Nov:
      *  stepping back, finished surface seen at a shallow angle got carved away). */
@@ -47,6 +54,7 @@ final class Tsdf {
         rgb = new byte[cap * 3];
         at = new int[cap];
         carvedIn = new int[cap];
+        seen = new byte[cap]; contra = new short[cap]; seenIn = new int[cap];
         clear();
     }
 
@@ -82,7 +90,7 @@ final class Tsdf {
         if (keys[i] == k) return slots[i];
         if (n >= cap) return -1;
         keys[i] = k; slots[i] = n; at[n] = i;
-        sdf[n] = 0; w[n] = 0; carvedIn[n] = -1;
+        sdf[n] = 0; w[n] = 0; carvedIn[n] = -1; seen[n] = 0; contra[n] = 0; seenIn[n] = -1;
         return n++;
     }
 
@@ -132,7 +140,7 @@ final class Tsdf {
             float vz = (((int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs;
             if (!where.test(vx, vy, vz)) continue;
             int i = slots[t];
-            w[i] = 0; sdf[i] = 0;
+            w[i] = 0; sdf[i] = 0; seen[i] = 0; contra[i] = 0;
             cleared++;
         }
         return cleared;
@@ -148,7 +156,7 @@ final class Tsdf {
             float vz = (((int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs - z;
             if (vx * vx + vy * vy + vz * vz > r * r) continue;
             int i = slots[t];
-            w[i] = 0; sdf[i] = 0;
+            w[i] = 0; sdf[i] = 0; seen[i] = 0; contra[i] = 0;
             cleared++;
         }
         return cleared;
@@ -177,6 +185,12 @@ final class Tsdf {
             int i = get(vx, vy, vz);
             if (i < 0) continue;
             int wi = w[i];
+            if ((seen[i] & 0xFF) >= LOCK_FRAMES) { // finished: only sustained see-through (it moved) undoes it
+                if (carvedIn[i] == frame) continue;
+                carvedIn[i] = frame;
+                if (++contra[i] >= UNLOCK_FRAMES) { w[i] = 0; sdf[i] = 0; seen[i] = 0; contra[i] = 0; }
+                continue;
+            }
             if (wi >= SOLID_W) { // solid: a small nudge toward free space, at most once per depth frame
                 if (carvedIn[i] == frame) continue;
                 carvedIn[i] = frame;
@@ -200,8 +214,10 @@ final class Tsdf {
             int i = d > 0.99f ? get(vx, vy, vz) : getOrCreate(vx, vy, vz); // free space only carves existing voxels
             if (i < 0) continue;
             int wi = w[i];
+            if ((seen[i] & 0xFF) >= LOCK_FRAMES) { contra[i] = 0; continue; } // finished: seen as surface again
             sdf[i] = (sdf[i] * wi + d) / (wi + 1);
             if (wi < MAX_W) w[i] = (short) (wi + 1);
+            if (Math.abs(d) < 0.5f && seenIn[i] != frame) { seenIn[i] = frame; if ((seen[i] & 0xFF) < 255) seen[i]++; }
             if (Math.abs(d) < 0.4f) {
                 int j = i * 3;
                 float a = 1f / Math.min(wi + 1, 12);

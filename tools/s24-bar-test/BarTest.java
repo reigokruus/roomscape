@@ -60,6 +60,7 @@ public class BarTest {
             float y = t.meshPos.get(i * 3 + 1), z = t.meshPos.get(i * 3 + 2), x = t.meshPos.get(i * 3);
             if (Math.abs(x) < 0.3f && Math.abs(y - BY) < 0.06f && Math.abs(z - BZ) < 0.06f) near++;
         }
+        System.out.println("  (whole mesh: " + t.meshVerts / 3 + " triangles)");
         return near;
     }
     public static void main(String[] a) {

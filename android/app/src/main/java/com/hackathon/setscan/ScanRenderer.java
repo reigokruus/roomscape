@@ -5870,7 +5870,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private volatile Object[] liveMeshNew;   // {FloatBuffer tris, ByteBuffer conf, FloatBuffer lines, ByteBuffer lineConf, int[] {triVerts, lineVerts}}
     private long liveMeshAt;
     private int liveMeshProg, liveMeshTriVerts, liveMeshLineVerts;
-    private final int[] liveMeshVbo = new int[4];
+    private final int[] liveMeshVbo = new int[6];
+    private final java.util.List<java.nio.FloatBuffer> liveGroupBorn = new java.util.ArrayList<>();
+    private boolean flyIn = LivePreview.FLY_IN;
 
     /** The live preview's photo choices (LivePreview). */
     final LivePreview livePreview = new LivePreview();
@@ -5911,7 +5913,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (nm != null) {
             liveMeshNew = null;
             LivePreview.Result r = (LivePreview.Result) nm[0];
-            if (liveMeshVbo[0] == 0) GLES20.glGenBuffers(4, liveMeshVbo, 0);
+            if (liveMeshVbo[0] == 0) GLES20.glGenBuffers(6, liveMeshVbo, 0);
             // Never more bytes than the buffers hold (an upload past the end throws and kills the app).
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]);
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.restVerts) * 12, r.restPos.capacity() * 4), r.restPos, GLES20.GL_DYNAMIC_DRAW);
@@ -5921,12 +5923,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.lineVerts) * 12, r.lines.capacity() * 4), r.lines, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[3]);
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.lineVerts), r.lineConf.capacity()), r.lineConf, GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[4]);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.restVerts) * 4, r.restBorn.capacity() * 4), r.restBorn, GLES20.GL_DYNAMIC_DRAW);
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[5]);
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, Math.min(Math.max(1, r.lineVerts) * 4, r.lineBorn.capacity() * 4), r.lineBorn, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
             liveMeshTriVerts = r.restVerts; liveMeshLineVerts = r.lineVerts;
             liveGroupTex.clear(); liveGroupTex.addAll(r.groupTex);
             liveGroupPos.clear(); liveGroupPos.addAll(r.groupPos);
             liveGroupUv.clear(); liveGroupUv.addAll(r.groupUv);
             liveGroupVerts.clear(); liveGroupVerts.addAll(r.groupVerts);
+            liveGroupBorn.clear(); liveGroupBorn.addAll(r.groupBorn);
         }
         if (LivePreview.SHOW_CAMERA) drawLiveDim(1f - LivePreview.DIM);
         else drawZebra(1f); // no camera picture: only what was captured, on the zebra background
@@ -5934,36 +5941,66 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         // Photo-filled triangles, opaque, with the photo the Photo view will use.
         if (!liveGroupTex.isEmpty()) {
-            if (livePhotoProg == 0) livePhotoProg = program(
-                    "uniform mat4 uMvp; attribute vec3 aPos; attribute vec2 aUv; varying vec2 vUv;" +
-                    "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vUv = aUv; }",
-                    "precision mediump float; uniform sampler2D uTex; varying vec2 vUv;" +
-                    "void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb, 1.0); }");
+            if (livePhotoProg == 0) {
+                String fs = "precision mediump float; uniform sampler2D uTex; varying vec2 vUv;" +
+                        "void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb, 1.0); }";
+                try {
+                    if (!flyIn) throw new RuntimeException("fly-in off");
+                    livePhotoProg = program(
+                        "uniform mat4 uMvp; uniform float uNow; attribute vec3 aPos; attribute vec2 aUv; attribute float aBorn; varying vec2 vUv;" +
+                        FLY_GLSL + "void main(){ vec3 p = aPos; p.y -= 0.25 * (1.0 - flyEase(aBorn)); gl_Position = uMvp * vec4(p, 1.0); vUv = aUv; }", fs);
+                } catch (RuntimeException e) {
+                    if (flyIn) { log("fly-in shader failed, no animation: " + e.getMessage()); flyIn = false; }
+                    livePhotoProg = program(
+                        "uniform mat4 uMvp; attribute vec3 aPos; attribute vec2 aUv; varying vec2 vUv;" +
+                        "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vUv = aUv; }", fs);
+                }
+            }
             GLES20.glUseProgram(livePhotoProg);
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(livePhotoProg, "uMvp"), 1, false, m, 0);
             GLES20.glUniform1i(GLES20.glGetUniformLocation(livePhotoProg, "uTex"), 0);
             int aPos = GLES20.glGetAttribLocation(livePhotoProg, "aPos"), aUv = GLES20.glGetAttribLocation(livePhotoProg, "aUv");
+            int aBornP = GLES20.glGetAttribLocation(livePhotoProg, "aBorn");
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(livePhotoProg, "uNow"), LivePreview.clock());
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
+            if (aBornP >= 0) GLES20.glEnableVertexAttribArray(aBornP);
             for (int g = 0; g < liveGroupTex.size(); g++) {
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, liveGroupTex.get(g));
                 GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, liveGroupPos.get(g));
                 GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 0, liveGroupUv.get(g));
+                if (aBornP >= 0 && g < liveGroupBorn.size()) GLES20.glVertexAttribPointer(aBornP, 1, GLES20.GL_FLOAT, false, 0, liveGroupBorn.get(g));
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, liveGroupVerts.get(g));
             }
             GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv);
+            if (aBornP >= 0) GLES20.glDisableVertexAttribArray(aBornP);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
         if (liveMeshTriVerts == 0) { if (LivePreview.SHOW_CAMERA && OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m); return; }
-        if (liveMeshProg == 0) liveMeshProg = program(
-                "uniform mat4 uMvp; attribute vec3 aPos; attribute float aConf; varying float vConf;" +
-                "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vConf = aConf; }",
-                "precision mediump float; uniform vec4 uCol; uniform vec4 uNew; uniform float uConfirmed; varying float vConf;" +
-                "void main(){ gl_FragColor = mix(uNew, uCol, smoothstep(0.15, uConfirmed, vConf)); }");
+        if (liveMeshProg == 0) {
+            try {
+                if (!flyIn) throw new RuntimeException("fly-in off");
+                liveMeshProg = program(
+                    "uniform mat4 uMvp; uniform float uNow; attribute vec3 aPos; attribute float aConf; attribute float aBorn; varying float vConf; varying float vFade;" +
+                    FLY_GLSL + "void main(){ float e = flyEase(aBorn); vec3 p = aPos; p.y -= 0.25 * (1.0 - e); gl_Position = uMvp * vec4(p, 1.0); vConf = aConf; vFade = e; }",
+                    "precision mediump float; uniform vec4 uCol; uniform vec4 uNew; uniform float uConfirmed; varying float vConf; varying float vFade;" +
+                    "void main(){ vec4 c = mix(uNew, uCol, smoothstep(0.15, uConfirmed, vConf)); gl_FragColor = vec4(c.rgb, c.a * vFade); }");
+            } catch (RuntimeException e) {
+                if (flyIn) { log("fly-in shader failed, no animation: " + e.getMessage()); flyIn = false; }
+                liveMeshProg = program(
+                    "uniform mat4 uMvp; attribute vec3 aPos; attribute float aConf; varying float vConf;" +
+                    "void main(){ gl_Position = uMvp * vec4(aPos, 1.0); vConf = aConf; }",
+                    "precision mediump float; uniform vec4 uCol; uniform vec4 uNew; uniform float uConfirmed; varying float vConf;" +
+                    "void main(){ gl_FragColor = mix(uNew, uCol, smoothstep(0.15, uConfirmed, vConf)); }");
+            }
+        }
         GLES20.glUseProgram(liveMeshProg);
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(liveMeshProg, "uMvp"), 1, false, m, 0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(liveMeshProg, "uConfirmed"), LivePreview.CONFIRMED);
         int aPos = GLES20.glGetAttribLocation(liveMeshProg, "aPos"), aConf = GLES20.glGetAttribLocation(liveMeshProg, "aConf");
+        int aBorn = GLES20.glGetAttribLocation(liveMeshProg, "aBorn");
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(liveMeshProg, "uNow"), LivePreview.clock());
+        if (aBorn >= 0) GLES20.glEnableVertexAttribArray(aBorn);
         int uCol = GLES20.glGetUniformLocation(liveMeshProg, "uCol"), uNew = GLES20.glGetUniformLocation(liveMeshProg, "uNew");
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
@@ -5976,6 +6013,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform4f(uNew, tc[0], tc[1], tc[2], tc[3]);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[0]); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[1]); GLES20.glVertexAttribPointer(aConf, 1, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
+        if (aBorn >= 0) { GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[4]); GLES20.glVertexAttribPointer(aBorn, 1, GLES20.GL_FLOAT, false, 0, 0); }
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, liveMeshTriVerts);
         GLES20.glDisable(GLES20.GL_POLYGON_OFFSET_FILL);
         // wireframe
@@ -5984,12 +6022,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glLineWidth(Math.max(1f, height / 1400f));
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[2]); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[3]); GLES20.glVertexAttribPointer(aConf, 1, GLES20.GL_UNSIGNED_BYTE, true, 0, 0);
+        if (aBorn >= 0) { GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, liveMeshVbo[5]); GLES20.glVertexAttribPointer(aBorn, 1, GLES20.GL_FLOAT, false, 0, 0); }
         GLES20.glDrawArrays(GLES20.GL_LINES, 0, liveMeshLineVerts);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aConf);
+        if (aBorn >= 0) GLES20.glDisableVertexAttribArray(aBorn);
         GLES20.glDisable(GLES20.GL_BLEND);
         if (LivePreview.SHOW_CAMERA && OVERVIEW && overviewBlend > 0.5f) drawOverviewProjection(m);
     }
+
+    /** The fly-in's easing (rk 10 Nov): 0 when the surface appears, 1 after 0.4 s, easing out. */
+    private static final String FLY_GLSL = "float flyEase(float born){ float t = clamp((uNow - born) / 0.4, 0.0, 1.0); return 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t); }";
 
     /** Screen corners (-1,-1), (1,-1), (-1,1) of the real camera's view in the camera texture, for the overview. */
     private final float[] ovCamUv = new float[6];

@@ -15,7 +15,17 @@ final class LiveMesh: @unchecked Sendable {
     struct Vertex {
         var x, y, z: Float
         var confidence: Float
+        /// When this bit of surface first appeared (seconds, LiveMesh.clock), for the fly-in (rk 10 Nov).
+        var born: Float
     }
+
+    /// The fly-in: new surface rises into place from below (or fades in), ~0.4 s. Keyed by the vertex's voxel cell,
+    /// so surface that's only re-extracted doesn't animate again.
+    static let appear = true
+    static let appearFromBelow = true   // false: fade only
+    private var bornAt: [SIMD3<Int32>: Float] = [:]
+    static let start = CACurrentMediaTime()
+    static var clock: Float { Float(CACurrentMediaTime() - start) }
 
     /// What the renderer draws: one vertex buffer, triangle indices and edge indices into it.
     struct Buffers {
@@ -87,6 +97,7 @@ final class LiveMesh: @unchecked Sendable {
     /// Worker queue.
     func reset() {
         tsdf.clear()
+        bornAt.removeAll()
         gpu = nil
         gpuSynced = false
         gpuFailed = false
@@ -194,9 +205,14 @@ final class LiveMesh: @unchecked Sendable {
         sets[nextSet] = set
         nextSet = (nextSet + 1) % sets.count
         let v = vertices.contents().bindMemory(to: Vertex.self, capacity: vertexCount)
+        // The first build shows at once (no fly-in for the whole room on Continue scan).
+        let now = bornAt.isEmpty && vertexCount > 3000 ? Self.clock - 10 : Self.clock
         for i in 0..<vertexCount {
             let p = scratch.positions[i]
-            v[i] = Vertex(x: p.x, y: p.y, z: p.z, confidence: scratch.confidence[i])
+            let cell = SIMD3<Int32>((p / tsdf.vs).rounded(.down))
+            let born: Float
+            if let b = bornAt[cell] { born = b } else { born = now; bornAt[cell] = now }
+            v[i] = Vertex(x: p.x, y: p.y, z: p.z, confidence: scratch.confidence[i], born: born)
         }
         scratch.triangles.withUnsafeBytes { triangles.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
         let slotPointer = slots.contents().bindMemory(to: Int32.self, capacity: max(scratch.triangles.count / 3, 1))
@@ -245,6 +261,8 @@ final class LiveMeshRenderer {
 
     private struct Uniforms {
         var viewProjection: simd_float4x4
+        /// now (s, LiveMesh.clock), fly-in on, from below (1) or fade (0), unused.
+        var appear: SIMD4<Float>
     }
 
     /// LivePreview's colours and thresholds, for the shaders.
@@ -324,7 +342,8 @@ final class LiveMeshRenderer {
     /// Draws the mesh if there is one yet; false if there's nothing to draw.
     func encode(_ encoder: MTLRenderCommandEncoder, viewProjection: simd_float4x4, live: LiveCamera? = nil) -> Bool {
         guard let buffers = mesh.buffers else { return false }
-        var uniforms = Uniforms(viewProjection: viewProjection)
+        var uniforms = Uniforms(viewProjection: viewProjection,
+                                appear: SIMD4(LiveMesh.clock, LiveMesh.appear ? 1 : 0, LiveMesh.appearFromBelow ? 1 : 0, 0))
         encoder.setCullMode(.none)
         encoder.setVertexBuffer(buffers.vertices, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
@@ -369,14 +388,15 @@ final class LiveMeshRenderer {
     #include <metal_stdlib>
     using namespace metal;
 
-    struct MeshVertex { packed_float3 position; float confidence; };
-    struct Uniforms { float4x4 viewProjection; };
+    struct MeshVertex { packed_float3 position; float confidence; float born; };
+    struct Uniforms { float4x4 viewProjection; float4 appear; };
     struct Colours { float4 tentative; float4 tentativeEdge; float4 solid; float4 solidEdge; float confirmed; };
     struct LiveUniform { float4x4 projection; float on; float hasDepth; };
     struct MeshOut {
         float4 position [[position, invariant]];
         float3 world;
         float confidence;
+        float fade;
     };
 
     vertex MeshOut meshVertex(uint vid [[vertex_id]],
@@ -384,7 +404,16 @@ final class LiveMeshRenderer {
                               constant Uniforms &u [[buffer(1)]]) {
         MeshVertex v = vertices[vid];
         MeshOut out;
-        out.position = u.viewProjection * float4(float3(v.position), 1.0);
+        float3 p = float3(v.position);
+        out.fade = 1.0;
+        if (u.appear.y > 0.5) {
+            // Fly-in: 0.4 s, easing out; from 25 cm below, fading in (rk: from below looks best).
+            float t = saturate((u.appear.x - v.born) / 0.4);
+            float e = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+            if (u.appear.z > 0.5) p.y -= 0.25 * (1.0 - e);
+            out.fade = e;
+        }
+        out.position = u.viewProjection * float4(p, 1.0);
         out.world = float3(v.position);
         out.confidence = v.confidence;
         return out;
@@ -431,7 +460,8 @@ final class LiveMeshRenderer {
             }
         }
         float solid = smoothstep(0.15, c.confirmed, in.confidence);
-        return mix(c.tentative, c.solid, saturate(solid));
+        float4 col = mix(c.tentative, c.solid, saturate(solid));
+        return float4(col.rgb, col.a * in.fade);
     }
 
     vertex MeshOut dimVertex(uint vid [[vertex_id]]) {
@@ -439,6 +469,7 @@ final class LiveMeshRenderer {
         out.position = float4(vid & 1 ? 1.0 : -1.0, vid & 2 ? 1.0 : -1.0, 0.0, 1.0);
         out.world = float3(0.0);
         out.confidence = 0.0;
+        out.fade = 1.0;
         return out;
     }
 
@@ -448,7 +479,8 @@ final class LiveMeshRenderer {
 
     fragment float4 meshEdge(MeshOut in [[stage_in]], constant Colours &c [[buffer(3)]]) {
         float solid = smoothstep(0.15, c.confirmed, in.confidence);
-        return mix(c.tentativeEdge, c.solidEdge, saturate(solid));
+        float4 col = mix(c.tentativeEdge, c.solidEdge, saturate(solid));
+        return float4(col.rgb, col.a * in.fade);
     }
     """
 }

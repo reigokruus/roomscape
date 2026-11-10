@@ -254,6 +254,7 @@ enum GPUBench {
         if let f = ProcessInfo.processInfo.environment["FOOTPRINT"] { TsdfGPU.footprintCheck = f == "1" }
         if let k = ProcessInfo.processInfo.environment["LOCK_W"].flatMap(Float.init) { TsdfGPU.lockWeight = k }
         if let k = ProcessInfo.processInfo.environment["UNLOCK_N"].flatMap(Int.init) { TsdfGPU.unlockFrames = k }
+        if let f = ProcessInfo.processInfo.environment["NEAREST"] { TsdfGPU.nearestRule = f == "1" }
         let prepTime = Date().timeIntervalSince(t1)
         // Fine voxels: only a box around the chosen view's camera (a detail zone), so the block fits.
         if voxel < 0.02, ProcessInfo.processInfo.environment["NO_BOX"] != "1", let view, view < frames.count {

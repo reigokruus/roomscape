@@ -111,7 +111,7 @@ final class LiveGhost: @unchecked Sendable {
                 p[axis] = level
                 p[u] = cu ? hi[u] : lo[u]
                 p[v] = cv ? hi[v] : lo[v]
-                vertices.append(LiveMesh.Vertex(x: p.x, y: p.y, z: p.z, confidence: 1))
+                vertices.append(LiveMesh.Vertex(x: p.x, y: p.y, z: p.z, confidence: 1, born: -1000))
             }
             triangles += [base, base + 1, base + 2, base, base + 2, base + 3]
             edges += [base, base + 1, base + 1, base + 2, base + 2, base + 3, base + 3, base]
