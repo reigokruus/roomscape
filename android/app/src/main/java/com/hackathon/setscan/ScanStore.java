@@ -164,13 +164,17 @@ final class ScanStore {
         if (d.ceiling != null) m.put("ceiling", vec(d.ceiling));
         try (FileOutputStream f = new FileOutputStream(new File(tmp, "meta.json"))) { f.write(m.toString(1).getBytes("UTF-8")); }
         // Kept across saves: the sync identity, and package parts this app doesn't use (an iPhone's ios/ folder).
-        for (String keep : new String[]{"sync.json", "rmsc-extra", "splats.bin", "source-manifest.json"}) {
+        // Also the files written into the scan folder after a save (measurements, doorways, height, logs and diagnostics):
+        // a later save (rename, Continue scan, an edit) used to leave them behind.
+        for (String keep : new String[]{"sync.json", "rmsc-extra", "splats.bin", "source-manifest.json",
+                "measurements.json", "scan-log.txt", "perf-scan.jsonl", "perf-scan.summary.json",
+                "depth-pairs.bin", "feature-heights.bin", "live-mesh.bin"}) {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }
         // Built from the points (the Photo view's surface, room outline, flat planes): kept while the points are the
         // same; after Continue scan they're stale, and are built again.
-        if (samePoints) for (String keep : new String[]{"surface.ply", "outline.json", "planes.json"}) {
+        if (samePoints) for (String keep : new String[]{"surface.ply", "outline.json", "planes.json", "doorways.json", "height.json"}) {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }

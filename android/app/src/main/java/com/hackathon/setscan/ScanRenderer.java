@@ -2355,7 +2355,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             File dir = currentDir;
             perf.stop();
-            if (dir != null) { keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
+            if (dir != null) { saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
         }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
@@ -3619,6 +3619,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void reset() {
+        lastLiveMesh = null;
         screenFile = null;   // the next scan records its own screen video
         roomEdits.clear(); planningPreview = false; planningLoadError = null; planningScanKey = null;
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
@@ -4413,6 +4414,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (ok) screenPending = file; else if (file != null) file.delete();
         }, "screen-video-close").start();
         // (screenFile stays set: one video per scan; reset() clears it for the next scan)
+    }
+
+    /** live-mesh.bin: the triangle soup (float x,y,z per corner, big-endian, after an int corner count and the floor
+     *  height) of the last live doorway search. Diagnostics only (not in the .rmsc). */
+    private void saveLiveMesh(File dir) {
+        float[] vv = lastLiveMesh;
+        if (vv == null) return;
+        try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "live-mesh.bin"))))) {
+            o.writeInt(vv.length / 3); o.writeFloat(lastLiveFloor); for (float v : vv) o.writeFloat(v);
+        } catch (Exception e) { logError("live mesh", e); }
     }
 
     /** After the save: screen.mp4 into the scan folder. */
@@ -6757,7 +6768,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Live doorway outlines while scanning (rk 10 Nov): on/off, and when the last search ran. */
     static boolean LIVE_DOORS = true;
-    private long liveDoorAt, liveDoorMs;   // the search runs at most a third of the time (14:01: 1-2.4 s each, frame dips)
+    private long liveDoorAt, liveDoorMs;
+    private volatile float[] lastLiveMesh; private volatile float lastLiveFloor;   // the search runs at most a third of the time (14:01: 1-2.4 s each, frame dips)
     /** Doorways being tracked during the scan: each with how many searches in a row found it and missed it. */
     private final java.util.ArrayList<float[]> liveTrack = new java.util.ArrayList<>();   // x0 z0 x1 z1 floorY width height sure hits misses shown
 
@@ -6783,6 +6795,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, nv, walls, floor,
                 (x, y, z) -> tsdf.seenThrough(x, y, z) || OutlineFill.judge(phs, views, new float[]{x, y, z}, null) == 1, why);   // the same evidence as at Done
         if (ds.isEmpty() && why.length() > 0) log("live doorways, left out:" + (why.length() > 300 ? why.substring(0, 300) : why));
+        // the mesh the last live search saw, saved with the scan (live-mesh.bin) to find offline why live finds nothing
+        // while the search at Done finds the doorways (13:41, 14:01 scans)
+        lastLiveMesh = vv; lastLiveFloor = floor;
         synchronized (liveTrack) {
             for (float[] t : liveTrack) t[11] = 0;   // matched this time?
             for (DoorwayFinder.Doorway d : ds) {
