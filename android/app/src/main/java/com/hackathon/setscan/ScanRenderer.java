@@ -4444,7 +4444,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             notTrackingSince = 0;
             lostSince = 0;
             if (!viewing && count > 2000 && frameNo % 10 == 0) plainWallHint(frame, nowMs);
-            if (!viewing && !ceilingHinted && scanMs > 45000 && planner.isReady() && frameNo % 60 == 0) ceilingHint();
+            // (no ceiling prompt: tilting up to a plain ceiling cost tracking even with wall in view, rk 10 Nov 13:37)
         } else if (everTracked) {
             // Lost tracking after it worked. ARCore usually recovers by itself once it sees something textured again;
             // restarting only helps the S24's "paused for no reason" case, and a restart can shift the whole map.
@@ -4459,10 +4459,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
             else if (camera.getTrackingFailureReason() == com.google.ar.core.TrackingFailureReason.NONE
-                    && nowMs - lostSince > 8000 && recoveries < 10) {   // ARCore gets 8 s to find its own map first (was 3 s)
+                    && nowMs - lostSince > 25000 && recoveries < 10) {   // ARCore gets 25 s to find its own map first (a restart throws its map away)
                 recoveries++;
                 lostSince = 0;
-                log("tracking lost for 8 s, restarting AR session (attempt " + recoveries + ")");
+                log("tracking lost for 25 s, restarting AR session (attempt " + recoveries + ")");
                 sessionRestarted = true;   // a restart can come back in a shifted frame: re-align before fusing
                 recentPts.clear();
                 activity.restartSession();
@@ -5985,6 +5985,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // attempt fits very well (rk 10 Nov 11:47: ARCore came back after 1.2 s about 20 cm off; three attempts in
             // 16 s, 63-90% on the scan, each a few cm different from the last, so it never resumed).
             boolean strong = ok && res.fit.inliers >= 0.8f && res.fit.median < 0.015f;
+            // ARCore came back on its own (no restart): one decent match is enough
+            if (ok && !sessionRestarted && res.fit.inliers >= 0.55f && res.fit.median < 0.02f) strong = true;
             // after a jump: a fit that keeps the old frame (within 15 cm / ~2°) is the jump undone, accepted at once
             float[] jg = jumpGuess;
             if (ok && jg != null && Realign.away(F, jg) < 0.2f) strong = true;
@@ -6003,6 +6005,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             realignRunning = true; realignLastStart = nowMs;
             final java.util.ArrayList<float[]> all = new java.util.ArrayList<>();
             for (java.util.ArrayList<float[]> f : recentPts) all.addAll(f);
+            // at most ~1,200 samples: each attempt took 8-11 s on the phone with all of them (rk 10 Nov 13:36)
+            if (all.size() > 1200) { java.util.ArrayList<float[]> sub = new java.util.ArrayList<>(1200); float st = all.size() / 1200f; for (int i = 0; i < 1200; i++) sub.add(all.get((int) (i * st))); all.clear(); all.addAll(sub); }
             final float[] tryFix = fixTry.clone(), stay = stayGuess == null ? null : stayGuess.clone(), oldFix = poseFix.clone();
             final float pivX = haveGoodCam ? lastGoodCam[12] : Float.NaN, pivZ = haveGoodCam ? lastGoodCam[14] : Float.NaN;
             final boolean restarted = sessionRestarted; final Realign rl = realign; final int attempt = ++realignAttempts;
@@ -6604,7 +6608,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 float cx = (d.x0 + d.x1) / 2, cz = (d.z0 + d.z1) / 2; float[] best = null; float bd = 0.3f;
                 for (float[] t : liveTrack) { float dd = (float) Math.hypot((t[0] + t[2]) / 2 - cx, (t[1] + t[3]) / 2 - cz); if (dd < bd) { bd = dd; best = t; } }
                 if (best == null) { liveTrack.add(new float[]{d.x0, d.z0, d.x1, d.z1, d.floorY, d.width, d.height, d.sure ? 1 : 0, 1, 0, 0, 1}); continue; }
-                boolean agree = bd < 0.05f && Math.abs(best[5] - d.width) < 0.05f && Math.abs(best[6] - d.height) < 0.05f;
+                boolean agree = bd < 0.15f;   // the same opening again (sizes settle as more is scanned)
                 float a = best[10] > 0 ? 0.3f : 1f;   // shown: move smoothly; not yet: take the new one
                 float[] nw = {d.x0, d.z0, d.x1, d.z1, d.floorY, d.width, d.height};
                 for (int k = 0; k < 7; k++) best[k] += (nw[k] - best[k]) * a;
@@ -6622,7 +6626,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             activity.setDoorways(show);
         }
         perf.note("ms: live doorway search", System.currentTimeMillis() - t0);
+        log(String.format(java.util.Locale.US, "live doorways: %d found, %d tracked, %d shown (%d ms)", ds.size(), liveTrack.size(), countShown(), System.currentTimeMillis() - t0));
     }
+
+    private int countShown() { int n = 0; synchronized (liveTrack) { for (float[] t : liveTrack) if (t[10] > 0) n++; } return n; }
 
     /** GL thread: every ~1 s, copy the voxels near the phone and build their mesh on another thread. */
     private void maybeLiveMesh(Camera camera, long nowMs) {

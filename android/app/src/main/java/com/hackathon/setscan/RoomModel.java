@@ -211,7 +211,9 @@ final class RoomModel {
         }
         // A large ARCore floor plane is more precise than the point histogram.
         for (Surface s : surfaces)
-            if (s.kind == Surface.Kind.FLOOR && s.area == bestFloorArea && bestFloorArea > 1f) floorY = s.cy;
+            // only when it agrees with the scanned floor (rk 10 Nov 13:35: an ARCore 'floor' 14 cm above the real one
+            // made every height 14-16 cm short)
+            if (s.kind == Surface.Kind.FLOOR && s.area == bestFloorArea && bestFloorArea > 1f && Math.abs(s.cy - grid.floorY) < 0.05f) floorY = s.cy;
         if (!Float.isNaN(userFloorY)) floorY = userFloorY;
 
         // 2) Ceiling height: a ceiling plane if found, else the top of the scan if it looks like a ceiling.

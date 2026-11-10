@@ -175,12 +175,18 @@ final class DoorwayFinder {
         }
         // The same opening found from two overlapping wall planes: keep the better seen one.
         List<Doorway> kept = new ArrayList<>();
+        out.sort((a, b) -> Boolean.compare(b.sure, a.sure));   // sure ones first
         for (Doorway d : out) {
             boolean dup = false;
             for (int i = 0; i < kept.size(); i++) {
                 Doorway k = kept.get(i);
                 float dx = (d.x0 + d.x1 - k.x0 - k.x1) / 2, dz = (d.z0 + d.z1 - k.z0 - k.z1) / 2;
                 if (dx * dx + dz * dz < 0.4f * 0.4f) { dup = true; if (d.seenShare > k.seenShare) kept.set(i, d); break; }
+            }
+            // an unsure opening right next to another one (a frame's reveal or the door leaf at an angle) is not a doorway
+            if (!dup && !d.sure) for (Doorway k : kept) {
+                float dx = (d.x0 + d.x1 - k.x0 - k.x1) / 2, dz = (d.z0 + d.z1 - k.z0 - k.z1) / 2;
+                if (dx * dx + dz * dz < 0.9f * 0.9f) { dup = true; break; }
             }
             if (!dup) kept.add(d);
         }
