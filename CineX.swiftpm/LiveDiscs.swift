@@ -480,7 +480,9 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
                 let hold = got.hold
                 commands.addCompletedHandler { _ in _ = hold }
             }
-            if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix, live: live) != true, count > 0, !ghost.isActive {
+            if LivePreview.livePoints {
+                if count > 0, !ghost.isActive { drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection) }
+            } else if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix, live: live) != true, count > 0, !ghost.isActive {
                 drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection)
             }
             ghostRenderer?.encode(encoder, viewProjection: projection * viewMatrix)

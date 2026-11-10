@@ -695,7 +695,7 @@ struct ResultView: View {
                 scene.rootNode.addChildNode(photo)
                 photoRoom = photo
                 updateHoles()
-                style = .photo
+                style = LivePreview.livePoints ? .points : .photo
                 showStyle(style)
             }
         }
@@ -750,8 +750,9 @@ struct ResultView: View {
         scene.rootNode.addChildNode(lightingScene.root)
         self.lightingScene = lightingScene
         self.shell = shell
-        // Photo is the default look: the photo room, or the splats in their scanned colours.
-        style = .photo
+        // Photo is the default look: the photo room, or the splats in their scanned colours (Points with the
+        // points-only test switch).
+        style = LivePreview.livePoints ? .points : .photo
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
         #endif

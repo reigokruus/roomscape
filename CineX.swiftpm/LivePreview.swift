@@ -17,6 +17,12 @@ enum LivePreview {
     /// scan screen shows only what was captured (the mesh, white and photo-filled) on the zebra background, so what
     /// you see is all you get.
     static let showCamera = false
+    /// "Points-only live view" (test, off by default; rk 10 Nov, as on Android): while scanning only the coloured 2 cm
+    /// points are drawn, never the live mesh (it's still built in the background); finished scans open in Points.
+    nonisolated static var livePoints: Bool {
+        get { UserDefaults.standard.bool(forKey: "livePoints") || ProcessInfo.processInfo.arguments.contains("-livePoints") }
+        set { UserDefaults.standard.set(newValue, forKey: "livePoints") }
+    }
     /// The camera picture's brightness under the preview, 0…1 (when it's shown).
     static let dim: Float = 0.38
     /// Tentative surface (seen a few times) and solid surface, as RGBA.
