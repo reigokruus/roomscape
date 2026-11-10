@@ -14,6 +14,8 @@ final class LiveCapture {
     let mesh: LiveMesh?
     /// Continue scan: the saved scan's coarse outline in blue (see `LiveGhost`).
     let ghost = LiveGhost()
+    /// Flat tiles (test switch, off by default): camera-painted 30 cm tiles on flat surfaces (FlatTiles).
+    let tiles: FlatTiles?
     /// The raw recording of this scan (RawRecorder), when recording is on.
     var recorder: RawRecorder?
     /// Hardware use while scanning (PerfLog).
@@ -37,6 +39,7 @@ final class LiveCapture {
         device = MTLCreateSystemDefaultDevice()
         cloud = device.flatMap { LiveCloud(device: $0) }
         mesh = device.map { LiveMesh(device: $0) }
+        tiles = device.flatMap { FlatTiles(device: $0) }
         // The live preview: the scan's photos as textures, filling the mesh as the Photo view will (LivePreview).
         let photos = device.flatMap { LivePhotoStore(device: $0) }
         cloud?.photoStore = photos
@@ -54,10 +57,11 @@ final class LiveCapture {
 
     func start() {
         guard link == nil, let cloud else { return }
-        let mesh = mesh
+        let mesh = mesh, tiles = tiles
         worker.async {
             cloud.reset()
             mesh?.reset()
+            tiles?.reset()
         }
         let link = CADisplayLink(target: WeakTarget(self), selector: #selector(WeakTarget.tick))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 5, maximum: 10, preferred: 10)
@@ -272,10 +276,16 @@ final class LiveCapture {
         _ = p
         let camera = frame.camera.transform, time = frame.timestamp
         let perfLog = perf
+        let tiles = tiles
         worker.async { [weak self] in
             let t0 = CACurrentMediaTime()
             cloud.integrate(frame, tsdf: mesh?.tsdf, covered: covered, mesh: mesh)
             perfLog?.note("depth frame (points, fusion, photo)", ms: (CACurrentMediaTime() - t0) * 1000)
+            if FlatTiles.enabled, let tiles {
+                let t1 = CACurrentMediaTime()
+                tiles.update(frame)
+                perfLog?.note("flat tiles", ms: (CACurrentMediaTime() - t1) * 1000)
+            }
             DispatchQueue.main.async { self?.busy = false }
         }
         // A separate block, so the frame is already let go while the mesh is built.
@@ -315,7 +325,7 @@ final class LiveDiscsMTKView: MTKView {
 
     init?(live: LiveCapture) {
         guard let device = live.device, let cloud = live.cloud,
-              let renderer = LiveDiscRenderer(device: device, cloud: cloud, mesh: live.mesh, ghost: live.ghost) else { return nil }
+              let renderer = LiveDiscRenderer(device: device, cloud: cloud, mesh: live.mesh, ghost: live.ghost, tiles: live.tiles) else { return nil }
         self.renderer = renderer
         renderer.perf = live.perf
         super.init(frame: .zero, device: device)
@@ -349,6 +359,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let cloud: LiveCloud
     private let meshRenderer: LiveMeshRenderer?
     private let ghostRenderer: LiveGhostRenderer?
+    private let tilesRenderer: FlatTilesRenderer?
     private let ghost: LiveGhost
     private let queue: MTLCommandQueue
     private let depthPipeline: MTLRenderPipelineState
@@ -371,7 +382,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         var cell: Float
     }
 
-    init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?, ghost: LiveGhost) {
+    init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?, ghost: LiveGhost, tiles: FlatTiles? = nil) {
         let options = MTLCompileOptions()
         // Both passes must put every tile at exactly the same depth.
         options.preserveInvariance = true
@@ -408,6 +419,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         meshRenderer = mesh.flatMap { LiveMeshRenderer(device: device, mesh: $0) }
         liveMesh = mesh
         ghostRenderer = LiveGhostRenderer(device: device, ghost: ghost)
+        tilesRenderer = tiles.flatMap { FlatTilesRenderer(device: device, tiles: $0) }
         self.ghost = ghost
         self.queue = queue
         self.depthPipeline = depthPipeline
@@ -485,6 +497,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             } else if meshRenderer?.encode(encoder, viewProjection: projection * viewMatrix, live: live) != true, count > 0, !ghost.isActive {
                 drawDiscs(encoder, count: count, viewMatrix: viewMatrix, projection: projection)
             }
+            tilesRenderer?.encode(encoder, viewProjection: projection * viewMatrix)
             ghostRenderer?.encode(encoder, viewProjection: projection * viewMatrix)
             if overviewView != nil, let frame = session?.currentFrame {
                 // Only the outline of what the phone sees now; the picture itself is on the mesh (above) once the

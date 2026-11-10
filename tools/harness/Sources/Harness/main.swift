@@ -16,6 +16,8 @@ try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: t
 func profile(_ s: String?) -> Profile { s == "s24" ? .s24 : .iPhone15Pro }
 
 switch args.first ?? "all" {
+case "tiles":
+    try TilesRun.run(URL(fileURLWithPath: args[1]), out: out, limit: args.count > 2 ? Double(args[2]) ?? 1e9 : 1e9)
 case "calibrate":
     for path in args.dropFirst() { try Calibration.run(URL(fileURLWithPath: path)) }
 case "track":
