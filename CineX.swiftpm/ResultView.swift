@@ -756,6 +756,9 @@ struct ResultView: View {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
         #endif
+        // Shown now: the splats were added hidden, and when the style was already Points (set when the photo room
+        // came in) the change handler doesn't run, so nothing showed (rk 10 Nov 19:22 scan, points-only switch on).
+        showStyle(style)
         // No splat training any more (rk 9 Nov: the Splats view is gone; the splat data only feeds Lighting).
         #if DEBUG
         // UI checks in the Simulator: -openPanel lighting | objects
