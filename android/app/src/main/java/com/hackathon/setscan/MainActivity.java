@@ -911,7 +911,7 @@ public class MainActivity extends Activity {
     private Button sizeBtn, logBtn;
     private LinearLayout hud, procBox;
     private FrameLayout.LayoutParams procLp;
-    private TextView hudHint, hudSub, hudDetailPct, hudRoomPct, procLabel;
+    private TextView hudHint, hudSub, hudDetailPct, hudRoomPct, hudTimer, procLabel;
     private android.widget.ProgressBar hudDetail, hudRoom, procBar;
 
     /** Which buttons show: while scanning only Finish; in the viewer the everyday tools; everything else in debug mode (long-press the main button). */
@@ -1434,6 +1434,15 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams rp2 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         rp2.topMargin = dp(6);
         hud.addView(r2, rp2);
+        // Scan length (rk 10 Nov): counts only while depth is being fused (not while the position is lost).
+        hudTimer = new TextView(this);
+        hudTimer.setTextColor(0x99FFFFFF); hudTimer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        hudTimer.setTypeface(android.graphics.Typeface.MONOSPACE);
+        hudTimer.setGravity(Gravity.END);
+        hudTimer.setText("0:00");
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        tp.topMargin = dp(4);
+        hud.addView(hudTimer, tp);
         hud.setOnLongClickListener(v -> { mainButton.performLongClick(); return true; });
         FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP);
         hp.topMargin = dp(40); hp.leftMargin = dp(12); hp.rightMargin = dp(12);
@@ -1503,7 +1512,7 @@ public class MainActivity extends Activity {
     }
 
     /** From the renderer, ~2x a second while scanning. level 0 ok, 1 hold on, 2 stop and stay here. */
-    void updateHud(String hint, String sub, int level, float detail, float room, int points) {
+    void updateHud(String hint, String sub, int level, float detail, float room, int points, int scanSeconds) {
         runOnUiThread(() -> {
             if (hud == null) return;
             // The record button shows whether ARCore is really recording (it can stop on its own).
@@ -1521,6 +1530,7 @@ public class MainActivity extends Activity {
             hudDetailPct.setText(Math.round(detail * 100) + "%");
             hudRoom.setProgress(Math.round(room * 1000));
             hudRoomPct.setText(Math.round(room * 100) + "%");
+            if (hudTimer != null) hudTimer.setText(String.format(java.util.Locale.US, "%d:%02d", scanSeconds / 60, scanSeconds % 60));
         });
     }
 

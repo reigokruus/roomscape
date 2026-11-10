@@ -3464,7 +3464,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        drainDepth(); gpuReady.clear(); stampFrame = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
+        drainDepth(); gpuReady.clear(); stampFrame = 0; scanMs = 0; lastTickMs = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
@@ -4217,6 +4217,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("tracking " + lastTs + " -> " + ts + " (reason " + camera.getTrackingFailureReason() + ", frame " + frameNo + ")");
             lastTs = ts;
         }
+        // Scan length: only while tracking and fusing (not while lost / re-aligning, not viewing).
+        if (!viewing && lastTickMs > 0 && ts == TrackingState.TRACKING && !needRealign) scanMs += Math.min(250, nowMs - lastTickMs);
+        lastTickMs = nowMs;
         if (ts == TrackingState.TRACKING) {
             everTracked = true;
             notTrackingSince = 0;
@@ -5528,6 +5531,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private long fewFeaturesSince, plainHintAt;
+    private long scanMs, lastTickMs;
 
     /** Early warning before a loss (rk 10 Nov 10:44: lost on a plain wall): ARCore tracks few features for a second. */
     private void plainWallHint(Frame frame, long nowMs) {
@@ -6482,7 +6486,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // What you get is what you see (LivePreview): the bars count surface that has its photo, not only its shape.
         if (LIVE_MESH && (livePreview.filledRoom > 0 || livePreview.filledInView > 0)) room *= livePreview.filledRoom;
         roomShown = Math.max(roomShown, room);
-        activity.updateHud(hint, sub, level, Math.max(0f, d), roomShown, count);
+        activity.updateHud(hint, sub, level, Math.max(0f, d), roomShown, count, (int) (scanMs / 1000));
     }
 
     private String detailLine() {
