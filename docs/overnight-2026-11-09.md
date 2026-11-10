@@ -219,6 +219,9 @@ iPhone:
 6. (Optional) Turn on "Build scans from the recording (test)" and "Finer surface for thin things (test)", scan the
    climbing bars from ~1–2 m, Done, wait for the rebuild: the bars should be rods, not a slab. Rebuild is slower and
    uses more memory; turn it off again if anything misbehaves.
+Gyro look (both phones, rk 10 Nov 08:44): Enter the room, then turn and tilt the phone: the view should turn with it,
+start facing the same way as when you stepped in, keep the horizon level in portrait and landscape; a drag still adds
+on top; ▲/▼ walk where you look; "Gyro on/off" next to Exit turns it off (remembered).
 S24:
 1. Install: ~/Library/Android/sdk/platform-tools/adb install -r ~/DEV/shootlocal/android/app/build/outputs/apk/debug/app-debug.apk
 2. Open a scan: Photo; Lighting on: the photo room is lit (if it stays unlit, the shader fell back: tell me).

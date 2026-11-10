@@ -2,6 +2,7 @@ import SwiftUI
 import SceneKit
 import RoomPlan
 import simd
+import CoreMotion
 
 /// Shows a saved scan: as splats (the captured points as discs on their surfaces, inside RoomPlan's walls and floor)
 /// when the scan has points, or as RoomPlan's own 3D model. The splats show as a white mesh with a grid (Mesh) or in
@@ -63,6 +64,8 @@ struct ResultView: View {
     @State private var buildingSplats = false
     /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
     @State private var lightingOn = false
+    /// Gyro look while standing in the room (on by default, remembered).
+    @AppStorage("walkGyro") private var walkGyro = true
     @State private var lighting: LightingSetup?
     @State private var lightingScene: LightingScene?
     @State private var shell: RoomShell?
@@ -115,7 +118,7 @@ struct ResultView: View {
                                   onTapRay: pickingAreas ? areaTapped : objectsOn ? objectTapped : nil,
                                   onTwist: objectsOn && selectedMovable ? objectTwisted : nil,
                                   onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
-                                  standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove,
+                                  standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove, gyroLook: walkGyro,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)))
                     // The room is drawn below the controls, never under them.
                     .padding(.top, walk == .off ? controlsHeight : 0)
@@ -866,6 +869,12 @@ struct ResultView: View {
                 print("debug: object \(objects[k].label) \(args[j + 1])")
             }
         }
+        // -enterRoom: stand in the middle of the room (Enter the room), for UI checks in the Simulator.
+        if args.contains("-enterRoom"), let node = photoRoom ?? meshNode {
+            let (lo, hi) = node.boundingBox
+            let c = node.simdConvertPosition(SIMD3((Float(lo.x) + Float(hi.x)) / 2, 0, (Float(lo.z) + Float(hi.z)) / 2), to: nil)
+            if let fy = walkFloorY { walk = .inside(SIMD3(c.x, fy, c.z)) }
+        }
     }
     #endif
 
@@ -954,6 +963,11 @@ struct ResultView: View {
                     Label("Exit", systemImage: "arrow.uturn.backward")
                 }
                 .buttonStyle(.borderedProminent)
+                Button { walkGyro.toggle() } label: {
+                    Label(walkGyro ? "Gyro on" : "Gyro off", systemImage: walkGyro ? "gyroscope" : "hand.draw")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel(walkGyro ? "Turn off looking around by turning the phone" : "Look around by turning the phone")
                 Spacer()
                 // Eye height: taller / shorter, 10 cm a tap.
                 VStack(spacing: 4) {
@@ -974,7 +988,8 @@ struct ResultView: View {
             }
             .frame(maxWidth: .infinity)
             .overlay(alignment: .top) {
-                Text("Drag to look · pinch to zoom · double-tap the floor to walk there")
+                Text(walkGyro ? "Turn the phone or drag to look · pinch to zoom · double-tap the floor to walk there"
+                              : "Drag to look · pinch to zoom · double-tap the floor to walk there")
                     .font(.caption2)
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(.regularMaterial, in: Capsule())
@@ -1235,6 +1250,8 @@ struct RoomSceneView: UIViewRepresentable {
     var walkFloorY: Float? = nil
     /// Held ▲ (+1) / ▼ (-1): walk forward or back, level, in the look direction.
     var walkMove = 0
+    /// Standing in the room: turning / tilting the phone looks around (rk 10 Nov).
+    var gyroLook = true
     /// Eye height above the floor while standing, metres.
     var eyeHeight: Float = 1.5
 
@@ -1440,7 +1457,68 @@ struct RoomSceneView: UIViewRepresentable {
         }
 
         func applyLook() {
-            walkCamera.simdOrientation = simd_quatf(angle: yaw, axis: SIMD3(0, 1, 0)) * simd_quatf(angle: pitch, axis: SIMD3(1, 0, 0))
+            walkCamera.simdOrientation = simd_quatf(angle: lookYaw, axis: SIMD3(0, 1, 0)) * simd_quatf(angle: lookPitch, axis: SIMD3(1, 0, 0))
+        }
+
+        // Gyro look: `yaw` / `pitch` are then offsets (drags) on top of the phone's own heading and tilt.
+        let motion = CMMotionManager()
+        var gyroLook = true
+        private var heading: Double?, heading0: Double?, devicePitch: Double = 0
+        private var attitudeIsDeviceToWorld: Bool?
+
+        var lookYaw: Float {
+            guard gyroLook, let heading, let heading0 else { return yaw }
+            return yaw + Float(heading - heading0)
+        }
+        var lookPitch: Float { gyroLook && heading != nil ? max(-1.45, min(1.45, pitch + Float(devicePitch))) : pitch }
+
+        func setGyroLook(_ on: Bool) {
+            guard on != gyroLook else { return }
+            if !on, standing != nil {
+                // Keep the view where it is.
+                yaw = lookYaw; pitch = lookPitch
+                stopMotion()
+            }
+            gyroLook = on
+            if on, standing != nil { pitch = 0; startMotion() }
+            applyLook()
+        }
+
+        func startMotion() {
+            guard gyroLook, motion.isDeviceMotionAvailable, !motion.isDeviceMotionActive else { return }
+            heading = nil; heading0 = nil; attitudeIsDeviceToWorld = nil
+            motion.deviceMotionUpdateInterval = 1.0 / 60
+            motion.startDeviceMotionUpdates(using: .xArbitraryZVertical)
+        }
+
+        func stopMotion() {
+            if motion.isDeviceMotionActive { motion.stopDeviceMotionUpdates() }
+            heading = nil; heading0 = nil
+        }
+
+        /// The back camera's heading (about the vertical, relative to when it started) and tilt from level, smoothed.
+        func readMotion() {
+            guard gyroLook, let dm = motion.deviceMotion else { return }
+            let g = SIMD3(dm.gravity.x, dm.gravity.y, dm.gravity.z)
+            let tilt = asin(max(-1, min(1, g.z)))     // the back (-z) against up (-gravity)
+            let q = dm.attitude.quaternion
+            let qd = simd_quatd(ix: q.x, iy: q.y, iz: q.z, r: q.w)
+            if attitudeIsDeviceToWorld == nil {
+                // Which way the attitude turns: device → world puts gravity at (0, 0, -1).
+                attitudeIsDeviceToWorld = qd.act(g).z < qd.inverse.act(g).z
+            }
+            let rot = attitudeIsDeviceToWorld! ? qd : qd.inverse
+            let back = rot.act(SIMD3<Double>(0, 0, -1))
+            let h = atan2(back.y, back.x)
+            if let old = heading {
+                var d = h - old
+                while d > .pi { d -= 2 * .pi }
+                while d < -.pi { d += 2 * .pi }
+                heading = old + d * 0.6
+                devicePitch += (tilt - devicePitch) * 0.6
+            } else {
+                heading = h; heading0 = h; devicePitch = tilt
+            }
         }
 
         /// Steps into the room at `p` (or walks there when already inside), or back out to the previous view.
@@ -1457,7 +1535,8 @@ struct RoomSceneView: UIViewRepresentable {
                     savedPointOfView = from
                     let f = -SIMD3(from.simdWorldTransform.columns.2.x, from.simdWorldTransform.columns.2.y, from.simdWorldTransform.columns.2.z)
                     yaw = atan2(-f.x, -f.z)
-                    pitch = -0.1
+                    pitch = gyroLook ? 0 : -0.1
+                    startMotion()
                     if walkCamera.camera == nil {
                         let cam = RoomSceneView.makeCamera()
                         cam.zNear = 0.05
@@ -1488,6 +1567,7 @@ struct RoomSceneView: UIViewRepresentable {
             } else {
                 link?.invalidate()
                 link = nil
+                stopMotion()
                 walkGestures.forEach { $0.isEnabled = false }
                 orbitGestures.forEach { $0.isEnabled = true }
                 SCNTransaction.begin()
@@ -1512,8 +1592,12 @@ struct RoomSceneView: UIViewRepresentable {
             let now = CACurrentMediaTime()
             let dt = Float(min(0.1, now - lastStep))
             lastStep = now
+            if gyroLook, standing != nil, motion.isDeviceMotionActive {
+                readMotion()
+                applyLook()
+            }
             guard walkMove != 0, standing != nil else { return }
-            let forward = SIMD3<Float>(-sin(yaw), 0, -cos(yaw))
+            let forward = SIMD3<Float>(-sin(lookYaw), 0, -cos(lookYaw))
             walkCamera.simdPosition += forward * Float(walkMove) * 1.2 * dt
         }
 
@@ -1524,7 +1608,8 @@ struct RoomSceneView: UIViewRepresentable {
             // Drag the scene: turn the opposite way to the finger, like a photo sphere.
             let scale = Float((walkCamera.camera?.fieldOfView ?? 60) / 60) * 0.005
             yaw += Float(d.x) * scale
-            pitch = max(-1.3, min(1.3, pitch + Float(d.y) * scale))
+            let limit: Float = gyroLook && motion.isDeviceMotionActive ? 2.6 : 1.3
+            pitch = max(-limit, min(limit, pitch + Float(d.y) * scale))
             applyLook()
         }
 
@@ -1667,6 +1752,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.walkFloorY = walkFloorY
         context.coordinator.viewHeight = view.bounds.height
         context.coordinator.walkMove = walkMove
+        context.coordinator.setGyroLook(gyroLook)
         context.coordinator.setEyeHeight(eyeHeight)
         context.coordinator.setStanding(standAt)
         guard standAt == nil, context.coordinator.lastTop != topView else { return }
