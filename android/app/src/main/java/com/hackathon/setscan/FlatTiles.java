@@ -26,7 +26,9 @@ final class FlatTiles {
     static final float INLIER = 0.035f, FRONT = 0.07f;
 
     static final class Plane { float nx, ny, nz, d, ux, uy, uz, vx, vy, vz; }
-    static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; }
+    static final class Tile { int plane, iu, iv, slot; float score, pending; int contra; float born = -1, repainted = -1; }
+    private final long base = System.currentTimeMillis();
+    private float now() { return (System.currentTimeMillis() - base) / 1000f; }
 
     final ArrayList<Plane> planes = new ArrayList<>();
     final HashMap<Long, Tile> tiles = new HashMap<>();
@@ -125,7 +127,7 @@ final class FlatTiles {
             float expected = (float) Math.pow(TILE * di[0] / Math.max(0.3f, vdist) / 2, 2) * head;
             looked++;
             // raw depth leaves many pixels empty on plain walls: a third of the tile is enough
-            if (c[0] < 0.3f * expected) { lowCover++; continue; }
+            if (c[0] < 0.2f * expected) { lowCover++; continue; }   // (16:16 scan: 0.3 left 421 of 598 tiles unpainted)
             if (c[1] > Math.max(3, 0.08f * tot)) { blocked++; continue; }   // something stands in front
             if (c[2] > 0.2f * tot) { opening++; continue; }                  // the depth went through: an opening
             float score = head / Math.max(0.3f, vdist);
@@ -143,7 +145,8 @@ final class FlatTiles {
 
     /** GL thread: paints a job's tiles from the camera picture now (taken from where the depth was). */
     synchronized void paint(Job j, float[] ti, int cameraTex, Norm texToNorm) {
-        for (Tile t : j.paint) t.score = t.pending;
+        float tn = now();
+        for (Tile t : j.paint) { if (t.born < 0) t.born = tn; else t.repainted = tn; t.score = t.pending; }
         paint(j.paint, planes.get(j.plane), j.pose, ti, cameraTex, texToNorm);
     }
 
@@ -222,8 +225,19 @@ final class FlatTiles {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         paintProg = ScanRenderer.program("attribute vec4 aPos; attribute vec2 aUv; varying vec2 vUv; void main(){ gl_Position = aPos; vUv = aUv; }",
                 "#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 vUv; uniform samplerExternalOES uTex; void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb, 1.0); }");
-        drawProg = ScanRenderer.program("attribute vec4 aPos; attribute vec2 aUv; uniform mat4 uMvp; varying vec2 vUv; void main(){ gl_Position = uMvp * aPos; vUv = aUv; }",
-                "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb, 1.0); }");
+        // rk 10 Nov 16:19: a new tile flashes white, then develops like a Polaroid (~1 s): from washed-out, warm and
+        // flat to full colour. A repaint from a better look only brightens a little for 0.3 s. Time-based (15 fps).
+        drawProg = ScanRenderer.program("attribute vec4 aPos; attribute vec2 aUv; attribute vec2 aAge; uniform mat4 uMvp; uniform float uNow; varying vec2 vUv; varying vec2 vAge;"
+                        + " void main(){ gl_Position = uMvp * aPos; vUv = aUv; vAge = vec2(uNow - aAge.x, aAge.y < 0.0 ? 99.0 : uNow - aAge.y); }",
+                "precision mediump float; varying vec2 vUv; varying vec2 vAge; uniform sampler2D uTex;"
+                        + " void main(){ vec3 c = texture2D(uTex, vUv).rgb; float a = vAge.x;"
+                        + "  float dev = smoothstep(0.15, 1.1, a);"                                   // developing 0..1
+                        + "  float l = dot(c, vec3(0.299, 0.587, 0.114));"
+                        + "  vec3 washed = mix(vec3(l), c, 0.35) * vec3(1.06, 1.0, 0.9) * 0.55 + 0.45;"   // pale, warm, low contrast
+                        + "  vec3 col = mix(washed, c, dev);"
+                        + "  float flash = 1.0 - smoothstep(0.0, 0.35, a);"                            // white flash at birth
+                        + "  float re = (1.0 - smoothstep(0.0, 0.3, vAge.y)) * 0.15;"                  // a repaint: a slight glow
+                        + "  gl_FragColor = vec4(mix(col, vec3(1.0), clamp(flash * 0.95 + re, 0.0, 1.0)), 1.0); }");
     }
 
     /** The painted tiles as textured quads, 5 mm in front of their plane. */
@@ -237,18 +251,21 @@ final class FlatTiles {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, atlasTex);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(drawProg, "uTex"), 0);
         int aPos = GLES20.glGetAttribLocation(drawProg, "aPos"), aUv = GLES20.glGetAttribLocation(drawProg, "aUv");
-        vbo.position(0); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 20, vbo);
-        vbo.position(3); GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 20, vbo);
-        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv);
+        int aAge = GLES20.glGetAttribLocation(drawProg, "aAge");
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(drawProg, "uNow"), now());
+        vbo.position(0); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 28, vbo);
+        vbo.position(3); GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 28, vbo);
+        vbo.position(5); GLES20.glVertexAttribPointer(aAge, 2, GLES20.GL_FLOAT, false, 28, vbo);
+        GLES20.glEnableVertexAttribArray(aPos); GLES20.glEnableVertexAttribArray(aUv); GLES20.glEnableVertexAttribArray(aAge);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vboVerts);
-        GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv);
+        GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv); GLES20.glDisableVertexAttribArray(aAge);
     }
 
     private void rebuild() {
         dirty = false;
         ArrayList<Tile> live = new ArrayList<>(); for (Tile t : tiles.values()) if (t.score > 0) live.add(t);
         vboVerts = live.size() * 6;
-        vbo = ByteBuffer.allocateDirect(Math.max(1, vboVerts) * 20).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        vbo = ByteBuffer.allocateDirect(Math.max(1, vboVerts) * 28).order(ByteOrder.nativeOrder()).asFloatBuffer();
         float inset = 0.5f / PX;
         for (Tile t : live) {
             Plane p = planes.get(t.plane);
@@ -259,7 +276,7 @@ final class FlatTiles {
                 float a = (t.iu + ((k & 1) == 0 ? 0 : 1)) * TILE, b = (t.iv + ((k & 2) == 0 ? 0 : 1)) * TILE;
                 float off = 0.005f - p.d;
                 c[k] = new float[]{p.ux * a + p.vx * b + p.nx * off, p.uy * a + p.vy * b + p.ny * off, p.uz * a + p.vz * b + p.nz * off,
-                        u0 + ((k & 1) == 0 ? 0 : du), v0 + ((k & 2) == 0 ? 0 : du)};
+                        u0 + ((k & 1) == 0 ? 0 : du), v0 + ((k & 2) == 0 ? 0 : du), t.born, t.repainted};
             }
             for (int idx : new int[]{0, 1, 3, 0, 3, 2}) vbo.put(c[idx]);
         }
