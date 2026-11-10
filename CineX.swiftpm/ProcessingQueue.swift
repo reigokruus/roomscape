@@ -340,6 +340,7 @@ struct ProcessingSection: View {
     @State private var fine = ProcessingQueue.fineSurface
     @State private var livePoints = LivePreview.livePoints
     @State private var flatTiles = FlatTiles.enabled
+    @State private var screenVideo = ScreenVideo.enabled
 
     var body: some View {
         Section {
@@ -352,6 +353,8 @@ struct ProcessingSection: View {
                 .onChange(of: livePoints) { _, on in LivePreview.livePoints = on }
             Toggle("Flat tiles (test)", isOn: $flatTiles)
                 .onChange(of: flatTiles) { _, on in FlatTiles.enabled = on }
+            Toggle("Screen video (test)", isOn: $screenVideo)
+                .onChange(of: screenVideo) { _, on in ScreenVideo.enabled = on }
         } footer: {
             Text((fromRecording
                   ? "After Done, the scan is built again from its recording, in the background. The live scan is kept in the scan's before-rebuild folder."

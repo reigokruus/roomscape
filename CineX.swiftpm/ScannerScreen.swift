@@ -38,6 +38,8 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     @Published var areaNote: String?
     private var hudTask: Task<Void, Never>?
     private var lastMemoryWarning: Date?
+    /// What the screen showed while scanning (test switch "Screen video"), saved with the scan as screen.mp4.
+    private var screen: ScreenVideo?
     let captureView: RoomCaptureView
     /// LiDAR points and live discs, read from RoomPlan's own ARKit session.
     let live: LiveCapture
@@ -182,6 +184,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
         }
         startHud()
         if RawRecorder.enabled { live.recorder = RawRecorder() }
+        if ScreenVideo.enabled { let s = ScreenVideo(); screen = s; s.begin() }
         live.perf = perf
         live.mesh?.perf = perf
         live.attachDiscs(to: captureView)
@@ -221,6 +224,7 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             live.recorder = nil
             recorder.finish { folder, _ in try? FileManager.default.removeItem(at: folder) } // Cancel discards the scan
         }
+        if let s = screen { screen = nil; s.end { file in if let file { try? FileManager.default.removeItem(at: file) } } }
         live.perf?.stop()
         live.perf = nil
         if improving != nil { ImproveLog.write("cancelled while \(phase)") }
@@ -471,6 +475,13 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                         log.info("raw recording: \(recorder.frames) frames, \(bytes / 1_000_000) MB")
                         // Process later: in the background, now that the recording is in the scan's folder.
                         if main { Task { @MainActor in ProcessingQueue.shared.scanSaved(saved) } }
+                    }
+                }
+                if let s = self.screen {
+                    self.screen = nil
+                    s.end { file in
+                        if let file { ScreenVideo.move(file, into: saved.captureURL) }
+                        log.info("screen video: \(s.frames) frames")
                     }
                 }
                 self.saved = saved
