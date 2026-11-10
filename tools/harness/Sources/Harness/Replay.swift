@@ -251,6 +251,7 @@ enum GPUBench {
         }
         if let k = ProcessInfo.processInfo.environment["CARVE_MARGIN"].flatMap(Float.init) { TsdfGPU.marginK = k }
         if let k = ProcessInfo.processInfo.environment["BEHIND"].flatMap(Float.init) { TsdfGPU.behindK = k }
+        if let f = ProcessInfo.processInfo.environment["FOOTPRINT"] { TsdfGPU.footprintCheck = f == "1" }
         let prepTime = Date().timeIntervalSince(t1)
         // Fine voxels: only a box around the chosen view's camera (a detail zone), so the block fits.
         if voxel < 0.02, ProcessInfo.processInfo.environment["NO_BOX"] != "1", let view, view < frames.count {
@@ -261,8 +262,10 @@ enum GPUBench {
         let t2 = Date()
         // `only`: just the depth frames around the view (to see what a few frames give before the rest is fused).
         let onlyNear = ProcessInfo.processInfo.environment["ONLY_NEAR"].flatMap(Int.init)
+        let maxFrame = ProcessInfo.processInfo.environment["MAX_FRAME"].flatMap(Int.init)
         for (i, d) in depth.enumerated() {
             if let k = onlyNear, let view, abs(depthFrameIndex[i] - view) > k { continue }
+            if let mf = maxFrame, depthFrameIndex[i] > mf { continue }
             gpu.integrate(depth: d.m, width: d.w, height: d.h, pose: d.pose, fx: d.fx, fy: d.fy, cx: d.cx, cy: d.cy, step: 2)
         }
         gpu.finish()

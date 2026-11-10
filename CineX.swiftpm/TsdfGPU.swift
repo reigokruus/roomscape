@@ -48,7 +48,7 @@ final class TsdfGPU {
         let dims = hi &- lo
         let count = Int(dims.x) * Int(dims.y) * Int(dims.z)
         guard count > 0, count < 40_000_000,
-              let library = try? device.makeLibrary(source: Self.source.replacingOccurrences(of: "MARGIN_K", with: String(format: "%.4f", Self.marginK)).replacingOccurrences(of: "BEHIND_K", with: String(format: "%.4f", Self.behindK)), options: nil),
+              let library = try? device.makeLibrary(source: Self.source.replacingOccurrences(of: "MARGIN_K", with: String(format: "%.4f", Self.marginK)).replacingOccurrences(of: "BEHIND_K", with: String(format: "%.4f", Self.behindK)).replacingOccurrences(of: "FOOTPRINT_CHECK", with: Self.footprintCheck ? "1.0" : "0.0"), options: nil),
               let function = library.makeFunction(name: "integrate"),
               let pipeline = try? device.makeComputePipelineState(function: function),
               let sdf = device.makeBuffer(length: count * 4, options: .storageModeShared),
@@ -219,6 +219,8 @@ final class TsdfGPU {
     /// How far behind a seen surface it's marked inside, as a share of the band. 1 = the whole band (8 cm at 4 cm
     /// voxels): a rung 10–15 cm in front of a wall then merges with it (harness: BEHIND).
     nonisolated(unsafe) static var behindK: Float = 1.0
+    /// Carve a voxel only when the depth over its whole patch lies beyond it (see the kernel; harness: FOOTPRINT=0/1).
+    nonisolated(unsafe) static var footprintCheck = true
 
     private static let source = """
     #include <metal_stdlib>
@@ -263,6 +265,20 @@ final class TsdfGPU {
             // Free space: only voxels already seen, between the margin and `carve` in front of the surface.
             float nearS = p.trunc + MARGIN_K * L, farS = min(p.carve, L - 0.25);
             if (w == 0 || s <= nearS || s > farS) return;
+            // Only when the whole voxel is clear in this view, not just the pixel at its centre: close up, a voxel
+            // holding part of a thin bar has its centre beside the bar, sees the wall behind and was carved away
+            // (rk 10 Nov: bars kept from 1 m vanished when moving in). The depth over the voxel's patch (3×3 samples,
+            // up to ±8 px) must all lie beyond it.
+            if (FOOTPRINT_CHECK > 0.5) {
+                float rpx = min(8.0, 0.6 * p.vs * p.fx / z);
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    float uu = u + float(dx) * rpx, vv = v + float(dy) * rpx;
+                    if (uu < 0.0 || vv < 0.0 || uu >= float(p.width) || vv >= float(p.height)) continue;
+                    float dd = depth[uint(vv) * p.width + uint(uu)];
+                    if (dd > 0.0 && dd * r / z < r + p.trunc) return;   // something at or in front of the voxel there
+                }
+            }
             if (w >= solidW) { sdf[i] += (1.0 - sdf[i]) * 0.04; dirty[bi] = 1; return; }
             float sum = sdf[i] * float(w) + float(add);
             ushort nw = min(ushort(w + add), maxW);
