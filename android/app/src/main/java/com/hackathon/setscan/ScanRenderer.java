@@ -2371,7 +2371,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             afterDoneWork = () -> {
                 File dir = dirAtDone != null ? dirAtDone : currentDir;
                 perf.stop();
-                if (dir != null) { saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
+                if (dir != null) { saveEvents(dir); saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
             };
         }
         new Thread(() -> {
@@ -3641,6 +3641,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         lastLiveMesh = null;
+        synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
         screenFile = null;   // the next scan records its own screen video
         roomEdits.clear(); planningPreview = false; planningLoadError = null; planningScanKey = null;
         synchronized(lighting) { lighting.props.removeIf(p -> p.catalog != null); lighting.selected = -1; }
@@ -4544,7 +4545,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false; recentPts.clear(); realignResult = null; jumpGuess = null;
                     snapshotForRealign();
                     healthLosses++;
-                    log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
+                    log("tracking lost mid-scan: fusion paused until the view lines up with the scan again"); evMark();
                     activity.toast("Lost position. Stand still and turn the phone back to the scanned area.");
                 }
             }
@@ -4587,7 +4588,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // Measured against the time since the last frame we saw: after a pause (a save, a slow frame) the phone
             // has simply walked further. Up to 2 m/s counts as walking, not as ARCore moving its map.
             if (havePrevPose && frameMove > Math.max(0.15f, 2f * frameDt)) {
-                settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove));
+                settleUntil = nowMs + 1500; poseJumps++; log(String.format(java.util.Locale.US, "pose jump %.2f m, pausing capture 1.5 s", frameMove)); evMark();
                 relAnchored = false;   // the held view doesn't follow the jump (14:01 scan: 0.29 and 0.33 m jumps while held showed as twitches)
                 // ARCore moved its map without saying it lost track (11:47:09: 0.5 m): the scan, not ARCore, decides
                 // where the view is; nothing is fused until it lines up again (the quick path after a loss).
@@ -4703,6 +4704,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (trackingNow) maybeAskClaudeLive(nowMs);
         }
         logState(ts, nowMs);
+        if (!viewing && everTracked) trackPose(camera, ts);
         if (frameNo % 15 == 0) {
             String s;
             if (ts != TrackingState.TRACKING) {
@@ -4981,10 +4983,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
+            evCapture(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m, depth.getTimestamp());
             // After tracking was lost mid-scan: nothing is fused until the depth lines up with what's already there
             // (rk 10 Nov: after a loss and an AR restart a second, shifted layer was fused over the first).
             if (needRealign && !realigned(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m, nowMsFrame)) return;
+            float[] rawM = m.clone();
             applyFix(m);
+            shadowCheck(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, rawM, nowMsFrame);
             System.arraycopy(m, 0, lastGoodCam, 0, 16); haveGoodCam = true;   // where the phone was, for a re-alignment guess
             int[] rgb = new int[3];
             frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
@@ -6012,6 +6017,89 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
     }
 
+    // ---- Evidence for the alignment after map jumps (rk 10 Nov 15:13): depth frames around every jump, loss and
+    // resume (events-depth.bin), the pose at 10 Hz with time and rotation (pose-track.bin), and a shadow check of the
+    // alignment for 20 s after each resume, logged but not applied. ----
+    static final class EvFrame { long ts; long ms; float[] raw, fix; float fx, fy, cx, cy; int w, h; short[] d; }
+    private final java.util.ArrayDeque<EvFrame> evRing = new java.util.ArrayDeque<>();
+    private final java.util.ArrayList<EvFrame> evKept = new java.util.ArrayList<>();
+    private long evUntil, evLastMs; static final int EV_MAX = 400;   // ~29 KB each: at most ~12 MB
+
+    private synchronized void evCapture(java.nio.ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m, long ts) {
+        long now = System.currentTimeMillis();
+        if (now - evLastMs < 300) return;   // about 3 a second
+        evLastMs = now;
+        EvFrame f = new EvFrame(); f.ts = ts; f.ms = now - t0; f.raw = m.clone(); f.fix = poseFix.clone(); f.fx = fx; f.fy = fy; f.cx = cx; f.cy = cy; f.w = dw; f.h = dh;
+        f.d = new short[dw * dh];
+        for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) f.d[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+        if (now < evUntil) { if (evKept.size() < EV_MAX) evKept.add(f); }
+        else { evRing.addLast(f); while (evRing.size() > 15) evRing.removeFirst(); }   // the last ~5 s
+    }
+
+    /** A jump, loss or resume: keep the last ~5 s and the next 20 s of depth frames. */
+    private synchronized void evMark() {
+        while (!evRing.isEmpty() && evKept.size() < EV_MAX) evKept.add(evRing.removeFirst());
+        evUntil = System.currentTimeMillis() + 20000;
+    }
+
+    private synchronized void saveEvents(File dir) {
+        if (!evKept.isEmpty()) try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "events-depth.bin"))))) {
+            o.writeInt(evKept.size());
+            for (EvFrame f : evKept) {
+                o.writeLong(f.ts); o.writeLong(f.ms); for (float v : f.raw) o.writeFloat(v); for (float v : f.fix) o.writeFloat(v);
+                o.writeFloat(f.fx); o.writeFloat(f.fy); o.writeFloat(f.cx); o.writeFloat(f.cy); o.writeInt(f.w); o.writeInt(f.h);
+                for (short v : f.d) o.writeShort(v);
+            }
+        } catch (Exception e) { logError("events depth", e); }
+        if (trackN > 0) try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "pose-track.bin"))))) {
+            o.writeInt(trackN); for (int i = 0; i < trackN * TRACK_F; i++) o.writeFloat(track[i]);
+        } catch (Exception e) { logError("pose track", e); }
+    }
+
+    // pose-track.bin: per sample (10 a second) ms since app start, tracking (1/0), lining up (1/0), ARCore's pose
+    // tx ty tz qx qy qz qw, the correction's x z and turn (deg)
+    static final int TRACK_F = 13; private final float[] track = new float[13 * 36000]; private int trackN; private long trackLastMs;
+    private void trackPose(Camera camera, TrackingState ts) {
+        long now = System.currentTimeMillis();
+        if (now - trackLastMs < 100 || trackN >= track.length / TRACK_F) return;
+        trackLastMs = now;
+        Pose p = camera.getPose(); int o = trackN * TRACK_F;
+        track[o] = now - t0; track[o + 1] = ts == TrackingState.TRACKING ? 1 : 0; track[o + 2] = needRealign ? 1 : 0;
+        track[o + 3] = p.tx(); track[o + 4] = p.ty(); track[o + 5] = p.tz(); track[o + 6] = p.qx(); track[o + 7] = p.qy(); track[o + 8] = p.qz(); track[o + 9] = p.qw();
+        track[o + 10] = poseFix[12]; track[o + 11] = poseFix[14]; track[o + 12] = (float) Math.toDegrees(Math.atan2(poseFix[2], poseFix[0]));
+        trackN++;
+    }
+
+    private volatile Realign shadowRealign; private long shadowUntil, shadowFrom, shadowLast; private volatile boolean shadowRunning;
+    /** For 20 s after a resume: what the alignment would say now (logged, never applied). */
+    private void shadowCheck(java.nio.ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] rawM, long nowMs) {
+        final Realign rl = shadowRealign;
+        if (rl == null) return;
+        if (nowMs > shadowUntil) { shadowRealign = null; return; }
+        if (shadowRunning || nowMs - shadowLast < 1000) return;
+        shadowLast = nowMs; shadowRunning = true;
+        final java.util.ArrayList<float[]> pts = new java.util.ArrayList<>();
+        for (int v = 3; v < dh - 3; v += 4) for (int u = 3; u < dw - 3; u += 4) {
+            int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF; if (mm < 300 || mm > 3500) continue;
+            float d = mm * 0.001f, xc = (u + 0.5f - cx) * d / fx, yc = (cy - (v + 0.5f)) * d / fy, zc = -d;
+            pts.add(new float[]{rawM[0] * xc + rawM[4] * yc + rawM[8] * zc + rawM[12], rawM[1] * xc + rawM[5] * yc + rawM[9] * zc + rawM[13], rawM[2] * xc + rawM[6] * yc + rawM[10] * zc + rawM[14]});
+        }
+        final float[] fixNow = poseFix.clone(); final float since = (nowMs - shadowFrom) / 1000f;
+        Thread th = new Thread(() -> {
+            try {
+                if (pts.size() >= 100) {
+                    Realign.Fit f = rl.solve(pts, fixNow);
+                    float dx = f.fix[12] - fixNow[12], dz = f.fix[14] - fixNow[14];
+                    float dd = (float) Math.toDegrees(Math.atan2(f.fix[2], f.fix[0]) - Math.atan2(fixNow[2], fixNow[0]));
+                    log(String.format(java.util.Locale.US, "shadow align +%.0f s: %d%% on the scan before the loss, median %.1f cm; would nudge %.1f, %.1f cm, %.1f deg (not applied)",
+                            since, Math.round(f.inliers * 100), f.median * 100, dx * 100, dz * 100, dd));
+                }
+            } catch (Throwable e) { logError("shadow align", new RuntimeException(e)); }
+            finally { shadowRunning = false; }
+        }, "shadow-align");
+        th.setPriority(Thread.MIN_PRIORITY); th.start();
+    }
+
     /** view = (the turn since the last good frame, in the camera's axes)^T · the last good view. */
     private void heldView(float[] out) {
         System.arraycopy(heldView, 0, out, 0, 16);
@@ -6237,6 +6325,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (ok && jg == null && res.fit.inliers >= 0.55f && res.fit.median < 0.02f && Realign.away(F, poseFix) < 0.10f) { strong = true; log(String.format(java.util.Locale.US, "one match is enough: it keeps the old correction (%.2f away)", Realign.away(F, poseFix))); }
             if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
+                evMark(); shadowRealign = realign; shadowUntil = nowMs + 20000; shadowFrom = nowMs;   // check the alignment for 20 s (shadow, not applied)
                 hasFix = true; needRealign = false; realign = null; recentPts.clear(); jumpGuess = null;
                 havePrevPose = false;   // the new correction moves the pose: not a jump (13:52: "pose jump 0.20 m" right after resuming)
                 segment++;
