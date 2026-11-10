@@ -4691,7 +4691,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     fuseBuf[fuseN * 5 + 3] = Float.intBitsToFloat((rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16 | (fine ? 1 << 24 : 0) | (gpuOn ? 1 << 25 : 0));
                     // How far along this ray free space may be cleared: the nearest depth over a voxel's width around the
                     // pixel (a ray just beside a thin bar mustn't clear the bar), in ray length.
-                    {
+                    {   // (only the CPU fusion reads it; with the GPU on this is the detail zones' samples only)
                         int rpx = Math.max(1, Math.min(6, Math.round(0.6f * tsdf.vs * fx / d)));
                         int nearMm = mm;
                         for (int ny = -1; ny <= 1; ny++) for (int nx = -1; nx <= 1; nx++) {
@@ -4866,7 +4866,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (n == 0) return;
         float[] v = new float[16];
         Matrix.invertM(v, 0, m, 0);
-        int budget = Math.min(n, 250000), removed = 0;
+        // 60k points per depth frame, round robin (the whole cloud every few frames): 250k with the 3x3 footprint
+        // check took ~50 ms of the drawing thread (rk 10 Nov 10:31 scan: 19 fps).
+        int budget = Math.min(n, 60000), removed = 0;
         for (int it = 0; it < budget; it++) {
             int i = carveCursor++;
             if (carveCursor >= n) carveCursor = 0;
