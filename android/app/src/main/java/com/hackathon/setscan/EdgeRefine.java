@@ -15,10 +15,12 @@ final class EdgeRefine {
     static final float SEARCH = 0.15f, STEP = 0.01f;
     /** Tuning (offline tests): how much of the opening a photo must show (of 5 points), and the edge rule (0 = the
      *  strong edge nearest the middle, 1 = the strongest edge on the inner side of the rough one). */
-    static int MIN_CORNERS = 5, RULE = 0;
+    static int MIN_CORNERS = 3, RULE = 0;
 
     /** A photo: camera-to-world pose (OpenGL camera), intrinsics in the grey image's pixels (v down), grey levels. */
-    static final class Photo { float[] pose, view; float fx, fy, cx, cy; int w, h; byte[] grey; }
+    static final class Photo { float[] pose, view; float fx, fy, cx, cy; int w, h; byte[] grey;
+        /** Its depth (mm, 0 = none) with intrinsics for that image; may be null. */
+        short[] depth; int dw, dh; float dfx, dfy, dcx, dcy; }
 
     static final class Result { float u0, u1, top; float s0, s1, sTop; int photos; String why = ""; }
 
@@ -75,6 +77,7 @@ final class EdgeRefine {
         float sum = 0; int n = 0;
         for (Photo p : ph) for (float y = y0; y <= y1; y += 0.05f) {
             float x = ox + ux * u, z = oz + uz * u;
+            if (!onWall(p, x, floorY + y, z)) continue;
             float[] a = proj(p, x, floorY + y, z), b = proj(p, x, floorY + y + 0.02f, z);
             if (a == null || b == null) continue;
             float g = across(p, a, b); if (g < 0) continue;
@@ -87,6 +90,7 @@ final class EdgeRefine {
     static float lintelScore(List<Photo> ph, float ox, float oz, float ux, float uz, float floorY, float ua, float ub, float h) {
         float sum = 0; int n = 0;
         for (Photo p : ph) for (float u = ua; u <= ub; u += 0.04f) {
+            if (!onWall(p, ox + ux * u, floorY + h, oz + uz * u)) continue;
             float[] a = proj(p, ox + ux * u, floorY + h, oz + uz * u), b = proj(p, ox + ux * (u + 0.02f), floorY + h, oz + uz * (u + 0.02f));
             if (a == null || b == null) continue;
             float g = across(p, a, b); if (g < 0) continue;
@@ -111,6 +115,24 @@ final class EdgeRefine {
         float fx = x - ix, fy = y - iy;
         int a = p.grey[iy * p.w + ix] & 255, b = p.grey[iy * p.w + ix + 1] & 255, c = p.grey[(iy + 1) * p.w + ix] & 255, d = p.grey[(iy + 1) * p.w + ix + 1] & 255;
         return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+    }
+
+    /** Whether this photo's depth puts a surface at the wall point within a few pixels around it (one side of a
+     *  frame edge is wall; an edge where both sides are far beyond is the door leaf or the next room, not the frame).
+     *  Without depth: true. */
+    static boolean onWall(Photo p, float x, float y, float z) {
+        if (p.depth == null) return true;
+        float[] m = p.view;
+        float cx = m[0] * x + m[4] * y + m[8] * z + m[12], cy = m[1] * x + m[5] * y + m[9] * z + m[13], cz = m[2] * x + m[6] * y + m[10] * z + m[14];
+        float d = -cz; if (d < 0.3f) return false;
+        int u = (int) (p.dfx * cx / d + p.dcx), v = (int) (p.dcy - p.dfy * cy / d);
+        for (int b = -2; b <= 2; b++) for (int a = -2; a <= 2; a++) {
+            int uu = u + a, vv = v + b;
+            if (uu < 0 || vv < 0 || uu >= p.dw || vv >= p.dh) continue;
+            int mm = p.depth[vv * p.dw + uu] & 0xFFFF;
+            if (mm > 0 && Math.abs(mm * 0.001f - d) < 0.06f + 0.03f * d) return true;
+        }
+        return false;
     }
 
     /** World point to photo pixels, or null behind the camera. */

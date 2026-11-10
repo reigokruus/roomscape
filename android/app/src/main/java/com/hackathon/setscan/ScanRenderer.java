@@ -500,6 +500,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 java.util.List<DoorwayFinder.Doorway> ds = DoorwayFinder.find(vv, mvAll, walls, walkFloorY(),
                         (x, y, z) -> tsdf.seenThrough(x, y, z) || OutlineFill.judge(phs, views, new float[]{x, y, z}, null) == 1, why);
                 log("doorways: " + ds.size() + " from " + walls.length / 4 + " wall planes, " + phs.size() + " photos with depth (" + (System.currentTimeMillis() - td) + " ms)");
+                // The lintel from the photos (EdgeRefine): offline on rk's 80 x 204 door it read 2.00-2.05 m where the
+                // surface gave 2.06-2.17. The jambs stay as found (the photo edges weren't reliable there yet).
+                if (!ds.isEmpty()) try {
+                    long te = System.currentTimeMillis();
+                    java.util.List<EdgeRefine.Photo> eph = edgePhotos();
+                    for (DoorwayFinder.Doorway d : ds) {
+                        float len = (float) Math.hypot(d.x1 - d.x0, d.z1 - d.z0); if (len < 0.3f) continue;
+                        EdgeRefine.Result r = EdgeRefine.refine(eph, d.x0, d.z0, (d.x1 - d.x0) / len, (d.z1 - d.z0) / len, d.floorY, 0, len, d.height);
+                        log(String.format(java.util.Locale.US, "doorway lintel from %d photos: %.2f -> %.2f m (edge %.0f) %s", r.photos, d.height, r.top, r.sTop, r.why));
+                        if (r.photos >= 3 && r.sTop > 15 && Math.abs(r.top - d.height) < 0.15f) d.height = r.top;
+                    }
+                    log("doorway photo edges: " + (System.currentTimeMillis() - te) + " ms");
+                } catch (Throwable e) { logError("doorway edges", new RuntimeException(e)); }
                 if (why.length() > 0) log("doorways, left out:" + why);
                 for (DoorwayFinder.Doorway d : ds) log("  " + d);
                 doorways = ds;
@@ -5782,6 +5795,27 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** feature-heights.bin: ARCore's feature point heights from the scan (for the ceiling when it's opened again). */
     private float[] pendingHeight;
+
+    /** The scan's photos as grey images with their cameras, for EdgeRefine (half size: 512 px wide). */
+    private java.util.List<EdgeRefine.Photo> edgePhotos() {
+        java.util.ArrayList<EdgeRefine.Photo> out = new java.util.ArrayList<>();
+        for (PhotoRoom.Keyframe k : new java.util.ArrayList<>(photos.keyframes)) {
+            if (k.jpg == null) continue;
+            android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options(); o.inSampleSize = 2;
+            android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeByteArray(k.jpg, 0, k.jpg.length, o);
+            if (b == null) continue;
+            EdgeRefine.Photo p = new EdgeRefine.Photo();
+            p.pose = k.pose; p.view = k.view; p.w = b.getWidth(); p.h = b.getHeight();
+            float sx = p.w / k.w, sy = p.h / k.h;
+            p.fx = k.fx * sx; p.fy = k.fy * sy; p.cx = k.cx * sx; p.cy = k.cy * sy;
+            int[] px = new int[p.w * p.h]; b.getPixels(px, 0, p.w, 0, 0, p.w, p.h); b.recycle();
+            p.grey = new byte[px.length];
+            for (int i = 0; i < px.length; i++) { int c = px[i]; p.grey[i] = (byte) ((((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255)) / 10); }
+            if (k.depth != null) { p.depth = k.depth; p.dw = k.dw; p.dh = k.dh; p.dfx = k.dfx; p.dfy = k.dfy; p.dcx = k.dcx; p.dcy = k.dcy; }
+            out.add(p);
+        }
+        return out;
+    }
 
     private void saveHeight(File dir) {
         float[] h = pendingHeight; if (h == null) return;

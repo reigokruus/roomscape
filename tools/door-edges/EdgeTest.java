@@ -17,7 +17,7 @@ public class EdgeTest {
             for (int k = 0; k < 16; k++) view[k] = in.readFloat();
             for (int k = 0; k < 16; k++) pose[k] = in.readFloat();
             float fx = in.readFloat(), fy = in.readFloat(), cx = in.readFloat(), cy = in.readFloat(), w = in.readFloat(), h = in.readFloat();
-            in.readBoolean(); int dw = in.readInt(), dh = in.readInt(); for (int k = 0; k < 4; k++) in.readFloat(); in.skipBytes(dw * dh * 2);
+            in.readBoolean(); int dw = in.readInt(), dh = in.readInt(); float dfx = in.readFloat(), dfy = in.readFloat(), dcx = in.readFloat(), dcy = in.readFloat(); short[] dep = new short[dw * dh]; for (int k = 0; k < dw * dh; k++) dep[k] = in.readShort();
             File jf = new File(dir, String.format(Locale.US, "kf/%03d.jpg", i));
             BufferedImage img = jf.exists() ? javax.imageio.ImageIO.read(jf) : null; if (img == null) continue;
             EdgeRefine.Photo p = new EdgeRefine.Photo(); p.pose = pose; p.view = OutlineFill.invert(pose);
@@ -25,6 +25,7 @@ public class EdgeTest {
             p.fx = fx * sx; p.fy = fy * sy; p.cx = cx * sx; p.cy = cy * sy; p.w = img.getWidth(); p.h = img.getHeight();
             int[] rgb = img.getRGB(0, 0, p.w, p.h, null, 0, p.w); p.grey = new byte[p.w * p.h];
             for (int j = 0; j < rgb.length; j++) { int c = rgb[j]; p.grey[j] = (byte) ((((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255)) / 10); }
+            if (dw * dh > 0 && System.getenv("NODEPTH") == null) { p.depth = dep; p.dw = dw; p.dh = dh; p.dfx = dfx; p.dfy = dfy; p.dcx = dcx; p.dcy = dcy; }
             ph.add(p);
         }
         java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\{[^}]*\\}").matcher(js);
