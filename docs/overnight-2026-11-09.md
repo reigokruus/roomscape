@@ -147,6 +147,21 @@ nearby splats), the storyboard's size fallback, and S24 scans imported without a
 cuts out / moves objects without them (HoleFill.cutOut). Options for rk: (a) keep as is; (b) Points from points.bin
 directly (plain dots, no splat build) and patch colours from the photo room, then drop surfels.bin and the build.
 
+## Second rounds (05:00–05:40)
+- Hole fill on two more rooms (harness LOWCONF=1): 19:00 desk room +1.0% surface, 22:14 ladder room +1.4%, nothing far
+  from the existing surface in either. The biggest new patches rendered against the camera photos: the desk view
+  barely changes; at the 22:14 ladder a few small flakes appear, no sheet. Pictures: overnight-pictures/hole-fill-other-rooms.
+- Full harness regression (`Harness all`: tight / normal / corridor / chest rooms, hole-fill patch colours, tap to
+  clear) gives exactly the same numbers as last evening's code (b7d0e68, built in a separate worktree). It runs the
+  CPU fusion path; tonight's GPU-path changes were checked on the real recordings (SYNCTEST identical meshes, fill rounds).
+- Thin bars, round 2: re-fusing only the area around the pull-up bar view at 1.9 cm (harness gpubench <rec> 0.019
+  1300) shows the bars as rods: the wall cross tube, the bar going out from the upper bracket and the lower bracket
+  with its bar match the photo; at 4 cm they're a slab. 1.5 cm also shows them, noisier. But that one 3 m box is 116k
+  triangles, so it needs flat-area simplification (or only keeping the fine surface off the coarse one, with a better
+  rule than tonight's) before it can go on the phone. Not in the builds. Pictures: overnight-pictures/thin-bars-round2.
+- Occlusion-aware photo painting: no new problems seen in the Simulator views of the recovered 20:12 room (Photo and
+  Lighting); a textured check on the 19:00 / 22:14 rooms needs them imported into the Simulator (not done tonight).
+
 ## S24 GPU fusion: plan (not built; needs the phone to test)
 1. One test scan with tonight's stage timings (e8365f7) to see how the GL thread's 95 ms split (ARCore update, depth
    fusion pixels, carve, photo, live mesh draw).

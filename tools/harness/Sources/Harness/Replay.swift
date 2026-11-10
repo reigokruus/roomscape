@@ -236,6 +236,19 @@ enum GPUBench {
             if lowConf { lowDepth.append(ml) }
             depthFrameIndex.append(fi)
         }
+        // VIEW_AT=x,y,z: render from the frame that looks most squarely at that point from 0.5–2 m (instead of a number).
+        var view = view
+        if let look = ProcessInfo.processInfo.environment["VIEW_AT"]?.split(separator: ",").compactMap({ Float($0) }), look.count == 3 {
+            let P = SIMD3(look[0], look[1], look[2])
+            var bestScore: Float = -2
+            for (i, f) in frames.enumerated() where f.ok {
+                let c = SIMD3(f.pose.columns.3.x, f.pose.columns.3.y, f.pose.columns.3.z), fw = -SIMD3(f.pose.columns.2.x, f.pose.columns.2.y, f.pose.columns.2.z)
+                let d = simd_distance(c, P); guard d < 2.0, d > 0.5 else { continue }
+                let score = simd_dot(simd_normalize(P - c), fw)
+                if score > bestScore { bestScore = score; view = i }
+            }
+            print("view at (\(look[0]), \(look[1]), \(look[2])): frame \(view ?? -1)")
+        }
         let prepTime = Date().timeIntervalSince(t1)
         // Fine voxels: only a box around the chosen view's camera (a detail zone), so the block fits.
         if voxel < 0.02, let view, view < frames.count {
