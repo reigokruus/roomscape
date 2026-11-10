@@ -54,6 +54,7 @@ struct ResultView: View {
     @State private var walk: WalkState = .off
     /// Held ▲ (+1) or ▼ (-1) while standing in the room.
     @State private var walkMove = 0
+    @State private var walkStrafe = 0
     /// Measure (rk 10 Nov): tap two spots on the scan while standing in the room.
     @State private var measuring = false
     @State private var measureClear = 0
@@ -121,7 +122,7 @@ struct ResultView: View {
                                   onTapRay: pickingAreas ? areaTapped : objectsOn ? objectTapped : nil,
                                   onTwist: objectsOn && selectedMovable ? objectTwisted : nil,
                                   onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
-                                  standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove, gyroLook: walkGyro,
+                                  standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove, walkStrafe: walkStrafe, gyroLook: walkGyro,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)),
                                   measuring: measuring && walk.standingAt != nil, measureClear: measureClear)
                     // The room is drawn below the controls, never under them.
@@ -937,6 +938,31 @@ struct ResultView: View {
         return max(0.3, min(2.2, Double(ceiling - s.floorY) - 0.1))
     }
 
+    /// Exit, Gyro, Measure (and Clear) while standing in the room.
+    @ViewBuilder private var walkBarButtons: some View {
+        Button {
+            walkMove = 0; walkStrafe = 0
+            measuring = false
+            walk = .off
+        } label: {
+            Label("Exit", systemImage: "arrow.uturn.backward")
+        }
+        .buttonStyle(.borderedProminent)
+        Button { walkGyro.toggle() } label: {
+            Label(walkGyro ? "Gyro on" : "Gyro off", systemImage: walkGyro ? "gyroscope" : "hand.draw")
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel(walkGyro ? "Turn off looking around by turning the phone" : "Look around by turning the phone")
+        Button { measuring.toggle() } label: {
+            Label(measuring ? "Measure: on" : "Measure", systemImage: "ruler")
+        }
+        .buttonStyle(.bordered)
+        if measuring {
+            Button("Clear") { measureClear += 1 }
+                .buttonStyle(.bordered)
+        }
+    }
+
     /// Enter the room / the floor hint / ▲▼ and Exit while standing in it.
     @ViewBuilder private var walkControls: some View {
         switch walk {
@@ -959,46 +985,35 @@ struct ResultView: View {
                     .buttonStyle(.bordered)
             }
         case .inside:
-            HStack(alignment: .bottom, spacing: 12) {
-                Button {
-                    walkMove = 0
-                    measuring = false
-                    walk = .off
-                } label: {
-                    Label("Exit", systemImage: "arrow.uturn.backward")
-                }
-                .buttonStyle(.borderedProminent)
-                Button { walkGyro.toggle() } label: {
-                    Label(walkGyro ? "Gyro on" : "Gyro off", systemImage: walkGyro ? "gyroscope" : "hand.draw")
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel(walkGyro ? "Turn off looking around by turning the phone" : "Look around by turning the phone")
-                VStack(spacing: 6) {
-                    Button { measuring.toggle() } label: {
-                        Label(measuring ? "Measure: on" : "Measure", systemImage: "ruler")
+            // The moves (forward, back, left, right; hold) and the eye height in their own cluster on the right, above
+            // a bottom bar that wraps, so nothing leaves the screen (rk 10 Nov 12:07, the same as Android).
+            VStack(alignment: .trailing, spacing: 10) {
+                HStack(alignment: .bottom, spacing: 10) {
+                    Spacer()
+                    // Eye height: taller / shorter, 10 cm a tap.
+                    VStack(spacing: 4) {
+                        Button { eyeHeight = min(maxEyeHeight, (eyeHeight + 0.1)) } label: { Image(systemName: "chevron.up") }
+                            .accessibilityLabel("Taller")
+                        Text(String(format: "%.2f m", min(eyeHeight, maxEyeHeight)))
+                            .font(.caption.monospacedDigit())
+                        Button { eyeHeight = max(0.3, min(eyeHeight, maxEyeHeight) - 0.1) } label: { Image(systemName: "chevron.down") }
+                            .accessibilityLabel("Shorter")
                     }
                     .buttonStyle(.bordered)
-                    if measuring {
-                        Button("Clear") { measureClear += 1 }
-                            .buttonStyle(.bordered)
+                    .padding(6)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    VStack(spacing: 6) {
+                        HoldButton(systemImage: "arrowtriangle.up.fill") { walkMove = $0 ? 1 : 0 }
+                        HStack(spacing: 6) {
+                            HoldButton(systemImage: "arrowtriangle.left.fill") { walkStrafe = $0 ? -1 : 0 }
+                            HoldButton(systemImage: "arrowtriangle.down.fill") { walkMove = $0 ? -1 : 0 }
+                            HoldButton(systemImage: "arrowtriangle.right.fill") { walkStrafe = $0 ? 1 : 0 }
+                        }
                     }
                 }
-                Spacer()
-                // Eye height: taller / shorter, 10 cm a tap.
-                VStack(spacing: 4) {
-                    Button { eyeHeight = min(maxEyeHeight, (eyeHeight + 0.1)) } label: { Image(systemName: "chevron.up") }
-                        .accessibilityLabel("Taller")
-                    Text(String(format: "%.2f m", min(eyeHeight, maxEyeHeight)))
-                        .font(.caption.monospacedDigit())
-                    Button { eyeHeight = max(0.3, min(eyeHeight, maxEyeHeight) - 0.1) } label: { Image(systemName: "chevron.down") }
-                        .accessibilityLabel("Shorter")
-                }
-                .buttonStyle(.bordered)
-                .padding(6)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                VStack(spacing: 8) {
-                    HoldButton(systemImage: "arrowtriangle.up.fill") { walkMove = $0 ? 1 : 0 }
-                    HoldButton(systemImage: "arrowtriangle.down.fill") { walkMove = $0 ? -1 : 0 }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { walkBarButtons; Spacer(minLength: 0) }
+                    VStack(alignment: .leading, spacing: 8) { walkBarButtons }
                 }
             }
             .frame(maxWidth: .infinity)
@@ -1266,6 +1281,8 @@ struct RoomSceneView: UIViewRepresentable {
     var walkFloorY: Float? = nil
     /// Held ▲ (+1) / ▼ (-1): walk forward or back, level, in the look direction.
     var walkMove = 0
+    /// Held ◀ (-1) / ▶ (+1): sideways, level, across the look direction.
+    var walkStrafe = 0
     /// Standing in the room: turning / tilting the phone looks around (rk 10 Nov).
     var gyroLook = true
     /// Eye height above the floor while standing, metres.
@@ -1544,6 +1561,7 @@ struct RoomSceneView: UIViewRepresentable {
         var standing: SIMD3<Float>?
         var walkFloorY: Float?
         var walkMove = 0
+        var walkStrafe = 0
         var yaw: Float = 0, pitch: Float = 0
         var walkGestures: [UIGestureRecognizer] = []
         var link: CADisplayLink?
@@ -1701,9 +1719,9 @@ struct RoomSceneView: UIViewRepresentable {
                 readMotion()
                 applyLook()
             }
-            guard walkMove != 0, standing != nil else { return }
-            let forward = SIMD3<Float>(-sin(lookYaw), 0, -cos(lookYaw))
-            walkCamera.simdPosition += forward * Float(walkMove) * 1.2 * dt
+            guard walkMove != 0 || walkStrafe != 0, standing != nil else { return }
+            let forward = SIMD3<Float>(-sin(lookYaw), 0, -cos(lookYaw)), right = SIMD3<Float>(cos(lookYaw), 0, -sin(lookYaw))
+            walkCamera.simdPosition += forward * Float(walkMove) * 1.2 * dt + right * Float(walkStrafe) * 1.0 * dt
         }
 
         @objc func looked(_ g: UIPanGestureRecognizer) {
@@ -1859,6 +1877,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.walkFloorY = walkFloorY
         context.coordinator.viewHeight = view.bounds.height
         context.coordinator.walkMove = walkMove
+        context.coordinator.walkStrafe = walkStrafe
         context.coordinator.setGyroLook(gyroLook)
         context.coordinator.setEyeHeight(eyeHeight)
         context.coordinator.setStanding(standAt)
