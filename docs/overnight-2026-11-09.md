@@ -159,8 +159,10 @@ directly (plain dots, no splat build) and patch colours from the photo room, the
   with its bar match the photo; at 4 cm they're a slab. 1.5 cm also shows them, noisier. But that one 3 m box is 116k
   triangles, so it needs flat-area simplification (or only keeping the fine surface off the coarse one, with a better
   rule than tonight's) before it can go on the phone. Not in the builds. Pictures: overnight-pictures/thin-bars-round2.
-- Occlusion-aware photo painting: no new problems seen in the Simulator views of the recovered 20:12 room (Photo and
-  Lighting); a textured check on the 19:00 / 22:14 rooms needs them imported into the Simulator (not done tonight).
+- Occlusion-aware photo painting: the 19:00 and 22:14 scans opened in the Simulator (copies, no recordings): both paint
+  and light fine (overnight-pictures/photo-painting). 22:14 shows big grey areas; harness `photocover` (same layout
+  code): the corner check costs little (grey 6.7→7.4%, 22.3→22.8%, 5.5→6.1% on 19:00 / 22:14 / 22:39); 22:14's grey is
+  coverage (no photo sees those parts well enough; a 200-photo cap only takes it to 19%), not tonight's change.
 
 ## S24 GPU fusion: plan (not built; needs the phone to test)
 1. One test scan with tonight's stage timings (e8365f7) to see how the GL thread's 95 ms split (ARCore update, depth

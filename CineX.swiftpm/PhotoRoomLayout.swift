@@ -202,14 +202,17 @@ enum PhotoLayout {
             if score <= bestScore { continue }
             // Not hidden anywhere on the triangle: the centre and the corners pulled slightly in (rk 9 Nov: the photo of
             // a 3 cm bar was painted onto the wall behind it, as splatters, when only the centre was checked).
-            guard inside(photo, a), inside(photo, b), inside(photo, c), !occluded(photo, centre),
-                  !occluded(photo, centre + (a - centre) * 0.8), !occluded(photo, centre + (b - centre) * 0.8),
-                  !occluded(photo, centre + (c - centre) * 0.8) else { continue }
+            guard inside(photo, a), inside(photo, b), inside(photo, c), !occluded(photo, centre) else { continue }
+            if checkCorners, occluded(photo, centre + (a - centre) * 0.8) || occluded(photo, centre + (b - centre) * 0.8)
+                || occluded(photo, centre + (c - centre) * 0.8) { continue }
             best = k
             bestScore = score
         }
         return (best, bestScore)
     }
+
+    /// Also check three inner corners for occlusion, not just the centre (harness compares both).
+    nonisolated(unsafe) static var checkCorners = true
 
     /// Pixel position of `p` in the photo (row 0 at the top), or nil when it's behind the camera.
     static func project(_ photo: Photo, _ p: SIMD3<Float>) -> SIMD2<Float>? {

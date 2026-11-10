@@ -55,6 +55,17 @@ case "why":
     Why.run(URL(fileURLWithPath: args[1]), SIMD3(Float(args[2])!, Float(args[3])!, Float(args[4])!))
 case "align":
     Align.run(iphone: URL(fileURLWithPath: args[1]), s24: URL(fileURLWithPath: args[2]), out: URL(fileURLWithPath: "harness-out/align-top.png"))
+case "photocover":
+    // harness photocover <capture folder>...: triangles painted vs left grey, with and without the corner occlusion check.
+    for path in args.dropFirst() {
+        for corners in [false, true] {
+            PhotoLayout.checkCorners = corners
+            let t = Date()
+            guard let l = PhotoLayout.make(folder: URL(fileURLWithPath: path), maxPhotos: Int(ProcessInfo.processInfo.environment["PHOTOS"] ?? "80") ?? 80, leaveOutCeiling: true) else { print("no layout: \(path)"); break }
+            let painted = l.groups.reduce(0) { $0 + $1.triangles.count }
+            print(String(format: "%@ corners %@: %d painted, %d grey (%.1f%%), %d photos, %.1f s", URL(fileURLWithPath: path).lastPathComponent, corners ? "on " : "off", painted, l.plain.count, Double(l.plain.count) * 100 / Double(max(1, painted + l.plain.count)), l.groups.count, Date().timeIntervalSince(t)))
+        }
+    }
 case "gpubench":
     // harness gpubench <recording> [voxel metres] [frame to render from] [gpuonly]
     try GPUBench.run(URL(fileURLWithPath: args[1]), voxel: args.count > 2 ? Float(args[2]) ?? 0.04 : 0.04,
