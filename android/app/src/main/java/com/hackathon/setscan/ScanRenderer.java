@@ -4033,6 +4033,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onSurfaceCreated(GL10 gl, EGLConfig config) {
+        // A new GL context: the GPU surface block is gone with the old one. Mid-scan the CPU fuses from here (a fresh
+        // block would overwrite what was synced with partial data); a new scan starts on the GPU again.
+        if (gpuTsdf != null) { gpuTsdf = null; gpuSurfaceBroken = true; log("GL context lost: GPU surface off for this scan, the CPU fuses"); }
         labelTex.clear(); labelProg = 0; // old GL objects are gone with the old context
         GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
         int[] t = new int[1];

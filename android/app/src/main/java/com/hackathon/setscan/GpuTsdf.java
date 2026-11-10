@@ -31,7 +31,7 @@ final class GpuTsdf {
     String error = "";
 
     private int fuseProg, packProg;
-    private int sdfBuf, wBuf, colBuf, dirtyBuf, depthBuf, imgBuf, listBuf, stageBuf, countBuf;
+    private int sdfBuf, wBuf, colBuf, dirtyBuf, depthBuf, imgBuf, listBuf, stageBuf, countBuf, metaBuf;
     private int depthCap;
     private int frame;
 
@@ -45,13 +45,13 @@ final class GpuTsdf {
             fuseProg = compute(FUSE);
             packProg = compute(PACK);
             int voxels = nx * ny * nz, bricks = bx * by * bz;
-            int[] b = new int[9];
-            GLES20.glGenBuffers(9, b, 0);
-            sdfBuf = b[0]; wBuf = b[1]; colBuf = b[2]; dirtyBuf = b[3]; depthBuf = b[4]; imgBuf = b[5]; listBuf = b[6]; stageBuf = b[7]; countBuf = b[8];
-            alloc(sdfBuf, voxels * 4); alloc(wBuf, voxels * 4); alloc(colBuf, voxels * 4); alloc(dirtyBuf, bricks * 4);
+            int[] b = new int[10];
+            GLES20.glGenBuffers(10, b, 0);
+            sdfBuf = b[0]; wBuf = b[1]; colBuf = b[2]; dirtyBuf = b[3]; depthBuf = b[4]; imgBuf = b[5]; listBuf = b[6]; stageBuf = b[7]; countBuf = b[8]; metaBuf = b[9];
+            alloc(sdfBuf, voxels * 4); alloc(wBuf, voxels * 4); alloc(colBuf, voxels * 4); alloc(dirtyBuf, bricks * 4); alloc(metaBuf, voxels * 4);
             alloc(listBuf, MAX_SYNC_BRICKS * 4); alloc(stageBuf, MAX_SYNC_BRICKS * 512 * 12); alloc(countBuf, 4);
             check("buffers");
-            Log.i(TAG, "GPU surface: block " + nx + "x" + ny + "x" + nz + " voxels (" + voxels * 12 / 1048576 + " MB)");
+            Log.i(TAG, "GPU surface: block " + nx + "x" + ny + "x" + nz + " voxels (" + voxels * 16 / 1048576 + " MB)");
         } catch (Throwable e) {
             failed = true; error = String.valueOf(e.getMessage());
             Log.e(TAG, "GPU surface unavailable: " + error);
@@ -123,6 +123,7 @@ final class GpuTsdf {
             GLES30.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, 3, dirtyBuf);
             GLES30.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, 4, depthBuf);
             GLES30.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, 5, imgBuf);
+            GLES30.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, 9, metaBuf);
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(fuseProg, "uToCam"), 1, false, inv, 0);
             GLES20.glUniform4f(GLES20.glGetUniformLocation(fuseProg, "uK"), fx, fy, cx, cy);
             GLES20.glUniform2i(GLES20.glGetUniformLocation(fuseProg, "uSize"), w, h);
@@ -180,7 +181,9 @@ final class GpuTsdf {
                 for (int k = 0; k < count; k++) {
                     int base = k * 512 * 12;
                     for (int i = 0; i < 512; i++) {
-                        s.sdf[k * 512 + i] = sb.getFloat(base + i * 4);
+                        float v = sb.getFloat(base + i * 4);
+                        if (Float.isNaN(v) || Float.isInfinite(v)) throw new RuntimeException("GPU surface gave a bad value (NaN)");
+                        s.sdf[k * 512 + i] = v;
                         s.w[k * 512 + i] = sb.getInt(base + 2048 + i * 4);
                         s.col[k * 512 + i] = sb.getInt(base + 4096 + i * 4);
                     }
@@ -214,7 +217,7 @@ final class GpuTsdf {
     }
 
     void release() {
-        int[] b = {sdfBuf, wBuf, colBuf, dirtyBuf, depthBuf, imgBuf, listBuf, stageBuf, countBuf};
+        int[] b = {sdfBuf, wBuf, colBuf, dirtyBuf, depthBuf, imgBuf, listBuf, stageBuf, countBuf, metaBuf};
         GLES20.glDeleteBuffers(b.length, b, 0);
         if (fuseProg != 0) GLES20.glDeleteProgram(fuseProg);
         if (packProg != 0) GLES20.glDeleteProgram(packProg);
@@ -233,6 +236,9 @@ final class GpuTsdf {
             "layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;\n" +
             "layout(std430, binding = 4) readonly buffer Depth { float depth[]; };\n" +
             "layout(std430, binding = 5) readonly buffer Img { uint img[]; };\n" +
+            "// Finished surface, as the CPU Tsdf: bits 0-7 frames seen as surface, 8-23 clear see-throughs in a row.\n" +
+            "layout(std430, binding = 9) buffer Meta { uint meta[]; };\n" +
+            "const uint LOCK_FRAMES = 20u; const uint UNLOCK_FRAMES = 250u;\n" +
             "uniform mat4 uToCam; uniform vec4 uK; uniform ivec2 uSize; uniform ivec3 uOrigin; uniform ivec3 uBricks;\n" +
             "uniform vec4 uP; uniform vec3 uCam;\n" +
             "const uint MAX_W = 40u; const uint SOLID_W = 20u;\n" +
@@ -255,6 +261,8 @@ final class GpuTsdf {
             "  int bi = (b.z * uBricks.y + b.y) * uBricks.x + b.x;\n" +
             "  int i = bi * 512 + (l.z * 64 + l.y * 8 + l.x);\n" +
             "  uint w = wgt[i];\n" +
+            "  uint mt = meta[i]; uint seenF = mt & 255u; uint contra = (mt >> 8) & 65535u;\n" +
+            "  bool locked = seenF >= LOCK_FRAMES;\n" +
             "  // How many CPU rays (one per depth pixel, steps of half a voxel) would cross this voxel: its size over a pixel.\n" +
             "  float fp = z / uK.x;\n" +
             "  uint add = uint(clamp((vs / fp) * (vs / fp), 1.0, 8.0));\n" +
@@ -270,6 +278,12 @@ final class GpuTsdf {
             "      float dd = depth[int(vv) * uSize.x + int(uu)];\n" +
             "      if (dd > 0.0 && dd * r / z < r + trunc) return;\n" +
             "    }\n" +
+            "    if (locked) {   // finished: only sustained clear see-through (it moved) undoes it\n" +
+            "      contra += 1u;\n" +
+            "      if (contra >= UNLOCK_FRAMES) { wgt[i] = 0u; sdf[i] = 0.0; meta[i] = 0u; dirty[bi] = 1u; }\n" +
+            "      else meta[i] = seenF | (contra << 8);\n" +
+            "      return;\n" +
+            "    }\n" +
             "    if (w >= SOLID_W) { sdf[i] += (1.0 - sdf[i]) * 0.04 * cw; dirty[bi] = 1u; return; }\n" +
             "    sdf[i] = (sdf[i] * float(w) + cw) / (float(w) + cw);\n" +
             "    wgt[i] = min(w + 1u, MAX_W);\n" +
@@ -277,10 +291,12 @@ final class GpuTsdf {
             "    return;\n" +
             "  }\n" +
             "  if (s < -trunc) return;\n" +
+            "  if (locked) { meta[i] = seenF; return; }   // seen as surface again: the see-through count starts over\n" +
             "  float dn = clamp(s / trunc, -1.0, 1.0);\n" +
             "  if (w == 0u && dn > 0.99) return;   // free space only changes voxels that exist\n" +
             "  sdf[i] = (sdf[i] * float(w) + dn * float(add)) / float(w + add);\n" +
             "  wgt[i] = min(w + add, MAX_W);\n" +
+            "  if (abs(dn) < 0.5 && seenF < 255u) meta[i] = (seenF + 1u) | (contra << 8);\n" +
             "  if (abs(dn) < 0.4) {\n" +
             "    uint p = img[int(v) * uSize.x + int(u)];\n" +
             "    vec3 nc = vec3(float(p & 255u), float((p >> 8) & 255u), float((p >> 16) & 255u));\n" +
