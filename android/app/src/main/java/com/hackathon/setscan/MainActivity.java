@@ -282,10 +282,47 @@ public class MainActivity extends Activity {
     private void shareMenu() {
         File dir = renderer.currentDir;
         if (dir == null) { toast("The scan saves itself a moment after Done. Try Share again in a few seconds."); return; }
+        File video = new File(dir, "recording.mp4");
+        String videoItem = video.exists() ? String.format(java.util.Locale.US, "Share scan video (large, %d MB)", video.length() / 1048576) : null;
+        String[] items = videoItem != null ? new String[]{"Send to nearby phone", "Save to device…", "Share file (.rmsc)", videoItem}
+                : new String[]{"Send to nearby phone", "Save to device…", "Share file (.rmsc)"};
         new android.app.AlertDialog.Builder(this).setTitle("Share room")
-                .setItems(new String[]{"Send to nearby phone", "Save to device…", "Share file (.rmsc)"}, (d, which) -> {
-                    if (which == 0) nearby.showSendDialog(dir); else if (which == 1) saveRmsc(); else shareRmsc();
+                .setItems(items, (d, which) -> {
+                    if (which == 0) nearby.showSendDialog(dir); else if (which == 1) saveRmsc(); else if (which == 2) shareRmsc();
+                    else shareUri("Packing the video...", "video/mp4", "Share scan video",
+                            () -> Rmsc.exportVideo(this, dir, renderer.currentName != null ? renderer.currentName : dir.getName()));
                 }).show();
+    }
+
+    interface UriMaker { android.net.Uri make() throws Exception; }
+
+    /** Makes a file in Downloads/RoomScape on a background thread, then opens the share sheet for it. */
+    private void shareUri(String packing, String mime, String title, UriMaker maker) {
+        toast(packing);
+        new Thread(() -> {
+            try {
+                android.net.Uri uri = maker.make();
+                runOnUiThread(() -> {
+                    android.content.Intent send = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                    send.setType(mime);
+                    send.putExtra(android.content.Intent.EXTRA_STREAM, uri);
+                    send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    toast("Saved to Downloads/RoomScape. Pick where to send it.");
+                    try { startActivity(android.content.Intent.createChooser(send, title)); }
+                    catch (Exception e) { toast("Saved, but sharing failed: " + e.getMessage()); }
+                });
+            } catch (Throwable e) { runOnUiThread(() -> toast("Couldn't share: " + e.getMessage())); }
+        }).start();
+    }
+
+    /** Diagnostics without a finished scan (long-press the logo on the home screen): logs, device, GPU, last crash. */
+    private void shareDiagnostics() {
+        if (renderer != null) try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(getFilesDir(), "app-log.txt"))) { o.write(renderer.logText().getBytes("UTF-8")); } catch (Exception ignored) { }
+        File latest = null;
+        File[] scans = new File(getFilesDir(), "scans").listFiles(File::isDirectory);
+        if (scans != null) for (File f : scans) if (latest == null || f.lastModified() > latest.lastModified()) latest = f;
+        final File l = latest;
+        shareUri("Packing the diagnostics...", "application/zip", "Share RoomScape diagnostics", () -> Rmsc.exportDiagnostics(this, l));
     }
 
     static final int SAVE_RMSC = 7302;
@@ -458,6 +495,9 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        Rmsc.appFiles = getFilesDir();
+        installCrashLog();
+        writeDeviceInfo();
         adoptStrayRecordings();
 
         FrameLayout root = new FrameLayout(this);
@@ -1511,6 +1551,36 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** A crash leaves crash-last.txt (stack, time, device), sent with the next export's diagnostics. */
+    private void installCrashLog() {
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        final File out = new File(getFilesDir(), "crash-last.txt");
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(out))) {
+                w.println("crash " + new java.util.Date() + " on thread " + t.getName());
+                w.println(android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL + ", Android " + android.os.Build.VERSION.RELEASE + " (SDK " + android.os.Build.VERSION.SDK_INT + ")");
+                e.printStackTrace(w);
+                if (renderer != null) { w.println("--- app log ---"); w.println(renderer.logText()); }
+            } catch (Throwable ignored) { }
+            if (prev != null) prev.uncaughtException(t, e);
+        });
+    }
+
+    /** device.json for the diagnostics: model, Android, ARCore and app versions, memory. */
+    private void writeDeviceInfo() {
+        try {
+            org.json.JSONObject j = new org.json.JSONObject();
+            j.put("manufacturer", android.os.Build.MANUFACTURER).put("model", android.os.Build.MODEL).put("device", android.os.Build.DEVICE)
+             .put("android", android.os.Build.VERSION.RELEASE).put("sdk", android.os.Build.VERSION.SDK_INT).put("soc", android.os.Build.VERSION.SDK_INT >= 31 ? android.os.Build.SOC_MODEL : "");
+            try { j.put("arcore", getPackageManager().getPackageInfo("com.google.ar.core", 0).versionName); } catch (Exception e) { j.put("arcore", "not installed"); }
+            try { android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0); j.put("app", pi.versionName).put("appBuild", pi.versionCode); } catch (Exception ignored) { }
+            android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); am.getMemoryInfo(mi);
+            j.put("ramMB", mi.totalMem / 1048576).put("heapLimitMB", am.getLargeMemoryClass());
+            try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(getFilesDir(), "device.json"))) { o.write(j.toString(1).getBytes("UTF-8")); }
+        } catch (Exception ignored) { }
+    }
+
     /** From the renderer, ~2x a second while scanning. level 0 ok, 1 hold on, 2 stop and stay here. */
     void updateHud(String hint, String sub, int level, float detail, float room, int points, int scanSeconds) {
         runOnUiThread(() -> {
@@ -1631,7 +1701,13 @@ public class MainActivity extends Activity {
         android.widget.ImageView logo = new android.widget.ImageView(this);
         logo.setImageResource(R.drawable.logo);
         logo.setAdjustViewBounds(true);
-        logo.setContentDescription("RoomScape");
+        logo.setContentDescription("RoomScape. Long-press to share diagnostics");
+        logo.setOnLongClickListener(v -> {
+            new android.app.AlertDialog.Builder(this).setTitle("Share diagnostics?")
+                    .setMessage("Logs, phone model, Android/ARCore/app versions, graphics chip info and the last crash, for fixing problems. No location, no account, no photos.")
+                    .setPositiveButton("Share", (d, w) -> shareDiagnostics()).setNegativeButton("Cancel", null).show();
+            return true;
+        });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(120));
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         lp.bottomMargin = dp(8);
@@ -2338,6 +2414,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        // The app's event log, for "Share diagnostics" even when no scan was finished.
+        if (renderer != null) try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(getFilesDir(), "app-log.txt"))) { o.write(renderer.logText().getBytes("UTF-8")); } catch (Exception ignored) { }
         setGyroSensor(false);
         stopRecordingIfAny();
         super.onPause();

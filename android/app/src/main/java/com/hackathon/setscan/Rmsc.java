@@ -194,6 +194,67 @@ final class Rmsc {
         copyIf(z, new File(dir, "path.bin"), "android/path.bin");
         // Parts of the package this app doesn't use (an iPhone's ios/ folder) go back out unchanged (mesh.ply is above).
         putTree(z, new File(dir, "rmsc-extra"), "");
+        putDiagnostics(z, dir);
+    }
+
+    /** Writes `name` into Downloads/RoomScape through `fill`, returns a shareable uri (as `export`). */
+    static Uri toDownloads(Context ctx, String name, String mime, ZipFill fill) throws Exception {
+        Uri uri; OutputStream raw;
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            cv.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/RoomScape");
+            uri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            if (uri == null) throw new Exception("could not create the file in Downloads");
+            raw = ctx.getContentResolver().openOutputStream(uri);
+        } else {
+            File out = new File(ctx.getExternalFilesDir(null), name);
+            uri = Uri.fromFile(out);
+            raw = new FileOutputStream(out);
+        }
+        try (OutputStream o = new BufferedOutputStream(raw, 1 << 16)) { fill.write(o); }
+        return uri;
+    }
+    interface ZipFill { void write(OutputStream o) throws Exception; }
+
+    /** Diagnostics only (no room): for when a scan never finished. The latest scan's logs too, if there is one. */
+    static Uri exportDiagnostics(Context ctx, File latestScan) throws Exception {
+        String name = "roomscape-diagnostics-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(new java.util.Date()) + ".zip";
+        return toDownloads(ctx, name, "application/zip", o -> {
+            try (ZipOutputStream z = new ZipOutputStream(o)) { putDiagnostics(z, latestScan); }
+        });
+    }
+
+    /** The scan's own video (recording.mp4), as <name>-video.mp4. */
+    static Uri exportVideo(Context ctx, File dir, String base) throws Exception {
+        File f = new File(dir, "recording.mp4");
+        if (!f.exists()) throw new Exception("this scan has no video");
+        return toDownloads(ctx, safeName(base) + "-video.mp4", "video/mp4", o -> {
+            try (InputStream in = new FileInputStream(f)) { byte[] buf = new byte[1 << 16]; int r; while ((r = in.read(buf)) > 0) o.write(buf, 0, r); }
+        });
+    }
+
+    /** The app's files folder (set at start-up), for the diagnostics that aren't per scan. */
+    static volatile File appFiles;
+
+    /** android/diagnostics/: what's needed to understand a scan from another phone without a cable (rk 10 Nov): the
+     *  scan's perf and event logs, the device (model, Android, ARCore, app, GPU and its limits), the GPU self-test and
+     *  the last crash. No location, no account. Optional: other readers ignore it (docs/rmsc-format.md). */
+    static void putDiagnostics(ZipOutputStream z, File dir) throws Exception {
+        if (dir != null) {
+            copyIf(z, new File(dir, "perf-scan.jsonl"), "android/diagnostics/perf-scan.jsonl");
+            copyIf(z, new File(dir, "perf-scan.summary.json"), "android/diagnostics/perf-scan.summary.json");
+            copyIf(z, new File(dir, "scan-log.txt"), "android/diagnostics/scan-log.txt");
+        }
+        File f = appFiles;
+        if (f != null) {
+            copyIf(z, new File(f, "device.json"), "android/diagnostics/device.json");
+            copyIf(z, new File(f, "gpu-info.txt"), "android/diagnostics/gpu-info.txt");
+            copyIf(z, new File(f, "gpu-selftest.txt"), "android/diagnostics/gpu-selftest.txt");
+            copyIf(z, new File(f, "crash-last.txt"), "android/diagnostics/crash-last.txt");
+            copyIf(z, new File(f, "app-log.txt"), "android/diagnostics/app-log.txt");
+        }
     }
 
     /** Copies a binary PLY mesh into the zip with every vertex moved up by dy; returns its triangle count. */

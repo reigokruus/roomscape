@@ -126,8 +126,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     synchronized void log(String msg) {
         android.util.Log.i("RoomScape", msg); // also in logcat, for checking from the Mac
-        if (log.length() > 20000) return;
+        if (log.length() > 300000) log.delete(0, 150000);   // keep the latest part (it goes out with the diagnostics)
         log.append(String.format(java.util.Locale.US, "%6.1fs  %s%n", (System.currentTimeMillis() - t0) / 1000f, msg));
+    }
+
+    synchronized String logText() { return log.toString(); }
+
+    /** The app's event log as scan-log.txt in the scan folder (diagnostics in the .rmsc). */
+    void saveLogInto(File dir) {
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "scan-log.txt"))) { o.write(logText().getBytes("UTF-8")); }
+        catch (Exception ignored) { }
     }
 
     private void logError(String where, Exception e) {
@@ -2211,7 +2219,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             File dir = currentDir;
             perf.stop();
-            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); }
+            if (dir != null) { perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan: perf-scan.jsonl"); saveLogInto(dir); }
         }, "perf-stop").start();
         dropEarlyDrift();
         purgeCleared();
@@ -5267,10 +5275,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (!gpuSurfaceWanted || gpuSurfaceBroken) return false;
         if (gpuTsdf == null) {
             gpuTsdf = new GpuTsdf(m[12] - 6, m[13] - 2.2f, m[14] - 6, m[12] + 6, m[13] + 2.6f, m[14] + 6, tsdf.vs, tsdf.trunc, tsdf.carve, tsdf.carveWeight);
+            saveGpuInfo(gpuTsdf.failed ? "GPU surface unavailable, the CPU fuses: " + gpuTsdf.error + "\n" + GpuTsdf.info : "GPU surface on\n" + GpuTsdf.info);
             if (gpuTsdf.failed) { log("GPU surface unavailable: " + gpuTsdf.error); gpuTsdf = null; gpuSurfaceBroken = true; return false; }
             log("GPU surface on: " + gpuTsdf.nx + "x" + gpuTsdf.ny + "x" + gpuTsdf.nz + " voxels");
         }
         return true;
+    }
+
+    private void saveGpuInfo(String s) {
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(activity.getFilesDir(), "gpu-info.txt"))) { o.write(s.getBytes("UTF-8")); }
+        catch (Exception ignored) { }
     }
 
     /** GL thread: the GPU's changed bricks into the CPU surface (on the fusion thread, in order with its work). */

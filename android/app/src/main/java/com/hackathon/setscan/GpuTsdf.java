@@ -29,6 +29,8 @@ final class GpuTsdf {
     final int bx, by, bz;          // size in bricks
     boolean failed;
     String error = "";
+    /** The driver and its limits, for the diagnostics. */
+    static volatile String info = "";
 
     private int fuseProg, packProg;
     private int sdfBuf, wBuf, colBuf, dirtyBuf, depthBuf, imgBuf, listBuf, stageBuf, countBuf, metaBuf;
@@ -52,8 +54,9 @@ final class GpuTsdf {
             GLES20.glGetIntegerv(GLES31.GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, q, 0); int inv = q[0];
             GLES20.glGetIntegerv(GLES31.GL_MAX_SHADER_STORAGE_BLOCK_SIZE, q, 0); long maxBlock = q[0] < 0 ? Integer.MAX_VALUE : q[0];
             long need = (long) nx * ny * nz * 4;
-            Log.i(TAG, "GPU: " + ver + " " + GLES20.glGetString(GLES20.GL_RENDERER) + "; storage blocks " + blocks + ", bindings " + bindings
-                    + ", work group " + inv + ", block size " + maxBlock / 1048576 + " MB (need " + need / 1048576 + ")");
+            info = "GPU: " + ver + " " + GLES20.glGetString(GLES20.GL_RENDERER) + " (" + GLES20.glGetString(GLES20.GL_VENDOR) + "); storage blocks " + blocks + ", bindings " + bindings
+                    + ", work group " + inv + ", block size " + maxBlock / 1048576 + " MB (need " + need / 1048576 + ")";
+            Log.i(TAG, info);
             if (blocks < 8 || bindings < 10 || inv < 256) throw new RuntimeException("GPU limits too small: storage blocks " + blocks + ", bindings " + bindings + ", work group " + inv);
             if (need > maxBlock) throw new RuntimeException("block " + need / 1048576 + " MB over the GPU's " + maxBlock / 1048576 + " MB buffer limit");
             fuseProg = compute(FUSE);
