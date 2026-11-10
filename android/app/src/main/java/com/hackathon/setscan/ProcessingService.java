@@ -40,7 +40,7 @@ public class ProcessingService extends Service {
             nm.createNotificationChannel(new NotificationChannel(CH, "Scan processing", NotificationManager.IMPORTANCE_LOW));
             b = new Notification.Builder(this, CH);
         } else b = new Notification.Builder(this);
-        Notification n = b.setContentTitle("CineX is improving your scan")
+        Notification n = b.setContentTitle("RoomScape is improving your scan")
                 .setContentText("You can use other apps. Come back when it's done.")
                 .setSmallIcon(android.R.drawable.stat_notify_sync).setOngoing(true).build();
         try {

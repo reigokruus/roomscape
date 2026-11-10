@@ -1644,11 +1644,23 @@ public class MainActivity extends Activity {
         return k == null || k.trim().isEmpty() ? null : k.trim();
     }
 
+    /** The scan lost its place 30 s ago and hasn't found it again: keep looking, or carry on as a new part. */
+    void offerNewPart() {
+        runOnUiThread(() -> {
+            if (isFinishing()) return;
+            new android.app.AlertDialog.Builder(this).setTitle("Still can't find where you are")
+                    .setMessage("Point at something you already scanned to continue where you were. Or carry on from here as a new part of the scan (it may not line up with the rest).")
+                    .setPositiveButton("Keep looking", null)
+                    .setNegativeButton("Carry on from here", (d, w) -> renderer.forceResume = true)
+                    .show();
+        });
+    }
+
     private boolean askedOutletKey;
     /** Outlets are found by Claude: ask for the key once per app run. */
     void outletsNeedKey() {
         runOnUiThread(() -> {
-            if (askedOutletKey || isFinishing()) return;
+            if (askedOutletKey || isFinishing() || !debug) return;   // no unasked key prompt for first-time users
             askedOutletKey = true;
             new android.app.AlertDialog.Builder(this)
                     .setTitle("Find power outlets?")

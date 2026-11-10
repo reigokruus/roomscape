@@ -1941,7 +1941,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** GL thread: run the whole improvement chain on its own, reporting one progress bar. */
     private void startAuto() {
-        if (count == 0) return;
+        if (count == 0) { activity.toast("Nothing was captured, so there's nothing to save. Start a new scan and move the phone slowly around the room."); return; }
         autosave(); // right away: Android may close the app in the background, and the scan only lives in memory
         if (!AUTO_PROCESS) return;
         autoStage = 1;
@@ -4242,7 +4242,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (lostSince == 0) {
                 lostSince = nowMs;
                 if (count > 2000 && !needRealign) {
-                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0;
+                    needRealign = true; realignOk = 0; realignSince = nowMs; realignHintAt = nowMs; sessionRestarted = false; realignTick = 0; newPartOffered = false; forceResume = false;
                     snapshotForRealign();
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again");
                     activity.toast("Lost position. Point back at an area you already scanned.");
@@ -5573,6 +5573,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    volatile boolean forceResume;
+    private boolean newPartOffered;
+
     private final float[] lastGoodCam = new float[16];
     private boolean haveGoodCam;
     private volatile boolean realignBuilding;
@@ -5608,6 +5611,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             needRealign = false; return true;
         }
         if (stayGuess == null) stayGuess = stayGuessFor(m);
+        // Never lined up after 30 s: the user decides (a first-time user mustn't be stuck with a scan that stopped
+        // growing). Carrying on is a new part of the scan (its own segment, droppable later), never silent.
+        if (forceResume) {
+            forceResume = false; needRealign = false; realign = null; segment++;
+            log(String.format(java.util.Locale.US, "carrying on as a new part after %.1f s (the user chose it); segment %d", (nowMs - realignSince) / 1000f, segment));
+            return true;
+        }
+        if (nowMs - realignSince > 30000 && !newPartOffered) { newPartOffered = true; activity.offerNewPart(); }
         if (realignTick++ % 3 != 0) return false;   // the ICP every 3rd depth frame (it's heavy for the drawing thread)
         java.util.ArrayList<float[]> pts = new java.util.ArrayList<>();
         for (int v = 3; v < dh - 3; v += 5) for (int u = 3; u < dw - 3; u += 5) {
