@@ -232,3 +232,14 @@ S24:
 - S24 recordings are kept (rk). Add an S24 "rebuild from recording" (ARCore playback of recording.mp4 through the
   scan pipeline, as the iPhone's RecordingProcessor), after the iPhone overnight items, so old S24 scans can be
   reprocessed.
+
+## 10:34 scans (iPhone Scan_2026-11-10_10-34-56, S24 scan_1794299489729, S24 build 10:22)
+- S24: GPU surface ran live the whole scan (no fallback), 19.1 fps, thermal max 1 (fair), RSS 937 MB; the points'
+  see-through check (49 ms) and depth pixels (66 ms) on the drawing thread were the cost, GPU 4.2 ms. Carve budget
+  250k → 60k points per depth frame (0492176). Tracking lost once, resumed after 3.4 s as segment 1 (no shift).
+- Room size: this pair can't be lined up reliably (mostly a close-up of the bars): the scale search sits at its
+  lower limit (0.86; widened to 0.74 it goes there too, yaw flips). Depth ratio vs the iPhone (unreliable fit):
+  1.22 under 1 m, 1.06 at 1–1.5 m, 0.92 at 1.5–2 m: a different line from last night's (0.87·true + 0.23), so a
+  fixed correction is wrong; the per-scan fit (logged, not applied, in the 10:38 build) needs one scan. Not switched on.
+- Bars: iPhone f267 at 4 cm / 1.9 cm: rungs as ridges on a slab with the wall/door, 1.9 cm shows each rung's outline.
+  Pictures: recordings/overnight-pictures/bars-1034.
