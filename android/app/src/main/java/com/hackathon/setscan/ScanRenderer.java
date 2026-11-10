@@ -498,6 +498,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 for (DoorwayFinder.Doorway d : ds) log("  " + d);
                 doorways = ds;
                 activity.setDoorways(ds);
+                activity.loadMeasurements(dirNow);
                 if (dirNow != null) saveDoorways(dirNow, ds);
             } catch (Throwable e) { logError("doorways", new RuntimeException(e)); }
             RoomProxies rp = simple ? RoomProxies.build(roomNow, pos, col, count) : new RoomProxies();

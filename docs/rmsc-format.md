@@ -26,6 +26,7 @@ Apple UTI: `com.roomscape.rmsc`, conforming to `public.zip-archive` and `public.
 | `thumb.jpg` | no | A preview picture, about 512 px wide |
 | `ios/…`, `android/…` | no | Platform extras, such as the ARKit world map (`ios/worldmap.arexperience`) or Android splats. Other platforms ignore them, and a reader must keep working without them |
 | `android/doorways.json` | no | Doorways the Android app found (open wall openings): `[{"x0", "z0", "x1", "z1", "floorY", "width", "height", "open"}]`, the opening's bottom corners in the scan's world (before the floor shift), metres. A first version; a shared `structure` list (with iPhone RoomPlan doors) is proposed, not yet in the manifest |
+| `android/measurements.json` | no | Measurements the user kept (Measure in Enter the room): `[[x0, y0, z0, x1, y1, z1], …]`, the two ends in the scan's world (before the floor shift), metres. A shared `measurements` list in the manifest (with an optional name) is proposed, not yet in the manifest |
 | `android/diagnostics/…` | no | For fixing problems only: the scan's perf log (`perf-scan.jsonl`, `perf-scan.summary.json`), event log (`scan-log.txt`), `device.json` (model, Android, ARCore and app versions, RAM), `gpu-info.txt` (driver and limits), `gpu-selftest.txt`, `crash-last.txt`, `app-log.txt`. No location or account data. Readers ignore it |
 
 A reader must ignore files it doesn't know. A writer may leave out every optional file.

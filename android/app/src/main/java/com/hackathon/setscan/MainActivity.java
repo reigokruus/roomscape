@@ -862,6 +862,9 @@ public class MainActivity extends Activity {
                 if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) cancelHoldRing();
                 return true;
             }
+            if (walkState == 0 && measureOverlay != null && e.getActionMasked() == MotionEvent.ACTION_DOWN) { downTime = e.getEventTime(); downX = e.getX(); downY = e.getY(); }
+            if (walkState == 0 && measureOverlay != null && e.getActionMasked() == MotionEvent.ACTION_UP && e.getEventTime() - downTime < 300
+                    && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12) && measureOverlay.tapAt(e.getX(), e.getY())) return true;
             if (walkTouch(e)) return true;
             if (objPanel.getVisibility() == View.VISIBLE && objectTouch(e)) return true;
             if (renderer.lighting.enabled) {
@@ -1308,7 +1311,9 @@ public class MainActivity extends Activity {
         measureClear = new Button(this);
         measureClear.setText("Clear");
         Ios.textButton(measureClear);
-        measureClear.setOnClickListener(v -> { measureOverlay.clearAll(); updateMeasureButtons(); });
+        measureClear.setOnClickListener(v -> new android.app.AlertDialog.Builder(this).setTitle("Remove all measurements?")
+                .setMessage("They're saved with this scan.").setPositiveButton("Remove all", (d, w) -> { measureOverlay.clearAll(); updateMeasureButtons(); })
+                .setNegativeButton("Cancel", null).show());
         measureClear.setVisibility(View.GONE);
         bar.addView(measureClear, mlp);
         // Eye height: taller / shorter, 10 cm a tap, remembered.
@@ -1449,10 +1454,13 @@ public class MainActivity extends Activity {
             renderer.look(e.getX() - lastX, e.getY() - lastY);
             lastX = e.getX(); lastY = e.getY();
         }
+        // A tap on a measurement selects it (Delete next to it), in or out of Measure mode; a tap on the scan in
+        // Measure mode adds a point.
+        if (walkState == 2 && measureOverlay != null && act == MotionEvent.ACTION_UP && !multiTouch && e.getEventTime() - downTime < 300
+                && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12) && measureOverlay.tapAt(e.getX(), e.getY())) { updateMeasureButtons(); return true; }
         if (walkState == 2 && measuring && act == MotionEvent.ACTION_UP && !multiTouch && Math.hypot(e.getX() - downX, e.getY() - downY) < dp(12)) {
             float tx = e.getX(), ty = e.getY();
             long held = e.getEventTime() - downTime;
-            if (held >= 500) { if (measureOverlay.removeAt(tx, ty)) { toast("Measurement removed"); updateMeasureButtons(); } return true; }
             if (held < 300) {
                 glView.queueEvent(() -> {
                     float[] p = renderer.measurePick(tx, ty);
@@ -1727,6 +1735,11 @@ public class MainActivity extends Activity {
     private MeasureOverlay measureOverlay;
 
     /** Doorways found after the scan: outlined with their size in the 3D view (MeasureOverlay). */
+    /** The scan's saved measurements (measurements.json), shown again when it's opened. */
+    void loadMeasurements(File dir) {
+        runOnUiThread(() -> { ensureOverlay(); measureOverlay.load(dir); updateMeasureButtons(); });
+    }
+
     void setDoorways(java.util.List<DoorwayFinder.Doorway> ds) {
         runOnUiThread(() -> { ensureOverlay(); measureOverlay.setDoorways(ds); });
     }
@@ -1749,7 +1762,7 @@ public class MainActivity extends Activity {
         }
         measureOverlay.setVisibility(walkState == 2 ? View.VISIBLE : View.GONE);
         if (!on) measureOverlay.cancelPending();
-        if (on) toast("Tap two spots on the scan. Hold a label to remove it.");
+        if (on) toast("Tap two spots on the scan. Tap a measurement to select or delete it.");
         updateMeasureButtons();
     }
 
