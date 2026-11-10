@@ -64,7 +64,7 @@ final class ScanExport {
         void clear() { n = 0; }
     }
 
-    static final int MAX_RECS = 600; // ~60 KB each, kept in memory: when full, every other one is dropped (see thinRecs)
+    static final int MAX_RECS = 300; // ~60 KB each, kept in memory: when full, every other one is dropped (see thinRecs)
     static final int MAX_EXPORT_FRAMES = 300;
 
     /**

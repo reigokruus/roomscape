@@ -328,7 +328,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      * [x0, z0, x1, z1, height] per wall, floor at 0) in the scan folder, so a .rmsc export carries them like the
      * iPhone's (see Rmsc.write). Skipped when the scan came with another phone's mesh.
      */
-    private volatile Tsdf readbackRejected;
+    private volatile Tsdf.Band readbackRejected;
 
     void writeSurface(File dir) {
         try {
@@ -337,9 +337,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             ByteBuffer c = meshPosAll != null ? meshColAll : tsdf.meshCol;
             int verts = meshPosAll != null ? meshVerts : tsdf.meshVerts;
             writePly(dir, "surface.ply", p, c, verts);
-            Tsdf rj = readbackRejected;
-            if (rj != null) {   // the read-back that was kept out, numbered, never overwritten
+            Tsdf.Band rjb = readbackRejected;
+            if (rjb != null) {   // the read-back that was kept out, numbered, never overwritten
                 readbackRejected = null;
+                Tsdf rj = new Tsdf(Math.max(16, rjb.n + rjb.n / 2), tsdf.vs, tsdf.trunc, tsdf.carve); rj.minW = tsdf.minW;
+                rj.restore(rjb);
                 rj.extractMesh();
                 int k = 1; while (new File(dir, "surface-readback-" + k + ".ply").exists()) k++;
                 writePly(dir, "surface-readback-" + k + ".ply", rj.meshPos, rj.meshCol, rj.meshVerts);
@@ -2375,6 +2377,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void finishScan() {
+        liveScratch = null;   // the live mesh's copy of the surface (tens of MB): the after-Done steps need the memory (15:23 scan ran out)
         style = 2;   // the result opens in Points (rk 10 Nov 15:22)
         if (roomLux() > 0) { Lighting.ROOM_LUX = Math.max(5f, roomLux()); log(String.format(java.util.Locale.US, "room light from camera exposure: %.0f lx (%d samples)", roomLux(), luxSamples.size())); }
         java.util.List<RoomModel.PlaneData> planes = capturePlanes();
@@ -2410,19 +2413,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // covered the whole room, the saved one 16% of it). Keep a copy; if the read-back leaves under 70% of the
             // area, the copy is kept and the read-back result is saved beside it (surface-readback-N.ply).
             drainFuse();
-            Tsdf before = gpuTsdf != null ? tsdf.copyAll() : null;
-            int cellsBefore = before != null ? before.surfaceCells() : 0;
+            Tsdf.Band before = gpuTsdf != null ? tsdf.band() : null;
+            int cellsBefore = before != null ? tsdf.bandCells(before) : 0;
             gpuSyncAll();
             drainFuse();
             readbackRejected = null;
             if (before != null) {
-                int cellsAfter = tsdf.surfaceCells();
+                Tsdf.Band after = tsdf.band();
+                int cellsAfter = tsdf.bandCells(after);
                 log(String.format(java.util.Locale.US, "surface area at Done: %d cells before the read-back, %d after", cellsBefore, cellsAfter));
                 if (cellsBefore > 40 && cellsAfter < 0.7f * cellsBefore) {
-                    readbackRejected = tsdf.copyAll();
-                    synchronized (tsdf) { before.copyInto(tsdf); }
-                    log(String.format(java.util.Locale.US, "read-back kept out: it covered %.0f%% of the surface before it; the surface before is kept, the read-back saved beside it", 100f * cellsAfter / cellsBefore));
+                    readbackRejected = after;
+                    synchronized (tsdf) { tsdf.restore(before); }
+                    log(String.format(java.util.Locale.US, "read-back kept out: it covered %.0f%% of the surface before it; the surface before is put back, the read-back saved beside it", 100f * cellsAfter / cellsBefore));
                 }
+                before = null;
             }
             meshTris = tsdf.extractMesh();
             log("surface: " + tsdf.size() + " voxels -> " + meshTris + " triangles (" + (System.currentTimeMillis() - t0) + " ms)");
@@ -7397,6 +7402,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // rk 10 Nov 13:45: tell the user to stay put and look back (the view keeps turning with the gyro)
             level = 2;
             hint = walkingWhileLost ? "Lost position. Stand still and turn the phone back to the scanned area" : "Lost position. Turn the phone back to the scanned area";
+        }
+        else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
+            // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said)
+            level = 2;
+            hint = "No depth for a moment, nothing is being added: hold still, then point at the room from 1-3 m";
         }
         else if (needRealign && everTracked) {
             // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed

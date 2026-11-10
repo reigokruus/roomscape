@@ -126,6 +126,42 @@ final class Tsdf {
         }
     }
 
+    /** The voxels near the surface only (seen enough, |sdf| < 1): a compact copy (a full copyAll() of a 1.5M-voxel
+     *  surface is ~70 MB, which ran a phone out of memory at Done). */
+    static final class Band { long[] k; float[] sdf; short[] w; byte[] rgb; int n; }
+    Band band() {
+        int m = 0;
+        for (int i = 0; i < n; i++) if (w[i] >= minW && Math.abs(sdf[i]) < 1f) m++;
+        Band b = new Band(); b.k = new long[m]; b.sdf = new float[m]; b.w = new short[m]; b.rgb = new byte[m * 3];
+        for (int t = 0; t < keys.length && b.n < m; t++) {
+            long k = keys[t]; if (k == Long.MIN_VALUE) continue;
+            int i = slots[t]; if (i < 0 || i >= n || w[i] < minW || Math.abs(sdf[i]) >= 1f) continue;
+            b.k[b.n] = k; b.sdf[b.n] = sdf[i]; b.w[b.n] = w[i]; b.rgb[b.n * 3] = rgb[i * 3]; b.rgb[b.n * 3 + 1] = rgb[i * 3 + 1]; b.rgb[b.n * 3 + 2] = rgb[i * 3 + 2]; b.n++;
+        }
+        return b;
+    }
+
+    /** Puts a band back (voxels it has get its values; others stay). */
+    void restore(Band b) {
+        for (int j = 0; j < b.n; j++) {
+            long k = b.k[j];
+            int x = (int) (k & 0x1FFFFF) - (1 << 20), y = (int) ((k >>> 21) & 0x1FFFFF) - (1 << 20), z = (int) ((k >>> 42) & 0x1FFFFF) - (1 << 20);
+            setVoxel(x, y, z, b.sdf[j], b.w[j], b.rgb[j * 3] & 255, b.rgb[j * 3 + 1] & 255, b.rgb[j * 3 + 2] & 255);
+        }
+    }
+
+    /** Coverage of a band in 25 cm floor-plan cells. */
+    int bandCells(Band b) {
+        java.util.HashSet<Long> cells = new java.util.HashSet<>();
+        for (int j = 0; j < b.n; j++) {
+            if (Math.abs(b.sdf[j]) >= 0.5f) continue;
+            long k = b.k[j];
+            float x = (((int) (k & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs, z = (((int) ((k >>> 42) & 0x1FFFFF) - (1 << 20)) + 0.5f) * vs;
+            cells.add(((long) Math.floor(x / 0.25f) << 32) ^ ((long) Math.floor(z / 0.25f) & 0xFFFFFFFFL));
+        }
+        return cells.size();
+    }
+
     /** How many 25 cm floor-plan cells have surface in them (a coverage measure). */
     int surfaceCells() {
         java.util.HashSet<Long> cells = new java.util.HashSet<>();
