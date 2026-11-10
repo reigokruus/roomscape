@@ -907,6 +907,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 final int tw = width, th = height;
                 final java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+                drainDepth();
                 final int cn = count;
                 final float[] pa = new float[cn * 3];
                 FloatBuffer pd = pos.duplicate(); pd.position(0); pd.get(pa, 0, cn * 3);
@@ -1005,6 +1006,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (d.lux > 0) { loadedLux = d.lux; Lighting.ROOM_LUX = d.lux; }
                 glTasks.add(() -> {
                     if (gen != surfGen) return;
+                    drainDepth();
                     int[] rgb = new int[3];
                     for (int i = 0; i < d.n && count < MAX_POINTS; i++) {
                         float x = d.pos[i * 3], y = d.pos[i * 3 + 1], z = d.pos[i * 3 + 2];
@@ -1550,6 +1552,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** GL thread: merge one photo's depth points into the scan (2 cm dedupe) and the surface. */
     private void addDepthPoints(float[] P, byte[] C, int m, float camX, float camY, float camZ) {
+        drainDepth();
         int[] rgb = new int[3];
         for (int i = 0; i < m && count < MAX_POINTS; i++) {
             float x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
@@ -2667,6 +2670,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Removes the points that pass the test. */
     private int removePointsWhere(Tsdf.Where drop) {
+        drainDepth();   // the depth thread mustn't add points while they're moved
         int k = 0;
         for (int i = 0; i < count; i++) {
             if (drop.test(pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2))) continue;
@@ -2746,6 +2750,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private int removePointsNear(float[] c, float r) {
+        drainDepth();   // the depth thread mustn't add points while they're moved
         int k = 0;
         for (int i = 0; i < count; i++) {
             float dx = pos.get(i * 3) - c[0], dy = pos.get(i * 3 + 1) - c[1], dz = pos.get(i * 3 + 2) - c[2];
@@ -3459,7 +3464,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         depthK = 1f; depthC = 0f; dfN = 0; dfAt = 0; dfLastFit = 0;
         needRealign = false; realignOk = 0; hasFix = false; android.opengl.Matrix.setIdentityM(poseFix, 0); segment = 0; realign = null; realignBuilding = false; haveGoodCam = false;
         surfGen++; liveMeshTriVerts = 0; liveMeshLineVerts = 0; liveMeshNew = null; surfDone = null; surfBase = null; surfPending = null; surfCount = 0; surfShown = null; loadedSplats = null; training = false; trainer = null; trainViews = null;
-        depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
+        drainDepth(); gpuReady.clear(); stampFrame = 0; depthFrames = depthPixels = depthRejectedRange = depthRejectedConf = depthRejectedEdge = depthNotYet = 0; depthStale = 0; recoveries = 0; lastError = "";
         voxels.clear(); depthOnlyFirst = -1; appendSimplify = 0; demoTool = 0; personSpot = null; ivPerson = null;
         roomShown = 0; hallDone = false; shownHint = null; tooFast = tooFar = false;
         earlyDepthFrames = -1; loadedAny = false; objects.clear(); objects.active = false; outlets.clear(); roomItems.clear(); outletsRunning = false;
@@ -4273,6 +4278,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 try {
                     nowMsFrame = nowMs;
                     integrate(frame, camera);
+                    dispatchGpuReady();
+                    perf.note("depth frames waiting", depthQueued.get());
                 } catch (Exception e) {
                     logError("integrate", e);
                 }
@@ -4642,14 +4649,115 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 recs.add(r);
             }
             depthFitCollect(frame, camera, dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy);
-            final float dfK = depthK, dfC = depthC;   // this frame's depth correction (identity until the fit is sure)
+            boolean gpuOnNow = gpuSurfaceReady(m);
+            // The per-pixel work (points, carving, the CPU surface's samples, the GPU's depth) runs on the depth thread
+            // from copies of this frame (rk 10 Nov 10:53: 4-6 fps on the drawing thread lost a door). Every new depth
+            // frame is queued; the drawing thread only waits when 6 are already waiting.
+            DepthJob job = new DepthJob();
+            job.dw = dw; job.dh = dh; job.fx = fx; job.fy = fy; job.cx = cx; job.cy = cy;
+            job.ifx = ifx; job.ify = ify; job.icx = icx; job.icy = icy; job.m = m.clone(); job.gpuOn = gpuOnNow;
+            job.k = depthK; job.c = depthC; job.gain = colorGain;
+            job.d = new short[dw * dh];
+            for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) job.d[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+            if (cbuf != null) {
+                job.cf = new byte[dw * dh];
+                for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) job.cf[v * dw + u] = cbuf.get(v * cRow + u * cPix);
+            }
+            if (cpuImage != null) job.copyImage(cpuImage);
+            submitDepth(job);
+            sampleLux(frame);
+        } catch (NotYetAvailableException e) {
+            depthNotYet++;
+            // no depth yet
+        } finally {
+            if (depth != null) depth.close();
+            if (conf != null) conf.close();
+            if (cpuImage != null) { cpuImage.close(); cpuImage = null; }
+        }
+    }
+
+
+    /** One depth frame, copied off ARCore's images, for the depth thread. */
+    static final class DepthJob {
+        int dw, dh; float fx, fy, cx, cy, ifx, ify, icx, icy, k, c, gain; float[] m; boolean gpuOn;
+        short[] d; byte[] cf; float[] gd; int[] grgb;
+        byte[] iy, iu, iv; int iw, ih, yRow, yPix, uRow, uPix, vRow, vPix;
+        void copyImage(Image img) {
+            Image.Plane[] pl = img.getPlanes();
+            iw = img.getWidth(); ih = img.getHeight();
+            yRow = pl[0].getRowStride(); yPix = pl[0].getPixelStride(); uRow = pl[1].getRowStride(); uPix = pl[1].getPixelStride();
+            vRow = pl[2].getRowStride(); vPix = pl[2].getPixelStride();
+            ByteBuffer b0 = pl[0].getBuffer().duplicate(), b1 = pl[1].getBuffer().duplicate(), b2 = pl[2].getBuffer().duplicate();
+            b0.rewind(); b1.rewind(); b2.rewind();
+            iy = new byte[b0.remaining()]; b0.get(iy); iu = new byte[b1.remaining()]; b1.get(iu); iv = new byte[b2.remaining()]; b2.get(iv);
+        }
+    }
+
+    private final java.util.concurrent.ExecutorService depthExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "depth-points"); t.setPriority(Thread.NORM_PRIORITY); return t; });
+    private final java.util.concurrent.atomic.AtomicInteger depthQueued = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile java.util.concurrent.Future<?> depthLast;
+    /** Depth frames done on the depth thread whose GPU part waits for the drawing thread. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<DepthJob> gpuReady = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    /** The frame stamp of points (seenStamp): the depth thread's own count, in order with its work. */
+    private int stampFrame;
+
+    private void submitDepth(final DepthJob j) {
+        if (depthQueued.get() >= 6) {   // far behind: wait for one (never drop a depth frame)
+            long t0 = System.nanoTime();
+            while (depthQueued.get() >= 6) { try { Thread.sleep(2); } catch (InterruptedException e) { break; } }
+            perf.note("ms: waited for depth thread", (System.nanoTime() - t0) / 1e6);
+        }
+        depthQueued.incrementAndGet();
+        depthLast = depthExec.submit(() -> {
+            long t0 = System.nanoTime();
+            try { synchronized (pointsLock) { processDepth(j); } }
+            catch (Throwable e) { logError("depth thread", new RuntimeException(e)); }
+            finally { depthQueued.decrementAndGet(); }
+            perf.note("ms: depth frame (depth thread)", (System.nanoTime() - t0) / 1e6);
+        });
+    }
+
+    /** Drawing thread: waits until the depth thread has done every queued frame (before anything else reads or changes
+     *  the points), then dispatches their GPU parts. */
+    private void drainDepth() {
+        if (Thread.currentThread().getName().equals("depth-points")) return;   // called from the depth thread's own work
+        java.util.concurrent.Future<?> f = depthLast;
+        if (f != null && depthQueued.get() > 0) { try { f.get(); } catch (Exception e) { logError("depth drain", new RuntimeException(e)); } }
+        dispatchGpuReady();
+    }
+
+    /** Drawing thread, every frame: the GPU surface part of frames the depth thread has finished. */
+    private void dispatchGpuReady() {
+        DepthJob j;
+        while ((j = gpuReady.poll()) != null) {
+            if (gpuTsdf == null) continue;
+            long g0 = System.nanoTime();
+            gpuTsdf.integrate(j.gd, j.grgb, j.dw, j.dh, j.m, j.fx, j.fy, j.cx, j.cy);
+            if (System.currentTimeMillis() - gpuSyncAt > 500) { gpuSyncAt = System.currentTimeMillis(); gpuSyncToCpu(); }
+            perf.note("ms: GPU surface (dispatch + sync)", (System.nanoTime() - g0) / 1e6);
+            if (gpuTsdf.failed) { log("GPU surface stopped: " + gpuTsdf.error + "; the CPU fuses from here"); gpuTsdf = null; gpuSurfaceBroken = true; }
+        }
+    }
+
+    private final Object pointsLock = new Object();
+
+    /** Depth thread: one frame's pixels into the points, the surface samples and the carving. */
+    private void processDepth(DepthJob j) {
+        if (count >= MAX_POINTS) return;
+        stampFrame++;
+        final int dw = j.dw, dh = j.dh; final float fx = j.fx, fy = j.fy, cx = j.cx, cy = j.cy, ifx = j.ifx, ify = j.ify, icx = j.icx, icy = j.icy;
+        final float[] m = j.m;
+        ShortBuffer dbuf = ShortBuffer.wrap(j.d); final int dRow = dw, dPix = 1;
+        ByteBuffer cbuf = j.cf != null ? ByteBuffer.wrap(j.cf) : null; final int cRow = dw, cPix = 1;
+        int[] rgb = new int[3];
+        frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
+        depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
+            final float dfK = j.k, dfC = j.c;   // this frame's depth correction (identity until the fit is sure)
             long pxT0 = System.nanoTime();
             fuseN = 0;
-            boolean gpuOn = gpuSurfaceReady(m);
-            if (gpuOn) {
-                if (gpuDepth == null || gpuDepth.length < dw * dh) { gpuDepth = new float[dw * dh]; gpuRgb = new int[dw * dh]; }
-                java.util.Arrays.fill(gpuDepth, 0, dw * dh, 0f);
-            }
+            boolean gpuOn = j.gpuOn;
+            if (gpuOn) { j.gd = new float[dw * dh]; j.grgb = new int[dw * dh]; }
             for (int v = 0; v < dh; v++) {
                 for (int u = 0; u < dw; u++) {
                     int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
@@ -4681,11 +4789,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     boolean fine = !zones.isEmpty() && inZone(wx, wy, wz);
                     long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
                     int hit = voxels.get(vk);
-                    sampleColor(xc / d * ifx + icx, icy - yc / d * ify, rgb);
+                    sampleColorJ(j, xc / d * ifx + icx, icy - yc / d * ify, rgb);
                     // The surface (TSDF) part goes to the GPU (GpuTsdf) or the fusion thread (below), the points stay here.
                     if (gpuOn) {
-                        gpuDepth[v * dw + u] = d;
-                        gpuRgb[v * dw + u] = (rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16;
+                        j.gd[v * dw + u] = d;
+                        j.grgb[v * dw + u] = (rgb[0] & 255) | (rgb[1] & 255) << 8 | (rgb[2] & 255) << 16;
                     }
                     if (!gpuOn || fine) {   // with the GPU on, only detail-zone samples still go to the CPU (bit 25: not the room)
                     if (fuseN * 5 + 5 > fuseBuf.length) fuseBuf = java.util.Arrays.copyOf(fuseBuf, fuseBuf.length * 2);
@@ -4708,25 +4816,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     fuseN++;
                     }
                     if (weak) continue;
-                    if (hit < 0 || seenStamp[hit] != depthFrames) frameHits++;
+                    if (hit < 0 || seenStamp[hit] != stampFrame) frameHits++;
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
                     voxels.put(vk, count);
                     addPoint(wx, wy, wz, rgb);
-                    if (count >= MAX_POINTS) return;
+                    if (count >= MAX_POINTS) break;
                 }
             }
             submitFuse(m[12], m[13], m[14]);
-            if (gpuOn) {
-                long g0 = System.nanoTime();
-                gpuTsdf.integrate(gpuDepth, gpuRgb, dw, dh, m, fx, fy, cx, cy);
-                if (System.currentTimeMillis() - gpuSyncAt > 500) { gpuSyncAt = System.currentTimeMillis(); gpuSyncToCpu(); }
-                perf.note("ms: GPU surface (dispatch + sync)", (System.nanoTime() - g0) / 1e6);
-                if (gpuTsdf.failed) { log("GPU surface stopped: " + gpuTsdf.error + "; the CPU fuses from here"); gpuTsdf = null; gpuSurfaceBroken = true; }
-            }
+            if (gpuOn) gpuReady.add(j);   // the drawing thread dispatches it (GL context)
             long cvT0 = System.nanoTime();
             perf.note("ms: depth fusion pixels", (cvT0 - pxT0) / 1e6);
-            carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
-            perf.note("ms: carve", (System.nanoTime() - cvT0) / 1e6);
+            // Behind (frames waiting): skip this frame's see-through check (it works round-robin, later frames catch up),
+            // never the frame's points or surface.
+            if (depthQueued.get() <= 2) {
+                carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
+                perf.note("ms: carve", (System.nanoTime() - cvT0) / 1e6);
+            } else perf.note("carve skipped (depth thread behind)", 1);
             if (depthPixelsFrame > 300) { float fs = (float) farPixelsFrame / depthPixelsFrame; farShare = farShare < 0 ? fs : farShare * 0.7f + fs * 0.3f; }
             float cf = centreSolid(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m);
             if (cf < 0 && frameHits > 200) cf = (float) frameSolid / frameHits;
@@ -4748,15 +4854,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) dcopy[v * dw + u] = dbuf.get(v * dRow + u * dPix);
             lastDepth = dcopy; lastDw = dw; lastDh = dh; lastDIntr = new float[]{fx, fy, cx, cy};
             System.arraycopy(m, 0, lastDPose, 0, 16);
-            sampleLux(frame);
-        } catch (NotYetAvailableException e) {
-            depthNotYet++;
-            // no depth yet
-        } finally {
-            if (depth != null) depth.close();
-            if (conf != null) conf.close();
-            if (cpuImage != null) { cpuImage.close(); cpuImage = null; }
-        }
+    }
+
+    private void sampleColorJ(DepthJob j, float fu, float fv, int[] out) {
+        int u = (int) fu, v = (int) fv;
+        if (j.iy == null || u < 0 || v < 0 || u >= j.iw || v >= j.ih) { out[0] = out[1] = out[2] = 180; return; }
+        int y = j.iy[v * j.yRow + u * j.yPix] & 0xFF;
+        int oU = (v / 2) * j.uRow + (u / 2) * j.uPix, oV = (v / 2) * j.vRow + (u / 2) * j.vPix;
+        int cb = (oU < j.iu.length ? j.iu[oU] & 0xFF : 128) - 128, cr = (oV < j.iv.length ? j.iv[oV] & 0xFF : 128) - 128;
+        float r = y + 1.402f * cr, g = y - 0.344f * cb - 0.714f * cr, b = y + 1.772f * cb;
+        if (j.gain > 1.02f) { r = liftG(r, j.gain); g = liftG(g, j.gain); b = liftG(b, j.gain); }
+        out[0] = clampI((int) r); out[1] = clampI((int) g); out[2] = clampI((int) b);
     }
 
     private void integrateFeaturePoints(Frame frame, Camera camera) {
@@ -4874,7 +4982,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         for (int it = 0; it < budget; it++) {
             int i = carveCursor++;
             if (carveCursor >= n) carveCursor = 0;
-            if (obs[i] == 0 || seenStamp[i] == depthFrames) continue; // dead, or seen in this very frame
+            if (obs[i] == 0 || seenStamp[i] == stampFrame) continue; // dead, or seen in this very frame
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
             float zc = v[2] * x + v[6] * y + v[10] * z + v[14];
             float dp = -zc;
@@ -4990,7 +5098,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         pos.put(i, x); pos.put(i + 1, y); pos.put(i + 2, z);
         int j = count * 4;
         col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) seenAlpha(1));
-        obs[count] = 1; seenStamp[count] = depthFrames; thru[count] = 0;
+        obs[count] = 1; seenStamp[count] = stampFrame; thru[count] = 0;
         if (seg == null || seg.length < pos.capacity() / 3) seg = new byte[pos.capacity() / 3];
         seg[count] = segment;
         count++;
@@ -5001,14 +5109,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (obs[idx] == 0) { // a cleared spot seen solid again: start it fresh
             pos.put(idx * 3, x); pos.put(idx * 3 + 1, y); pos.put(idx * 3 + 2, z);
             col.put(idx * 4, (byte) rgb[0]); col.put(idx * 4 + 1, (byte) rgb[1]); col.put(idx * 4 + 2, (byte) rgb[2]); col.put(idx * 4 + 3, (byte) seenAlpha(1));
-            obs[idx] = 1; thru[idx] = 0; seenStamp[idx] = depthFrames; refined = true;
+            obs[idx] = 1; thru[idx] = 0; seenStamp[idx] = stampFrame; refined = true;
             return;
         }
-        if (thru[idx] != 0 && seenStamp[idx] != depthFrames) thru[idx]--;
+        if (thru[idx] != 0 && seenStamp[idx] != stampFrame) thru[idx]--;
         int n = obs[idx] & 0xFF;
         if (n < 255) obs[idx] = (byte) (n + 1);
-        if (seenStamp[idx] != depthFrames) { // count each depth frame once (many pixels land in one 2 cm spot)
-            seenStamp[idx] = depthFrames;
+        if (seenStamp[idx] != stampFrame) { // count each depth frame once (many pixels land in one 2 cm spot)
+            seenStamp[idx] = stampFrame;
             int a = col.get(idx * 4 + 3) & 0xFF;
             if (a < 255) col.put(idx * 4 + 3, (byte) Math.min(255, a + 255 / SOLID_SEEN + 1));
             if (a >= 255 - 255 / SOLID_SEEN) frameSolid++;
@@ -5044,6 +5152,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private void purgeCleared() {
+        drainDepth();   // the depth thread mustn't add points while they're moved
         int k = 0;
         for (int i = 0; i < count; i++) {
             if (obs[i] == 0) continue;
@@ -5060,6 +5169,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private void dropNoise() {
+        drainDepth();   // the depth thread mustn't add points while they're moved
         int keep = 0;
         boolean[] drop = new boolean[count];
         for (int i = 0; i < count; i++) {
@@ -5105,10 +5215,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- surface fusion thread (rk 10 Nov: the S24's drawing thread spent 73% of its time fusing depth) ----
     private final java.util.concurrent.ExecutorService fuseExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "tsdf-fuse"); t.setPriority(Thread.NORM_PRIORITY); return t; });
-    private java.util.concurrent.Future<?> fuseLast;
+    private volatile java.util.concurrent.Future<?> fuseLast;
     private float[] fuseBuf = new float[5 * 16384];
     private int fuseN;
-    private boolean fuseDrained = true;
+    private volatile boolean fuseDrained = true;
 
     /** Hands this depth frame's surface samples to the fusion thread. At most one frame waits behind the running one. */
     private void submitFuse(final float ox, final float oy, final float oz) {
@@ -5120,6 +5230,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { prev.get(); } catch (Exception e) { logError("fuse wait", new RuntimeException(e)); }
             perf.note("ms: waited for fusion", (System.nanoTime() - t0) / 1e6);
         }
+        synchronized (fuseExec) {
         fuseDrained = false;
         fuseLast = fuseExec.submit(() -> {
             long t0 = System.nanoTime();
@@ -5138,6 +5249,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             } catch (Throwable e) { logError("fuse", new RuntimeException(e)); }
             perf.note("ms: surface fusion (thread)", (System.nanoTime() - t0) / 1e6);
         });
+        }
     }
 
     // ---- GPU surface (GpuTsdf, debug switch "GPU surface"; rk 10 Nov) ----
@@ -5164,8 +5276,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (g == null) return;
         final GpuTsdf.Sync sy = g.sync();
         if (sy == null || sy.count == 0) return;
-        fuseDrained = false;
-        fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } });
+        synchronized (fuseExec) { fuseDrained = false;
+        fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } }); }
     }
 
     /** GL thread: everything the GPU has, into the CPU surface, before it's read (Done, depth AI). */
@@ -5174,8 +5286,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GpuTsdf.Sync sy = gpuTsdf.sync();
             if (sy == null || sy.count == 0) break;
             final GpuTsdf g = gpuTsdf;
-            fuseDrained = false;
-            fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } });
+            synchronized (fuseExec) { fuseDrained = false;
+            fuseLast = fuseExec.submit(() -> { synchronized (tsdf) { g.apply(sy, tsdf); } }); }
             if (sy.count < GpuTsdf.MAX_SYNC_BRICKS) break;
         }
     }
@@ -5275,6 +5387,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Waits until the fusion thread has fused everything handed to it (before anything else reads or changes the surface). */
     private void drainFuse() {
+        drainDepth();
         java.util.concurrent.Future<?> f = fuseLast;
         if (f == null || fuseDrained) return;
         try { f.get(); } catch (Exception e) { logError("fuse drain", new RuntimeException(e)); }
@@ -5398,9 +5511,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private void snapshotForRealign() {
         long t0 = System.currentTimeMillis();
+        drainDepth();
         final int n = count;
         final float[] xyz = new float[n * 3];
-        pos.position(0); pos.get(xyz, 0, n * 3); pos.position(0);
+        FloatBuffer pd = pos.duplicate(); pd.position(0); pd.get(xyz, 0, n * 3);
         fixTry = poseFix.clone();
         stayGuess = null;
         realign = null; realignBuilding = true;
@@ -6672,6 +6786,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float lift(float c) {
         float x = Math.min(1f, Math.max(0f, c) / 255f);
         x = x * colorGain / (1f + (colorGain - 1f) * x); // shadows boosted by colorGain, white stays white (light detection still works)
+        return x * 255f;
+    }
+
+    private static float liftG(float c, float gain) {
+        float x = Math.min(1f, Math.max(0f, c) / 255f);
+        x = x * gain / (1f + (gain - 1f) * x);
         return x * 255f;
     }
 
