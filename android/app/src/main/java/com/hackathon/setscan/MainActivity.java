@@ -1113,7 +1113,7 @@ public class MainActivity extends Activity {
     /** The scrolling panel under the 3D view (holds viewerBottom). */
     private android.widget.ScrollView viewerPanel;
     private FrameLayout.LayoutParams toolBarsLp;
-    private TextView viewerTitle;
+    private TextView viewerTitle, resetWalls;
     /** The room's size under the title in the 3D view ("5.12 × 6.70 m · 2.48 m high"), or null. */
     private volatile String roomSizeText;
 
@@ -1122,6 +1122,7 @@ public class MainActivity extends Activity {
     private void setViewerTitle() {
         if (viewerTitle == null) return;
         String name = renderer.currentName != null ? renderer.currentName : "Scan", size = roomSizeText;
+        if (resetWalls != null) resetWalls.setVisibility(renderer.wallsEdited() ? View.VISIBLE : View.GONE);
         if (size == null) { viewerTitle.setText(name); return; }
         // "scanned area" on a line of its own, so the size itself never gets cut off (rk 10 Nov 12:07)
         if (size.startsWith("scanned area ")) size = "scanned area\n" + size.substring(13);
@@ -1155,6 +1156,15 @@ public class MainActivity extends Activity {
         viewerTitle.setMaxLines(3);
         viewerTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
         viewerTop.addView(viewerTitle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        // "Reset walls": only after a room's walls were dragged by hand (the scan's own outline back)
+        resetWalls = new TextView(this);
+        resetWalls.setText("Reset walls");
+        resetWalls.setTextColor(0xFFFFD60A);
+        resetWalls.setTextSize(13);
+        resetWalls.setPadding(dp(10), dp(6), dp(10), dp(6));
+        resetWalls.setVisibility(View.GONE);
+        resetWalls.setOnClickListener(v -> glView.queueEvent(renderer::resetWallEdits));
+        viewerTop.addView(resetWalls, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         viewerShared = new android.widget.ImageView(this);
         viewerShared.setImageResource(R.drawable.ic_shared);
         viewerShared.setImageTintList(android.content.res.ColorStateList.valueOf(Ios.ACCENT));

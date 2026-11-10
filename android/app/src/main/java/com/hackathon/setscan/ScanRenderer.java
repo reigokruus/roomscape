@@ -6956,6 +6956,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float[] e = wallEdits != null && i < wallEdits.length ? wallEdits[i] : new float[4];
         return new float[]{r.rect[0] - e[0], r.rect[1] + e[1], r.rect[2] - e[2], r.rect[3] + e[3]};
     }
+    /** Any room's walls dragged by hand (the result shows "Reset walls"). */
+    boolean wallsEdited() { float[][] we = wallEdits; if (we == null || !viewing) return false; for (int i = 0; i < we.length; i++) if (edited(i)) return true; return false; }
     private boolean edited(int i) { float[][] we = wallEdits; return we != null && i < we.length && (we[i][0] != 0 || we[i][1] != 0 || we[i][2] != 0 || we[i][3] != 0); }
     /** A room's line with the edits: the walled area changes by the rectangle's change. */
     private String roomLine(int i) {
