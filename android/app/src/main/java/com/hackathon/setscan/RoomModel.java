@@ -171,7 +171,9 @@ final class RoomModel {
         // (rk 10 Nov 12:21: the busiest band was at 2.23 m in a 2.88 m room)
         int mx = 0; for (int b = 0; b < bins; b++) mx = Math.max(mx, h[b]);
         int best = -1; for (int b = bins - 1; b >= 0; b--) if (h[b] >= Math.max(15, 0.3f * mx)) { best = b; break; }
-        if (best < 0) return Float.NaN;
+        // the lowest bands (2.25-2.33 m) alone aren't a ceiling: the 14:08 scan, which never looked up, read 2.22 m
+        // "trusted" from features on and above the door frame
+        if (best < 2) return Float.NaN;
         // the median of the features in and next to that band
         float lo = floorY + 2.25f + (best - 1) * 0.04f, hi = floorY + 2.25f + (best + 2) * 0.04f;
         float[] v = new float[featureN]; int k = 0;
@@ -250,10 +252,10 @@ final class RoomModel {
         // lower one; anything under 2 m above the floor isn't a room's ceiling)
         // ARCore's tracked points first: they came within 2.5-3 cm of rk's 2.88 m on the 13:03 and 13:18 scans where the
         // depth read 2.97 and 3.23 m (a plain ceiling has no texture for this phone's depth). The depth only without them.
-        if (!Float.isNaN(fc) && fc - floorY > 2.2f) { ceilingY = fc; hasCeiling = true; ceilingTrusted = true; }
+        if (!Float.isNaN(fc) && fc - floorY > 2.3f) { ceilingY = fc; hasCeiling = true; ceilingTrusted = true; }
         // ARCore's own ceiling planes only without its points (13:03: a plane at 2.97 m, the points 2.905, truth 2.88)
-        if (Float.isNaN(featureCeilingY) || featureCeilingY - floorY <= 2.2f)
-            for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING && s.cy - floorY > 2.2f && (!hasCeiling || s.cy > ceilingY)) { ceilingY = s.cy; hasCeiling = true; ceilingTrusted = true; }
+        if (Float.isNaN(featureCeilingY) || featureCeilingY - floorY <= 2.3f)
+            for (Surface s : surfaces) if (s.kind == Surface.Kind.CEILING && s.cy - floorY > 2.3f && (!hasCeiling || s.cy > ceilingY)) { ceilingY = s.cy; hasCeiling = true; ceilingTrusted = true; }
         if (!hasCeiling && maxY - floorY > 2.0f && maxY - floorY < 4f) hasCeiling = true;
 
         if (!Float.isNaN(userCeilingY) && userCeilingY > floorY + 1.2f) { ceilingY = userCeilingY; hasCeiling = true; }
