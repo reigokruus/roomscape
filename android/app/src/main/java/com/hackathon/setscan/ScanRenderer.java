@@ -235,7 +235,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         return tookOwn;
     }
-    private long depthKeptPx, depthAllPx;   // depth pixels at PAINT_MIN or more, of all (for the finish line)
+    private long depthKeptPx, depthAllPx; private final long[] zoneAll = new long[3], zoneSure = new long[3];   // depth pixels at PAINT_MIN or more, of all (for the finish line)
     static boolean painted(int conf) { return conf == 0 || conf >= PAINT_MIN; }   // 0 = no rating (older scans, other sources)
     /** What's drawn: the real colour or the confidence grey; dots below PAINT_MIN hidden (alpha 0); unrated dots black
      *  in the greys. The real colours stay in col, untouched. */
@@ -2605,7 +2605,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     MainActivity.recordWanted ? "on" : "off", FIXED_FOCUS ? "fixed" : "auto", fpsCap30 ? "30 fps" : "60 fps"));
             log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through"
                     + (depthAllPx > 0 ? String.format(java.util.Locale.US, "; depth pixels sure enough (confidence %d+): %.0f%%", PAINT_MIN, 100.0 * depthKeptPx / depthAllPx) : "")
-                    + (CLOSEST_WINS ? "; dots replaced by a closer sure look: " + supersededTotal : ""));
+                    + (CLOSEST_WINS ? "; dots replaced by a closer sure look: " + supersededTotal : "")
+                    + (zoneAll[0] > 0 ? String.format(java.util.Locale.US, "; sure depth by picture area: centre %.0f%%, middle %.0f%%, edge %.0f%%",
+                        100.0 * zoneSure[0] / zoneAll[0], 100.0 * zoneSure[1] / Math.max(1, zoneAll[1]), 100.0 * zoneSure[2] / Math.max(1, zoneAll[2])) : ""));
         perf.stage("after Done");
         // The logs, video and diagnostics go into THIS scan's folder: a minute after Done (the after-Done steps take well
         // under a minute), or at once when another scan is started or opened first (rk 10 Nov 15:04-15:06: three quick
@@ -3938,7 +3940,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void reset() {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
-        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0;
+        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0; java.util.Arrays.fill(zoneAll, 0); java.util.Arrays.fill(zoneSure, 0);
         filledWall = null; wallCand = null; wallCandHits = 0; guessCells = null; shownSet = false; guessWeight = 0; guessUpdates = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
@@ -5447,7 +5449,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 short[] md = new short[dw * dh]; int kept = 0;
                 for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) {
                     int c = cbuf.get(v * cRow + u * cPix) & 0xFF;
-                    if (c >= PAINT_MIN) { md[v * dw + u] = dbuf.get(v * dRow + u * dPix); kept++; }
+                    // where in the picture the sure readings are (rk 22:54: are first placements "from the side of the view" worse?)
+                    float ex = Math.abs(u - dw / 2f) / (dw / 2f), ey = Math.abs(v - dh / 2f) / (dh / 2f); int zone = Math.max(ex, ey) < 0.33f ? 0 : Math.max(ex, ey) < 0.66f ? 1 : 2;
+                    zoneAll[zone]++;
+                    if (c >= PAINT_MIN) { md[v * dw + u] = dbuf.get(v * dRow + u * dPix); kept++; zoneSure[zone]++; }
                 }
                 depthKeptPx += kept; depthAllPx += dw * dh;
                 dbuf = ShortBuffer.wrap(md); dRow = dw; dPix = 1;
