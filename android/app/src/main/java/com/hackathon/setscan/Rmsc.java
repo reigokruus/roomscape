@@ -318,7 +318,8 @@ final class Rmsc {
             copyIf(z, new File(dir, "removed-points.bin"), "android/removed-points.bin");
             copyIf(z, new File(dir, "guessed-wall.json"), "android/guessed-wall.json");
             copyIf(z, new File(dir, "dot-confidence.bin"), "android/dot-confidence.bin");
-            copyIf(z, new File(dir, "lowconf-points.bin"), "android/lowconf-points.bin");   // dots ARCore was never sure enough about (below 90%)   // per dot: ARCore depth confidence and closest distance   // one plain wall guessed by the app (generated, not scanned)   // points the clean-up at Done took out (kept, data is gold)
+            copyIf(z, new File(dir, "lowconf-points.bin"), "android/lowconf-points.bin");
+            copyIf(z, new File(dir, "merged-dots.bin"), "android/merged-dots.bin");   // which dots stand for merged flat cells   // dots ARCore was never sure enough about (below 90%)   // per dot: ARCore depth confidence and closest distance   // one plain wall guessed by the app (generated, not scanned)   // points the clean-up at Done took out (kept, data is gold)
         }
         File f = appFiles;
         if (f != null) {

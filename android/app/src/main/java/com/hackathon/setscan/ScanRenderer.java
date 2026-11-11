@@ -117,7 +117,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Greys while scanning only; the result and the gallery show the real colours (rk 11 Nov 22:18: "I want to see what
      *  it picked up"). */
     private boolean greyNow() { return CONF_GREY && !viewing; }
-    private boolean greyShown; private int paintShown = -1;
+    private boolean greyShown, mergedShown; private int paintShown = -1;
+    /** Debug tools "Show merged areas": dots standing for merged flat cells drawn blue, live and in saved scans. */
+    static volatile boolean SHOW_MERGED = false;
     private final ByteBuffer greyBuf = offHeap(MAX_POINTS * 4, "greys");
     private int curConf = 0, curMm = 0;     // the reading being added (depth thread), for addPoint/refine
     /** Only sure readings paint a dot (rk 11 Nov 22:09: "make only points above 90% paint"): ARCore depth confidence
@@ -161,25 +163,27 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  averaged into the merged dot. Display and dot count only; nothing else about the scan changes. */
     static volatile boolean MERGE_FLAT = true;
     private final byte[] mergedDot = new byte[MAX_POINTS];   // 1 = this dot stands for a merged flat cell
-    private int mergeCursor, mergedAway; private long mergeAt;
+    private int mergeCursor, mergedAway; private long mergeAt, mergeLogAt;
+    private int mergeRounds, mergeLateSkips, mergeRoundAway, mergeCells, mergeNotSettled, mergeRecent, mergeInView, mergeNotFlat;
     private final int[] mergeMem = new int[64];
     private void maybeMergeFlat(long nowMs) {
-        if (!MERGE_FLAT || nowMs - mergeAt < 2000 || count < 5000 || depthLate()) return;
-        mergeAt = nowMs;
+        if (!MERGE_FLAT || nowMs - mergeAt < 2000 || count < 5000) return;
+        if (depthLate()) { mergeLateSkips++; mergeAt = nowMs; return; }
+        mergeAt = nowMs; mergeRounds++;
         int n = count, budget = Math.min(n, 15000), away = 0;
         final boolean nearCap = n > MAX_POINTS * 0.9f; final float[] cm = lastGoodCam;
         for (int it = 0; it < budget; it++) {
             int i = mergeCursor++; if (mergeCursor >= n) mergeCursor = 0;
             if (obs[i] == 0 || mergedDot[i] != 0 || !(nearCm[i] > 0 && nearCm[i] < FINE_NEAR_M * 100)) continue;   // fine dots only
-            if ((col.get(i * 4 + 3) & 0xFF) < 200) continue;   // settled: seen in 4+ separate depth frames
+            if ((col.get(i * 4 + 3) & 0xFF) < 200) { mergeNotSettled++; continue; }   // settled: seen in 4+ separate depth frames
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
             // Not under the user's eyes (rk 23:36): only dots out of the camera's view and untouched for ~4 s (30 depth
             // frames); near the cap (90%) anything settled, so it still catches up before the limit matters.
             if (!nearCap) {
-                if (stampFrame - seenStamp[i] < 30) continue;
+                if (stampFrame - seenStamp[i] < 30) { mergeRecent++; continue; }
                 float dx = x - cm[12], dy = y - cm[13], dz = z - cm[14];
                 float xc = cm[0] * dx + cm[1] * dy + cm[2] * dz, yc = cm[4] * dx + cm[5] * dy + cm[6] * dz, zc = cm[8] * dx + cm[9] * dy + cm[10] * dz;
-                if (zc < -0.05f && Math.abs(xc) < -zc * 0.8f && Math.abs(yc) < -zc * 1.1f) continue;   // in view
+                if (zc < -0.05f && Math.abs(xc) < -zc * 0.8f && Math.abs(yc) < -zc * 1.1f) { mergeInView++; continue; }   // in view
             }
             float bx = (float) Math.floor(x / VOXEL) * VOXEL, by = (float) Math.floor(y / VOXEL) * VOXEL, bz = (float) Math.floor(z / VOXEL) * VOXEL;
             int m = 0;
@@ -207,7 +211,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
             double[] ev = Anchors.eig3(xx / m, yy / m, zz / m, xy / m, xz / m, yz / m);
             double thick = Math.sqrt(Math.max(0, ev[2])), cs = (Math.sqrt(sr / m) + Math.sqrt(sg / m) + Math.sqrt(sb / m)) / 3;
-            if (thick >= 0.004 || cs >= 12) continue;   // shape or colour change: the fine dots stay
+            if (thick >= 0.004 || cs >= 12) { mergeNotFlat++; continue; }   // shape or colour change: the fine dots stay
+            mergeCells++;
             int k = mergeMem[0]; int conf = 0, near = 32767, ob = 0, al = 0;
             for (int q = 0; q < m; q++) { int j = mergeMem[q]; conf = Math.max(conf, confBest[j] & 0xFF); if (nearCm[j] > 0) near = Math.min(near, nearCm[j]); ob = Math.max(ob, obs[j] & 0xFF); al = Math.max(al, col.get(j * 4 + 3) & 0xFF); }
             for (int q = 1; q < m; q++) {
@@ -220,6 +225,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             confBest[k] = (byte) conf; nearCm[k] = (short) near; obs[k] = (byte) ob; mergedDot[k] = 1;
         }
         if (away > 0) { mergedAway += away; refined = true; }
+        mergeRoundAway += away;
+        if (nowMs - mergeLogAt >= 15000) {   // one summary line every 15 s (rk 23:44: when did it merge, what held it back)
+            mergeLogAt = nowMs;
+            log(String.format(java.util.Locale.US, "merge (last 15 s): %d rounds, %d skipped (depth late); %d fine dots merged into %d cells; passed over: %d not settled, %d seen in the last ~4 s, %d in view, %d not flat or even",
+                    mergeRounds, mergeLateSkips, mergeRoundAway, mergeCells, mergeNotSettled, mergeRecent, mergeInView, mergeNotFlat));
+            mergeRounds = mergeLateSkips = mergeRoundAway = mergeCells = mergeNotSettled = mergeRecent = mergeInView = mergeNotFlat = 0;
+        }
     }
     // ---- Hold "Rescan": a sphere in front of the phone where old dots are cleared and refilled by fresh readings ----
     static volatile float SPHERE_R = 0.15f;   // sphere radius, m (debug tools "Rescan sphere")
@@ -360,6 +372,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (!greyNow()) { r = col.get(i * 4) & 0xFF; g = col.get(i * 4 + 1) & 0xFF; b = col.get(i * 4 + 2) & 0xFF; }
             else if (c == 0) { r = g = b = 0; }   // no rating: solid black
             else { r = g = b = c; }
+            if (SHOW_MERGED && mergedDot[i] != 0) { r = 40; g = 120; b = 255; }   // debug: merged flat cells in blue
             greyBuf.put(i * 4, (byte) r); greyBuf.put(i * 4 + 1, (byte) g); greyBuf.put(i * 4 + 2, (byte) b); greyBuf.put(i * 4 + 3, (byte) alpha);
         }
     }
@@ -1380,6 +1393,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 final byte[] oa = java.util.Arrays.copyOf(obs, cn);
                 final byte[] sga = seg == null ? null : java.util.Arrays.copyOf(seg, cn);
                 final byte[] cfa = java.util.Arrays.copyOf(confBest, cn); final short[] nca = java.util.Arrays.copyOf(nearCm, cn);
+                final byte[] mga = java.util.Arrays.copyOf(mergedDot, cn);
                 final java.util.List<Object> jpgs = ScanExport.readKeyframesRaw(photos, width, height);
                 final java.util.List<Runnable> encode = new java.util.ArrayList<>();
                 for (int i = 0; i < photos.keyframes.size() && i < jpgs.size(); i++) {
@@ -1417,6 +1431,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
                         d.seg = sga == null ? null : new byte[live];
                         d.dotConf = new byte[live * 3];   // with every save (Done, autosave, a kept Cancel): matches points.bin
+                        d.merged = new byte[live];
                         for (int i = 0, j = 0; i < cn; i++) {
                             if (oa[i] == 0) continue; // cleared by see-through
                             if (!painted(cfa[i] & 0xFF)) {   // only weak readings: kept aside, not a scan point
@@ -1426,6 +1441,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                             }
                             if (d.seg != null) d.seg[j] = sga[i];
                             d.dotConf[j * 3] = cfa[i]; d.dotConf[j * 3 + 1] = (byte) (nca[i] >> 8); d.dotConf[j * 3 + 2] = (byte) nca[i];
+                            d.merged[j] = mga[i];
                             d.pos[j * 3] = pa[i * 3]; d.pos[j * 3 + 1] = pa[i * 3 + 1]; d.pos[j * 3 + 2] = pa[i * 3 + 2];
                             d.col[j * 3] = ca[i * 4]; d.col[j * 3 + 1] = ca[i * 4 + 1]; d.col[j * 3 + 2] = ca[i * 4 + 2];
                             j++;
@@ -1485,6 +1501,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     int m = in.readInt(); if (m == d.n) { dc = new byte[m * 3]; in.readFully(dc); }
                 } catch (Exception e) { logError("dot-confidence.bin", e); }
                 final byte[] dotConf = dc;
+                byte[] mg = null; File mgf = new File(dir, "merged-dots.bin");
+                if (mgf.exists() && appendSimplify <= 0) try (java.io.DataInputStream in = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(mgf)))) {
+                    int m = in.readInt(); if (m == d.n) { mg = new byte[m]; in.readFully(mg); }
+                } catch (Exception e) { logError("merged-dots.bin", e); }
+                final byte[] mergedFile = mg;
                 if (appendSimplify > 0) simplifyLoaded(d, appendSimplify);
                 if (currentName == null || replaceMarks) currentName = d.name;
                 loadedAny = true;
@@ -1501,6 +1522,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         voxels.put(vk, count);
                         addPoint(x, y, z, rgb);
                         obs[count - 1] = 2;
+                        if (mergedFile != null) mergedDot[count - 1] = mergedFile[i];
                         if (dotConf != null) { confBest[count - 1] = dotConf[i * 3]; nearCm[count - 1] = (short) (((dotConf[i * 3 + 1] & 255) << 8) | (dotConf[i * 3 + 2] & 255)); }
                         if (d.seg != null && i < d.seg.length) seg[count - 1] = d.seg[i];
                     }
@@ -3240,7 +3262,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
@@ -3326,7 +3348,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
@@ -6278,7 +6300,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
@@ -7533,7 +7555,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---------------- drawing ----------------
 
     private void uploadNew() {
-        if (greyShown != greyNow() || paintShown != PAINT_MIN) { greyShown = greyNow(); paintShown = PAINT_MIN; refined = true; refineCursor = 0; }   // switched: send every dot's colour again
+        if (greyShown != greyNow() || paintShown != PAINT_MIN || mergedShown != SHOW_MERGED) { greyShown = greyNow(); paintShown = PAINT_MIN; mergedShown = SHOW_MERGED; refined = true; refineCursor = 0; }   // switched: send every dot's colour again
         // Re-send a slice of already-uploaded points each frame so refined positions/colours show up.
         if (refined && uploaded > 0) {
             int slice = Math.min(uploaded, 40000);
