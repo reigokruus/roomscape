@@ -4738,6 +4738,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
 
         TrackingState ts = camera.getTrackingState();
+        if (!viewing) checkLossStop(ts, System.currentTimeMillis());
         // a replay: when the recording has played to its end, Done (MainActivity.replayFinished)
         Runnable rd = replayDone;
         if (rd != null && !viewing && frameNo % 15 == 0) {
@@ -4795,6 +4796,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     snapshotForRealign();
                     healthLosses++;
                     log("tracking lost mid-scan: fusion paused until the view lines up with the scan again"); evMark();
+                    if (STOP_ON_LOSS) lossStopAt = nowMs + LOSS_GRACE_MS;   // a hiccup under a second doesn't end the scan
                     notAddingSince = nowMs; postHud(ts);   // at once, not at the next 5th frame
                     // (no toast: the card at the top says what to do; rk 10 Nov 15:53 got two different messages at once)
                 }
@@ -6329,7 +6331,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     /** Debug tools "Plain-wall warning". */
-    static boolean PLAIN_WARNING = true;
+    static boolean PLAIN_WARNING = false;   // (rk 11 Nov 22:02: no tracking-loss notices; the standing line stays)
     private long warnFewSince, plainWarnBuzzAt; private volatile long plainWarnUntil;
     private long fewFeaturesSince, plainHintAt; private volatile long plainHintUntil; private volatile int featuresNow = -1;
 
@@ -6727,7 +6729,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- One plain wall filled as a rectangle (WallGuess; rk 11 Nov 21:40) ----
     static boolean FILL_WALL = true;        // debug tools "Fill the plain wall"
     static boolean STANDING_NOTE = true;    // debug tools "Standing notice"
-    static final String STANDING_TEXT = "Keep corners, edges or furniture in view. On a plain wall the phone loses track and the scan fails.";
+    static final String STANDING_TEXT = "Keep corners, edges or furniture in view. If the phone loses track on a plain wall, the scan stops.";
     static final float PLAIN_SPREAD = 60f;  // brightness spread of a plain wall's points (offline: hall wall 32-52, curtains 68-84, cabinets 124-145)
     volatile WallGuess.Wall filledWall;     // the wall's current best estimate (the guessed dots go on it)
     private float guessWeight; private int guessUpdates;
@@ -6859,7 +6861,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- Good spots (Anchors): views with many features and 3D shape, to send the user to after a loss ----
     /** Debug tools "Good spot after a loss" (on by default). */
-    static boolean GOOD_SPOTS = true;
+    static boolean GOOD_SPOTS = false;     // (rk 11 Nov 22:02: "showing the picture where to point doesn't work": off)
+    /** Debug tools "Stop the scan on a loss" (rk 11 Nov 22:02): when ARCore loses track the scan simply ends and is kept,
+     *  no lost-track prompts. */
+    static boolean STOP_ON_LOSS = true;
+    static final long LOSS_GRACE_MS = 1000; private long lossStopAt;
+    /** Each frame: tracking lost and not back within the grace: the scan ends as if Done was tapped (kept, processed). */
+    private void checkLossStop(TrackingState ts, long nowMs) {
+        if (lossStopAt == 0) return;
+        if (ts == TrackingState.TRACKING) { lossStopAt = 0; log("tracking back within " + LOSS_GRACE_MS + " ms: the scan goes on"); return; }
+        if (nowMs < lossStopAt) return;
+        lossStopAt = 0;
+        log("tracking lost for over " + LOSS_GRACE_MS + " ms: the scan stops here and is kept (rk 11 Nov 22:02: no lost-track prompts, just stop)");
+        activity.stopOnLoss();
+    }
     final Anchors anchors = new Anchors();
     private volatile Anchors.Anchor goal; private volatile long goalSince; private long anchorOfferAt;
     private final java.util.Set<Anchors.Anchor> goalTried = new java.util.HashSet<>();
@@ -7013,7 +7028,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log(String.format(java.util.Locale.US, "carrying on as a new part after %.1f s (the user chose it); segment %d", (nowMs - realignSince) / 1000f, segment));
             return true;
         }
-        if (nowMs - realignSince > 30000 && !newPartOffered) { newPartOffered = true; activity.offerNewPart(); }
+        if (nowMs - realignSince > 30000 && !newPartOffered && !STOP_ON_LOSS) { newPartOffered = true; activity.offerNewPart(); }
         // This depth frame's samples (ARCore's frame) join the last few frames' (a second or two of looking: more of
         // the room than one view, so a corner can't be taken for another corner as easily).
         java.util.ArrayList<float[]> pts = new java.util.ArrayList<>();
@@ -8450,7 +8465,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // A quiet pause (rk 10 Nov 15:58: never "lost", no red, the scan stays in view): one calm hint.
             // rk 10 Nov 16:45: an immediate, clear notice so the user knows exactly when to stop moving
             level = 3;   // amber
-            hint = lostHint();
+            hint = STOP_ON_LOSS ? STANDING_TEXT : lostHint();
         }
         else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
             // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said); tracking itself
@@ -8461,8 +8476,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (needRealign && everTracked) {
             // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed
             // for 24 s while nothing was being scanned)
-            level = 3;   // still not adding: the same notice until data is fused again
-            hint = lostHint();
+            level = STOP_ON_LOSS ? 1 : 3;   // (without lost-track prompts: ARCore moved its map, it lines up again by itself)
+            hint = STOP_ON_LOSS ? STANDING_TEXT : lostHint();
         }
         else if (ts != TrackingState.TRACKING) {
             level = 2;
@@ -8512,7 +8527,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (notAdding && !lostNow) notAddingSince = lastNewDepthMs + 3000;   // a depth stall: the change is when 3 s ran out
             // a stale change time (20:25 scan logged "101435 ms": the time of an earlier pose jump, kept since then)
             boolean known = nowMs - notAddingSince < 5000;
-            activity.haptic(notAdding);
+            if (!STOP_ON_LOSS) activity.haptic(notAdding);
             log(notAdding ? (known ? String.format(java.util.Locale.US, "lost-track notice shown %d ms after the change", nowMs - notAddingSince)
                     : "lost-track notice shown (" + (lostNow ? "re-aligning" : "no new depth") + "; when it changed isn't known)") : "scanning again: notice off");
             notAddingSince = nowMs;   // used once

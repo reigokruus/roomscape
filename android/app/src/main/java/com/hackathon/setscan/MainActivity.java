@@ -52,6 +52,17 @@ public class MainActivity extends Activity {
     /** A replay (intent extra replayName): its name; started once. */
     private String replayName; private boolean replayStarted, replayEnded;
 
+    /** ARCore lost track mid-scan and STOP_ON_LOSS is on: Done, as if tapped (the scan is kept). */
+    void stopOnLoss() {
+        runOnUiThread(() -> {
+            if (renderer.isViewing()) return;
+            act("tracking lost: scan stopped automatically");
+            haptic(true);
+            toast("Scan stopped: the phone lost track. Everything scanned is kept.");
+            onMainButton();
+        });
+    }
+
     /** The replayed recording ended: Done, as if tapped. */
     void replayFinished() {
         runOnUiThread(() -> {
@@ -782,16 +793,20 @@ public class MainActivity extends Activity {
             dropB.setText(ScanRenderer.DROP_UNDER_TILES ? "Points under tiles: hidden" : "Points under tiles: kept");
             dropB.setOnClickListener(v -> { ScanRenderer.DROP_UNDER_TILES = !ScanRenderer.DROP_UNDER_TILES; sp.edit().putBoolean("abDropUnderTiles", ScanRenderer.DROP_UNDER_TILES).apply(); dropB.setText(ScanRenderer.DROP_UNDER_TILES ? "Points under tiles: hidden" : "Points under tiles: kept"); });
             Button spotB = new Button(this);
-            ScanRenderer.GOOD_SPOTS = sp.getBoolean("abGoodSpots", true);
+            ScanRenderer.GOOD_SPOTS = sp.getBoolean("abGoodSpots2", false);
             spotB.setText(ScanRenderer.GOOD_SPOTS ? "Good spot after a loss: on" : "Good spot after a loss: off");
-            spotB.setOnClickListener(v -> { ScanRenderer.GOOD_SPOTS = !ScanRenderer.GOOD_SPOTS; sp.edit().putBoolean("abGoodSpots", ScanRenderer.GOOD_SPOTS).apply(); spotB.setText(ScanRenderer.GOOD_SPOTS ? "Good spot after a loss: on" : "Good spot after a loss: off"); });
+            spotB.setOnClickListener(v -> { ScanRenderer.GOOD_SPOTS = !ScanRenderer.GOOD_SPOTS; sp.edit().putBoolean("abGoodSpots2", ScanRenderer.GOOD_SPOTS).apply(); spotB.setText(ScanRenderer.GOOD_SPOTS ? "Good spot after a loss: on" : "Good spot after a loss: off"); });
             Button warnB = new Button(this);
-            ScanRenderer.PLAIN_WARNING = sp.getBoolean("abPlainWarning", true);
+            ScanRenderer.PLAIN_WARNING = sp.getBoolean("abPlainWarning2", false);
             warnB.setText(ScanRenderer.PLAIN_WARNING ? "Plain-wall warning: on" : "Plain-wall warning: off");
-            warnB.setOnClickListener(v -> { ScanRenderer.PLAIN_WARNING = !ScanRenderer.PLAIN_WARNING; sp.edit().putBoolean("abPlainWarning", ScanRenderer.PLAIN_WARNING).apply(); warnB.setText(ScanRenderer.PLAIN_WARNING ? "Plain-wall warning: on" : "Plain-wall warning: off"); });
+            warnB.setOnClickListener(v -> { ScanRenderer.PLAIN_WARNING = !ScanRenderer.PLAIN_WARNING; sp.edit().putBoolean("abPlainWarning2", ScanRenderer.PLAIN_WARNING).apply(); warnB.setText(ScanRenderer.PLAIN_WARNING ? "Plain-wall warning: on" : "Plain-wall warning: off"); });
             Button uwB = new Button(this);   // EXPERIMENT (remove with experiment/): records the ultrawide without ARCore
             uwB.setText("Ultrawide recorder (experiment)");
             uwB.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)));
+            Button stopB = new Button(this);
+            ScanRenderer.STOP_ON_LOSS = sp.getBoolean("abStopOnLoss", true);
+            stopB.setText(ScanRenderer.STOP_ON_LOSS ? "Stop the scan on a loss: on" : "Stop the scan on a loss: off");
+            stopB.setOnClickListener(v -> { ScanRenderer.STOP_ON_LOSS = !ScanRenderer.STOP_ON_LOSS; sp.edit().putBoolean("abStopOnLoss", ScanRenderer.STOP_ON_LOSS).apply(); stopB.setText(ScanRenderer.STOP_ON_LOSS ? "Stop the scan on a loss: on" : "Stop the scan on a loss: off"); });
             Button greyB = new Button(this);
             ScanRenderer.CONF_GREY = sp.getBoolean("abConfGrey", true);
             greyB.setText(ScanRenderer.CONF_GREY ? "Confidence greys: on" : "Confidence greys: off");
@@ -831,7 +846,7 @@ public class MainActivity extends Activity {
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB, greyB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB, greyB, stopB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }
