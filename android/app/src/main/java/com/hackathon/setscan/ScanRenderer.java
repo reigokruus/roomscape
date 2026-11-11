@@ -6877,6 +6877,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // ARCore came back in its old frame. Today's scans: the good returns were 0.00-0.05 away (m + deg/30), the
             // doubtful ones 0.17 and more (13:52's wrong-angle 65.8 s resume: 0.58), so 0.10.
             if (ok && jg == null && res.fit.inliers >= 0.55f && res.fit.median < 0.02f && Realign.away(F, poseFix) < 0.10f) { strong = true; log(String.format(java.util.Locale.US, "one match is enough: it keeps the old correction (%.2f away)", Realign.away(F, poseFix))); }
+            // A close fit near ARCore's own pose (ARCore came back in its own frame, give or take): one very good frame
+            // within 20 cm and 8 deg of the correction in use is enough (rk 11 Nov 20:48: ARCore was back after 4.3 s,
+            // the scan only carried on after 18 s; offline over the saved losses (tools/realign-bench/Recovery.java)
+            // this would have resumed 4 of 4 right, 0.2-15 s sooner, and the drifting far fits never pass it).
+            if (ok && !strong && jg == null && !sessionRestarted && res.fit.inliers >= 0.6f && res.fit.median < 0.015f) {
+                float lm = (float) Math.hypot(F[12] - poseFix[12], F[14] - poseFix[14]);
+                double ld = Math.abs(Math.toDegrees(Math.atan2(F[2], F[0]) - Math.atan2(poseFix[2], poseFix[0]))); if (ld > 180) ld = 360 - ld;
+                if (lm <= 0.2f && ld <= 8) { strong = true; log(String.format(java.util.Locale.US, "one match is enough: close to ARCore's own pose (%.2f m, %.1f deg)", lm, ld)); }
+            }
             // A single strong match may not turn the scan by more than 10 degrees from the correction in use (or from
             // the jump guess): 16:40 scan, after a camera restart three tries said -10, -24, -36 deg, the last at 82%
             // was taken, and the tiles then disagreed with the new data (taken back 37 -> 139). Bigger turns need two
