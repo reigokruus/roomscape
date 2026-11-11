@@ -6254,6 +6254,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }, "realign-snapshot").start();
     }
 
+    /** Debug tools "Plain-wall warning". */
+    static boolean PLAIN_WARNING = true;
+    private long warnFewSince, plainWarnBuzzAt; private volatile long plainWarnUntil;
     private long fewFeaturesSince, plainHintAt; private volatile long plainHintUntil; private volatile int featuresNow = -1;
 
     // ---- the held view while lost ----
@@ -6592,6 +6595,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         featuresNow = n;
         // Before ARCore loses its place on a plain wall or corner (rk 10 Nov 15:58; 11 of today's 12 losses were "not
         // enough features"): under 20 sure features for 1 s shows the calm plain-wall hint on the card (no toast).
+        // Plain-wall warning (debug switch, default on; rk 11 Nov "how could we handle plain walls"): under 15 features
+        // for 2 s is a stronger, earlier-ranked line with one buzz. Offline over 19 losses in rk's and Vera's logs
+        // (tools/realign-bench/warn-rules.py): all 19 had it, median 4 s before; ~1.8 a minute came without a loss
+        // following (some of those because the user turned away in time).
+        if (PLAIN_WARNING) {
+            if (n >= 15) warnFewSince = 0;
+            else if (warnFewSince == 0) warnFewSince = nowMs;
+            else if (nowMs - warnFewSince >= 2000) {
+                if (plainWarnUntil < nowMs) {
+                    log("plain-wall warning (" + n + " features for " + (nowMs - warnFewSince) / 1000 + " s)");
+                    if (nowMs - plainWarnBuzzAt > 8000) { activity.haptic(false); plainWarnBuzzAt = nowMs; }
+                }
+                plainWarnUntil = nowMs + 2500;
+            }
+        }
         if (n >= 20) { fewFeaturesSince = 0; return; }
         if (fewFeaturesSince == 0) { fewFeaturesSince = nowMs; return; }
         if (nowMs - fewFeaturesSince > 1000) {
@@ -8226,6 +8244,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     : "Lost track: move slowly, pointing at the floor or furniture";
         }
         else if (d < 0 || count < 3000) { level = 1; hint = LIVE_POINTS ? "Walk slowly and sway the phone over the room: points appear as it's captured" : LIVE_MESH ? "Walls and objects get covered in a mesh as they're found. Walk slowly and sway the phone over bare or orange areas" : "Dots show progress: red = needs more, green = done. Walk slowly and sway the phone over red dots"; }
+        else if (PLAIN_WARNING && System.currentTimeMillis() < plainWarnUntil) { level = 2; hint = "Plain wall: keep the floor line or a corner in view"; }
         else if (photoWanted && d >= 0.35f) { level = 1; hint = "Hold still a moment… taking a photo"; }
         else if (tooFar && d < 0.7f) { level = 2; hint = "Too far: walls bend past 2 m. Step closer (1 to 2 m)"; }
         else if (tooFast) { level = 2; hint = "Too fast: slow down, or the phone loses its place"; }

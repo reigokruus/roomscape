@@ -87,6 +87,11 @@ screen video with it. Share .rmsc files only with the people who need them.
   the scan sees it reach above ~1.6 m.
 - Curtains and furniture against a wall are measured as the wall. Pull curtains aside, or drag that wall line in the
   result.
+- **Plain walls lose tracking** (Android: the phone finds its place from visible detail, and a blank wall has none):
+  sweep a plain wall at an angle with a corner, the floor edge, a door frame or furniture in the picture; never face
+  it straight on. On a location with many blank walls, put a few strips of masking tape or sticky notes on them (about
+  one per metre at eye height) and take them off after. "Plain wall: keep the floor line or a corner in view" is the
+  warning that tracking is about to go. Rooms with many plain walls: scan them with the iPhone if you can.
 - If the amber "Lost track" notice appears, stop and point back where it says. Scanning carries on by itself.
 - Tap **Done**. The size, height and floor area appear at the top and in the room card.
 
