@@ -131,6 +131,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  farther or equal one (rk 10 Nov), so repeated looks settle instead of churning. Sideways only the reading's own
      *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
     static volatile boolean CLOSEST_WINS = true;
+    /** Debug tools "Fine dots up close": readings from under FINE_NEAR_M get 0.8 cm cells instead of 2 cm. */
+    static volatile boolean FINE_NEAR = true;
+    static final float FINE_NEAR_M = 1.0f;
     /** Debug tools "Dot size" (rk 11 Nov 22:26: "can you make the dots smaller"): a factor on the drawn dot size (dots
      *  are drawn in world size, smaller on screen further away). 0.5 = about 1.4 cm across (was 2.8 cm). Display only. */
     static volatile float DOT_SCALE = 1f;   // (rk 22:40: smaller dots showed the gaps between them: back to full size)
@@ -147,15 +150,16 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final int SUPERSEDE_ALONG = 2;
     private int supersededTotal;
     /** Depth thread. Returns true when the reading took over its own cell's dot (nothing more to do for it). */
-    private boolean supersede(float wx, float wy, float wz, float cx, float cy, float cz, int mm, int[] rgb) {
+    private boolean supersede(float wx, float wy, float wz, float cx, float cy, float cz, int mm, int[] rgb, boolean fineCells) {
+        final float cell = fineCells ? VOXEL_FINE : VOXEL; final int reach = fineCells ? SUPERSEDE_ALONG * 2 : SUPERSEDE_ALONG;   // the same +-4 cm
         int newCm = mm / 10;
         float dx = wx - cx, dy = wy - cy, dz = wz - cz, l = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (l < 1e-3f) return false;
         dx /= l; dy /= l; dz /= l;
         boolean tookOwn = false;
-        for (int k = -SUPERSEDE_ALONG; k <= SUPERSEDE_ALONG; k++) {
-            float px = wx + dx * k * VOXEL, py = wy + dy * k * VOXEL, pz = wz + dz * k * VOXEL;
-            int idx = voxels.get(key(px, py, pz));
+        for (int k = -reach; k <= reach; k++) {
+            float px = wx + dx * k * cell, py = wy + dy * k * cell, pz = wz + dz * k * cell;
+            int idx = voxels.get(fineCells ? fineKey(px, py, pz) : key(px, py, pz));
             if (idx < 0 || idx >= count || obs[idx] == 0) continue;
             int old = nearCm[idx];
             if (old <= 0 || newCm >= old * 0.8f || old - newCm < 15) continue;   // not clearly closer: leave it
@@ -3159,7 +3163,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         voxels.clear();
         for (int i = 0; i < count; i++) {
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
-            voxels.put(!zones.isEmpty() && inZone(x, y, z) ? fineKey(x, y, z) : key(x, y, z), i);
+            boolean fineDot = (!zones.isEmpty() && inZone(x, y, z)) || (FINE_NEAR && nearCm[i] > 0 && nearCm[i] < FINE_NEAR_M * 100);
+            voxels.put(fineDot ? fineKey(x, y, z) : key(x, y, z), i);
         }
     }
 
@@ -5605,7 +5610,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (d > FAR_M) farPixelsFrame++;
                     if (d < 0.8f) { nearPixelsFrame++; nearSum[0] += wx; nearSum[1] += wy; nearSum[2] += wz; }
                     boolean fine = !zones.isEmpty() && inZone(wx, wy, wz);
-                    long vk = fine ? fineKey(wx, wy, wz) : key(wx, wy, wz);
+                    // close readings get the fine grid (0.8 cm; rk 22:40: the gaps between dots aren't filled): an S24 depth
+                    // pixel covers under 1 cm within 1 m, so a 2 cm cell threw detail away there
+                    boolean fineDot = fine || (FINE_NEAR && d < FINE_NEAR_M);
+                    long vk = fineDot ? fineKey(wx, wy, wz) : key(wx, wy, wz);
                     int hit = voxels.get(vk);
                     if (hit > 0) viewKnown++; else viewNew++;   // the view on surface already in the scan vs new (once-a-second log)
                     sampleColorJ(j, xc / d * ifx + icx, icy - yc / d * ify, rgb);
@@ -5637,7 +5645,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (weak) continue;
                     if (hit < 0 || seenStamp[hit] != stampFrame) frameHits++;
                     curConf = cv; curMm = mm;
-                    if (CLOSEST_WINS && painted(cv) && supersede(wx, wy, wz, m[12], m[13], m[14], mm, rgb)) { curConf = 0; curMm = 0; continue; }
+                    if (CLOSEST_WINS && painted(cv) && supersede(wx, wy, wz, m[12], m[13], m[14], mm, rgb, fineDot)) { curConf = 0; curMm = 0; continue; }
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); curConf = 0; curMm = 0; continue; }
                     voxels.put(vk, count);
                     addPoint(wx, wy, wz, rgb); curConf = 0; curMm = 0;
