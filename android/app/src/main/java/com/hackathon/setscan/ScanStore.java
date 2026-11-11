@@ -41,6 +41,7 @@ final class ScanStore {
         float[] pos; byte[] col; int n;
         byte[] seg; // per point: which stretch of tracking it came from (0, +1 after each loss); null = all 0
         byte[] dotConf; // per point: best ARCore depth confidence, closest distance (cm, big-endian short); null = none
+        byte[] lowConf; // dots with only weak readings (below ScanRenderer.PAINT_MIN): x, y, z float, r, g, b, confidence; not scan points
         List<Kf> kfs = new ArrayList<>();
         float[] path = new float[0];
         List<float[]> corners = new ArrayList<>(), walls = new ArrayList<>();
@@ -124,6 +125,9 @@ final class ScanStore {
             boolean any = false; for (int i = 0; i < d.n; i++) if (d.seg[i] != 0) { any = true; break; }
             if (any) try (DataOutputStream o = out(new File(tmp, "segments.bin"))) { o.writeInt(d.n); o.write(d.seg, 0, d.n); }
         }
+        if (d.lowConf != null && d.lowConf.length > 0) {
+            try (DataOutputStream o = out(new File(tmp, "lowconf-points.bin"))) { o.writeInt(d.lowConf.length / 16); o.write(d.lowConf); }
+        }
         if (d.dotConf != null && d.dotConf.length >= d.n * 3) {
             try (DataOutputStream o = out(new File(tmp, "dot-confidence.bin"))) { o.writeInt(d.n); o.write(d.dotConf, 0, d.n * 3); }
         }
@@ -172,7 +176,7 @@ final class ScanStore {
         // a later save (rename, Continue scan, an edit) used to leave them behind.
         for (String keep : new String[]{"sync.json", "rmsc-extra", "splats.bin", "source-manifest.json",
                 "measurements.json", "scan-log.txt", "perf-scan.jsonl", "perf-scan.summary.json",
-                "depth-pairs.bin", "feature-heights.bin", "live-mesh.bin", "events-depth.bin", "pose-track.bin", "tiles.json", "tiles.png", "floor-edits.json", "floor-area.json", "removed-points.bin", "guessed-wall.json", "dot-confidence.bin"}) {
+                "depth-pairs.bin", "feature-heights.bin", "live-mesh.bin", "events-depth.bin", "pose-track.bin", "tiles.json", "tiles.png", "floor-edits.json", "floor-area.json", "removed-points.bin", "guessed-wall.json", "dot-confidence.bin", "lowconf-points.bin"}) {
             File from = new File(dir, keep), to = new File(tmp, keep);
             if (from.exists() && !to.exists()) copyTree(from, to);
         }

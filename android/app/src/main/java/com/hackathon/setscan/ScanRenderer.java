@@ -114,13 +114,25 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Debug tools "Confidence greys": dots drawn in grey by their confidence (white = ARCore most sure, black = least);
      *  display only, the real colours are kept and saved as always. */
     static volatile boolean CONF_GREY = true;
-    private boolean greyShown;
+    private boolean greyShown; private int paintShown = -1;
     private final ByteBuffer greyBuf = offHeap(MAX_POINTS * 4, "greys");
     private int curConf = 0, curMm = 0;     // the reading being added (depth thread), for addPoint/refine
+    /** Only sure readings paint a dot (rk 11 Nov 22:09: "make only points above 90% paint"): ARCore depth confidence
+     *  230 of 255 or more. A spot with only weaker readings isn't drawn, doesn't count as scanned, and isn't saved as a
+     *  scan point (lowconf-points.bin keeps it aside); a sure reading later paints it. Debug tools "Paint from confidence". */
+    static volatile int PAINT_MIN = 230;
+    static boolean painted(int conf) { return conf == 0 || conf >= PAINT_MIN; }   // 0 = no rating (older scans, other sources)
+    /** What's drawn: the real colour or the confidence grey; dots below PAINT_MIN hidden (alpha 0); unrated dots black
+     *  in the greys. The real colours stay in col, untouched. */
     private void fillGrey(int from, int to) {
         for (int i = from; i < to; i++) {
-            int c = confBest[i] & 0xFF; int g = c == 0 ? 128 : c;   // not known: mid grey
-            greyBuf.put(i * 4, (byte) g); greyBuf.put(i * 4 + 1, (byte) g); greyBuf.put(i * 4 + 2, (byte) g); greyBuf.put(i * 4 + 3, col.get(i * 4 + 3));
+            int c = confBest[i] & 0xFF, a = col.get(i * 4 + 3) & 0xFF;
+            int alpha = a == 0 || (c > 0 && c < PAINT_MIN) ? 0 : 255;
+            int r, g, b;
+            if (!CONF_GREY) { r = col.get(i * 4) & 0xFF; g = col.get(i * 4 + 1) & 0xFF; b = col.get(i * 4 + 2) & 0xFF; }
+            else if (c == 0) { r = g = b = 0; }   // no rating: solid black
+            else { r = g = b = c; }
+            greyBuf.put(i * 4, (byte) r); greyBuf.put(i * 4 + 1, (byte) g); greyBuf.put(i * 4 + 2, (byte) b); greyBuf.put(i * 4 + 3, (byte) alpha);
         }
     }
     private int refineCursor; private boolean refined; private int refinedTotal, droppedNoise;
@@ -1168,22 +1180,29 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         d.thumb = android.graphics.Bitmap.createBitmap(full, 0, 0, tw, th, flip, true);
                         full.recycle();
                         int live = 0;
-                        for (int i = 0; i < cn; i++) if (oa[i] != 0) live++;
+                        java.io.ByteArrayOutputStream low = new java.io.ByteArrayOutputStream(); int lowN = 0;
+                        for (int i = 0; i < cn; i++) if (oa[i] != 0 && painted(cfa[i] & 0xFF)) live++;
                         d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
                         d.seg = sga == null ? null : new byte[live];
                         d.dotConf = new byte[live * 3];   // with every save (Done, autosave, a kept Cancel): matches points.bin
                         for (int i = 0, j = 0; i < cn; i++) {
                             if (oa[i] == 0) continue; // cleared by see-through
+                            if (!painted(cfa[i] & 0xFF)) {   // only weak readings: kept aside, not a scan point
+                                for (int v : new int[]{Float.floatToIntBits(pa[i * 3]), Float.floatToIntBits(pa[i * 3 + 1]), Float.floatToIntBits(pa[i * 3 + 2])}) { low.write(v >>> 24); low.write(v >>> 16); low.write(v >>> 8); low.write(v); }
+                                low.write(ca[i * 4]); low.write(ca[i * 4 + 1]); low.write(ca[i * 4 + 2]); low.write(cfa[i]); lowN++;
+                                continue;
+                            }
                             if (d.seg != null) d.seg[j] = sga[i];
                             d.dotConf[j * 3] = cfa[i]; d.dotConf[j * 3 + 1] = (byte) (nca[i] >> 8); d.dotConf[j * 3 + 2] = (byte) nca[i];
                             d.pos[j * 3] = pa[i * 3]; d.pos[j * 3 + 1] = pa[i * 3 + 1]; d.pos[j * 3 + 2] = pa[i * 3 + 2];
                             d.col[j * 3] = ca[i * 4]; d.col[j * 3 + 1] = ca[i * 4 + 1]; d.col[j * 3 + 2] = ca[i * 4 + 2];
                             j++;
                         }
+                        d.lowConf = low.toByteArray();
                         for (Runnable r : encode) r.run();
                         File out = ScanStore.save(activity, dir, d);
                         currentDir = out; currentName = name;
-                        log("saved '" + name + "': " + d.n + " points, " + d.kfs.size() + " photos -> " + out);
+                        log("saved '" + name + "': " + d.n + " points, " + d.kfs.size() + " photos -> " + out + (d.lowConf.length > 0 ? " (+" + d.lowConf.length / 16 + " weak ones aside in lowconf-points.bin)" : ""));
                         done.done(out, null);
                     } catch (Throwable e) { logError("save", new RuntimeException(e)); done.done(null, String.valueOf(e.getMessage())); }
                 }).start();
@@ -4493,7 +4512,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
                 HIDE_DECL + FlatTiles.MASK_DECL +
                 "void main(){ float hh = 0.0;" + HIDE_TEST.replace("HIDE", "hh = 1.0;") + FlatTiles.MASK_TEST +
-                "  if (hh > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; }" +
+                "  if (hh > 0.5 || aColor.a < 0.002) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; }" +
                 "  if (uCut > 0.5) { vec2 r = aPos.xz - uCenter.xz;" +
                 "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
                 "      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; } }" +
@@ -5841,7 +5860,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** A spot seen again: blend the new reading in, so repeated looks clean up a bad first one. */
     private void refine(int idx, float x, float y, float z, int[] rgb) {
-        if (curConf > (confBest[idx] & 0xFF)) confBest[idx] = (byte) curConf;
+        int before = confBest[idx] & 0xFF;
+        boolean sureNow = painted(curConf), wasPainted = before == 0 || before >= PAINT_MIN;
+        if (curConf > 0 && before > 0 && before < PAINT_MIN && curConf >= PAINT_MIN) {
+            // the first sure reading of a spot that only had weak ones: the dot starts again from it
+            confBest[idx] = (byte) curConf; nearCm[idx] = (short) Math.min(32767, curMm / 10);
+            pos.put(idx * 3, x); pos.put(idx * 3 + 1, y); pos.put(idx * 3 + 2, z);
+            col.put(idx * 4, (byte) rgb[0]); col.put(idx * 4 + 1, (byte) rgb[1]); col.put(idx * 4 + 2, (byte) rgb[2]); col.put(idx * 4 + 3, (byte) seenAlpha(1));
+            obs[idx] = 1; thru[idx] = 0; seenStamp[idx] = stampFrame; refined = true;
+            return;
+        }
+        if (wasPainted && before > 0 && !sureNow) return;   // a weak reading doesn't move or recolour a painted dot
+        if (curConf > before) confBest[idx] = (byte) curConf;
         if (curMm > 0) { int cm = curMm / 10; if (nearCm[idx] == 0 || cm < nearCm[idx]) nearCm[idx] = (short) Math.min(32767, cm); }
         if (obs[idx] == 0) { // a cleared spot seen solid again: start it fresh
             pos.put(idx * 3, x); pos.put(idx * 3 + 1, y); pos.put(idx * 3 + 2, z);
@@ -5855,8 +5885,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (seenStamp[idx] != stampFrame) { // count each depth frame once (many pixels land in one 2 cm spot)
             seenStamp[idx] = stampFrame;
             int a = col.get(idx * 4 + 3) & 0xFF;
-            if (a < 255) col.put(idx * 4 + 3, (byte) Math.min(255, a + 255 / SOLID_SEEN + 1));
-            if (a >= 255 - 255 / SOLID_SEEN) frameSolid++;
+            if (painted(confBest[idx] & 0xFF)) {   // a weakly seen spot stays "to scan" until a sure reading paints it
+                if (a < 255) col.put(idx * 4 + 3, (byte) Math.min(255, a + 255 / SOLID_SEEN + 1));
+                if (a >= 255 - 255 / SOLID_SEEN) frameSolid++;
+            }
         }
         float w = 1f / (Math.min(n, 20) + 1);
         int i = idx * 3;
@@ -7216,7 +7248,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---------------- drawing ----------------
 
     private void uploadNew() {
-        if (greyShown != CONF_GREY) { greyShown = CONF_GREY; refined = true; refineCursor = 0; }   // switched: send every dot's colour again
+        if (greyShown != CONF_GREY || paintShown != PAINT_MIN) { greyShown = CONF_GREY; paintShown = PAINT_MIN; refined = true; refineCursor = 0; }   // switched: send every dot's colour again
         // Re-send a slice of already-uploaded points each frame so refined positions/colours show up.
         if (refined && uploaded > 0) {
             int slice = Math.min(uploaded, 40000);
@@ -7227,7 +7259,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, refineCursor * 12, (end - refineCursor) * 12, pos);
             pos.position(0);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
-            ByteBuffer src = col; if (CONF_GREY) { fillGrey(refineCursor, end); src = greyBuf; }
+            ByteBuffer src = greyBuf; fillGrey(refineCursor, end);
             src.position(refineCursor * 4);
             GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, refineCursor * 4, (end - refineCursor) * 4, src);
             src.position(0);
@@ -7241,7 +7273,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, uploaded * 12, (count - uploaded) * 12, pos);
         pos.position(0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
-        ByteBuffer src = col; if (CONF_GREY) { fillGrey(uploaded, count); src = greyBuf; }
+        ByteBuffer src = greyBuf; fillGrey(uploaded, count);
         src.position(uploaded * 4);
         GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, uploaded * 4, (count - uploaded) * 4, src);
         src.position(0);
