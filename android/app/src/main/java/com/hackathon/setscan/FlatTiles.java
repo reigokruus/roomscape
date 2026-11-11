@@ -83,6 +83,8 @@ final class FlatTiles {
 
     final ArrayList<Plane> planes = new ArrayList<>();
     final HashMap<Long, Tile> tiles = new HashMap<>();
+    /** Rough Java-side bytes (the photo atlas itself is a GL texture), for the scan log's memory line. */
+    long heapBytes() { return mask.length + 96L * tiles.size() + (vbo != null ? 4L * vbo.capacity() : 0); }
     private int atlasTex, fbo, paintProg, drawProg, slots;
     private FloatBuffer vbo; private int vboVerts; private boolean dirty;
     int painted, removed;

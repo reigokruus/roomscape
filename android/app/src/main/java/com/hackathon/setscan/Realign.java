@@ -66,6 +66,11 @@ final class Realign {
         int find(long k) { int i = slot(k); while (true) { long q = keys[i]; if (q == k) return i; if (q == EMPTY) return -1; i = (i + 1) & mask; } }
     }
     Cells tCoarse, tMid, tFine;
+    long heapBytes() {
+        long b = 0;
+        for (Cells c : new Cells[]{tCoarse, tMid, tFine}) if (c != null) b += 8L * c.keys.length + 4L * c.xyz.length;
+        return b;
+    }
     private final float[] near = new float[3];
 
     /** Like nearest(), on the flat cells; the result in `near` (false: none within reach). Not thread-safe per Realign. */

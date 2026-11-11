@@ -525,6 +525,7 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         {   // recording switches before anything scans (a guest build starts with both off; a saved choice wins)
             android.content.SharedPreferences sp0 = getSharedPreferences(PREFS, MODE_PRIVATE);
+            if (sp0.getBoolean("abLowMemory", false)) System.setProperty("roomscape.lowmem", "1");   // before ScanRenderer loads (it reads this once)
             recordWanted = sp0.getBoolean("abRecord", !guestBuild());
             ScanRenderer.SCREEN_VIDEO = sp0.getBoolean("abScreen", !guestBuild());
         }
@@ -780,6 +781,17 @@ public class MainActivity extends Activity {
             ScanRenderer.DROP_UNDER_TILES = sp.getBoolean("abDropUnderTiles", false);
             dropB.setText(ScanRenderer.DROP_UNDER_TILES ? "Points under tiles: hidden" : "Points under tiles: kept");
             dropB.setOnClickListener(v -> { ScanRenderer.DROP_UNDER_TILES = !ScanRenderer.DROP_UNDER_TILES; sp.edit().putBoolean("abDropUnderTiles", ScanRenderer.DROP_UNDER_TILES).apply(); dropB.setText(ScanRenderer.DROP_UNDER_TILES ? "Points under tiles: hidden" : "Points under tiles: kept"); });
+            Button lowB = new Button(this);
+            final boolean lowWanted = sp.getBoolean("abLowMemory", false);
+            lowB.setText((lowWanted ? "Low memory mode (like a 512 MB phone): on" : "Low memory mode (like a 512 MB phone): off")
+                    + (lowWanted != ScanRenderer.FORCED_LOW_MEMORY ? ", after an app restart" : ""));
+            lowB.setOnClickListener(v -> {
+                boolean lowOn = !sp.getBoolean("abLowMemory", false);
+                sp.edit().putBoolean("abLowMemory", lowOn).apply();
+                lowB.setText((lowOn ? "Low memory mode (like a 512 MB phone): on" : "Low memory mode (like a 512 MB phone): off")
+                        + (lowOn != ScanRenderer.FORCED_LOW_MEMORY ? ", after an app restart" : ""));
+                toast("Close the app (swipe it away) and open it again");
+            });
             Button photoB = new Button(this);
             ScanRenderer.PHOTO_SURFACE = sp.getBoolean("abPhotoSurface", false);
             photoB.setText(ScanRenderer.PHOTO_SURFACE ? "Photo surface: on" : "Photo surface: off");
@@ -792,7 +804,7 @@ public class MainActivity extends Activity {
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }
@@ -2044,6 +2056,18 @@ public class MainActivity extends Activity {
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         lp.bottomMargin = dp(8);
         col.addView(logo, lp);
+        {   // build and memory mode, so a screenshot says which build and mode a scan used
+            TextView bl = new TextView(this);
+            String code = "?";
+            try { code = String.valueOf(getPackageManager().getPackageInfo(getPackageName(), 0).versionCode); } catch (Exception ignored) { }
+            bl.setText("Build " + code + " · " + (ScanRenderer.FORCED_LOW_MEMORY ? "low memory mode (like a 512 MB phone)"
+                    : ScanRenderer.LOW_MEMORY ? "low memory phone" : "memory limit " + (Runtime.getRuntime().maxMemory() >> 20) + " MB"));
+            bl.setTextColor(ScanRenderer.FORCED_LOW_MEMORY ? 0xFFE0A030 : Ios.SECONDARY);
+            bl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            bl.setGravity(Gravity.CENTER);
+            bl.setPadding(0, 0, 0, dp(8));
+            col.addView(bl);
+        }
 
         col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_scan, "New room scan", true, false, v -> startNewScan())));
         col.addView(Ios.footer(this, "Walk slowly around the room and point the phone at every wall, window, door and piece of furniture."));

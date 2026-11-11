@@ -42,6 +42,13 @@ final class Tsdf {
     static final int SOLID_W = 20;
     private int n;
 
+    /** The fixed tables plus the mesh buffers, in bytes (for the scan log's memory line). */
+    long heapBytes() {
+        long b = 12L * keys.length + (long) cap * (4 + 2 + 3 + 4 + 4 + 1 + 2 + 4);
+        if (meshPos != null) b += meshPos.capacity() * 4L + meshCol.capacity() + meshConf.capacity();
+        return b;
+    }
+
     Tsdf(int maxVoxels, float voxel, float truncation, float carveDist) {
         vs = voxel; trunc = truncation; carve = carveDist;
         cap = maxVoxels;

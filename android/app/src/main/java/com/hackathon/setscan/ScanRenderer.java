@@ -32,7 +32,13 @@ import javax.microedition.khronos.opengles.GL10;
 public class ScanRenderer implements GLSurfaceView.Renderer {
     // Fewer points on phones with a 512 MB app limit (Galaxy S23 Ultra, 11 Nov: out of memory with 1.2 million): each
     // point costs ~30 bytes held all the time (position, colour, counters)
-    static final boolean LOW_MEMORY = Runtime.getRuntime().maxMemory() < 700L * 1048576;
+    /** Debug tools "Force low memory" (read once at start, so it needs an app restart): behave like a 512 MB phone
+     *  (Galaxy S23 Ultra) on a bigger one, to test the low-memory limits on rk's S24. MainActivity sets the property
+     *  before this class loads. */
+    static final boolean FORCED_LOW_MEMORY = "1".equals(System.getProperty("roomscape.lowmem"));
+    static final boolean LOW_MEMORY = FORCED_LOW_MEMORY || Runtime.getRuntime().maxMemory() < 700L * 1048576;
+    /** The heap limit the app keeps under: the real one, or 512 MB when low memory is forced. */
+    static final long HEAP_LIMIT = FORCED_LOW_MEMORY ? Math.min(Runtime.getRuntime().maxMemory(), 512L * 1048576) : Runtime.getRuntime().maxMemory();
     private static final int MAX_POINTS = LOW_MEMORY ? 1_200_000 : 2_000_000;
     private static final float VOXEL = 0.02f;
     private static final int MAX_PATH = 20_000;
@@ -52,12 +58,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final FloatBuffer pos = offHeap(MAX_POINTS * 12, "points").asFloatBuffer();
     private final ByteBuffer col = offHeap(MAX_POINTS * 4, "colours");
 
+    private static volatile boolean offHeapMapped;
+
     private static ByteBuffer offHeap(int bytes, String what) {
         try {
             File f = File.createTempFile("scan-" + what + "-", ".buf");
             try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw")) {
                 raf.setLength(bytes);
                 ByteBuffer b = raf.getChannel().map(java.nio.channels.FileChannel.MapMode.READ_WRITE, 0, bytes);
+                offHeapMapped = true;
                 return b.order(ByteOrder.nativeOrder());
             } finally { f.delete(); }   // the mapping stays valid; the file goes when the app does
         } catch (Throwable e) {
@@ -2420,6 +2429,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     void finishScan() {
+        logMemory("Done");
         liveScratch = null;   // the live mesh's copy of the surface (tens of MB): the after-Done steps need the memory (15:23 scan ran out)
         style = 2;   // the result opens in Points (rk 10 Nov 15:22)
         if (roomLux() > 0) { Lighting.ROOM_LUX = Math.max(5f, roomLux()); log(String.format(java.util.Locale.US, "room light from camera exposure: %.0f lx (%d samples)", roomLux(), luxSamples.size())); }
@@ -3747,6 +3757,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     void reset() {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
+        memLogAt = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
@@ -5159,9 +5170,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (now - memoryCheckAt > 1000) {
             memoryCheckAt = now;
             Runtime rt = Runtime.getRuntime();
-            boolean full = rt.totalMemory() - rt.freeMemory() > rt.maxMemory() * 0.85;
+            boolean full = rt.totalMemory() - rt.freeMemory() > HEAP_LIMIT * 0.85;
             if (full && !memoryFull) log(String.format(java.util.Locale.US, "memory nearly full (%d of %d MB, %d points): the scan stops growing",
-                    (rt.totalMemory() - rt.freeMemory()) >> 20, rt.maxMemory() >> 20, count));
+                    (rt.totalMemory() - rt.freeMemory()) >> 20, HEAP_LIMIT >> 20, count));
+            if (full && !memoryFull) logMemory("nearly full");
             memoryFull = full;
         }
         return memoryFull;
@@ -6246,6 +6258,69 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  handing out only old depth images for 8 s while tracking (13:52 scan: 86-122 s, 354 stale images, nothing more
      *  was fused and the re-align never ran) restarts the AR session, then re-aligns like after a loss. 8 s, and not in
      *  the first 10 s after tracking returns (14:01 scan: at 4 s it restarted twice; the second restart cost 15 s). */
+    private long memLogAt;
+
+    private static long arr(Object a) {
+        if (a == null) return 0;
+        if (a instanceof byte[]) return ((byte[]) a).length;
+        if (a instanceof short[]) return 2L * ((short[]) a).length;
+        if (a instanceof int[]) return 4L * ((int[]) a).length;
+        if (a instanceof float[]) return 4L * ((float[]) a).length;
+        if (a instanceof long[]) return 8L * ((long[]) a).length;
+        if (a instanceof java.nio.Buffer) { java.nio.Buffer b = (java.nio.Buffer) a; return (long) b.capacity() * (a instanceof FloatBuffer || a instanceof java.nio.IntBuffer ? 4 : a instanceof java.nio.ShortBuffer ? 2 : 1); }
+        return 0;
+    }
+
+    /** One "memory (when):" line in the scan log: our own big arrays and buffers by name (MB), then what the Java
+     *  runtime and Android say (Debug.MemoryInfo, read on a worker thread: it takes tens of ms). So a field log shows
+     *  what fills the phone (11 Nov: a Galaxy S23 Ultra ran out at 1.2 M points without us knowing what took it). */
+    void logMemory(String when) {
+        StringBuilder b = new StringBuilder();
+        try {
+            java.util.function.BiConsumer<String, Long> add = (k, v) -> { if (v >= 512 * 1024) b.append(String.format(java.util.Locale.US, ", %s %.1f", k, v / 1048576f)); };
+            add.accept("surface tables", tsdf.heapBytes());
+            add.accept("detail tables", detail.heapBytes());
+            add.accept("voxel map", voxels.heapBytes());
+            add.accept("point arrays", arr(obs) + arr(seenStamp) + arr(thru) + arr(seg));
+            add.accept(offHeapMapped ? "points (mapped file, off the heap)" : "points (direct buffers, on the heap)", arr(pos) + arr(col));
+            add.accept("feature heights", arr(featY));
+            long kj = 0, kd = 0; int kn = 0;
+            for (PhotoRoom.Keyframe k : new java.util.ArrayList<>(photos.keyframes)) { kj += arr(k.jpg); kd += arr(k.depth); kn++; }
+            add.accept(kn + " keyframe photos", kj); add.accept("keyframe depth", kd);
+            long rb = 0; int rn = 0;
+            synchronized (this) { for (ScanExport.Rec r : recs) { rb += arr(r.depth) + arr(r.conf) + arr(r.gray); rn++; } }
+            add.accept(rn + " recorded depth frames", rb);
+            long eb = 0; int en = 0;
+            synchronized (this) { for (EvFrame f : evRing) { eb += arr(f.d); en++; } for (EvFrame f : evKept) { eb += arr(f.d); en++; } }
+            add.accept(en + " event depth frames", eb);
+            add.accept("pose log", arr(poseLog.ts) + arr(poseLog.p) + arr(poseLog.state) + arr(poseLog.reason));
+            Realign ra = realign, rs = shadowRealign;
+            add.accept("re-align cells", (ra != null ? ra.heapBytes() : 0) + (rs != null && rs != ra ? rs.heapBytes() : 0));
+            add.accept("flat tiles", flatTiles.heapBytes());
+            synchronized (this) { add.accept("text log", 2L * log.length()); }
+            add.accept("path", arr(path));
+        } catch (Throwable e) { b.append(", (counting failed: ").append(e).append(')'); }
+        final String ours = b.length() > 2 ? b.substring(2) : "-";
+        final int pts = count;
+        new Thread(() -> {
+            Runtime rt = Runtime.getRuntime();
+            String sys;
+            try {
+                android.os.Debug.MemoryInfo mi = new android.os.Debug.MemoryInfo();
+                android.os.Debug.getMemoryInfo(mi);
+                sys = String.format(java.util.Locale.US, "; Android (PSS, MB): java %s, native %s, graphics %s, code %s, other %s, total %s",
+                        kb(mi.getMemoryStat("summary.java-heap")), kb(mi.getMemoryStat("summary.native-heap")), kb(mi.getMemoryStat("summary.graphics")),
+                        kb(mi.getMemoryStat("summary.code")), kb(mi.getMemoryStat("summary.private-other")), kb(mi.getMemoryStat("summary.total-pss")));
+            } catch (Throwable e) { sys = "; Android memory info failed: " + e; }
+            log(String.format(java.util.Locale.US, "memory (%s, %d of max %d points): Java heap used %d of %d MB, free %d, limit %d MB (phone's real limit %d)%s, native heap %d MB; ours (MB): %s%s",
+                    when, pts, MAX_POINTS, (rt.totalMemory() - rt.freeMemory()) >> 20, rt.totalMemory() >> 20, rt.freeMemory() >> 20, HEAP_LIMIT >> 20, rt.maxMemory() >> 20,
+                    FORCED_LOW_MEMORY ? ", low memory mode (forced, like a 512 MB phone)" : LOW_MEMORY ? ", low memory phone" : "",
+                    android.os.Debug.getNativeHeapAllocatedSize() >> 20, ours, sys));
+        }, "memory-log").start();
+    }
+
+    private static String kb(String v) { try { return String.valueOf(Integer.parseInt(v) / 1024); } catch (Exception e) { return "?"; } }
+
     private void logState(TrackingState ts, long nowMs) {
         logLinkErrors();
         if (viewing || !everTracked) return;
@@ -6273,6 +6348,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 + String.format(java.util.Locale.US, ", heap %d MB, ARCore features %d", (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20, featuresNow));
         syncedBricks = 0; syncFull = 0;
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
+        if (memLogAt == 0 || nowMs - memLogAt >= 30000) { logMemory(memLogAt == 0 ? "scan start" : "every 30 s"); memLogAt = nowMs; }
     }
 
     // ---- Evidence for the alignment after map jumps (rk 10 Nov 15:13): depth frames around every jump, loss and
@@ -8317,6 +8393,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         private final long[] keys;
         private final int[] vals;
         private final int mask;
+
+        long heapBytes() { return 12L * keys.length; }
 
         LongIntMap(int capacityPow2) {
             keys = new long[capacityPow2];
