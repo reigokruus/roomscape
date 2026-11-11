@@ -133,6 +133,64 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static volatile boolean CLOSEST_WINS = true;
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
     static volatile boolean AUTO_ERASE = true;
+    /** Debug tools "Merge flat areas" (rk 11 Nov 23:20: "smooth over some areas where the dots make a coherent shape"):
+     *  settled fine (0.8 cm) dots in a 2 cm cell that lie flat (thinner than 4 mm) and evenly coloured (channel spread
+     *  under 12) become one dot there: the average position and colour, the best confidence, the closest distance.
+     *  Offline on the 23:07 scan: 30% of its dots were in such cells, ~26% fewer dots. Later readings in those cells are
+     *  averaged into the merged dot. Display and dot count only; nothing else about the scan changes. */
+    static volatile boolean MERGE_FLAT = true;
+    private final byte[] mergedDot = new byte[MAX_POINTS];   // 1 = this dot stands for a merged flat cell
+    private int mergeCursor, mergedAway; private long mergeAt;
+    private final int[] mergeMem = new int[64];
+    private void maybeMergeFlat(long nowMs) {
+        if (!MERGE_FLAT || nowMs - mergeAt < 2000 || count < 5000) return;
+        mergeAt = nowMs;
+        int n = count, budget = Math.min(n, 40000), away = 0;
+        for (int it = 0; it < budget; it++) {
+            int i = mergeCursor++; if (mergeCursor >= n) mergeCursor = 0;
+            if (obs[i] == 0 || mergedDot[i] != 0 || !(nearCm[i] > 0 && nearCm[i] < FINE_NEAR_M * 100)) continue;   // fine dots only
+            if ((col.get(i * 4 + 3) & 0xFF) < 200) continue;   // settled: seen enough times
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float bx = (float) Math.floor(x / VOXEL) * VOXEL, by = (float) Math.floor(y / VOXEL) * VOXEL, bz = (float) Math.floor(z / VOXEL) * VOXEL;
+            int m = 0;
+            int ix0 = (int) Math.floor(bx / VOXEL_FINE), ix1 = (int) Math.floor((bx + VOXEL - 1e-4f) / VOXEL_FINE);
+            int iy0 = (int) Math.floor(by / VOXEL_FINE), iy1 = (int) Math.floor((by + VOXEL - 1e-4f) / VOXEL_FINE);
+            int iz0 = (int) Math.floor(bz / VOXEL_FINE), iz1 = (int) Math.floor((bz + VOXEL - 1e-4f) / VOXEL_FINE);
+            for (int a = ix0; a <= ix1; a++) for (int b = iy0; b <= iy1; b++) for (int c = iz0; c <= iz1; c++) {
+                int j = voxels.get(fineKey((a + 0.5f) * VOXEL_FINE, (b + 0.5f) * VOXEL_FINE, (c + 0.5f) * VOXEL_FINE));
+                if (j < 0 || j >= n || obs[j] == 0 || mergedDot[j] != 0 || m >= mergeMem.length) continue;
+                float jx = pos.get(j * 3), jy = pos.get(j * 3 + 1), jz = pos.get(j * 3 + 2);
+                if (jx < bx || jx >= bx + VOXEL || jy < by || jy >= by + VOXEL || jz < bz || jz >= bz + VOXEL) continue;
+                boolean dup = false; for (int q = 0; q < m; q++) if (mergeMem[q] == j) { dup = true; break; }
+                if (!dup) mergeMem[m++] = j;
+            }
+            if (m < 3) continue;
+            double mx = 0, my = 0, mz = 0, cr = 0, cg = 0, cb = 0;
+            for (int q = 0; q < m; q++) { int j = mergeMem[q]; mx += pos.get(j * 3); my += pos.get(j * 3 + 1); mz += pos.get(j * 3 + 2); cr += col.get(j * 4) & 0xFF; cg += col.get(j * 4 + 1) & 0xFF; cb += col.get(j * 4 + 2) & 0xFF; }
+            mx /= m; my /= m; mz /= m; cr /= m; cg /= m; cb /= m;
+            double xx = 0, yy = 0, zz = 0, xy = 0, xz = 0, yz = 0, sr = 0, sg = 0, sb = 0;
+            for (int q = 0; q < m; q++) {
+                int j = mergeMem[q]; double dx = pos.get(j * 3) - mx, dy = pos.get(j * 3 + 1) - my, dz = pos.get(j * 3 + 2) - mz;
+                xx += dx * dx; yy += dy * dy; zz += dz * dz; xy += dx * dy; xz += dx * dz; yz += dy * dz;
+                double r = (col.get(j * 4) & 0xFF) - cr, g = (col.get(j * 4 + 1) & 0xFF) - cg, bl = (col.get(j * 4 + 2) & 0xFF) - cb;
+                sr += r * r; sg += g * g; sb += bl * bl;
+            }
+            double[] ev = Anchors.eig3(xx / m, yy / m, zz / m, xy / m, xz / m, yz / m);
+            double thick = Math.sqrt(Math.max(0, ev[2])), cs = (Math.sqrt(sr / m) + Math.sqrt(sg / m) + Math.sqrt(sb / m)) / 3;
+            if (thick >= 0.004 || cs >= 12) continue;   // shape or colour change: the fine dots stay
+            int k = mergeMem[0]; int conf = 0, near = 32767, ob = 0, al = 0;
+            for (int q = 0; q < m; q++) { int j = mergeMem[q]; conf = Math.max(conf, confBest[j] & 0xFF); if (nearCm[j] > 0) near = Math.min(near, nearCm[j]); ob = Math.max(ob, obs[j] & 0xFF); al = Math.max(al, col.get(j * 4 + 3) & 0xFF); }
+            for (int q = 1; q < m; q++) {
+                int j = mergeMem[q];
+                voxels.put(fineKey(pos.get(j * 3), pos.get(j * 3 + 1), pos.get(j * 3 + 2)), k);   // later readings there average into the merged dot
+                obs[j] = 0; col.put(j * 4 + 3, (byte) 0); away++;
+            }
+            pos.put(k * 3, (float) mx); pos.put(k * 3 + 1, (float) my); pos.put(k * 3 + 2, (float) mz);
+            col.put(k * 4, (byte) Math.round(cr)); col.put(k * 4 + 1, (byte) Math.round(cg)); col.put(k * 4 + 2, (byte) Math.round(cb)); col.put(k * 4 + 3, (byte) al);
+            confBest[k] = (byte) conf; nearCm[k] = (short) near; obs[k] = (byte) ob; mergedDot[k] = 1;
+        }
+        if (away > 0) { mergedAway += away; refined = true; }
+    }
     // ---- Hold "Rescan": a sphere in front of the phone where old dots are cleared and refilled by fresh readings ----
     static volatile float SPHERE_R = 0.15f;   // sphere radius, m (debug tools "Rescan sphere")
     /** Debug tools "Rescan sphere distance": its centre this far straight in front of the phone (m). */
@@ -2631,6 +2689,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through"
                     + (depthAllPx > 0 ? String.format(java.util.Locale.US, "; depth pixels sure enough (confidence %d+): %.0f%%", PAINT_MIN, 100.0 * depthKeptPx / depthAllPx) : "")
                     + (CLOSEST_WINS ? "; dots replaced by a closer sure look: " + supersededTotal : "")
+                    + (MERGE_FLAT ? "; fine dots merged into flat cells: " + mergedAway : "")
                     + (zoneAll[0] > 0 ? String.format(java.util.Locale.US, "; sure depth by picture area: centre %.0f%%, middle %.0f%%, edge %.0f%%",
                         100.0 * zoneSure[0] / zoneAll[0], 100.0 * zoneSure[1] / Math.max(1, zoneAll[1]), 100.0 * zoneSure[2] / Math.max(1, zoneAll[2])) : ""));
         perf.stage("after Done");
@@ -3966,7 +4025,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
         removed = null; removedN = 0; compactAt = 0;
-        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0; java.util.Arrays.fill(zoneAll, 0); java.util.Arrays.fill(zoneSure, 0);
+        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0; mergedAway = 0; mergeCursor = 0; java.util.Arrays.fill(mergedDot, (byte) 0); java.util.Arrays.fill(zoneAll, 0); java.util.Arrays.fill(zoneSure, 0);
         filledWall = null; wallCand = null; wallCandHits = 0; guessCells = null; shownSet = false; guessWeight = 0; guessUpdates = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
@@ -5145,7 +5204,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 long lmT0 = System.nanoTime();
                 if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
                 if (LIVE_POINTS) {
-                    drawFilledWall(mvp); if (trackingNow) maybeFillWall(nowMs);
+                    drawFilledWall(mvp); if (trackingNow) { maybeFillWall(nowMs); maybeMergeFlat(nowMs); }
                     if (trackingNow && haveGoodCam) rescanStep(lastGoodCam);
                     consumeLiveMesh(); drawPoints(mvp, 0.6f);   // smaller: close up they were big soft blobs
                     drawRescanSphere(mvp);
@@ -6157,7 +6216,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
