@@ -2656,7 +2656,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             runAfterDone();
         }, "perf-stop").start();
-        removed = new java.io.ByteArrayOutputStream(); removedN = 0;
+        if (removed == null) { removed = new java.io.ByteArrayOutputStream(); removedN = 0; }   // (also filled while scanning: compactions near the cap)
         boolean[] early = dropEarlyDrift();
         purgeCleared(early);
         dropNoise();
@@ -3965,6 +3965,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void reset() {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
+        removed = null; removedN = 0; compactAt = 0;
         anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0; java.util.Arrays.fill(zoneAll, 0); java.util.Arrays.fill(zoneSure, 0);
         filledWall = null; wallCand = null; wallCandHits = 0; guessCells = null; shownSet = false; guessWeight = 0; guessUpdates = 0;
         flatTiles.clear(); tilesJob = null;
@@ -5419,7 +5420,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return memoryFull;
     }
 
+    private long compactAt;
     private void integrate(Frame frame, Camera camera) {
+        // Near the cap, erased / replaced / rescanned dots (hidden, alpha 0) give their slots back at once instead of at
+        // Done (rk 23:20: keep the 1.2 M cap, pull back elsewhere; the 23:07 scan had ~125k such slots still counted).
+        // They're kept aside for removed-points.bin as at Done.
+        if (count >= MAX_POINTS * 0.97f && System.currentTimeMillis() - compactAt > 10000) {
+            compactAt = System.currentTimeMillis();
+            if (removed == null) { removed = new java.io.ByteArrayOutputStream(); removedN = 0; }
+            int before = count; purgeCleared(null);
+            if (count < before) log("near the dot limit: " + (before - count) + " erased / replaced dots gave their places back (" + count + " now)");
+        }
         if (count >= MAX_POINTS || memoryFull()) return;
         if (!depthSupported) {
             integrateFeaturePoints(frame, camera);
