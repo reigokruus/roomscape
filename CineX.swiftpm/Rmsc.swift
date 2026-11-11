@@ -167,6 +167,12 @@ enum Rmsc {
                 "doors": room?.doors.count ?? 0,
             ]
         }
+        // Floor area: from RoomPlan's floor outline; a room from another phone passes its own on (x, z don't move).
+        if let floor = room.flatMap(RoomFloor.init) {
+            manifest["floorArea"] = floor.manifest
+        } else if shell == nil, let passed = SourceManifest.load(scan)?.json["floorArea"] {
+            manifest["floorArea"] = passed
+        }
         let objects = RoomObjects.load(scan)?.objects ?? room.map(RoomObjects.fromRoomPlan) ?? []
         manifest["objects"] = RoomObjects.toManifest(objects, dropY: floorY)
         let outlets = OutletStore.load(scan)

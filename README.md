@@ -20,8 +20,9 @@ The two apps scan in different ways, so they don't have the same features.
   and reaches 5 m. **None of the RoomPlan features exist on Android: don't look for them there.**
 - **Android = ARCore depth, no LiDAR.** The room is coloured points, plus flat photo tiles on flat surfaces. Walls,
   rooms, floor area and doorways are worked out by our own code from the points: rougher than RoomPlan, and depth only
-  reaches ~3.5 m. In return Android has floor area per room, wall dragging and the "Lost track" notice, which the
-  iPhone doesn't have yet.
+  reaches ~3.5 m. In return Android has floor area per room (split at doorways), tapping a room, wall dragging and the
+  "Lost track" notice, which the iPhone doesn't have yet. (The iPhone shows one floor area for the whole room, from
+  RoomPlan.)
 
 Maturity: **solid** = used a lot, **works** = used and checked, **rough** = works but expect errors, **test switch** =
 off unless turned on, **untested** = built but not tried on a phone yet.
@@ -33,7 +34,7 @@ off unless turned on, **untested** = built but not tried on a phone yet.
 | Losing tracking | **works**: notice, buzz, lines up again by itself | RoomPlan's own prompts | amber line "Lost track. Stop and point back at where you were", with the direction, and one buzz; a tick when it carries on | Android: tracking still gets lost on plain walls; the tile check that would refuse a wrong line-up only logs for now; lining up from the camera picture isn't built |
 | RoomPlan model (walls, doors, windows, furniture boxes) | – | **solid** | "Model" tab: a clean grey 3D model of the room | |
 | Room size and height | **works** (≈, a few cm on width, ~10 cm on height) | **solid** (from RoomPlan) | the line under the scan name, e.g. "≈3.80 × 2.86 m · ≈2.82 m high", also in the ROOM card | walls hidden by curtains or furniture are measured at the front of them: drag the wall by hand |
-| Floor area | **rough**: right for rectangular rooms | – | "floor area ≈9.9 m²" in that line; with several rooms "2 rooms, floor ≈35 m² in all (tap a room)" | see "Floor area" below; iPhone: not built |
+| Floor area | **rough**: right for rectangular rooms | **new**: one area for the room, from RoomPlan's floor outline (L-shapes included); checked offline on 5 saved scans and on an iPhone 15 Pro Max (11 Nov: a 5.65 × 3.51 m room, ≈19 m²) | Android: "floor area ≈9.9 m²" in that line; with several rooms "2 rooms, floor ≈35 m² in all (tap a room)". iPhone: "Floor area ≈9.9 m²" in the ROOM card; Android rooms opened on the iPhone list each room | see "Floor area" below; iPhone: no split into rooms, not in the title line yet |
 | Tap a room | **works** | – | tapping a room's floor tints it amber and shows "Room 2: 6.4 m², 3.3 × 2.9 m" | iPhone: not built |
 | Correcting walls | **works** (new) | – | amber wall lines on the floor of the result; drag one, the size and m² update; "Reset walls" appears next to the size line | iPhone: not built |
 | Measure | **works** | **works** | in Enter the room: tap two spots, a yellow line with the distance; one spot gives its height | |

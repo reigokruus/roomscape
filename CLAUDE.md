@@ -64,7 +64,9 @@ This file is how to work in the code.
   that follows the walls instead of one rectangle per room; a manual split (draw a line across the floor). Ask for a
   few test scans: they're kept off the repo because they show a private home.
 - Android tracking loss on plain walls; the tile check (`tile check (shadow)` lines in `scan-log.txt`) only logs.
-- iPhone: floor area, tap-a-room and wall dragging aren't built; the carry-on past RoomPlan's limit is untested.
+- iPhone: floor area is one number per scan from RoomPlan's floor outline (`RoomFloor.swift`, maths in
+  `Planning/Core/FloorOutline.swift` with tests); tap-a-room and wall dragging aren't built; the carry-on past
+  RoomPlan's limit is untested.
 - Other phones (e.g. Galaxy S23+) not tried yet.
 
 ## Reading a scan (Android)

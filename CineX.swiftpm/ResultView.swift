@@ -1993,6 +1993,7 @@ struct SourceManifest {
     var walls: [[Double]] { (room?["walls"] as? [[NSNumber]])?.map { $0.map(\.doubleValue) } ?? [] }
     var corners: [[Double]] { (room?["corners"] as? [[NSNumber]])?.map { $0.map(\.doubleValue) } ?? [] }
     var ceilingY: Double? { (json["ceilingY"] as? NSNumber)?.doubleValue }
+    var floorArea: PackageFloorArea? { PackageFloorArea(json["floorArea"]) }
     var device: String? { (json["source"] as? [String: Any])?["device"] as? String }
     var platform: String? { (json["source"] as? [String: Any])?["platform"] as? String }
     var created: Date? { (json["created"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } }
@@ -2022,6 +2023,17 @@ struct ImportedRoomSummary: View {
                 }
                 .tint(.primary)
                 LabeledContent("Approx. size", value: sizeText)
+                if let floor = manifest?.floorArea {
+                    LabeledContent("Floor area", value: floor.text)
+                    if floor.rooms.count >= 2 {
+                        ForEach(floor.rooms.indices, id: \.self) { i in
+                            LabeledContent("Room \(i + 1)", value: PackageFloorArea.text(floor.rooms[i]))
+                        }
+                    }
+                } else if let corners = manifest?.corners, corners.count >= 3 {
+                    let area = FloorOutline.area(corners.filter { $0.count >= 3 }.map { FloorPoint(x: $0[0], z: $0[2]) })
+                    if area >= 0.5 { LabeledContent("Floor area", value: FloorOutline.text(area: area, rough: true)) }
+                }
                 if let walls = manifest?.walls, !walls.isEmpty { LabeledContent("Walls", value: "\(walls.count)") }
                 if outletCount > 0 { LabeledContent("Power outlets", value: "\(outletCount)") }
             }
@@ -2138,6 +2150,9 @@ struct RoomSummary: View {
                     .tint(.primary)
                 }
                 LabeledContent("Approx. size", value: sizeText)
+                if let floor = RoomFloor(room: room) {
+                    LabeledContent("Floor area", value: floor.text)
+                }
                 LabeledContent("Walls", value: "\(room.walls.count)")
                 LabeledContent("Windows (natural light)", value: "\(room.windows.count + missedWindows.count)")
                 LabeledContent("Doors", value: "\(room.doors.count)")
