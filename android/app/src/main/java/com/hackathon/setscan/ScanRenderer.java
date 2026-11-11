@@ -1077,6 +1077,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
                 drainDepth();
                 final int cn = count;
+                // never a scan with nothing in it (11 Nov: an empty state saved as a new scan hid the real one)
+                if (cn == 0) { log("save refused: no points"); done.done(null, "nothing scanned to save"); return; }
                 final float[] pa = new float[cn * 3];
                 FloatBuffer pd = pos.duplicate(); pd.position(0); pd.get(pa, 0, cn * 3);
                 final byte[] ca = new byte[cn * 4];

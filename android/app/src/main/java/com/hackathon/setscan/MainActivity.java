@@ -1263,7 +1263,7 @@ public class MainActivity extends Activity {
         viewerBottom.addView(Ios.footer(this, "Add parts you missed, or that came out thin or blurry. The phone recognises the room and adds to this scan."));
         // ROOM: the scan's name (tap to rename) and size, like the iPhone's summary.
         viewerBottom.addView(Ios.header(this, "Room"));
-        nameRow = (LinearLayout) Ios.row(this, 0, "Name", false, false, v -> saveScan());
+        nameRow = (LinearLayout) Ios.row(this, 0, "Name", false, false, v -> nameScan());
         ((TextView) nameRow.getChildAt(0)).setTextColor(Color.WHITE);
         nameValue = new TextView(this);
         nameValue.setTextColor(Ios.ACCENT);
@@ -2215,6 +2215,21 @@ public class MainActivity extends Activity {
         mainButton.setText("New scan");
         renderer.setStyle(2); // Points first: the photo surface isn't reliable on big scans yet (rk 10 Nov 15:22)
         glView.queueEvent(() -> renderer.loadScan(e.dir, () -> runOnUiThread(this::viewerUi)));
+    }
+
+    /** The result's Name row: renames the scan that is open (11 Nov: on a teammate's phone it saved the app's current,
+     *  empty state as a new scan "Corrigo office" with 0 points; the real scan stayed under its date). */
+    private void nameScan() {
+        File dir = renderer.currentDir;
+        if (!renderer.isViewing() || dir == null) { saveScan(); return; }
+        String cur = renderer.currentName != null ? renderer.currentName : "";
+        askName("Name this scan", cur.startsWith("Room ") ? "" : cur, name -> new Thread(() -> {
+            try {
+                ScanStore.rename(dir, name);
+                glView.queueEvent(() -> { renderer.currentName = name; renderer.log("renamed to '" + name + "'"); });
+                runOnUiThread(() -> { nameValue.setText(name); viewerTitle.setText(name); setViewerTitle(); toast("Renamed"); });
+            } catch (Exception ex) { runOnUiThread(() -> toast("Rename failed: " + ex.getMessage())); }
+        }).start());
     }
 
     private void saveScan() {
