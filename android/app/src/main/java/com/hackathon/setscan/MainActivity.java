@@ -803,6 +803,15 @@ public class MainActivity extends Activity {
             Button uwB = new Button(this);   // EXPERIMENT (remove with experiment/): records the ultrawide without ARCore
             uwB.setText("Ultrawide recorder (experiment)");
             uwB.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)));
+            Button dotB = new Button(this);
+            ScanRenderer.DOT_SCALE = sp.getFloat("abDotScale", 0.5f);
+            dotB.setText("Dot size: " + Math.round(ScanRenderer.DOT_SCALE * 100) + "%");
+            dotB.setOnClickListener(v -> {   // 100% (the old size) -> 70% -> 50% -> 35% -> 100%
+                float[] steps = {1f, 0.7f, 0.5f, 0.35f}; int k = 0;
+                for (int i = 0; i < steps.length; i++) if (Math.abs(steps[i] - ScanRenderer.DOT_SCALE) < 0.01f) k = (i + 1) % steps.length;
+                ScanRenderer.DOT_SCALE = steps[k]; sp.edit().putFloat("abDotScale", steps[k]).apply();
+                dotB.setText("Dot size: " + Math.round(ScanRenderer.DOT_SCALE * 100) + "%");
+            });
             Button closeB = new Button(this);
             ScanRenderer.CLOSEST_WINS = sp.getBoolean("abClosestWins", true);
             closeB.setText(ScanRenderer.CLOSEST_WINS ? "Closest sure look wins: on" : "Closest sure look wins: off");
@@ -858,7 +867,7 @@ public class MainActivity extends Activity {
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB, greyB, stopB, paintB, closeB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB, greyB, stopB, paintB, closeB, dotB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }

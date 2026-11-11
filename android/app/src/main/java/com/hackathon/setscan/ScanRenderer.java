@@ -131,6 +131,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  farther or equal one (rk 10 Nov), so repeated looks settle instead of churning. Sideways only the reading's own
      *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
     static volatile boolean CLOSEST_WINS = true;
+    /** Debug tools "Dot size" (rk 11 Nov 22:26: "can you make the dots smaller"): a factor on the drawn dot size (dots
+     *  are drawn in world size, smaller on screen further away). 0.5 = about 1.4 cm across (was 2.8 cm). Display only. */
+    static volatile float DOT_SCALE = 0.5f;
     static final int SUPERSEDE_ALONG = 2;
     private int supersededTotal;
     /** Depth thread. Returns true when the reading took over its own cell's dot (nothing more to do for it). */
@@ -6953,7 +6956,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         float r = ((w.rgb >> 16) & 255) / 255f, g = ((w.rgb >> 8) & 255) / 255f, bl = (w.rgb & 255) / 255f;
         if (greyNow()) { r = g = bl = 0.04f; }   // guessed, not measured: no ARCore confidence at all, so black in the greys
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-        planDraw(m, k == guessVerts.length ? guessVerts : java.util.Arrays.copyOf(guessVerts, k), GLES20.GL_POINTS, new float[]{r, g, bl, 1f}, 7f);
+        planDraw(m, k == guessVerts.length ? guessVerts : java.util.Arrays.copyOf(guessVerts, k), GLES20.GL_POINTS, new float[]{r, g, bl, 1f}, Math.max(2f, 7f * DOT_SCALE));
     }
     private float[] guessVerts;
 
@@ -7980,20 +7983,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uFloor"), cutFloor);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCeil"), cutCeil);
         if (!splats) {
-            GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 1.4f * sizeScale);
+            GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 1.4f * sizeScale * DOT_SCALE);
             GLES20.glUniform1f(uPass, 2f);
             drawPointArrays();
             return;
         }
         // Splat look: an opaque core pass fills the surface and the depth buffer,
         // then a larger soft gaussian halo is blended on top without writing depth.
-        GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 2.0f * sizeScale);
+        GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 2.0f * sizeScale * DOT_SCALE);
         GLES20.glUniform1f(uPass, 0f);
         drawPointArrays();
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glDepthMask(false);
-        GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 3.2f * sizeScale);
+        GLES20.glUniform1f(uSize, VOXEL * pxPerMeter * 3.2f * sizeScale * DOT_SCALE);
         GLES20.glUniform1f(uPass, 1f);
         drawPointArrays();
         GLES20.glDepthMask(true);
