@@ -427,6 +427,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     synchronized String logText() { return log.toString(); }
     int pointCount() { return count; }
+    private volatile int liveDots;
+    /** Dots in use (for the on-screen count): without the merged-away, erased and replaced ones still holding a slot. */
+    int liveDotCount() { return liveDots > 0 ? liveDots : count; }
     int maxPoints() { return MAX_POINTS; }
 
     /** The app's event log as scan-log.txt in the scan folder (diagnostics in the .rmsc). */
@@ -8837,9 +8840,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (shownHint != null && !photoHint && !hint.equals(shownHint) && now - shownAt < 1500 && !(level >= 2 && shownLevel < level) && shownLevel != 3) { hint = shownHint; level = shownLevel; }   // (the lost notice comes and goes at once)
         else if (!hint.equals(shownHint)) { shownHint = hint; shownLevel = level; shownAt = now; }
         if (++hudCalls % 12 == 1) { // recount every ~2 s (points get merged, dropped and loaded in other places)
-            int n = count, sc = 0;
-            for (int i = 0; i < n; i++) if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++;
-            solidCount = sc;
+            int n = count, sc = 0, live = 0;
+            for (int i = 0; i < n; i++) { if ((col.get(i * 4 + 3) & 0xFF) == 255) sc++; if (obs[i] != 0) live++; }
+            solidCount = sc; liveDots = live;   // dots really in use: merged, erased and replaced ones don't count (rk 23:35)
         }
         float room = count > 0 ? Math.min(1f, (float) solidCount / count) : 0f;
         // What you get is what you see (LivePreview): the bars count surface that has its photo, not only its shape.
