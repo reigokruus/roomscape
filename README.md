@@ -7,27 +7,49 @@ surfaces before the shoot day, and can plan cameras, lights and set-ups around t
 Two native apps share one file format:
 
 - **Android** (`android/`): ARCore phones, tested on a Galaxy S24. The main app for the pilot.
-- **iPhone** (`CineX.swiftpm/`, the app is called RoomScape): LiDAR iPhones (12 Pro or newer Pro) on iOS 17+.
+- **iPhone** (`CineX.swiftpm/`, the app is called RoomScape): LiDAR iPhones (12 Pro or newer Pro) on iOS 17 or newer.
 
 A scan from either phone can be shared as a **.rmsc** file and opened on the other ([format](docs/rmsc-format.md)).
 
-## What you get from a scan
+## Android vs iPhone: what to expect
 
-| | Android | iPhone | TODO |
-|---|---|---|---|
-| Live scan view | coloured points (2 cm), flat camera-picture tiles on walls and floor | RoomPlan with LiDAR; points-only and flat tiles as test switches | Android tiles only within ~3.5 m of the phone (the S24's depth range) |
-| Losing tracking | an amber "Lost track" notice with the direction back, a vibration, then it lines up with the scan again | RoomPlan's own handling | Android: tracking still gets lost on plain walls; the tile check that would refuse a wrong line-up only logs for now; lining up from the camera picture (image-based relocalisation) isn't built |
-| Room size and height | width × length along the walls, height from the ceiling | RoomPlan's walls, doors and windows | walls hidden by curtains or furniture are measured at the front of them: drag the wall by hand |
-| Floor area | per room, split at doorways; tap a room for its own m² | – | see "Floor area" below. iPhone: no floor area yet |
-| Correcting walls | drag a wall line in the result; Reset walls | – | iPhone: not built yet |
-| Measure | tap two points: distance, height of a point | the same | |
-| Doorways | width and height of openings | RoomPlan's doors | Android doorway sizes are approximate |
-| Power sockets | found in the scan's photos by Claude and marked in the scan, so a crew knows where to plug in | the same | |
-| Views | Photo, Points, Mesh; walk through the room | Photo, Points, Mesh, RoomPlan model; walk through | |
-| Larger spaces | one scan for several rooms; rooms are split at doorways | carries on past RoomPlan's ~9 × 9 m limit with points and tiles | iPhone: not yet tried on a real large space |
-| Continue scan | add to a saved scan later | the same | |
-| Sharing | .rmsc (Share, Save to device, send to a nearby phone) | the same | no cloud sync; only phone to phone on the same Wi-Fi |
-| Phones | tested on a Galaxy S24 | tested on an iPhone 15 Pro | Galaxy S23+ and other phones not tried yet |
+The two apps scan in different ways, so they don't have the same features.
+
+- **iPhone = Apple's RoomPlan + LiDAR.** RoomPlan recognises walls, doors, windows, openings and furniture boxes and
+  builds a clean room model; it guides the scan with its own prompts and stops at about 9 × 9 m. LiDAR depth is clean
+  and reaches 5 m. **None of the RoomPlan features exist on Android: don't look for them there.**
+- **Android = ARCore depth, no LiDAR.** The room is coloured points, plus flat photo tiles on flat surfaces. Walls,
+  rooms, floor area and doorways are worked out by our own code from the points: rougher than RoomPlan, and depth only
+  reaches ~3.5 m. In return Android has floor area per room, wall dragging and the "Lost track" notice, which the
+  iPhone doesn't have yet.
+
+Maturity: **solid** = used a lot, **works** = used and checked, **rough** = works but expect errors, **test switch** =
+off unless turned on, **untested** = built but not tried on a phone yet.
+
+| Feature | Android | iPhone | What it looks like | TODO |
+|---|---|---|---|---|
+| Live scan view | **works**: coloured 2 cm dots | **works**: RoomPlan's view; dots-only as a test switch | coloured dots on a grey striped background; the stripes show where nothing is scanned yet; hint card with "This spot" / "Room" bars at the top | |
+| Flat tiles | **works**, on by default | **test switch** ("Flat tiles (test)") | 30 cm photo squares that flash white and develop like a Polaroid on flat walls and floor; dots under them disappear | Android: only within ~3.5 m of the phone |
+| Losing tracking | **works**: notice, buzz, lines up again by itself | RoomPlan's own prompts | amber line "Lost track. Stop and point back at where you were", with the direction, and one buzz; a tick when it carries on | Android: tracking still gets lost on plain walls; the tile check that would refuse a wrong line-up only logs for now; lining up from the camera picture isn't built |
+| RoomPlan model (walls, doors, windows, furniture boxes) | – | **solid** | "Model" tab: a clean grey 3D model of the room | |
+| Room size and height | **works** (≈, a few cm on width, ~10 cm on height) | **solid** (from RoomPlan) | the line under the scan name, e.g. "≈3.80 × 2.86 m · ≈2.82 m high", also in the ROOM card | walls hidden by curtains or furniture are measured at the front of them: drag the wall by hand |
+| Floor area | **rough**: right for rectangular rooms | – | "floor area ≈9.9 m²" in that line; with several rooms "2 rooms, floor ≈35 m² in all (tap a room)" | see "Floor area" below; iPhone: not built |
+| Tap a room | **works** | – | tapping a room's floor tints it amber and shows "Room 2: 6.4 m², 3.3 × 2.9 m" | iPhone: not built |
+| Correcting walls | **works** (new) | – | amber wall lines on the floor of the result; drag one, the size and m² update; "Reset walls" appears next to the size line | iPhone: not built |
+| Measure | **works** | **works** | in Enter the room: tap two spots, a yellow line with the distance; one spot gives its height | |
+| Doorways | **rough** (approximate sizes) | **solid** (RoomPlan's doors) | Android: openings outlined in the result, dashed until the frame is scanned | |
+| Views | **solid**: Photo, Points, Mesh | **solid**: Photo, Points, Mesh, Model | tabs at the top of the result; "Enter the room" to walk through | |
+| Larger spaces | **works**: one scan, split into rooms at doorways | **untested**: carries on past RoomPlan's ~9 × 9 m limit with dots and tiles | iPhone: a line "Large space: points and tiles keep going…" | iPhone: not yet tried on a real large space |
+| Continue scan | **works** | **works** | "Continue scan" on a saved scan; the saved part shows in blue | |
+| Power sockets | **works** (needs a Claude key) | **works** (needs a Claude key) | sockets marked in the scan, found by Claude in the scan's photos | |
+| Objects | **works** | **works** | "Objects" button: furniture boxes you can hide, move and turn | |
+| Lighting preview | **rough** | **works**, with cable runs to the nearest socket | "Lighting" button: place a person and your lights, see the light on their face | |
+| Storyboard, Plan a Shoot, "Set it up with Claude" | – | **works** | buttons in the result's title bar and in Lighting | Android: not built |
+| Catalogue and scanned-item planning | **rough** | – | "Catalog" / "Scanned items": real gear sizes, hide detected furniture in a planning view | |
+| Sharing | **works**: Share (.rmsc), Save to device, Send to nearby phone | **works**: the same | Share button in the result | no cloud sync; phone to phone on the same Wi-Fi only |
+| Recording for fixing problems | **works**: camera recording, screen video, logs | **test switch** ("Screen video (test)"); camera recording on | kept in the scan folder on the phone, never in a .rmsc | |
+| Test switches | debug tools: long-press the main button | home screen, with the build time ("Build 10 Nov 19:55") | | |
+| Phones | Galaxy S24 | iPhone 15 Pro | | Galaxy S23+ and other phones not tried yet |
 
 ### Floor area: what works and what's still to do
 
@@ -51,9 +73,8 @@ Starting points:
 - Test scans (Android scan folders) are kept locally on the developer's Mac, not in this repo: they show a private
   home. Ask for a few to work with.
 
-On both phones there are also **objects** (furniture boxes, and lamps found by Claude), a **lighting preview** with
-cable runs to the nearest socket, and planning tools (**Storyboard**, **Plan a Shoot**). Claude features (sockets,
-lamps, "Set it up with Claude") need your own Claude API key on the phone. Everything else works offline.
+Claude features (sockets, lamps, "Set it up with Claude") need your own Claude API key on the phone. Everything else
+works offline.
 
 **Scans are private.** A scan holds photos and a 3D copy of the room, and the phones can keep a camera recording and a
 screen video with it. Share .rmsc files only with the people who need them.
@@ -88,7 +109,8 @@ Develop: open the `android` folder in [Android Studio](https://developer.android
 `cd android && ./gradlew assembleDebug`. The APK is in `android/app/build/outputs/apk/debug/`.
 
 ### iPhone
-1. Open **CineX.swiftpm** in Xcode (15 or newer; tested with 27).
+1. Open **CineX.swiftpm** in **Xcode 26 or newer** (it uses iOS 26 APIs when the phone has them; the app itself runs on
+   iOS 17 or newer).
 2. Connect the iPhone by cable, tap **Trust**, and turn on Settings › Privacy & Security › **Developer Mode**.
 3. In **Signing & Capabilities**, choose your Apple ID as the Team (a free Apple ID works).
 4. Press ▶︎ Run. The first time, approve the developer account on the iPhone under Settings › General › VPN & Device
