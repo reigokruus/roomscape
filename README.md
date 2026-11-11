@@ -13,20 +13,43 @@ A scan from either phone can be shared as a **.rmsc** file and opened on the oth
 
 ## What you get from a scan
 
-| | Android | iPhone |
-|---|---|---|
-| Live scan view | coloured points (2 cm), flat camera-picture tiles on walls and floor | RoomPlan with LiDAR; points-only and flat tiles as test switches |
-| Losing tracking | an amber "Lost track" notice with the direction back, a vibration, then it lines up with the scan again | RoomPlan's own handling |
-| Room size and height | width × length along the walls, height from the ceiling | RoomPlan's walls, doors and windows |
-| Floor area | per room, split at doorways; tap a room for its own m² | – |
-| Correcting walls | drag a wall line in the result (for curtains, furniture against a wall); Reset walls | – |
-| Measure | tap two points: distance, height of a point | the same |
-| Doorways | width and height of openings | RoomPlan's doors |
-| Views | Photo, Points, Mesh; walk through the room | Photo, Points, Mesh, RoomPlan model; walk through |
-| Larger spaces | one scan for several rooms; rooms are split at doorways | carries on past RoomPlan's ~9 × 9 m limit with points and tiles (new, not tried on a big space yet) |
-| Continue scan | add to a saved scan later | the same |
-| Power sockets | found in the scan's photos by Claude and marked in the scan, so a crew knows where to plug in | the same |
-| Sharing | .rmsc (Share, Save to device, send to a nearby phone) | the same |
+| | Android | iPhone | TODO |
+|---|---|---|---|
+| Live scan view | coloured points (2 cm), flat camera-picture tiles on walls and floor | RoomPlan with LiDAR; points-only and flat tiles as test switches | Android tiles only within ~3.5 m of the phone (the S24's depth range) |
+| Losing tracking | an amber "Lost track" notice with the direction back, a vibration, then it lines up with the scan again | RoomPlan's own handling | Android: tracking still gets lost on plain walls; the tile check that would refuse a wrong line-up only logs for now; lining up from the camera picture (image-based relocalisation) isn't built |
+| Room size and height | width × length along the walls, height from the ceiling | RoomPlan's walls, doors and windows | walls hidden by curtains or furniture are measured at the front of them: drag the wall by hand |
+| Floor area | per room, split at doorways; tap a room for its own m² | – | see "Floor area" below. iPhone: no floor area yet |
+| Correcting walls | drag a wall line in the result; Reset walls | – | iPhone: not built yet |
+| Measure | tap two points: distance, height of a point | the same | |
+| Doorways | width and height of openings | RoomPlan's doors | Android doorway sizes are approximate |
+| Power sockets | found in the scan's photos by Claude and marked in the scan, so a crew knows where to plug in | the same | |
+| Views | Photo, Points, Mesh; walk through the room | Photo, Points, Mesh, RoomPlan model; walk through | |
+| Larger spaces | one scan for several rooms; rooms are split at doorways | carries on past RoomPlan's ~9 × 9 m limit with points and tiles | iPhone: not yet tried on a real large space |
+| Continue scan | add to a saved scan later | the same | |
+| Sharing | .rmsc (Share, Save to device, send to a nearby phone) | the same | no cloud sync; only phone to phone on the same Wi-Fi |
+| Phones | tested on a Galaxy S24 | tested on an iPhone 15 Pro | Galaxy S23+ and other phones not tried yet |
+
+### Floor area: what works and what's still to do
+
+**Works:** simple rectangular rooms. The walls found by the scan bound the room; on a tape-measured 3.95 × 2.70 m
+room the width came out exact and the area about 7 % low (a thick curtain read as the end wall), which a wall drag
+fixes.
+
+**Not yet (suggested owner: Daniel):** other shapes. L-shaped rooms, and open-plan spaces like a living room +
+kitchen + hall (tested on 10 Nov), don't get a correct outline or a split into rooms yet. When the scan finds few
+walls, the outline falls back to a rectangle around the floor it saw (marked "about"), and an open space with no
+narrow doorway stays one room.
+
+Starting points:
+- The code: `android/app/src/main/java/com/hackathon/setscan/FloorArea.java` (rooms, walls, outline; it also runs on
+  the Mac: `java FloorArea.java <scan folder>` prints the rooms and draws a top-down picture). Its unit tests:
+  `android/app/src/test/java/com/hackathon/setscan/FloorAreaEditTest.java`. The result view's wall dragging is in
+  `ScanRenderer.java` (search `wallEdits`).
+- The saved numbers: `floor-area.json` in each scan folder, and `floorArea` in a .rmsc's manifest
+  ([format](docs/rmsc-format.md)).
+- An idea: let the user split a room by drawing a line across the floor, the same way walls are dragged now.
+- Test scans (Android scan folders) are kept locally on the developer's Mac, not in this repo: they show a private
+  home. Ask for a few to work with.
 
 On both phones there are also **objects** (furniture boxes, and lamps found by Claude), a **lighting preview** with
 cable runs to the nearest socket, and planning tools (**Storyboard**, **Plan a Shoot**). Claude features (sockets,
