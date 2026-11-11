@@ -131,6 +131,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  farther or equal one (rk 10 Nov), so repeated looks settle instead of churning. Sideways only the reading's own
      *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
     static volatile boolean CLOSEST_WINS = true;
+    /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
+    static volatile boolean AUTO_ERASE = true;
     // ---- Hold "Rescan": a sphere in front of the phone where old dots are cleared and refilled by fresh readings ----
     static volatile float SPHERE_R = 0.15f;   // sphere radius, m (debug tools "Rescan sphere")
     /** Debug tools "Rescan sphere distance": its centre this far straight in front of the phone (m). */
@@ -5925,7 +5927,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             int t = Math.min(255, (thru[i] & 0xFF) + 1);
             thru[i] = (byte) t;
             int seen = Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f));
-            if (t >= 4 && t >= (seen >= SOLID_SEEN ? 10 : seen)) { // solid surfaces need more evidence to be erased
+            // Automatic eraser (rk 23:16): with only sure (95%+) depth in play, two separate frames seeing clearly past
+            // the whole spot are enough (was 4, and up to 10 for a solid dot); the 3x3 footprint check above still keeps
+            // thin bars and chair legs seen against the wall.
+            boolean gone = AUTO_ERASE ? t >= 2 : t >= 4 && t >= (seen >= SOLID_SEEN ? 10 : seen);
+            if (gone) { // solid surfaces need more evidence to be erased
                 obs[i] = 0; thru[i] = 0;
                 col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done
                 removed++;
