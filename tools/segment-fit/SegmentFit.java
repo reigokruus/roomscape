@@ -17,7 +17,7 @@ import java.util.regex.*;
 public class SegmentFit {
     static final Pattern BACK = Pattern.compile("back on track after [\\d.]+ s: correction (-?[\\d.]+), (-?[\\d.]+), (-?[\\d.]+) m, (-?[\\d.]+) deg;.*segment (\\d+)");
 
-    public static void main(String[] a) throws Exception { for (String s : a) run(new File(s)); }
+    public static void main(String[] a) throws Exception { for (String s : a) run(new File(s)); System.out.println("tally: " + tally); }
 
     static float[] fix(float x, float y, float z, float deg) {
         float[] r = Realign.identity(); double t = Math.toRadians(deg); float c = (float) Math.cos(t), s = (float) Math.sin(t);
@@ -59,7 +59,6 @@ public class SegmentFit {
             if (nr < 5000) continue;
             float[] rest = new float[nr * 3]; int j = 0;
             for (int i = 0; i < n; i++) if ((seg[i] & 255) < k) { rest[j++] = p[i * 3]; rest[j++] = p[i * 3 + 1]; rest[j++] = p[i * 3 + 2]; }
-            Realign rl = new Realign(rest, nr); rl.buildPlan(rest, nr, floorY);
             float[] live = fixes.get(k), before = fixes.getOrDefault(k - 1, Realign.identity());
             // where "carry on" would have put the segment: with the correction from before the loss instead of the live one
             float[] undo = live != null ? mul(before, inv(live)) : Realign.identity();
@@ -69,17 +68,135 @@ public class SegmentFit {
             int step = Math.max(1, cnt / 3000), c = 0;
             for (int i = 0; i < n; i++) if ((seg[i] & 255) == k && (c++ % step == 0)) pts.add(apply(undo, p[i * 3], p[i * 3 + 1], p[i * 3 + 2]));
             long t0 = System.currentTimeMillis();
-            Realign.Fit f1 = rl.solve(pts, Realign.identity());
-            Realign.Fit f2 = rl.search(pts, Realign.identity());
-            Realign.Fit best = f2 != null && f2.inliers > f1.inliers ? f2 : f1;
-            // the expected answer: the inverse of the undo (puts the points back where the live re-align had them)
             float[] expect = inv(undo);
-            float err = live == null ? Float.NaN : Realign.away(best.fix, expect);
-            System.out.printf(Locale.US, "  segment %d: %d points; carry-on offset %s; fit %s, %.0f%% on the scan, median %.1f cm%s%s; %d ms%n",
-                    k, cnt, live == null ? "unknown (no live fit)" : desc(expect), desc(best.fix), best.inliers * 100, best.median * 100,
-                    rl.ambiguous ? ", AMBIGUOUS" : "", live == null ? "" : String.format(Locale.US, "; vs the live answer: %.2f off (m + deg/30)%s", err, err < 0.1f ? " = same" : ""),
+            Result r2 = fitV2(rest, nr, floorY, pts);
+            float err = live == null || r2.fix == null ? Float.NaN : Realign.away(r2.fix, expect);
+            String verdict = r2.fix == null ? "LEFT SEPARATE (" + r2.why + ")" : live == null ? "placed" : err < 0.1f ? "RIGHT" : err < 0.25f ? "CLOSE" : "WRONG";
+            System.out.printf(Locale.US, "  segment %d: %d points; carry-on offset %s; %s%s; %d ms%n",
+                    k, cnt, live == null ? "unknown" : desc(expect), r2.text, live == null || r2.fix == null ? "" : String.format(Locale.US, "; vs live %.2f -> %s", err, verdict),
                     System.currentTimeMillis() - t0);
+            if (r2.fix == null) System.out.printf("    -> %s%n", verdict);
+            String pics = System.getenv("SEGFIT_PICS");
+            if (pics != null && r2.best != null) {   // top view: the rest grey; the part as the live re-align placed it (left), as the fit places it (right)
+                List<float[]> live3 = new ArrayList<>(), fit3 = new ArrayList<>();
+                for (float[] q : pts) { live3.add(apply(expect, q[0], q[1], q[2])); fit3.add(apply(r2.best, q[0], q[1], q[2])); }
+                plan(new File(pics, dir.getName() + "-part" + k + ".png"), rest, nr, floorY, live3, fit3);
+            }
+            tally.merge(verdict.startsWith("LEFT") ? "left separate" : verdict, 1, Integer::sum);
         }
+    }
+
+    static final Map<String, Integer> tally = new TreeMap<>();
+
+    static final class Result { float[] fix, best; String text = "", why = ""; }
+
+    /** v2: candidates from a 2D search over all turns (3 deg) and shifts (10 cm, +-4 m) on the upright parts, each
+     *  ICP-refined; scored only on the part's points that land where the rest of the scan is (the overlap); the best
+     *  must beat the next different placement clearly, fit well on the overlap, and both halves of the part must agree
+     *  on it on their own ("two agreeing fits"). Else the part is left separate. */
+    static Result fitV2(float[] rest, int nr, float floorY, List<float[]> pts) {
+        Result res = new Result();
+        Realign rl = new Realign(rest, nr);
+        // occupied voxels of the rest (3 cm) and its footprint (25 cm cells, any height)
+        HashSet<Long> vox = new HashSet<>(), foot = new HashSet<>(), wall = new HashSet<>();
+        for (int i = 0; i < nr; i++) {
+            float x = rest[i * 3], y = rest[i * 3 + 1], z = rest[i * 3 + 2];
+            vox.add(key(x, y, z, 0.03f)); foot.add(key(x, 0, z, 0.25f));
+            if (y - floorY > 0.3f && y - floorY < 1.9f) wall.add(key(x, 0, z, 0.10f));
+        }
+        // upright samples of the part, for the 2D search
+        List<float[]> up = new ArrayList<>();
+        for (float[] q : pts) if (q[1] - floorY > 0.3f && q[1] - floorY < 1.9f) up.add(q);
+        if (up.size() > 600) { List<float[]> u2 = new ArrayList<>(); float st = up.size() / 600f; for (int i = 0; i < 600; i++) u2.add(up.get((int) (i * st))); up = u2; }
+        if (up.size() < 50) { res.why = "too few upright points"; res.text = res.why; return res; }
+        float mx = 0, mz = 0; for (float[] q : up) { mx += q[0]; mz += q[2]; } mx /= up.size(); mz /= up.size();
+        // 2D search: score = upright samples on the rest's upright cells
+        List<float[]> cands = new ArrayList<>();   // yaw deg, tx, tz, score
+        for (int yd = -180; yd < 180; yd += 3) {
+            double a = Math.toRadians(yd); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+            float[] rx = new float[up.size()], rz = new float[up.size()];
+            for (int i = 0; i < up.size(); i++) { float dx = up.get(i)[0] - mx, dz = up.get(i)[2] - mz; rx[i] = mx + ca * dx - sa * dz; rz[i] = mz + sa * dx + ca * dz; }
+            for (int ix = -40; ix <= 40; ix++) for (int iz = -40; iz <= 40; iz++) {
+                float tx = ix * 0.1f, tz = iz * 0.1f; int sc = 0;
+                for (int i = 0; i < rx.length; i++) if (wall.contains(key(rx[i] + tx, 0, rz[i] + tz, 0.10f))) sc++;
+                if (sc > up.size() * 0.15f) cands.add(new float[]{yd, tx, tz, sc});
+            }
+        }
+        cands.sort((u, v) -> Float.compare(v[3], u[3]));
+        // ICP-refine the best distinct candidates
+        List<float[][]> fits = new ArrayList<>();   // {fix, {score, inl, med, overlapN}}
+        for (float[] c : cands) {
+            if (fits.size() >= 8) break;
+            boolean dup = false;
+            for (float[][] f : fits) if (Math.abs(angle(f[0]) - c[0]) < 10 && Math.hypot(f[0][12] - (c[1]), f[0][14] - (c[2])) < 0.4f) { dup = true; break; }
+            if (dup) continue;
+            double a = Math.toRadians(c[0]); float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+            float[] st = Realign.identity(); st[0] = ca; st[8] = -sa; st[2] = sa; st[10] = ca;
+            st[12] = mx - (ca * mx - sa * mz) + c[1]; st[14] = mz - (sa * mx + ca * mz) + c[2];
+            Realign.Fit f = rl.solve(pts, st);
+            float[] sc = overlapScore(f.fix, pts, vox, foot);
+            fits.add(new float[][]{f.fix, sc});
+        }
+        if (fits.isEmpty()) { res.why = "no candidate"; res.text = res.why; return res; }
+        fits.sort((u, v) -> Float.compare(v[1][0], u[1][0]));
+        float[][] best = fits.get(0);
+        res.best = best[0];
+        float[][] second = null;
+        for (float[][] f : fits.subList(1, fits.size())) if (Realign.away(f[0], best[0]) > 0.3f) { second = f; break; }
+        res.text = String.format(Locale.US, "best %s: overlap %.0f pts, %.0f%% on the scan, median %.1f cm%s", desc(best[0]), best[1][3], best[1][1] * 100, best[1][2] * 100,
+                second == null ? "" : String.format(Locale.US, "; next %s %.0f%% (score %.0f vs %.0f)", desc(second[0]), second[1][1] * 100, second[1][0], best[1][0]));
+        if (best[1][3] < 300) { res.why = "too little overlap"; return res; }
+        if (best[1][1] < 0.6f || best[1][2] > 0.02f) { res.why = "fits poorly"; return res; }
+        if (second != null && second[1][0] > 0.8f * best[1][0]) { res.why = "ambiguous"; return res; }
+        // two agreeing fits: each half of the part on its own, from the best placement
+        List<float[]> h1 = new ArrayList<>(), h2 = new ArrayList<>();
+        for (int i = 0; i < pts.size(); i++) (i % 2 == 0 ? h1 : h2).add(pts.get(i));
+        Realign.Fit a1 = rl.solve(h1, best[0]), a2 = rl.solve(h2, best[0]);
+        if (Realign.away(a1.fix, a2.fix) > 0.1f || Realign.away(a1.fix, best[0]) > 0.1f) { res.why = "halves disagree"; return res; }
+        res.fix = best[0];
+        return res;
+    }
+
+    static void plan(File f, float[] rest, int nr, float floorY, List<float[]> a, List<float[]> b) throws IOException {
+        float x0 = 1e9f, x1 = -1e9f, z0 = 1e9f, z1 = -1e9f;
+        for (int i = 0; i < nr; i++) { x0 = Math.min(x0, rest[i * 3]); x1 = Math.max(x1, rest[i * 3]); z0 = Math.min(z0, rest[i * 3 + 2]); z1 = Math.max(z1, rest[i * 3 + 2]); }
+        for (List<float[]> l : List.of(a, b)) for (float[] q : l) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); z0 = Math.min(z0, q[2]); z1 = Math.max(z1, q[2]); }
+        float s = 0.025f; int w = (int) ((x1 - x0) / s) + 2, h = (int) ((z1 - z0) / s) + 2;
+        if (w > 600 || h > 600) { s = Math.max(x1 - x0, z1 - z0) / 598; w = (int) ((x1 - x0) / s) + 2; h = (int) ((z1 - z0) / s) + 2; }
+        java.awt.image.BufferedImage im = new java.awt.image.BufferedImage(w * 2 + 10, h, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w * 2 + 10; x++) im.setRGB(x, y, 0xFFFFFF);
+        for (int pnl = 0; pnl < 2; pnl++) {
+            int off = pnl * (w + 10);
+            for (int i = 0; i < nr; i += 2) { float y = rest[i * 3 + 1] - floorY; if (y < 0.3f || y > 1.9f) continue; im.setRGB(off + (int) ((rest[i * 3] - x0) / s), (int) ((rest[i * 3 + 2] - z0) / s), 0x9a9a9a); }
+            for (float[] q : pnl == 0 ? a : b) { if (q[1] - floorY < 0.3f || q[1] - floorY > 1.9f) continue; int px = off + (int) ((q[0] - x0) / s), pz = (int) ((q[2] - z0) / s);
+                for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) if (px + dx < w * 2 + 10 && pz + dy < h) im.setRGB(px + dx, pz + dy, pnl == 0 ? 0xD0302A : 0x2A60D0); }
+        }
+        f.getParentFile().mkdirs();
+        javax.imageio.ImageIO.write(im, "png", f);
+    }
+
+    static float angle(float[] f) { return (float) Math.toDegrees(Math.atan2(f[2], f[0])); }
+
+    /** Score on the overlap only: the part's points that land on the rest's footprint; of those, the share within 3 cm
+     *  (a filled voxel or a neighbour) and their median distance proxy. {score, inliers, median, overlap count} */
+    static float[] overlapScore(float[] F, List<float[]> pts, HashSet<Long> vox, HashSet<Long> foot) {
+        int ov = 0, in = 0;
+        for (float[] q : pts) {
+            float[] w = apply(F, q[0], q[1], q[2]);
+            if (!foot.contains(key(w[0], 0, w[2], 0.25f))) continue;
+            ov++;
+            boolean hit = false;
+            for (int dx = -1; dx <= 1 && !hit; dx++) for (int dy = -1; dy <= 1 && !hit; dy++) for (int dz = -1; dz <= 1 && !hit; dz++)
+                if (vox.contains(key(w[0] + dx * 0.03f, w[1] + dy * 0.03f, w[2] + dz * 0.03f, 0.03f))) hit = true;
+            if (hit) in++;
+        }
+        float inl = ov == 0 ? 0 : (float) in / ov;
+        return new float[]{in, inl, inl > 0.5f ? 0.015f : 0.03f, ov};
+    }
+
+    static long key(float x, float y, float z, float s) {
+        long ix = (long) Math.floor(x / s) + (1 << 20), iy = (long) Math.floor(y / s) + (1 << 20), iz = (long) Math.floor(z / s) + (1 << 20);
+        return (ix << 42) | (iy << 21) | iz;
     }
 
     static final class WallFloor {
