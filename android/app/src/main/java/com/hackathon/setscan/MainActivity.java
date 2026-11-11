@@ -817,11 +817,11 @@ public class MainActivity extends Activity {
             closeB.setText(ScanRenderer.CLOSEST_WINS ? "Closest sure look wins: on" : "Closest sure look wins: off");
             closeB.setOnClickListener(v -> { ScanRenderer.CLOSEST_WINS = !ScanRenderer.CLOSEST_WINS; sp.edit().putBoolean("abClosestWins", ScanRenderer.CLOSEST_WINS).apply(); closeB.setText(ScanRenderer.CLOSEST_WINS ? "Closest sure look wins: on" : "Closest sure look wins: off"); });
             Button paintB = new Button(this);
-            ScanRenderer.PAINT_MIN = sp.getInt("abPaintMin", 230);
+            ScanRenderer.PAINT_MIN = sp.getInt("abPaintMin2", 242);
             paintB.setText("Paint from confidence: " + Math.round(ScanRenderer.PAINT_MIN * 100 / 255f) + "%");
-            paintB.setOnClickListener(v -> {   // 90% -> 80% -> 50% -> all (the old 55) -> 90%
-                int[] steps = {230, 204, 128, 55}; int k = 0; for (int i = 0; i < steps.length; i++) if (steps[i] == ScanRenderer.PAINT_MIN) k = (i + 1) % steps.length;
-                ScanRenderer.PAINT_MIN = steps[k]; sp.edit().putInt("abPaintMin", steps[k]).apply();
+            paintB.setOnClickListener(v -> {   // 95% -> 90% -> 80% -> 50% -> all (the old 55) -> 95%
+                int[] steps = {242, 230, 204, 128, 55}; int k = 0; for (int i = 0; i < steps.length; i++) if (steps[i] == ScanRenderer.PAINT_MIN) k = (i + 1) % steps.length;
+                ScanRenderer.PAINT_MIN = steps[k]; sp.edit().putInt("abPaintMin2", steps[k]).apply();
                 paintB.setText("Paint from confidence: " + Math.round(ScanRenderer.PAINT_MIN * 100 / 255f) + "%");
             });
             Button stopB = new Button(this);
@@ -829,9 +829,9 @@ public class MainActivity extends Activity {
             stopB.setText(ScanRenderer.STOP_ON_LOSS ? "Stop the scan on a loss: on" : "Stop the scan on a loss: off");
             stopB.setOnClickListener(v -> { ScanRenderer.STOP_ON_LOSS = !ScanRenderer.STOP_ON_LOSS; sp.edit().putBoolean("abStopOnLoss", ScanRenderer.STOP_ON_LOSS).apply(); stopB.setText(ScanRenderer.STOP_ON_LOSS ? "Stop the scan on a loss: on" : "Stop the scan on a loss: off"); });
             Button greyB = new Button(this);
-            ScanRenderer.CONF_GREY = sp.getBoolean("abConfGrey", true);
+            ScanRenderer.CONF_GREY = sp.getBoolean("abConfGrey2", false);
             greyB.setText(ScanRenderer.CONF_GREY ? "Confidence greys: on" : "Confidence greys: off");
-            greyB.setOnClickListener(v -> { ScanRenderer.CONF_GREY = !ScanRenderer.CONF_GREY; sp.edit().putBoolean("abConfGrey", ScanRenderer.CONF_GREY).apply(); greyB.setText(ScanRenderer.CONF_GREY ? "Confidence greys: on" : "Confidence greys: off"); });
+            greyB.setOnClickListener(v -> { ScanRenderer.CONF_GREY = !ScanRenderer.CONF_GREY; sp.edit().putBoolean("abConfGrey2", ScanRenderer.CONF_GREY).apply(); greyB.setText(ScanRenderer.CONF_GREY ? "Confidence greys: on" : "Confidence greys: off"); });
             Button fillB = new Button(this);
             ScanRenderer.FILL_WALL = sp.getBoolean("abFillWall", true);
             fillB.setText(ScanRenderer.FILL_WALL ? "Guess the plain wall: on" : "Guess the plain wall: off");

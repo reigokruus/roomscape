@@ -113,7 +113,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final short[] nearCm = new short[MAX_POINTS];
     /** Debug tools "Confidence greys": dots drawn in grey by their confidence (white = ARCore most sure, black = least);
      *  display only, the real colours are kept and saved as always. */
-    static volatile boolean CONF_GREY = true;
+    static volatile boolean CONF_GREY = false;   // (rk 22:27: live dots in their real colour again)
     /** Greys while scanning only; the result and the gallery show the real colours (rk 11 Nov 22:18: "I want to see what
      *  it picked up"). */
     private boolean greyNow() { return CONF_GREY && !viewing; }
@@ -123,7 +123,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Only sure readings paint a dot (rk 11 Nov 22:09: "make only points above 90% paint"): ARCore depth confidence
      *  230 of 255 or more. A spot with only weaker readings isn't drawn, doesn't count as scanned, and isn't saved as a
      *  scan point (lowconf-points.bin keeps it aside); a sure reading later paints it. Debug tools "Paint from confidence". */
-    static volatile int PAINT_MIN = 230;
+    static volatile int PAINT_MIN = 242;   // 95% (rk 11 Nov 22:27; was 90% = 230)
     /** Debug tools "Closest sure look wins" (rk 11 Nov 22:25: wrong dots on the chair legs should "retry"): a sure
      *  reading taken clearly closer than a dot's closest look replaces the dots along its line of sight within
      *  +-SUPERSEDE_ALONG (2 cells of 2 cm: the S24's 90%+ depth scatters ~1-2 cm at 1 m) instead of landing beside them.
@@ -6954,7 +6954,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         if (k == 0) return;
         float r = ((w.rgb >> 16) & 255) / 255f, g = ((w.rgb >> 8) & 255) / 255f, bl = (w.rgb & 255) / 255f;
-        if (greyNow()) { r = g = bl = 0.04f; }   // guessed, not measured: no ARCore confidence at all, so black in the greys
+        if (!viewing) { r = g = bl = 0.04f; }   // guessed, not measured: solid black while scanning, so it's told apart (rk 22:09/22:27)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         planDraw(m, k == guessVerts.length ? guessVerts : java.util.Arrays.copyOf(guessVerts, k), GLES20.GL_POINTS, new float[]{r, g, bl, 1f}, Math.max(2f, 7f * DOT_SCALE));
     }
