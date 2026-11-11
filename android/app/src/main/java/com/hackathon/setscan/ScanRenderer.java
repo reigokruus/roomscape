@@ -6235,7 +6235,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         stayGuess = null;
         realign = null; realignBuilding = true;
         synchronized (goalTried) { goalTried.clear(); }
-        heldGuess = null;
+        heldGuess = null; viewShape = -1;
         pickGoal("lost");
         // The cells take ~3 s for a big scan (10:44 scan: 2.8 s on the drawing thread): built aside; nothing is fused
         // meanwhile (realigned() waits for them).
@@ -6614,7 +6614,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  says the phone is: facing where the rotation sensor turned it, standing where tracking was lost (the hint says to
      *  stop). After a loss ARCore can come back in a shifted frame (rk 11 Nov 20:12: back 0.63 m / 24.7 deg off; every
      *  re-align then found 0.6-0.7 m / 20-24 deg and was refused as "implausible" against ARCore for 20 s). */
-    private volatile float[] heldGuess;
+    private volatile float[] heldGuess; private float viewShape = -1;
     private float[] heldGuessFor(float[] cp) {
         if (!havePrevPose) return null;
         float[] v = lastShownView;
@@ -6775,6 +6775,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             needRealign = false; return true;
         }
         if (stayGuess == null) stayGuess = stayGuessFor(m);
+        if (heldGuess != null) {   // the view's 3D shape, for the held-view rule (a plain wall or a corridor slides)
+            short[] dd = new short[dw * dh];
+            for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) dd[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+            float sh = Anchors.shapeScore(dd, dw, dh, fx, fy, cx, cy)[0];
+            viewShape = viewShape < 0 ? sh : viewShape * 0.7f + sh * 0.3f;
+        }
         // Never lined up after 30 s: the user decides (a first-time user mustn't be stuck with a scan that stopped
         // growing). Carrying on is a new part of the scan (its own segment, droppable later), never silent.
         if (forceResume) {
@@ -6816,12 +6822,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     implausible = String.format(java.util.Locale.US, " (implausible: %.2f m sideways, %.2f m up/down, %.0f deg from where ARCore says)", Math.hypot(ddx, ddz), ddy, dyaw);
                 }
             }
-            float[] hg = heldGuess;
-            if (!ok && !implausible.isEmpty() && hg != null && res.good && !res.ambiguous && Realign.away(F, hg) < 0.35f) {
+            float[] hg = heldGuess; boolean byHeld = false;
+            if (!ok && !implausible.isEmpty() && hg != null && res.good && !res.ambiguous && Realign.away(F, hg) < 0.35f && viewShape >= Anchors.MIN_SHAPE) {
                 // refused only against ARCore, but where the rotation sensor and the "stop" say the phone is: ARCore
                 // came back in a shifted frame; the held view is the better judge
-                ok = true;
-                log(String.format(java.util.Locale.US, "  agrees with the held view (%.2f off): ARCore came back shifted, accepted%s", Realign.away(F, hg), implausible));
+                ok = true; byHeld = true;
+                log(String.format(java.util.Locale.US, "  agrees with the held view (%.2f off, view shape %.2f): ARCore came back shifted, counts as a match%s", Realign.away(F, hg), viewShape, implausible));
                 implausible = "";
             }
             realignOk = ok && (realignOk == 0 || drift < 0.08f) ? realignOk + 1 : (ok ? 1 : 0);
@@ -6861,6 +6867,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             double dYaw = Math.toDegrees(Math.atan2(F[2], F[0]) - Math.atan2(refFix[2], refFix[0]));
             while (dYaw > 180) dYaw -= 360; while (dYaw < -180) dYaw += 360;
             if (strong && Math.abs(dYaw) > 10) { strong = false; log(String.format(java.util.Locale.US, "  (a %.0f deg turn: needs a second agreeing try)", dYaw)); }
+            // Accepted only through the held view: always two agreeing tries in a row, whatever the fit or the turn
+            // (offline replay 11 Nov: one 92% try on 10 Nov 16:26 would otherwise have resumed at once, 0.56 away from
+            // where it really resumed later).
+            if (byHeld) strong = false;
             // Shadow tile check (logged only, nothing decided by it yet): does this correction still put the view on
             // the tiles painted before the loss? Offline on the 16:39 scan the -36 deg resume put 1-6% of the view on
             // the old tiles where the correction from before the loss put 12-15% (tools/tile-anchor).
