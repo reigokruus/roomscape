@@ -132,7 +132,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
     static volatile boolean CLOSEST_WINS = true;
     // ---- Hold "Rescan": a sphere in front of the phone where old dots are cleared and refilled by fresh readings ----
-    static volatile float SPHERE_R = 0.15f;   // sphere radius, m (debug tools "Rescan sphere size")
+    static volatile float SPHERE_R = 0.15f;   // sphere radius, m (debug tools "Rescan sphere")
+    /** Debug tools "Rescan sphere distance": its centre this far straight in front of the phone (m). */
+    static volatile float SPHERE_DIST = 0.6f;
     private volatile boolean rescanOn; private int rescanFromStamp; private volatile float centerDepth = 1f;
     private int rescanCleared; private long rescanStartMs;
     private final float[] rescanC = new float[3];
@@ -145,7 +147,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  0.4-2 m); dots inside it not seen since the press are cleared, so the readings coming in now place them again. */
     private void rescanStep(float[] cam) {
         if (!rescanOn || viewing) return;
-        float d = Math.max(0.4f, Math.min(2f, centerDepth));
+        float d = SPHERE_DIST;   // free floating at a fixed distance in front of the phone, moving with it (rk 23:00: not stuck to surfaces)
         rescanC[0] = cam[12] - cam[8] * d; rescanC[1] = cam[13] - cam[9] * d; rescanC[2] = cam[14] - cam[10] * d;
         if (frameNo % 3 != 0) return;
         float R = SPHERE_R, r2 = R * R; int n = count, cleared = 0;
@@ -176,20 +178,41 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             }
         }
     }
-    /** The sphere: three amber rings (around each axis), so it reads as a ball in 3D. */
+    /** The sphere: a see-through painted ball (about 20-30% opaque, a little stronger towards the rim so it reads round),
+     *  no lines; depth-tested against the dots without hiding them, so what's in front, inside and behind shows. */
+    private int sphereProg; private java.nio.FloatBuffer sphereMesh; private int sphereVerts;
     private void drawRescanSphere(float[] m) {
         if (!rescanOn || viewing) return;
-        int N = 48; float[] v = new float[3 * N * 2 * 3]; int k = 0;
-        for (int ring = 0; ring < 3; ring++) for (int i = 0; i < N; i++) for (int e = 0; e < 2; e++) {
-            double a = 2 * Math.PI * (i + e) / N; float c = (float) Math.cos(a) * SPHERE_R, sn = (float) Math.sin(a) * SPHERE_R;
-            float x = ring == 0 ? c : ring == 1 ? c : 0, y = ring == 0 ? sn : ring == 1 ? 0 : c, z = ring == 0 ? 0 : ring == 1 ? sn : sn;
-            v[k++] = rescanC[0] + x; v[k++] = rescanC[1] + y; v[k++] = rescanC[2] + z;
+        if (sphereProg == 0) {
+            sphereProg = program("uniform mat4 uMvp; uniform vec3 uC; uniform float uR; uniform vec3 uEye; attribute vec3 aN; varying float vRim;" +
+                    "void main(){ vec3 p = uC + aN * uR; vec3 v = normalize(uEye - p); vRim = 1.0 - abs(dot(aN, v)); gl_Position = uMvp * vec4(p, 1.0); }",
+                    "precision mediump float; varying float vRim; uniform vec4 uCol;" +
+                    "void main(){ float a = uCol.a * (0.6 + 0.4 * vRim * vRim); gl_FragColor = vec4(uCol.rgb, a); }");
+            int LAT = 18, LON = 32; float[] v = new float[LAT * LON * 6 * 3]; int k = 0;
+            for (int i = 0; i < LAT; i++) for (int j = 0; j < LON; j++) {
+                double t0 = Math.PI * i / LAT, t1 = Math.PI * (i + 1) / LAT, p0 = 2 * Math.PI * j / LON, p1 = 2 * Math.PI * (j + 1) / LON;
+                double[][] q = {{t0, p0}, {t1, p0}, {t1, p1}, {t0, p0}, {t1, p1}, {t0, p1}};
+                for (double[] e : q) { v[k++] = (float) (Math.sin(e[0]) * Math.cos(e[1])); v[k++] = (float) Math.cos(e[0]); v[k++] = (float) (Math.sin(e[0]) * Math.sin(e[1])); }
+            }
+            sphereMesh = ByteBuffer.allocateDirect(v.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer(); sphereMesh.put(v).position(0); sphereVerts = v.length / 3;
         }
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
-        GLES20.glLineWidth(4f);
-        planDraw(m, v, GLES20.GL_LINES, new float[]{1f, 0.69f, 0.13f, 1f}, 1f);
-        GLES20.glLineWidth(1f);
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        GLES20.glUseProgram(sphereProg);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(sphereProg, "uMvp"), 1, false, m, 0);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(sphereProg, "uC"), rescanC[0], rescanC[1], rescanC[2]);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(sphereProg, "uR"), SPHERE_R);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(sphereProg, "uEye"), lastGoodCam[12], lastGoodCam[13], lastGoodCam[14]);
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(sphereProg, "uCol"), 1f, 0.69f, 0.13f, 0.3f);
+        int aN = GLES20.glGetAttribLocation(sphereProg, "aN");
+        sphereMesh.position(0);
+        GLES20.glVertexAttribPointer(aN, 3, GLES20.GL_FLOAT, false, 0, sphereMesh);
+        GLES20.glEnableVertexAttribArray(aN);
+        GLES20.glEnable(GLES20.GL_BLEND); GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST); GLES20.glDepthMask(false);   // dots in front stay in front; the ball doesn't hide what's inside
+        GLES20.glEnable(GLES20.GL_CULL_FACE); GLES20.glCullFace(GLES20.GL_BACK);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, sphereVerts);
+        GLES20.glDisable(GLES20.GL_CULL_FACE);
+        GLES20.glDepthMask(true); GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDisableVertexAttribArray(aN);
     }
     /** Debug tools "Fine dots up close": readings from under FINE_NEAR_M get 0.8 cm cells instead of 2 cm. */
     static volatile boolean FINE_NEAR = true;
