@@ -40,6 +40,7 @@ final class ScanStore {
         long created;
         float[] pos; byte[] col; int n;
         byte[] seg; // per point: which stretch of tracking it came from (0, +1 after each loss); null = all 0
+        byte[] dotConf; // per point: best ARCore depth confidence, closest distance (cm, big-endian short); null = none
         List<Kf> kfs = new ArrayList<>();
         float[] path = new float[0];
         List<float[]> corners = new ArrayList<>(), walls = new ArrayList<>();
@@ -122,6 +123,9 @@ final class ScanStore {
         if (d.seg != null && d.seg.length >= d.n) {
             boolean any = false; for (int i = 0; i < d.n; i++) if (d.seg[i] != 0) { any = true; break; }
             if (any) try (DataOutputStream o = out(new File(tmp, "segments.bin"))) { o.writeInt(d.n); o.write(d.seg, 0, d.n); }
+        }
+        if (d.dotConf != null && d.dotConf.length >= d.n * 3) {
+            try (DataOutputStream o = out(new File(tmp, "dot-confidence.bin"))) { o.writeInt(d.n); o.write(d.dotConf, 0, d.n * 3); }
         }
         try (DataOutputStream o = out(new File(tmp, "kf.bin"))) {
             o.writeInt(d.kfs.size());

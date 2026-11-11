@@ -1135,6 +1135,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 ByteBuffer cd = col.duplicate(); cd.position(0); cd.get(ca, 0, cn * 4);
                 final byte[] oa = java.util.Arrays.copyOf(obs, cn);
                 final byte[] sga = seg == null ? null : java.util.Arrays.copyOf(seg, cn);
+                final byte[] cfa = java.util.Arrays.copyOf(confBest, cn); final short[] nca = java.util.Arrays.copyOf(nearCm, cn);
                 final java.util.List<Object> jpgs = ScanExport.readKeyframesRaw(photos, width, height);
                 final java.util.List<Runnable> encode = new java.util.ArrayList<>();
                 for (int i = 0; i < photos.keyframes.size() && i < jpgs.size(); i++) {
@@ -1170,9 +1171,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         for (int i = 0; i < cn; i++) if (oa[i] != 0) live++;
                         d.n = live; d.pos = new float[live * 3]; d.col = new byte[live * 3];
                         d.seg = sga == null ? null : new byte[live];
+                        d.dotConf = new byte[live * 3];   // with every save (Done, autosave, a kept Cancel): matches points.bin
                         for (int i = 0, j = 0; i < cn; i++) {
                             if (oa[i] == 0) continue; // cleared by see-through
                             if (d.seg != null) d.seg[j] = sga[i];
+                            d.dotConf[j * 3] = cfa[i]; d.dotConf[j * 3 + 1] = (byte) (nca[i] >> 8); d.dotConf[j * 3 + 2] = (byte) nca[i];
                             d.pos[j * 3] = pa[i * 3]; d.pos[j * 3 + 1] = pa[i * 3 + 1]; d.pos[j * 3 + 2] = pa[i * 3 + 2];
                             d.col[j * 3] = ca[i * 4]; d.col[j * 3 + 1] = ca[i * 4 + 1]; d.col[j * 3 + 2] = ca[i * 4 + 2];
                             j++;
@@ -2482,7 +2485,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (dir != null && tilesSaved != null) saveTiles(dir, tilesSaved);
                 if (dir != null && removedAtDone[0] != null) saveRemoved(dir, removedAtDone[0]);
                 if (dir != null) saveFilledWall(dir);
-                if (dir != null && confAtDone[0] != null) saveConfidence(dir, confAtDone[0]);
+                // (dot-confidence.bin is written with every save now, by ScanStore)
                 if (dir != null) { saveEvents(dir); saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
             };
         }
