@@ -1377,6 +1377,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             String nm = (currentName != null ? currentName : dir.getName()) + " (cancelled)";
             try { ScanStore.rename(dir, nm); } catch (Exception e) { logError("keep cancelled scan", e); }
             log("scan cancelled: kept as '" + nm + "' (" + count + " points) in " + dir.getName());
+            // its diagnostics too, as after Done (11 Nov 20:12: a cancelled scan kept no log, pose track or screen video)
+            try { saveEvents(dir); saveLogInto(dir); screenTargetDir = dir; finishScreenVideo(); } catch (Exception e) { logError("keep cancelled scan's diagnostics", e); }
             dir = null;
         }
         log(dir != null ? "scan cancelled: deleting its autosave " + dir.getName() : improveDir != null ? "continue scan cancelled: saved scan kept as it was" : "scan cancelled");
@@ -4571,14 +4573,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     (System.currentTimeMillis() - t0) / 1000f, lastTs, heldMode == 0 ? "live" : heldMode == 1 ? "held (rotation)" : "held (ARCore)", fusionState, sec / 60, sec % 60, hint));
             return;
         }
-        // Done (or the GL context went away): finish the file; it moves into the scan folder once that's saved
+        finishScreenVideo();
+    }
+
+    /** GL thread: finish screen.mp4 (Done, Cancel, or the GL context went away); it moves into the scan folder once
+     *  that's saved (screenTargetDir). Without this a cancelled scan left an unplayable file (no index; 11 Nov 20:12). */
+    private void finishScreenVideo() {
+        ScreenVideo v = screenVideo;
+        if (v == null) return;
         screenVideo = null;
         v.releaseGl();
-        final File file = screenFile;
+        final File file = screenFile, target = screenTargetDir;   // (Cancel resets right after: keep its folder)
         new Thread(() -> {
             boolean ok = v.finish();
             log(String.format(java.util.Locale.US, "screen video: %s, %d frames, %.1f ms on the draw thread per frame", ok ? "kept" : "failed", v.frames, v.frames > 0 ? v.glMsTotal / v.frames : 0));
-            if (ok) { screenPending = file; File d = screenTargetDir; if (d != null) keepScreenVideo(d); }   // the save may already be done
+            if (ok && target != null && file != null) { File to = new File(target, "screen.mp4"); if (file.renameTo(to)) log("screen video kept with the scan: screen.mp4 (" + to.length() / 1024 + " KB)"); }
+            else if (ok) { screenPending = file; File d = screenTargetDir; if (d != null) keepScreenVideo(d); }   // the save may already be done
             else if (file != null) file.delete();
         }, "screen-video-close").start();
         // (screenFile stays set: one video per scan; reset() clears it for the next scan)
@@ -4737,7 +4747,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     needRealign = false; realign = null; recentPts.clear(); realignResult = null;
                     log(String.format(java.util.Locale.US, "pause %.1f s: silent continue (ARCore back %.2f m and %.1f deg from the held view)", (nowMs - lostSince) / 1000f, dd, ang));
                     evMark();
-                } else log(String.format(java.util.Locale.US, "pause %.1f s: ARCore back %.2f m and %.1f deg from the held view: quiet re-align", (nowMs - lostSince) / 1000f, dd, ang));
+                } else {
+                    log(String.format(java.util.Locale.US, "pause %.1f s: ARCore back %.2f m and %.1f deg from the held view: quiet re-align", (nowMs - lostSince) / 1000f, dd, ang));
+                    heldGuess = heldGuessFor(cp);
+                }
             }
             lostSince = 0;
             if (!viewing && count > 2000 && frameNo % 10 == 0) plainWallHint(frame, nowMs);
@@ -4885,15 +4898,26 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // even when the phone points at a part not scanned yet (11 Nov, S23 Ultra: only the striped background showed
             // under "Still can't find where you are"; rk: the scanned overlay always stays in view). Back on track it
             // eases in again with the 0.3 s blend above.
+            // The live camera window stays where the phone really is (rk 11 Nov 20:13: "the pulled back frame isn't
+            // visible on the S24": the window was placed from the pulled-back camera, so it filled the same part of the
+            // screen and the pull-back looked like nothing happened).
+            Matrix.multiplyMM(realMvp, 0, proj, 0, view, 0);
             if (holding) {
                 float k = Math.min(1f, (nowMs - holdStartMs) / 800f); k = k * k * (3 - 2 * k);
+                // Not through a scanned wall behind the phone (a small room: 1.5 m back put the camera behind the wall,
+                // looking at its back): back as far as there's room, then up instead.
+                if (holdPullAt != holdStartMs) {
+                    holdPullAt = holdStartMs;
+                    float[] inv = new float[16]; Matrix.invertM(inv, 0, view, 0);
+                    float free = freeBehind(new float[]{inv[12], inv[13], inv[14]}, norm(new float[]{inv[8], inv[9], inv[10]}), 1.9f);
+                    holdBack = Math.max(0f, Math.min(1.5f, free - 0.3f)); holdUp = 0.3f + (1.5f - holdBack) * 0.35f;
+                }
                 float[] t = new float[16], v2 = new float[16];
-                Matrix.setIdentityM(t, 0); Matrix.translateM(t, 0, 0, -0.3f * k, -1.5f * k);
+                Matrix.setIdentityM(t, 0); Matrix.translateM(t, 0, 0, -holdUp * k, -holdBack * k);
                 Matrix.multiplyMM(v2, 0, t, 0, view, 0); System.arraycopy(v2, 0, view, 0, 16);
                 System.arraycopy(view, 0, lastShownView, 0, 16);
             }
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
-            System.arraycopy(mvp, 0, realMvp, 0, 16);
             if (OVERVIEW) overviewCamera(ts == TrackingState.TRACKING, nowMs);
             // the overlay (live doorway outlines) draws with the matrix the scan is drawn with: after the overview's
             // pulled-back camera (13:35: the outlines were projected with the phone's own camera and never showed)
@@ -4926,6 +4950,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (trackingNow) drawRescanTarget(mvp, camera);
             // (no darkening while paused: the scan stays fully in view, rk 10 Nov 15:58)
             if (overviewBlend > 0.001f) drawOverviewWindow();
+            drawGoal(mvp, nowMs);
             float[] clearTap = pendingClear;
             if (clearTap != null) { pendingClear = null; clearAt(clearTap[0], clearTap[1]); }
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
@@ -6210,6 +6235,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         stayGuess = null;
         realign = null; realignBuilding = true;
         synchronized (goalTried) { goalTried.clear(); }
+        heldGuess = null;
         pickGoal("lost");
         // The cells take ~3 s for a big scan (10:44 scan: 2.8 s on the drawing thread): built aside; nothing is fused
         // meanwhile (realigned() waits for them).
@@ -6232,7 +6258,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- the held view while lost ----
     private final float[] heldView = new float[16], heldRot = new float[9];
-    private long holdStartMs;
+    private long holdStartMs, holdPullAt = -1; private float holdBack = 1.5f, holdUp = 0.3f;
     private boolean haveHeldView, heldRotOk, holding, wasHolding;
     private final float[] lastShownView = new float[16], prevShown = new float[16], rawView = new float[16], relRaw = new float[16], relShown = new float[16]; private long holdEndMs;
     private boolean relAnchored; private volatile int heldMode;   // 0 live, 1 held by the rotation sensor, 2 held + ARCore's movement
@@ -6349,7 +6375,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 newDepthSince, depthStale - staleSince0, depthNotYet - notYetSince0,
                 vk0 + vn0 > 0 ? Math.round(100f * vk0 / (vk0 + vn0)) + "% scanned surface" : "-", walkingWhileLost ? ", walking" : "")
                 + (gpuTsdf != null ? ", GPU bricks read back " + syncedBricks + (syncFull > 0 ? " (" + syncFull + " full)" : "") : "")
-                + String.format(java.util.Locale.US, ", heap %d MB, ARCore features %d", (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20, featuresNow));
+                + String.format(java.util.Locale.US, ", heap %d MB, ARCore features %d", (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20, featuresNow)
+                + goalOffText());
         syncedBricks = 0; syncFull = 0;
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
         if (memLogAt == 0 || nowMs - memLogAt >= 30000) { logMemory(memLogAt == 0 ? "scan start" : "every 30 s"); memLogAt = nowMs; }
@@ -6583,6 +6610,26 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private float[] jumpGuess;
     private boolean newPartOffered;
 
+    /** The correction that puts ARCore's camera (cp: camera -> world, with the current correction) where the held view
+     *  says the phone is: facing where the rotation sensor turned it, standing where tracking was lost (the hint says to
+     *  stop). After a loss ARCore can come back in a shifted frame (rk 11 Nov 20:12: back 0.63 m / 24.7 deg off; every
+     *  re-align then found 0.6-0.7 m / 20-24 deg and was refused as "implausible" against ARCore for 20 s). */
+    private volatile float[] heldGuess;
+    private float[] heldGuessFor(float[] cp) {
+        if (!havePrevPose) return null;
+        float[] v = lastShownView;
+        float hx = -v[2], hz = -v[10], cx = -cp[8], cz = -cp[10];   // forward on the floor: held view, ARCore
+        if (hx * hx + hz * hz < 0.05f || cx * cx + cz * cz < 0.05f) return null;   // looking straight up or down: no heading
+        double d = Math.atan2(hz, hx) - Math.atan2(cz, cx);
+        float c = (float) Math.cos(d), sn = (float) Math.sin(d);
+        float[] r = Realign.identity();
+        r[0] = c; r[8] = -sn; r[2] = sn; r[10] = c;
+        float px = cp[12], pz = cp[14];
+        r[12] = prevPose[12] - (c * px - sn * pz); r[14] = prevPose[14] - (sn * px + c * pz);
+        float[] out = new float[16]; Matrix.multiplyMM(out, 0, r, 0, poseFix, 0);
+        return out;
+    }
+
     private final float[] lastGoodCam = new float[16];
 
     // ---- Good spots (Anchors): views with many features and 3D shape, to send the user to after a loss ----
@@ -6601,15 +6648,28 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (!Anchors.good(f, s)) return;
             Anchors.Anchor a = Anchors.make(m, System.currentTimeMillis(), f, s);
             Image img = cpuImage;
-            if (img != null) {   // a small grey picture of what the camera saw (the Y plane, ~160 wide)
-                Image.Plane yp = img.getPlanes()[0]; ByteBuffer yb = yp.getBuffer();
-                int iw = img.getWidth(), ih = img.getHeight(), step = Math.max(1, iw / 160), gw = iw / step, gh = ih / step, yRow = yp.getRowStride(), yPix = yp.getPixelStride();
-                byte[] g = new byte[gw * gh];
-                for (int v = 0; v < gh; v++) for (int u = 0; u < gw; u++) g[v * gw + u] = yb.get(v * step * yRow + u * step * yPix);
-                a.gray = g; a.gw = gw; a.gh = gh;
-            }
+            if (img != null) a.jpg = spotPicture(img);
             anchors.keep(a);
         } catch (Throwable e) { logError("good spot", new RuntimeException(e)); }
+    }
+
+    /** A colour picture of the camera image, ~320 px wide, as JPEG (YUV_420_888, every 2nd pixel). */
+    private static byte[] spotPicture(Image img) {
+        Image.Plane[] pl = img.getPlanes();
+        ByteBuffer yb = pl[0].getBuffer(), ub = pl[1].getBuffer(), vb = pl[2].getBuffer();
+        int iw = img.getWidth(), ih = img.getHeight(), step = Math.max(1, iw / 320) & ~1; if (step == 0) step = 1;
+        int w = iw / step, h = ih / step, yRow = pl[0].getRowStride(), yPix = pl[0].getPixelStride(), cRow = pl[1].getRowStride(), cPix = pl[1].getPixelStride();
+        int[] px = new int[w * h];
+        for (int v = 0; v < h; v++) for (int u = 0; u < w; u++) {
+            int x = u * step, y = v * step;
+            int Y = yb.get(y * yRow + x * yPix) & 255, U = (ub.get((y / 2) * cRow + (x / 2) * cPix) & 255) - 128, V = (vb.get((y / 2) * cRow + (x / 2) * cPix) & 255) - 128;
+            int r = Math.max(0, Math.min(255, Math.round(Y + 1.402f * V))), g = Math.max(0, Math.min(255, Math.round(Y - 0.344f * U - 0.714f * V))), b = Math.max(0, Math.min(255, Math.round(Y + 1.772f * U)));
+            px[v * w + u] = 0xFF000000 | r << 16 | g << 8 | b;
+        }
+        android.graphics.Bitmap bm = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        bm.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, o); bm.recycle();
+        return o.toByteArray();
     }
 
     /** Picks the good spot to send the user to (after a loss, or the next one when one didn't work). */
@@ -6626,15 +6686,53 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (a != null) {
             log(String.format(java.util.Locale.US, "good spot (%s): the view from %.0f s ago, %.1f m from where it was lost, turn %.0f deg, %d features, shape %.2f, score %.2f; %d spots kept",
                     why, (now - a.ms) / 1000f, o[0], o[1], a.features, a.shape, o[2], anchors.size()));
-            activity.showSpot(a.gray, a.gw, a.gh);
+            activity.showSpot(a.jpg);
         } else {
             log("good spot (" + why + "): none of the " + anchors.size() + " kept fits; pointing back where it was lost");
-            activity.showSpot(null, 0, 0);
+            activity.showSpot(null);
         }
     }
 
+    /** The good spot in the scan view while lost: an amber frame where it looked, lines back to where it was seen from
+     *  (a camera shape), so the user sees where in the room it is, not only "to your left". */
+    private void drawGoal(float[] m, long nowMs) {
+        Anchors.Anchor a = goal;
+        if (a == null || heldMode == 0 && !needRealign) return;
+        float[] c = a.cam;
+        float rx = c[0], ry = c[1], rz = c[2], ux = c[4], uy = c[5], uz = c[6];   // camera right and up in the world
+        float h = Math.max(0.25f, a.depthM * 0.35f), w = h * 0.75f;   // about the middle of what it saw
+        float[] k = new float[12];
+        int[][] sg = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+        for (int i = 0; i < 4; i++) { k[i * 3] = a.tx + rx * sg[i][0] * w + ux * sg[i][1] * h; k[i * 3 + 1] = a.ty + ry * sg[i][0] * w + uy * sg[i][1] * h; k[i * 3 + 2] = a.tz + rz * sg[i][0] * w + uz * sg[i][1] * h; }
+        float[] lines = new float[16 * 3]; int n = 0;
+        for (int i = 0; i < 4; i++) {
+            int j = (i + 1) % 4;
+            for (int q = 0; q < 3; q++) lines[n++] = k[i * 3 + q]; for (int q = 0; q < 3; q++) lines[n++] = k[j * 3 + q];
+            lines[n++] = c[12]; lines[n++] = c[13]; lines[n++] = c[14]; for (int q = 0; q < 3; q++) lines[n++] = k[i * 3 + q];
+        }
+        float pulse = 0.65f + 0.35f * (float) Math.sin(nowMs / 250.0);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glLineWidth(7f);
+        planDraw(m, lines, GLES20.GL_LINES, new float[]{1f, 0.69f, 0.13f, pulse}, 1f);
+        GLES20.glLineWidth(1f);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+    }
+
+    /** For the state line while a good spot is shown: how far the view shown is from pointing at it (did the user get there?). */
+    private String goalOffText() {
+        Anchors.Anchor a = goal;
+        if (a == null) return "";
+        float[] v = lastShownView, inv = new float[16];
+        if (!Matrix.invertM(inv, 0, v, 0)) return "";
+        float fx = -v[2], fy = -v[6], fz = -v[10], dx = a.tx - inv[12], dy = a.ty - inv[13], dz = a.tz - inv[14];
+        float l = (float) Math.sqrt(dx * dx + dy * dy + dz * dz), lf = (float) Math.sqrt(fx * fx + fy * fy + fz * fz);
+        if (l < 1e-3f || lf < 1e-3f) return "";
+        float ang = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, (fx * dx + fy * dy + fz * dz) / (l * lf)))));
+        return String.format(java.util.Locale.US, ", good spot %.0f deg off (%s)", ang, backTo());
+    }
+
     private void clearGoal() {
-        if (goal != null) activity.showSpot(null, 0, 0);
+        if (goal != null) activity.showSpot(null);
         goal = null;
     }
     private boolean haveGoodCam;
@@ -6718,6 +6816,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     implausible = String.format(java.util.Locale.US, " (implausible: %.2f m sideways, %.2f m up/down, %.0f deg from where ARCore says)", Math.hypot(ddx, ddz), ddy, dyaw);
                 }
             }
+            float[] hg = heldGuess;
+            if (!ok && !implausible.isEmpty() && hg != null && res.good && !res.ambiguous && Realign.away(F, hg) < 0.35f) {
+                // refused only against ARCore, but where the rotation sensor and the "stop" say the phone is: ARCore
+                // came back in a shifted frame; the held view is the better judge
+                ok = true;
+                log(String.format(java.util.Locale.US, "  agrees with the held view (%.2f off): ARCore came back shifted, accepted%s", Realign.away(F, hg), implausible));
+                implausible = "";
+            }
             realignOk = ok && (realignOk == 0 || drift < 0.08f) ? realignOk + 1 : (ok ? 1 : 0);
             // Shadow rule (11 Nov, S23 Ultra: ~100 tries over 73 s agreed on one correction, 55-70% on the scan, but were
             // all refused as "implausible" against where ARCore said it was, and ARCore can be badly off after a loss):
@@ -6789,6 +6895,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (all.size() > 1200) { java.util.ArrayList<float[]> sub = new java.util.ArrayList<>(1200); float st = all.size() / 1200f; for (int i = 0; i < 1200; i++) sub.add(all.get((int) (i * st))); all.clear(); all.addAll(sub); }
             final float[] tryFix = fixTry.clone(), stay = stayGuess == null ? null : stayGuess.clone(), oldFix = poseFix.clone();
             final Anchors.Anchor gs = goal; final float[] atSpot = gs == null ? null : guessFor(gs.cam, m);   // as if the phone stood where the good spot was seen
+            final float[] held = heldGuess == null ? null : heldGuess.clone();
             final float pivX = haveGoodCam ? lastGoodCam[12] : Float.NaN, pivZ = haveGoodCam ? lastGoodCam[14] : Float.NaN;
             final boolean restarted = sessionRestarted; final Realign rl = realign; final int attempt = ++realignAttempts;
             new Thread(() -> {
@@ -6800,6 +6907,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && stay != null) {
                         Realign.Fit f2 = rl.solve(all, stay);
                         if (f2.inliers > f.inliers) { f = f2; r.source = "where it was lost"; }
+                    }
+                    if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && held != null) {
+                        Realign.Fit f5 = rl.solve(all, held);
+                        if (f5.inliers > f.inliers) { f = f5; r.source = "the held view"; }
                     }
                     if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && atSpot != null) {
                         Realign.Fit f4 = rl.solve(all, atSpot);
@@ -6890,7 +7001,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Matrix.invertM(inv, 0, view, 0); // display-oriented camera to world: x right, y up, +z behind
         float[] p = {inv[12], inv[13], inv[14]}, b = norm(new float[]{inv[8], inv[9], inv[10]}), u = norm(new float[]{inv[4], inv[5], inv[6]});
         // Don't pull back through scanned things behind you (checked a few times a second on a sample of the points).
-        if (++ovCheck % 8 == 0) ovFree = freeBehind(p, b);
+        if (++ovCheck % 8 == 0) ovFree = freeBehind(p, b, OV_PULL + 0.4f);
         float wanted = Math.max(0, Math.min(OV_PULL, ovFree - 0.25f));
         ovPull += (wanted - ovPull) * 0.2f;
         float[] target = {p[0] + b[0] * ovPull * overviewBlend, p[1] + b[1] * ovPull * overviewBlend + OV_LIFT * overviewBlend, p[2] + b[2] * ovPull * overviewBlend};
@@ -6908,13 +7019,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private static float[] norm(float[] a) { float l = (float) Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); return l < 1e-6f ? a : new float[]{a[0] / l, a[1] / l, a[2] / l}; }
 
     /** How far behind the phone the space is free: the nearest scanned point within 20 cm of the backward ray. */
-    private float freeBehind(float[] p, float[] b) {
+    private float freeBehind(float[] p, float[] b, float reach) {
         int n = count, step = Math.max(1, n / 20000);
         float best = 99f;
         for (int i = 0; i < n; i += step) {
             float dx = pos.get(i * 3) - p[0], dy = pos.get(i * 3 + 1) - p[1], dz = pos.get(i * 3 + 2) - p[2];
             float t = dx * b[0] + dy * b[1] + dz * b[2];
-            if (t <= 0 || t > OV_PULL + 0.4f) continue;
+            if (t <= 0 || t > reach) continue;
             float ox = dx - b[0] * t, oy = dy - b[1] * t, oz = dz - b[2] * t;
             if (ox * ox + oy * oy + oz * oz < 0.04f && t < best) best = t;
         }
@@ -6953,7 +7064,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, bgTex);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(ovProg, "uTex"), 0);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(ovProg, "uA"), OV_OPACITY * overviewBlend);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ovProg, "uA"), OV_OPACITY * overviewBlend * (heldMode != 0 ? 0.6f : 1f));
         int aPos = GLES20.glGetAttribLocation(ovProg, "aPos"), aUv = GLES20.glGetAttribLocation(ovProg, "aUv");
         quadUv.position(0);
         GLES20.glVertexAttribPointer(aPos, 4, GLES20.GL_FLOAT, false, 0, cb);

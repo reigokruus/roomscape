@@ -1709,7 +1709,7 @@ public class MainActivity extends Activity {
         hudSpot.setAdjustViewBounds(true);
         hudSpot.setVisibility(View.GONE);
         hudSpot.setContentDescription("The spot to point the phone at");
-        LinearLayout.LayoutParams spl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(150));
+        LinearLayout.LayoutParams spl = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(260));
         spl.topMargin = dp(6);
         hud.addView(hudSpot, spl);
         hudDetail = bar(Ios.ACCENT); hudDetailPct = new TextView(this);
@@ -1834,16 +1834,16 @@ public class MainActivity extends Activity {
     /** From the renderer, ~2x a second while scanning. level 0 ok, 1 hold on, 2 stop and stay here. */
     private android.widget.ImageView hudSpot;
 
-    /** Shows the good spot's small grey picture under the hint (null hides it). The camera image is landscape: turned
-     *  to the phone's upright view. */
-    void showSpot(byte[] gray, int gw, int gh) {
+    /** Shows the good spot's picture under the hint (null hides it), big enough to recognise the place. The camera
+     *  image is landscape: turned to the phone's upright view. */
+    void showSpot(byte[] jpg) {
         android.graphics.Bitmap bm = null;
-        if (gray != null && gw > 0 && gh > 0) {
-            int[] px = new int[gw * gh];
-            for (int i = 0; i < px.length; i++) { int g = gray[i] & 255; px[i] = 0xFF000000 | g << 16 | g << 8 | g; }
-            android.graphics.Bitmap raw = android.graphics.Bitmap.createBitmap(px, gw, gh, android.graphics.Bitmap.Config.ARGB_8888);
-            android.graphics.Matrix rot = new android.graphics.Matrix(); rot.postRotate(90);
-            bm = android.graphics.Bitmap.createBitmap(raw, 0, 0, gw, gh, rot, true);
+        if (jpg != null) {
+            android.graphics.Bitmap raw = android.graphics.BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
+            if (raw != null) {
+                android.graphics.Matrix rot = new android.graphics.Matrix(); rot.postRotate(90);
+                bm = android.graphics.Bitmap.createBitmap(raw, 0, 0, raw.getWidth(), raw.getHeight(), rot, true);
+            }
         }
         final android.graphics.Bitmap show = bm;
         runOnUiThread(() -> {

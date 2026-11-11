@@ -12,7 +12,7 @@ import java.util.List;
  * While scanning, about once a second, a view is kept as an anchor when ARCore saw many features in it (it can find
  * its place there again) AND its depth has 3D shape in several directions (a corner, furniture, a door frame: the
  * re-align can't slide along it, unlike a plain wall, a wall and floor, or a corridor). Each anchor keeps its camera
- * pose, the point it looked at, the time, the feature count, the shape score and a small grey picture.
+ * pose, the point it looked at, the time, the feature count, the shape score and a colour picture.
  *
  * Pure Java (no Android): also runs on the Mac for checks on saved scans (tools/anchors).
  */
@@ -29,7 +29,7 @@ final class Anchors {
         int features;
         float shape;                         // 0..1, see shapeScore
         float depthM;                        // median depth, m
-        byte[] gray; int gw, gh;             // small grey picture of the camera image (may be null)
+        byte[] jpg;                          // colour picture of the camera image, ~320 px, JPEG (may be null)
         float quality() { return Math.min(1f, features / 150f) * Math.min(1f, shape / 0.35f); }
         float px() { return cam[12]; } float py() { return cam[13]; } float pz() { return cam[14]; }
         float fx() { return -cam[8]; } float fy() { return -cam[9]; } float fz() { return -cam[10]; }
