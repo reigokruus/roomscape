@@ -315,6 +315,7 @@ final class Rmsc {
             copyIf(z, new File(dir, "perf-scan.jsonl"), "android/diagnostics/perf-scan.jsonl");
             copyIf(z, new File(dir, "perf-scan.summary.json"), "android/diagnostics/perf-scan.summary.json");
             copyIf(z, new File(dir, "scan-log.txt"), "android/diagnostics/scan-log.txt");
+            copyIf(z, new File(dir, "removed-points.bin"), "android/removed-points.bin");   // points the clean-up at Done took out (kept, data is gold)
         }
         File f = appFiles;
         if (f != null) {

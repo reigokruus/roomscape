@@ -2447,12 +2447,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // under a minute), or at once when another scan is started or opened first (rk 10 Nov 15:04-15:06: three quick
         // scans; the first one's logs went into the second's folder and the second's were lost).
         final File dirAtDone = currentDir;
+        final byte[][] removedAtDone = new byte[1][];   // the points the clean-up below takes out (kept, not deleted)
         final FlatTiles.Saved tilesSaved = FLAT_TILES ? flatTiles.snapshot() : null;   // GL thread: read back now
         synchronized (afterDoneLock) {
             afterDoneWork = () -> {
                 File dir = dirAtDone != null ? dirAtDone : currentDir;
                 perf.stop();
                 if (dir != null && tilesSaved != null) saveTiles(dir, tilesSaved);
+                if (dir != null && removedAtDone[0] != null) saveRemoved(dir, removedAtDone[0]);
                 if (dir != null) { saveEvents(dir); saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
             };
         }
@@ -2460,10 +2462,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { Thread.sleep(60_000); } catch (InterruptedException ignored) { }
             runAfterDone();
         }, "perf-stop").start();
-        dropEarlyDrift();
-        purgeCleared();
+        removed = new java.io.ByteArrayOutputStream(); removedN = 0;
+        boolean[] early = dropEarlyDrift();
+        purgeCleared(early);
         dropNoise();
-        log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count);
+        log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count
+                + "; " + removedN + " points taken out in all, kept aside in removed-points.bin");
+        removedAtDone[0] = removed.toByteArray(); removed = null;
         try {
             long t0 = System.currentTimeMillis();
             // Data is gold: the read-back at Done must not take away most of the room (15:09 scan: the live surface
@@ -5832,18 +5837,48 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final float EARLY_S = 8f;
     private boolean loadedAny;               // points came from a saved scan (their stamps say nothing about time)
     private int earlyDepthFrames = -1; private long firstDepthMs;
-    private void dropEarlyDrift() {
-        if (earlyDepthFrames <= 0 || depthFrames < earlyDepthFrames * 4 || improveDir != null || loadedAny) return;
-        int n = 0;
-        for (int i = 0; i < count; i++) if (obs[i] != 0 && seenStamp[i] <= earlyDepthFrames && !inZone(pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2))) { obs[i] = 0; col.put(i * 4 + 3, (byte) 0); n++; }
-        log("start-of-scan drift: cleared " + n + " points only seen in the first " + (int) EARLY_S + " s (" + earlyDepthFrames + " depth frames)");
+    private boolean[] dropEarlyDrift() {
+        if (earlyDepthFrames <= 0 || depthFrames < earlyDepthFrames * 4 || improveDir != null || loadedAny) return null;
+        // Only early points the camera later saw straight past (a ghost wall from before ARCore settled); points that
+        // were simply never looked at again are real coverage and stay (rk 11 Nov 21:11: this rule took out 98,218
+        // points, 25% of the scan, everything only seen in the first 8 s). At most 10% of the scan.
+        boolean[] early = new boolean[count]; int n = 0, notSeenAgain = 0, cap = count / 10;
+        for (int i = 0; i < count; i++) {
+            if (obs[i] == 0 || seenStamp[i] > earlyDepthFrames || inZone(pos.get(i * 3), pos.get(i * 3 + 1), pos.get(i * 3 + 2))) continue;
+            notSeenAgain++;
+            if (thru[i] == 0 || n >= cap) continue;
+            early[i] = true; obs[i] = 0; col.put(i * 4 + 3, (byte) 0); n++;
+        }
+        log("start-of-scan drift: " + notSeenAgain + " points only seen in the first " + (int) EARLY_S + " s (" + earlyDepthFrames + " depth frames); "
+                + n + " of them seen through later, taken out (kept aside)" + (n >= cap && cap > 0 ? ", capped at 10% of the scan" : ""));
+        return early;
     }
 
-    private void purgeCleared() {
+    /** Points the clean-up at Done takes out are kept aside (removed-points.bin), never just deleted (data is gold):
+     *  x, y, z float + r, g, b + reason (1 early drift seen through, 2 cleared by see-through while scanning, 3 seen
+     *  only once, 4 seen through at Done). */
+    private java.io.ByteArrayOutputStream removed; private int removedN;
+    private void keepRemoved(int i, int reason) {
+        if (removed == null) return;
+        int a = Float.floatToIntBits(pos.get(i * 3)), b = Float.floatToIntBits(pos.get(i * 3 + 1)), c = Float.floatToIntBits(pos.get(i * 3 + 2));
+        for (int v : new int[]{a, b, c}) { removed.write(v >>> 24); removed.write(v >>> 16); removed.write(v >>> 8); removed.write(v); }
+        removed.write(col.get(i * 4)); removed.write(col.get(i * 4 + 1)); removed.write(col.get(i * 4 + 2)); removed.write(reason);
+        removedN++;
+    }
+
+    private void saveRemoved(File dir, byte[] data) {
+        try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "removed-points.bin"))))) {
+            o.writeInt(data.length / 16); o.write(data);
+            log("removed points kept with the scan: removed-points.bin (" + data.length / 16 + " points)");
+        } catch (Exception e) { logError("removed-points.bin", e); }
+    }
+
+    private void purgeCleared() { purgeCleared(null); }
+    private void purgeCleared(boolean[] early) {
         drainDepth();   // the depth thread mustn't add points while they're moved
         int k = 0;
         for (int i = 0; i < count; i++) {
-            if (obs[i] == 0) continue;
+            if (obs[i] == 0) { keepRemoved(i, early != null && i < early.length && early[i] ? 1 : 2); continue; }
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
@@ -5870,7 +5905,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (count < 2000 || keep < count * 0.3f) return;
         int k = 0;
         for (int i = 0; i < count; i++) {
-            if (drop[i]) continue;
+            if (drop[i]) { keepRemoved(i, (obs[i] & 0xFF) < 2 ? 3 : 4); continue; }
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
@@ -6357,7 +6392,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void logState(TrackingState ts, long nowMs) {
         logLinkErrors();
         if (viewing || !everTracked) return;
-        if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > 8000 && nowMs - trackingBackMs > 10000 && featuresNow >= 50 && depthSupported && recoveries < 10 && count > 2000) {   // (not on a plain view: there depth just has nothing to see, and a restart loses the map; 15:56 scan)
+        if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > (featuresNow >= 50 ? 8000 : 10000) && nowMs - trackingBackMs > 10000 && depthSupported && recoveries < 10 && count > 2000) {   // (any feature count after 10 s: 21:11 scan, depth frozen 25 s with 0 features; saved logs: freezes of 7, 9 and 24 s)   // (not on a plain view: there depth just has nothing to see, and a restart loses the map; 15:56 scan)
             recoveries++;
             log(String.format(java.util.Locale.US, "no new depth for %.1f s while tracking (%d old images repeated): restarting AR session (attempt %d)", (nowMs - lastNewDepthMs) / 1000f, depthStale - staleSince0, recoveries));
             lastNewDepthMs = nowMs;
@@ -6602,7 +6637,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (PLAIN_WARNING) {
             if (n >= 15) warnFewSince = 0;
             else if (warnFewSince == 0) warnFewSince = nowMs;
-            else if (nowMs - warnFewSince >= 2000) {
+            else if (nowMs - warnFewSince >= 2000 && !needRealign && lostSince == 0) {   // quiet while "Lost track" shows (21:11 scan: two warnings while lining up)
                 if (plainWarnUntil < nowMs) {
                     log("plain-wall warning (" + n + " features for " + (nowMs - warnFewSince) / 1000 + " s)");
                     if (nowMs - plainWarnBuzzAt > 8000) { activity.haptic(false); plainWarnBuzzAt = nowMs; }
@@ -8235,9 +8270,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             hint = lostHint();
         }
         else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
-            // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said)
-            level = 3;
-            hint = lostHint();
+            // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said); tracking itself
+            // is fine, so no "Lost track": one calm line, and the session restarts by itself after 8-10 s
+            level = 2;
+            hint = "Depth paused: hold the phone still a moment, it restarts by itself";
         }
         else if (needRealign && everTracked) {
             // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed
