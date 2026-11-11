@@ -28,10 +28,10 @@ import java.util.*;
 
 /**
  * EXPERIMENT (rk 11 Nov: "what if we switched away from ARCore completely and built our own that uses the ultrawide?").
- * Records the S24's ultrawide camera without ARCore, for checking offline on the Mac how well it could be tracked:
+ * Records the S24's ultrawide (or, for comparison, the main) camera without ARCore, for checking offline on the Mac how well it could be tracked:
  * video (1280x720, 30 fps, stabilisation and distortion correction off, fixed focus), every frame's sensor timestamp
  * and exposure, gyro / accelerometer / rotation vector at full rate on the same clock, and the lens calibration.
- * Files: <external app files>/recordings/uw-<time>/ (video.mp4, frames.csv, imu.csv, camera.json).
+ * Files: <external app files>/recordings/uw-<time>/ or main-<time>/ (video.mp4, frames.csv, imu.csv, camera.json, applied.json).
  *
  * Fully separate from the scanner: this folder (experiment/), one debug button, one manifest entry. To remove: delete
  * the folder, the button in MainActivity ("Ultrawide recorder") and the activity line in AndroidManifest.xml.
@@ -43,7 +43,7 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
     private CameraDevice camera; private CameraCaptureSession session; private MediaRecorder recorder;
     private SensorManager sensors; private File dir; private PrintWriter frames, imu;
     private boolean recording; private long startNs; private int frameCount;
-    private String camId;
+    private String camId, wideId, mainId; private Button lensB; private long recStartMs;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -52,14 +52,17 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
         preview = new TextureView(this);
         root.addView(preview, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout bar = new LinearLayout(this); bar.setOrientation(LinearLayout.VERTICAL); bar.setBackgroundColor(0xAA000000); bar.setPadding(24, 80, 24, 24);
-        status = new TextView(this); status.setTextColor(0xFFFFFFFF); status.setText("Ultrawide recorder (experiment): no ARCore. Walk the room like a scan, past the plain walls, and come back to where you started.");
-        button = new Button(this); button.setText("Start recording"); button.setOnClickListener(v -> { if (recording) stop(); else start(); });
-        bar.addView(status); bar.addView(button);
+        status = new TextView(this); status.setTextColor(0xFFFFFFFF); status.setTextSize(16);
+        status.setText("Walk your usual scan path past the plain walls, then return to where you started.");
+        button = new Button(this); button.setText("Record"); button.setOnClickListener(v -> { if (recording) stop(); else start(); });
+        lensB = new Button(this); lensB.setOnClickListener(v -> { if (recording) return; camId = camId.equals(wideId) ? mainId : wideId; showLens(); closeCamera(); openCamera(); });
+        bar.addView(status); bar.addView(button); bar.addView(lensB);
         root.addView(bar, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
         setContentView(root);
         sensors = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
         thread = new HandlerThread("uw"); thread.start(); handler = new Handler(thread.getLooper());
-        try { camId = pickUltrawide(); } catch (Exception e) { status.setText("No camera: " + e); }
+        try { wideId = pickUltrawide(); mainId = "0"; camId = wideId; } catch (Exception e) { status.setText("No camera: " + e); }
+        showLens();
     }
 
     /** The back camera with the widest view (S24: id 2, 104 deg). */
@@ -77,6 +80,8 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
         }
         return best;
     }
+
+    private void showLens() { if (lensB != null && camId != null) lensB.setText(camId.equals(wideId) ? "Lens: ultrawide (tap for main)" : "Lens: main (tap for ultrawide)"); }
 
     @Override protected void onResume() {
         super.onResume();
@@ -139,14 +144,15 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
             Integer iso = res.get(CaptureResult.SENSOR_SENSITIVITY); Float fd = res.get(CaptureResult.LENS_FOCUS_DISTANCE);
             synchronized (f) { f.println(res.getFrameNumber() + "," + ts + "," + exp + "," + iso + "," + skew + "," + fd); }
             frameCount++;
-            if (frameCount % 30 == 0) { final int n = frameCount; final long e = exp == null ? 0 : exp / 1000; runOnUiThread(() -> status.setText(String.format(Locale.US, "Recording: %d frames (%.0f s), exposure %d µs", n, n / 30f, e))); }
+            if (frameCount == 1) logApplied(res);
+            if (frameCount % 15 == 0) { final long e = exp == null ? 0 : exp / 1000; final long sec = (System.currentTimeMillis() - recStartMs) / 1000; runOnUiThread(() -> status.setText(String.format(Locale.US, "Recording %d:%02d · %d frames · exposure %d µs\nWalk your usual scan path past the plain walls, then return to where you started.", sec / 60, sec % 60, frameCount, e))); }
         }
     };
 
     private void start() {
         if (camera == null) return;
         try {
-            dir = new File(getExternalFilesDir("recordings"), "uw-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()));
+            dir = new File(getExternalFilesDir("recordings"), (camId.equals(wideId) ? "uw-" : "main-") + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()));
             dir.mkdirs();
             writeCalibration(new File(dir, "camera.json"));
             frames = new PrintWriter(new BufferedWriter(new FileWriter(new File(dir, "frames.csv")))); frames.println("frame,sensor_ts_ns,exposure_ns,iso,rolling_shutter_skew_ns,focus_diopters");
@@ -161,7 +167,7 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
             for (int t : new int[]{Sensor.TYPE_GYROSCOPE, Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_ROTATION_VECTOR, Sensor.TYPE_GYROSCOPE_UNCALIBRATED}) {
                 Sensor s = sensors.getDefaultSensor(t); if (s != null) sensors.registerListener(this, s, SensorManager.SENSOR_DELAY_FASTEST, handler);
             }
-            frameCount = 0; startNs = System.nanoTime();
+            frameCount = 0; startNs = System.nanoTime(); recStartMs = System.currentTimeMillis();
             startSession(recorder.getSurface());
             handler.postDelayed(() -> { try { recorder.start(); } catch (Exception e) { runOnUiThread(() -> status.setText("Recorder: " + e)); } }, 400);
             recording = true; button.setText("Stop");
@@ -169,7 +175,7 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
     }
 
     private void stop() {
-        recording = false; button.setText("Start recording");
+        recording = false; button.setText("Record");
         sensors.unregisterListener(this);
         try { if (session != null) session.stopRepeating(); } catch (Exception ignored) { }
         try { recorder.stop(); } catch (Exception ignored) { }
@@ -189,8 +195,30 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
     }
     @Override public void onAccuracyChanged(Sensor s, int a) { }
 
+    /** What the camera really applied (stabilisation, distortion correction, AE, focus), once per recording. */
+    private void logApplied(TotalCaptureResult r) {
+        try {
+            org.json.JSONObject j = new org.json.JSONObject();
+            j.put("videoStabilization", r.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE));
+            j.put("opticalStabilization", r.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE));
+            if (android.os.Build.VERSION.SDK_INT >= 28) j.put("distortionCorrection", r.get(CaptureResult.DISTORTION_CORRECTION_MODE));
+            j.put("afMode", r.get(CaptureResult.CONTROL_AF_MODE)); j.put("aeMode", r.get(CaptureResult.CONTROL_AE_MODE));
+            j.put("exposureNs", r.get(CaptureResult.SENSOR_EXPOSURE_TIME)); j.put("iso", r.get(CaptureResult.SENSOR_SENSITIVITY));
+            j.put("frameDurationNs", r.get(CaptureResult.SENSOR_FRAME_DURATION)); j.put("focusDiopters", r.get(CaptureResult.LENS_FOCUS_DISTANCE));
+            float[] ic = r.get(CaptureResult.LENS_INTRINSIC_CALIBRATION); if (ic != null) j.put("intrinsicsPerFrame", arr(ic));
+            try (Writer w = new FileWriter(new File(dir, "applied.json"))) { w.write(j.toString(2)); }
+        } catch (Exception ignored) { }
+    }
+
     /** The lens and sensor facts for undistorting and for the IMU-camera time base. */
     private void writeCalibration(File f) throws Exception {
+        org.json.JSONObject all = new org.json.JSONObject();
+        all.put("recorded", camId);
+        for (String id : new String[]{camId, camId.equals(wideId) ? mainId : wideId}) all.put("camera" + id, calib(id));
+        try (Writer w = new FileWriter(f)) { w.write(all.toString(2)); }
+    }
+
+    private org.json.JSONObject calib(String camId) throws Exception {
         CameraCharacteristics c = ((CameraManager) getSystemService(Context.CAMERA_SERVICE)).getCameraCharacteristics(camId);
         org.json.JSONObject j = new org.json.JSONObject();
         j.put("cameraId", camId).put("width", W).put("height", H);
@@ -208,7 +236,7 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
         j.put("sensorOrientation", c.get(CameraCharacteristics.SENSOR_ORIENTATION));
         j.put("hardwareLevel", c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL));
         j.put("model", android.os.Build.MODEL);
-        try (Writer w = new FileWriter(f)) { w.write(j.toString(2)); }
+        return j;
     }
 
     private static org.json.JSONArray arr(float[] a) throws Exception { org.json.JSONArray r = new org.json.JSONArray(); if (a != null) for (float v : a) r.put((double) v); return r; }

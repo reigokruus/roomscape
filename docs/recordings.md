@@ -28,3 +28,13 @@ Until then the iPhone path is our own debug recorder (coming with "record raw no
 2. A plain wall up close: walk along it about 30 cm away.
 3. A window: point at it for a while, then away.
 4. A room with furniture against a wall (a chest of drawers, a chair).
+
+## Experiment: ultrawide recorder (Android, 11 Nov)
+
+Debug tools › "Ultrawide recorder (experiment)": records the ultrawide (or the main) camera **without ARCore**, with
+per-frame timestamps, the motion sensors and the lens calibration, to check offline (`tools/ultrawide-bench`) whether
+a wider lens would keep more trackable detail on plain walls. Files: `Android/data/com.hackathon.setscan/files/recordings/uw-*/`
+and `main-*/` on the phone (they show the room: copy to the Mac only, never commit).
+
+To remove the experiment: delete `android/app/src/main/java/com/hackathon/setscan/experiment/`, the "Ultrawide
+recorder" button in `MainActivity.java`, the `UltrawideRecorderActivity` line in `AndroidManifest.xml` and this section.
