@@ -107,6 +107,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     final SensorLog sensors = new SensorLog();
     private final float[] poseTq = new float[7];
     private final byte[] obs = new byte[MAX_POINTS]; // how many times each point was seen (capped)
+    // Per dot, how sure the depth was (rk 11 Nov 21:55): ARCore's raw depth confidence of its best reading (0-255, 0 = not
+    // known, e.g. loaded from an older scan) and the distance of its closest reading (cm). Saved as dot-confidence.bin.
+    private final byte[] confBest = new byte[MAX_POINTS];
+    private final short[] nearCm = new short[MAX_POINTS];
+    /** Debug tools "Confidence greys": dots drawn in grey by their confidence (white = ARCore most sure, black = least);
+     *  display only, the real colours are kept and saved as always. */
+    static volatile boolean CONF_GREY = true;
+    private boolean greyShown;
+    private final ByteBuffer greyBuf = offHeap(MAX_POINTS * 4, "greys");
+    private int curConf = 0, curMm = 0;     // the reading being added (depth thread), for addPoint/refine
+    private void fillGrey(int from, int to) {
+        for (int i = from; i < to; i++) {
+            int c = confBest[i] & 0xFF; int g = c == 0 ? 128 : c;   // not known: mid grey
+            greyBuf.put(i * 4, (byte) g); greyBuf.put(i * 4 + 1, (byte) g); greyBuf.put(i * 4 + 2, (byte) g); greyBuf.put(i * 4 + 3, col.get(i * 4 + 3));
+        }
+    }
     private int refineCursor; private boolean refined; private int refinedTotal, droppedNoise;
     private final FloatBuffer path = ByteBuffer.allocateDirect(MAX_PATH * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
     private int pathCount;
@@ -2447,7 +2463,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // under a minute), or at once when another scan is started or opened first (rk 10 Nov 15:04-15:06: three quick
         // scans; the first one's logs went into the second's folder and the second's were lost).
         final File dirAtDone = currentDir;
-        final byte[][] removedAtDone = new byte[1][];   // the points the clean-up below takes out (kept, not deleted)
+        final byte[][] removedAtDone = new byte[1][];
+        final byte[][] confAtDone = new byte[1][];   // the points the clean-up below takes out (kept, not deleted)
         final FlatTiles.Saved tilesSaved = FLAT_TILES ? flatTiles.snapshot() : null;   // GL thread: read back now
         synchronized (afterDoneLock) {
             afterDoneWork = () -> {
@@ -2456,6 +2473,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (dir != null && tilesSaved != null) saveTiles(dir, tilesSaved);
                 if (dir != null && removedAtDone[0] != null) saveRemoved(dir, removedAtDone[0]);
                 if (dir != null) saveFilledWall(dir);
+                if (dir != null && confAtDone[0] != null) saveConfidence(dir, confAtDone[0]);
                 if (dir != null) { saveEvents(dir); saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
             };
         }
@@ -2470,6 +2488,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count
                 + "; " + removedN + " points taken out in all, kept aside in removed-points.bin");
         removedAtDone[0] = removed.toByteArray(); removed = null;
+        {   // per dot, in the order of points.bin: best confidence (1 byte) and closest distance (2 bytes, cm)
+            byte[] cb = new byte[count * 3];
+            for (int i = 0; i < count; i++) { cb[i * 3] = confBest[i]; cb[i * 3 + 1] = (byte) (nearCm[i] >> 8); cb[i * 3 + 2] = (byte) nearCm[i]; }
+            confAtDone[0] = cb;
+        }
         try {
             long t0 = System.currentTimeMillis();
             // Data is gold: the read-back at Done must not take away most of the room (15:09 scan: the live surface
@@ -2949,7 +2972,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
             }
             k++;
         }
@@ -3035,7 +3058,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
             }
             k++;
         }
@@ -4427,7 +4450,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // block would overwrite what was synced with partial data); a new scan starts on the GPU again.
         if (gpuTsdf != null) { gpuTsdf = null; gpuSurfaceBroken = true; log("GL context lost: GPU surface off for this scan, the CPU fuses"); }
         labelTex.clear(); labelProg = 0; // old GL objects are gone with the old context
-        GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+        clearBg();
         int[] t = new int[1];
         GLES20.glGenTextures(1, t, 0);
         bgTex = t[0];
@@ -5511,9 +5534,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     }
                     if (weak) continue;
                     if (hit < 0 || seenStamp[hit] != stampFrame) frameHits++;
-                    if (hit >= 0) { refine(hit, wx, wy, wz, rgb); continue; }
+                    curConf = cv; curMm = mm;
+                    if (hit >= 0) { refine(hit, wx, wy, wz, rgb); curConf = 0; curMm = 0; continue; }
                     voxels.put(vk, count);
-                    addPoint(wx, wy, wz, rgb);
+                    addPoint(wx, wy, wz, rgb); curConf = 0; curMm = 0;
                     if (count >= MAX_POINTS) break;
                 }
             }
@@ -5795,6 +5819,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         int j = count * 4;
         col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) seenAlpha(1));
         obs[count] = 1; seenStamp[count] = stampFrame; thru[count] = 0;
+        confBest[count] = (byte) curConf; nearCm[count] = (short) Math.min(32767, curMm / 10);
         if (seg == null || seg.length < pos.capacity() / 3) seg = new byte[pos.capacity() / 3];
         seg[count] = segment;
         count++;
@@ -5802,6 +5827,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** A spot seen again: blend the new reading in, so repeated looks clean up a bad first one. */
     private void refine(int idx, float x, float y, float z, int[] rgb) {
+        if (curConf > (confBest[idx] & 0xFF)) confBest[idx] = (byte) curConf;
+        if (curMm > 0) { int cm = curMm / 10; if (nearCm[idx] == 0 || cm < nearCm[idx]) nearCm[idx] = (short) Math.min(32767, cm); }
         if (obs[idx] == 0) { // a cleared spot seen solid again: start it fresh
             pos.put(idx * 3, x); pos.put(idx * 3 + 1, y); pos.put(idx * 3 + 2, z);
             col.put(idx * 4, (byte) rgb[0]); col.put(idx * 4 + 1, (byte) rgb[1]); col.put(idx * 4 + 2, (byte) rgb[2]); col.put(idx * 4 + 3, (byte) seenAlpha(1));
@@ -5869,6 +5896,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         removedN++;
     }
 
+    /** dot-confidence.bin: int count, then per dot (points.bin order) the best ARCore depth confidence (0-255, 0 = not
+     *  known) and the closest distance it was seen from (big-endian short, cm). Only matches points.bin as saved at Done. */
+    private void saveConfidence(File dir, byte[] data) {
+        try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "dot-confidence.bin"))))) {
+            o.writeInt(data.length / 3); o.write(data);
+            log("dot confidence kept with the scan: dot-confidence.bin (" + data.length / 3 + " dots)");
+        } catch (Exception e) { logError("dot-confidence.bin", e); }
+    }
+
     private void saveRemoved(File dir, byte[] data) {
         try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, "removed-points.bin"))))) {
             o.writeInt(data.length / 16); o.write(data);
@@ -5885,7 +5921,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
             }
             k++;
         }
@@ -5912,7 +5948,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i];
             }
             k++;
         }
@@ -6383,8 +6419,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         kb(mi.getMemoryStat("summary.java-heap")), kb(mi.getMemoryStat("summary.native-heap")), kb(mi.getMemoryStat("summary.graphics")),
                         kb(mi.getMemoryStat("summary.code")), kb(mi.getMemoryStat("summary.private-other")), kb(mi.getMemoryStat("summary.total-pss")));
             } catch (Throwable e) { sys = "; Android memory info failed: " + e; }
-            log(String.format(java.util.Locale.US, "memory (%s, %d of max %d points): Java heap used %d of %d MB, free %d, limit %d MB (phone's real limit %d)%s, native heap %d MB; ours (MB): %s%s",
-                    when, pts, MAX_POINTS, (rt.totalMemory() - rt.freeMemory()) >> 20, rt.totalMemory() >> 20, rt.freeMemory() >> 20, HEAP_LIMIT >> 20, rt.maxMemory() >> 20,
+            log(String.format(java.util.Locale.US, "memory (%s, build %d, %d of max %d points): Java heap used %d of %d MB, free %d, limit %d MB (phone's real limit %d)%s, native heap %d MB; ours (MB): %s%s",
+                    when, activity.buildCode(), pts, MAX_POINTS, (rt.totalMemory() - rt.freeMemory()) >> 20, rt.totalMemory() >> 20, rt.freeMemory() >> 20, HEAP_LIMIT >> 20, rt.maxMemory() >> 20,
                     FORCED_LOW_MEMORY ? ", low memory mode (forced, like a 512 MB phone)" : LOW_MEMORY ? ", low memory phone" : "",
                     android.os.Debug.getNativeHeapAllocatedSize() >> 20, ours, sys));
         }, "memory-log").start();
@@ -6815,6 +6851,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         if (k == 0) return;
         float r = ((w.rgb >> 16) & 255) / 255f, g = ((w.rgb >> 8) & 255) / 255f, bl = (w.rgb & 255) / 255f;
+        if (CONF_GREY) { r = g = bl = 0.04f; }   // guessed, not measured: no ARCore confidence at all, so black in the greys
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         planDraw(m, k == guessVerts.length ? guessVerts : java.util.Arrays.copyOf(guessVerts, k), GLES20.GL_POINTS, new float[]{r, g, bl, 1f}, 7f);
     }
@@ -7152,6 +7189,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---------------- drawing ----------------
 
     private void uploadNew() {
+        if (greyShown != CONF_GREY) { greyShown = CONF_GREY; refined = true; refineCursor = 0; }   // switched: send every dot's colour again
         // Re-send a slice of already-uploaded points each frame so refined positions/colours show up.
         if (refined && uploaded > 0) {
             int slice = Math.min(uploaded, 40000);
@@ -7162,9 +7200,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, refineCursor * 12, (end - refineCursor) * 12, pos);
             pos.position(0);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
-            col.position(refineCursor * 4);
-            GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, refineCursor * 4, (end - refineCursor) * 4, col);
-            col.position(0);
+            ByteBuffer src = col; if (CONF_GREY) { fillGrey(refineCursor, end); src = greyBuf; }
+            src.position(refineCursor * 4);
+            GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, refineCursor * 4, (end - refineCursor) * 4, src);
+            src.position(0);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
             refineCursor = end;
             if (refineCursor >= uploaded) { refineCursor = 0; refined = false; }
@@ -7175,9 +7214,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, uploaded * 12, (count - uploaded) * 12, pos);
         pos.position(0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colVbo);
-        col.position(uploaded * 4);
-        GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, uploaded * 4, (count - uploaded) * 4, col);
-        col.position(0);
+        ByteBuffer src = col; if (CONF_GREY) { fillGrey(uploaded, count); src = greyBuf; }
+        src.position(uploaded * 4);
+        GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, uploaded * 4, (count - uploaded) * 4, src);
+        src.position(0);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         uploaded = count;
     }
@@ -7309,6 +7349,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private int zebraProg;
 
     /** Full-screen stripes, `a` opaque, under everything (no depth). */
+    /** With grey dots the background is blue (stripes and plain), so black and white dots both stand out. */
+    static final float[] GREY_BG_LIGHT = {0.22f, 0.34f, 0.52f}, GREY_BG_DARK = {0.15f, 0.25f, 0.40f};
+    private static void clearBg() { if (CONF_GREY) GLES20.glClearColor(0.15f, 0.25f, 0.40f, 1f); else clearBg(); }
+
     private void drawZebra(float a) {
         if (zebraProg == 0) zebraProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
                 "precision highp float; uniform float uW; uniform float uA; uniform vec3 uL; uniform vec3 uD;"
@@ -7321,8 +7365,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUseProgram(zebraProg);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zebraProg, "uW"), ZEBRA_DP * activity.getResources().getDisplayMetrics().density);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zebraProg, "uA"), a);
-        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uL"), 1, ZEBRA_LIGHT, 0);
-        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uD"), 1, ZEBRA_DARK, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uL"), 1, CONF_GREY ? GREY_BG_LIGHT : ZEBRA_LIGHT, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uD"), 1, CONF_GREY ? GREY_BG_DARK : ZEBRA_DARK, 0);
         int aPos = GLES20.glGetAttribLocation(zebraProg, "aPos");
         quad.position(0);
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad);
@@ -7860,7 +7904,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             GLES20.glClearColor(0f, 0f, 0f, 1f);
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             GLES20.glColorMask(true, true, true, true);
-            GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+            clearBg();
             return;
         }
         // 1) alpha = 0.62 everywhere ("not scanned"), then scanned points punch it to 0
@@ -7889,7 +7933,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glClearColor(0f, 0f, 0f, 1f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glColorMask(true, true, true, true);
-        GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+        clearBg();
     }
 
     // ---- live surface mesh (rk, 7 Nov: like the iPhone's LiDAR mesh, polygons on what's detected, not splats) ----
@@ -8345,7 +8389,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glClearColor(0f, 0f, 0f, 1f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glColorMask(true, true, true, true);
-        GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f);
+        clearBg();
     }
 
     /** The scan screen's only feedback: one plain instruction and two progress bars, no buttons to press. */

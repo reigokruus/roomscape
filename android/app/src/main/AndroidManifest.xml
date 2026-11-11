@@ -24,7 +24,7 @@
         <!-- EXPERIMENT: ultrawide recorder without ARCore (remove with the experiment/ folder) -->
         <activity android:name=".experiment.UltrawideRecorderActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".MainActivity" android:exported="true"
-            android:screenOrientation="fullSensor"
+            android:screenOrientation="portrait"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode">
             <intent-filter>

@@ -774,9 +774,9 @@ public class MainActivity extends Activity {
             wallsB.setOnClickListener(v -> { ScanRenderer.ADJUST_WALLS = !ScanRenderer.ADJUST_WALLS; sp.edit().putBoolean("abAdjustWalls2", ScanRenderer.ADJUST_WALLS).apply(); wallsB.setText(ScanRenderer.ADJUST_WALLS ? "Adjust room walls: on" : "Adjust room walls: off"); });
             wallsB.setOnLongClickListener(v -> { glView.queueEvent(renderer::resetWallEdits); toast("Room walls reset to the scan's own"); return true; });
             Button tilesB = new Button(this);
-            ScanRenderer.FLAT_TILES = sp.getBoolean("abFlatTiles", true);
+            ScanRenderer.FLAT_TILES = sp.getBoolean("abFlatTiles2", false);   // off for the confidence-greys experiment (rk 11 Nov 21:55; a new key so it starts off)
             tilesB.setText(ScanRenderer.FLAT_TILES ? "Flat tiles: on" : "Flat tiles: off");
-            tilesB.setOnClickListener(v -> { ScanRenderer.FLAT_TILES = !ScanRenderer.FLAT_TILES; sp.edit().putBoolean("abFlatTiles", ScanRenderer.FLAT_TILES).apply(); tilesB.setText(ScanRenderer.FLAT_TILES ? "Flat tiles: on" : "Flat tiles: off"); });
+            tilesB.setOnClickListener(v -> { ScanRenderer.FLAT_TILES = !ScanRenderer.FLAT_TILES; sp.edit().putBoolean("abFlatTiles2", ScanRenderer.FLAT_TILES).apply(); tilesB.setText(ScanRenderer.FLAT_TILES ? "Flat tiles: on" : "Flat tiles: off"); });
             Button dropB = new Button(this);
             ScanRenderer.DROP_UNDER_TILES = sp.getBoolean("abDropUnderTiles", false);
             dropB.setText(ScanRenderer.DROP_UNDER_TILES ? "Points under tiles: hidden" : "Points under tiles: kept");
@@ -792,6 +792,10 @@ public class MainActivity extends Activity {
             Button uwB = new Button(this);   // EXPERIMENT (remove with experiment/): records the ultrawide without ARCore
             uwB.setText("Ultrawide recorder (experiment)");
             uwB.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)));
+            Button greyB = new Button(this);
+            ScanRenderer.CONF_GREY = sp.getBoolean("abConfGrey", true);
+            greyB.setText(ScanRenderer.CONF_GREY ? "Confidence greys: on" : "Confidence greys: off");
+            greyB.setOnClickListener(v -> { ScanRenderer.CONF_GREY = !ScanRenderer.CONF_GREY; sp.edit().putBoolean("abConfGrey", ScanRenderer.CONF_GREY).apply(); greyB.setText(ScanRenderer.CONF_GREY ? "Confidence greys: on" : "Confidence greys: off"); });
             Button fillB = new Button(this);
             ScanRenderer.FILL_WALL = sp.getBoolean("abFillWall", true);
             fillB.setText(ScanRenderer.FILL_WALL ? "Guess the plain wall: on" : "Guess the plain wall: off");
@@ -827,7 +831,7 @@ public class MainActivity extends Activity {
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB, greyB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }
@@ -2104,23 +2108,20 @@ public class MainActivity extends Activity {
                     .setPositiveButton("Share", (d, w) -> shareDiagnostics()).setNegativeButton("Cancel", null).show();
             return true;
         });
+        {   // the build number above the logo, big (rk 11 Nov 21:56: "show me the version ... so I don't use the wrong one")
+            TextView bl = new TextView(this);
+            bl.setText("Build " + buildCode() + (ScanRenderer.FORCED_LOW_MEMORY ? "  ·  low memory mode" : ""));
+            bl.setTextColor(ScanRenderer.FORCED_LOW_MEMORY ? 0xFFE0A030 : 0xFFFFFFFF);
+            bl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+            bl.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
+            bl.setGravity(Gravity.CENTER);
+            bl.setPadding(0, 0, 0, dp(6));
+            col.addView(bl);
+        }
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(120));
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         lp.bottomMargin = dp(8);
         col.addView(logo, lp);
-        {   // build and memory mode, so a screenshot says which build and mode a scan used
-            TextView bl = new TextView(this);
-            String code = "?";
-            try { code = String.valueOf(getPackageManager().getPackageInfo(getPackageName(), 0).versionCode); } catch (Exception ignored) { }
-            bl.setText("Build " + code + " · " + (ScanRenderer.FORCED_LOW_MEMORY ? "low memory mode (like a 512 MB phone)"
-                    : ScanRenderer.LOW_MEMORY ? "low memory phone" : "memory limit " + (Runtime.getRuntime().maxMemory() >> 20) + " MB"));
-            bl.setTextColor(ScanRenderer.FORCED_LOW_MEMORY ? 0xFFE0A030 : Ios.SECONDARY);
-            bl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-            bl.setGravity(Gravity.CENTER);
-            bl.setPadding(0, 0, 0, dp(8));
-            col.addView(bl);
-        }
-
         col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_scan, "New room scan", true, false, v -> startNewScan())));
         col.addView(Ios.footer(this, "Walk slowly around the room and point the phone at every wall, window, door and piece of furniture."));
         col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_import, "Import a scan (.rmsc)", false, false, v -> pickRmsc())));
@@ -2148,6 +2149,8 @@ public class MainActivity extends Activity {
         home.addView(sv);
         return home;
     }
+
+    int buildCode() { try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionCode; } catch (Exception e) { return 0; } }
 
     private void showHome() {
         act("home screen");

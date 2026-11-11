@@ -19,5 +19,6 @@ old=$($ADB -s $dev shell dumpsys package $P | sed -n 's/.*versionCode=\([0-9]*\)
 echo "phone: $dev"
 echo "APK version $new, installed ${old:-none}"
 if [ -n "$old" ] && [ "$new" -lt "$old" ]; then echo "the APK is older than the installed app: not installing"; exit 1; fi
-$ADB -s $dev install -r $APK
-echo "installed: $($ADB -s $dev shell dumpsys package $P | sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' | head -1)"
+$ADB -s $dev install -r $APK || true
+now=$($ADB -s $dev shell dumpsys package $P | sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' | head -1)
+if [ "$now" = "$new" ]; then echo "\nINSTALLED: build $now on the S24\n"; else echo "\n!!! INSTALL FAILED: phone still has build ${now:-none} (wanted $new) !!!\n"; exit 1; fi
