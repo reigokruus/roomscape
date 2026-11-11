@@ -50,6 +50,20 @@ public class WallGuessCheck {
             System.out.printf(Locale.US, "  %6.1f s %s: wall %.2f m wide x %.2f m high, %.2f m from the camera, %d points on it, %.0f%% of its width already scanned, colour #%06x, brightness spread %.0f%n",
                     e[0], e[1] == 0 ? "warning" : e[1] == 1 ? "loss   " : "walk   ", w.width, w.height, w.distance, w.support, w.scannedShare * 100, w.rgb, w.lumSpread);
             pictures(new File(out, dir.getName() + "-" + tag + ".png"), p, c, n, floorY, w, cam);
+            if (System.getenv("WALL_BAND") != null) {   // how thick the wall's points are, every 0.5 m along it (median and spread of the offset, cm)
+                float ux = w.nz, uz = -w.nx; StringBuilder sb = new StringBuilder("      band (cm, every 0.5 m: median offset/80% spread/count):");
+                for (float s0 = 0; s0 < w.width; s0 += 0.5f) {
+                    ArrayList<Float> offs = new ArrayList<>();
+                    for (int i = 0; i < n; i++) {
+                        float off = w.nx * p[i * 3] + w.nz * p[i * 3 + 2] - w.d; if (Math.abs(off) > 0.3f) continue;
+                        float s = (p[i * 3] - w.corners[0]) * ux + (p[i * 3 + 2] - w.corners[2]) * uz; float h = p[i * 3 + 1] - floorY;
+                        if (s >= s0 && s < s0 + 0.5f && h > 0.3f && h < 2.2f) offs.add(off);
+                    }
+                    if (offs.size() < 20) { sb.append(" | -"); continue; }
+                    Collections.sort(offs); sb.append(String.format(Locale.US, " | %+.0f/%.0f/%d", offs.get(offs.size() / 2) * 100, (offs.get(offs.size() * 9 / 10) - offs.get(offs.size() / 10)) * 100, offs.size()));
+                }
+                System.out.println(sb);
+            }
         }
     }
 

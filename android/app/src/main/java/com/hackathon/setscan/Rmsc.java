@@ -316,7 +316,7 @@ final class Rmsc {
             copyIf(z, new File(dir, "perf-scan.summary.json"), "android/diagnostics/perf-scan.summary.json");
             copyIf(z, new File(dir, "scan-log.txt"), "android/diagnostics/scan-log.txt");
             copyIf(z, new File(dir, "removed-points.bin"), "android/removed-points.bin");
-            copyIf(z, new File(dir, "filled-wall.json"), "android/filled-wall.json");   // one plain wall filled in by the app (generated, not scanned)   // points the clean-up at Done took out (kept, data is gold)
+            copyIf(z, new File(dir, "guessed-wall.json"), "android/guessed-wall.json");   // one plain wall guessed by the app (generated, not scanned)   // points the clean-up at Done took out (kept, data is gold)
         }
         File f = appFiles;
         if (f != null) {

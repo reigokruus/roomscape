@@ -3767,7 +3767,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
         anchors.clear(); clearGoal(); anchorOfferAt = 0;
-        filledWall = null; wallCand = null; wallCandHits = 0;
+        filledWall = null; wallCand = null; wallCandHits = 0; guessCells = null; shownSet = false; guessWeight = 0; guessUpdates = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
@@ -6693,7 +6693,25 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static boolean STANDING_NOTE = true;    // debug tools "Standing notice"
     static final String STANDING_TEXT = "Keep corners, edges or furniture in view. On a plain wall the phone loses track and the scan fails.";
     static final float PLAIN_SPREAD = 60f;  // brightness spread of a plain wall's points (offline: hall wall 32-52, curtains 68-84, cabinets 124-145)
-    volatile WallGuess.Wall filledWall;
+    volatile WallGuess.Wall filledWall;     // the wall's current best estimate (the guessed dots go on it)
+    private float guessWeight; private int guessUpdates;
+    private volatile boolean[] guessCells;  // 4 cm cells (along x up) with real scanned points: no guessed dot there
+    private final float[] shownCorners = new float[12]; private boolean shownSet;
+    static final float GUESS_STEP = 0.04f;
+
+    /** Which 4 cm cells of the wall already have scanned points (real points always win over guesses). */
+    private boolean[] scannedCells(WallGuess.Wall w, int n) {
+        int cw = Math.max(1, (int) (w.width / GUESS_STEP)), ch = Math.max(1, (int) (w.height / GUESS_STEP));
+        boolean[] cells = new boolean[cw * ch];
+        float ux = (w.corners[3] - w.corners[0]) / Math.max(1e-3f, w.width), uz = (w.corners[5] - w.corners[2]) / Math.max(1e-3f, w.width);
+        for (int i = 0; i < n; i++) {
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            if (Math.abs(w.nx * x + w.nz * z - w.d) > WallGuess.ON_BAND) continue;
+            int a = (int) (((x - w.corners[0]) * ux + (z - w.corners[2]) * uz) / GUESS_STEP), b = (int) ((y - w.corners[1]) / GUESS_STEP);
+            if (a >= 0 && b >= 0 && a < cw && b < ch) cells[b * cw + a] = true;
+        }
+        return cells;
+    }
     private WallGuess.Wall wallCand; private int wallCandHits; private long wallCheckAt; private volatile boolean wallChecking;
 
     /** GL thread, about every 1.5 s while scanning normally: is the camera looking at a plain wall it can fill? From
@@ -6702,7 +6720,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (!FILL_WALL || wallChecking || nowMs - wallCheckAt < 1500 || count < 20000 || needRealign || !haveGoodCam) return;
         wallCheckAt = nowMs; wallChecking = true;
         final float[] cam = lastGoodCam.clone(); final float floorY = walkFloorY(), ceilY = roomReady && room.ceilingY > room.floorY + 1.8f ? room.ceilingY : 0;
-        final int n = count; final boolean warned = nowMs < plainWarnUntil + 5000;
+        final int n = count; final boolean warned = nowMs < plainWarnUntil + 10000; final int featNow = featuresNow;
         new Thread(() -> {
             try {
                 WallGuess.Pts P = new WallGuess.Pts() {
@@ -6711,20 +6729,36 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 };
                 StringBuilder why = new StringBuilder();
                 WallGuess.Wall w = WallGuess.find(P, n, cam, floorY, ceilY, why);
-                boolean ok = w != null && w.lumSpread <= PLAIN_SPREAD && w.distance <= 3.5f;
-                if (!ok) { wallCandHits = 0; wallCand = null; return; }
-                // the same plane twice in a row before it's shown (one look isn't enough)
-                WallGuess.Wall c = wallCand;
-                boolean same = c != null && Math.abs(c.d - w.d) < 0.1f && c.nx * w.nx + c.nz * w.nz > 0.996f;
-                wallCand = w; wallCandHits = same ? wallCandHits + 1 : 1;
-                if (wallCandHits < 2) return;
+                // The wall that's causing problems: plain colours AND ARCore finding little to hold on to while looking at it
+                // (under 40 features), or the plain-wall warning just now. Offline on tonight's 4 scans: the hall wall at
+                // 2.4-2.5 m every time from about 3 m away; the curtain-and-window wall (even colours, many features) no more.
+                boolean ok = w != null && w.lumSpread <= PLAIN_SPREAD && w.distance <= 3.5f && ((featNow >= 0 && featNow < 40) || warned);
+                if (!ok) return;
+                // Guessed dots from the first rough estimate (rk 21:52: "start placing dots ... update themselves to the more
+                // accurate placement once I get closer"). Each estimate counts by its support and how close it was taken
+                // (1/d^2: close-up readings are much better on the S24); a better-supported estimate pulls the wall towards
+                // itself, a weaker one only a little; older ones fade (x0.9 each time).
+                float wNew = w.support / Math.max(0.25f, w.distance * w.distance);
                 WallGuess.Wall cur = filledWall;
-                boolean curSame = cur != null && Math.abs(cur.d - w.d) < 0.1f && cur.nx * w.nx + cur.nz * w.nz > 0.996f;
-                if (cur != null && !curSame && !warned) return;   // one wall only: another replaces it only where the plain-wall warning pointed
-                if (curSame && w.width <= cur.width + 0.05f) return;   // grows, never shrinks
-                filledWall = w;
-                log(String.format(java.util.Locale.US, "filled wall (generated, not scanned): %.2f x %.2f m, %.2f m away, %d points on it, %.0f%% of its width had points, brightness spread %.0f%s",
-                        w.width, w.height, w.distance, w.support, w.scannedShare * 100, w.lumSpread, cur == null ? "" : curSame ? " (wider)" : " (replaces the one before)"));
+                boolean same = cur != null && Math.abs(cur.d - w.d) < 0.15f && cur.nx * w.nx + cur.nz * w.nz > 0.99f;
+                if (cur != null && !same && !warned) return;   // one wall only: another replaces it only where the plain-wall warning pointed
+                WallGuess.Wall next;
+                if (same) {
+                    float W = guessWeight * 0.9f, k = wNew / (W + wNew);
+                    next = new WallGuess.Wall();
+                    for (int q = 0; q < 12; q++) next.corners[q] = cur.corners[q] + (w.corners[q] - cur.corners[q]) * k;
+                    float nx = cur.nx + (w.nx - cur.nx) * k, nz = cur.nz + (w.nz - cur.nz) * k, l = (float) Math.sqrt(nx * nx + nz * nz);
+                    next.nx = nx / l; next.nz = nz / l; next.d = cur.d + (w.d - cur.d) * k;
+                    next.width = (float) Math.hypot(next.corners[3] - next.corners[0], next.corners[5] - next.corners[2]); next.height = next.corners[7] - next.corners[1];
+                    next.rgb = k > 0.5f ? w.rgb : cur.rgb; next.lumSpread = w.lumSpread; next.support = Math.max(cur.support, w.support); next.distance = w.distance;
+                    guessWeight = W + wNew;
+                } else { next = w; guessWeight = wNew; }
+                guessCells = scannedCells(next, n);
+                filledWall = next;
+                guessUpdates++;
+                if (cur == null || !same || guessUpdates % 10 == 0)
+                    log(String.format(java.util.Locale.US, "guessed wall dots (generated, not scanned): %.2f x %.2f m, seen from %.2f m, %d points on it, brightness spread %.0f; update %d%s",
+                            next.width, next.height, w.distance, w.support, w.lumSpread, guessUpdates, cur == null ? "" : same ? "" : " (another wall, where the warning pointed)"));
                 File d = currentDir; if (d != null) saveFilledWall(d);
             } catch (Throwable e) { logError("wall fill", new RuntimeException(e)); }
             finally { wallChecking = false; }
@@ -6738,38 +6772,53 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void saveFilledWall(File d) {
         WallGuess.Wall w = filledWall; if (w == null) return;
         try {
-            org.json.JSONObject j = new org.json.JSONObject().put("generated", true).put("note", "filled in by the app, not scanned")
+            org.json.JSONObject j = new org.json.JSONObject().put("generated", true).put("note", "guessed by the app, not scanned: dots every 4 cm on this rectangle where no scanned point is").put("dotSpacing", GUESS_STEP)
                     .put("width", w.width).put("height", w.height).put("rgb", String.format("#%06x", w.rgb & 0xFFFFFF));
             org.json.JSONArray c = new org.json.JSONArray(); for (float v : w.corners) c.put((double) v); j.put("corners", c);
             j.put("plane", new org.json.JSONArray().put((double) w.nx).put((double) w.nz).put((double) w.d));
-            java.nio.file.Files.write(new File(d, "filled-wall.json").toPath(), j.toString(1).getBytes("UTF-8"));
-        } catch (Exception e) { logError("filled-wall.json", e); }
+            java.nio.file.Files.write(new File(d, "guessed-wall.json").toPath(), j.toString(1).getBytes("UTF-8"));
+        } catch (Exception e) { logError("guessed-wall.json", e); }
     }
 
     void loadFilledWall(File d) {
-        File f = d == null ? null : new File(d, "filled-wall.json"); if (f == null || !f.exists()) return;   // (none saved yet: keep the one in memory, e.g. right after Done)
+        File f = d == null ? null : new File(d, "guessed-wall.json"); if (f == null || !f.exists()) return;   // (none saved yet: keep the one in memory, e.g. right after Done)
         try {
             org.json.JSONObject j = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(f.toPath()), "UTF-8"));
             WallGuess.Wall w = new WallGuess.Wall(); org.json.JSONArray c = j.getJSONArray("corners");
             for (int i = 0; i < 12; i++) w.corners[i] = (float) c.getDouble(i);
             org.json.JSONArray pl = j.getJSONArray("plane"); w.nx = (float) pl.getDouble(0); w.nz = (float) pl.getDouble(1); w.d = (float) pl.getDouble(2);
             w.width = (float) j.getDouble("width"); w.height = (float) j.getDouble("height"); w.rgb = Integer.parseInt(j.getString("rgb").substring(1), 16);
-            filledWall = w;
-        } catch (Exception e) { logError("filled-wall.json", e); }
+            filledWall = w; shownSet = false;
+            final WallGuess.Wall ww = w; final int nn = count; guessCells = scannedCells(ww, nn);
+        } catch (Exception e) { logError("guessed-wall.json", e); }
     }
 
     /** The filled wall, a flat rectangle in its colour, 2 cm behind the wall so the scan's own points stay in front. */
     private void drawFilledWall(float[] m) {
-        WallGuess.Wall w = filledWall; if (w == null || !FILL_WALL) return;
-        float[] v = new float[12];
-        for (int i = 0; i < 4; i++) { v[i * 3] = w.corners[i * 3] - w.nx * 0.02f; v[i * 3 + 1] = w.corners[i * 3 + 1]; v[i * 3 + 2] = w.corners[i * 3 + 2] - w.nz * 0.02f; }
-        float r = ((w.rgb >> 16) & 255) / 255f, g = ((w.rgb >> 8) & 255) / 255f, b = (w.rgb & 255) / 255f;
+        WallGuess.Wall w = filledWall; boolean[] cells = guessCells;
+        if (w == null || !FILL_WALL || cells == null) return;
+        // the shown wall glides to the current estimate (no jumps): a tenth of the way each frame
+        if (!shownSet) { System.arraycopy(w.corners, 0, shownCorners, 0, 12); shownSet = true; }
+        else for (int q = 0; q < 12; q++) shownCorners[q] += (w.corners[q] - shownCorners[q]) * 0.1f;
+        float[] c = shownCorners;
+        float wid = (float) Math.hypot(c[3] - c[0], c[5] - c[2]), hei = c[7] - c[1];
+        int cw = Math.max(1, (int) (w.width / GUESS_STEP)), ch = Math.max(1, (int) (w.height / GUESS_STEP));
+        if (cells.length != cw * ch || wid < 0.1f) return;
+        float ux = (c[3] - c[0]) / wid, uz = (c[5] - c[2]) / wid, sx = wid / cw, sy = hei / ch;
+        int nd = 0; for (boolean b : cells) if (!b) nd++;
+        if (guessVerts == null || guessVerts.length < nd * 3) guessVerts = new float[nd * 3];
+        int k = 0;
+        for (int b = 0; b < ch; b++) for (int a = 0; a < cw; a++) {
+            if (cells[b * cw + a]) continue;
+            float s = (a + 0.5f) * sx, y = c[1] + (b + 0.5f) * sy;
+            guessVerts[k++] = c[0] + ux * s - w.nx * 0.01f; guessVerts[k++] = y; guessVerts[k++] = c[2] + uz * s - w.nz * 0.01f;
+        }
+        if (k == 0) return;
+        float r = ((w.rgb >> 16) & 255) / 255f, g = ((w.rgb >> 8) & 255) / 255f, bl = (w.rgb & 255) / 255f;
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-        planDraw(m, v, GLES20.GL_TRIANGLE_FAN, new float[]{r, g, b, 0.92f}, 1f);
-        GLES20.glLineWidth(3f);   // a thin amber edge: it's generated, not scanned
-        planDraw(m, v, GLES20.GL_LINE_LOOP, new float[]{1f, 0.69f, 0.13f, 0.8f}, 1f);
-        GLES20.glLineWidth(1f);
+        planDraw(m, k == guessVerts.length ? guessVerts : java.util.Arrays.copyOf(guessVerts, k), GLES20.GL_POINTS, new float[]{r, g, bl, 1f}, 7f);
     }
+    private float[] guessVerts;
 
     // ---- Good spots (Anchors): views with many features and 3D shape, to send the user to after a loss ----
     /** Debug tools "Good spot after a loss" (on by default). */

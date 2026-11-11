@@ -30,6 +30,12 @@ final class WallGuess {
      * pts: x, y, z per point (n), rgb per point (may be null); cam: camera -> world (column-major 4x4, looks along -z);
      * floorY, ceilY: heights (ceilY <= floorY + 1.8 means unknown: the plane's own top is used).
      */
+    /** The S24's depth on a plain wall is a fuzzy band, not a surface: 20-35 cm thick (10th to 90th percentile) on the
+     *  hall wall at 2-3 m (21:47 scan), its middle wandering +-6 cm along the wall. The plane fit and the wall's support
+     *  use a band to match (a 4-5 cm band found only a slice of it and missed where the wall ends); an opening is where
+     *  more points lie well behind it (over 45 cm, past the noise) than on it. */
+    static final float BAND = 0.08f, ON_BAND = 0.12f, BEHIND = 0.45f;
+
     /** The scan's points, read in place (the app's point buffers, or arrays on the Mac). */
     interface Pts { float x(int i); float y(int i); float z(int i); int rgb(int i); }
 
@@ -67,7 +73,7 @@ final class WallGuess {
             if (L < 0.25f) continue;
             float nx = -dz / L, nz = dx / L, d = nx * P.x(a) + nz * P.z(a);
             int c = 0;
-            for (int q = 0; q < m; q += 2) { int i = idx[q]; if (Math.abs(nx * P.x(i) + nz * P.z(i) - d) < 0.04f) c++; }
+            for (int q = 0; q < m; q += 2) { int i = idx[q]; if (Math.abs(nx * P.x(i) + nz * P.z(i) - d) < BAND) c++; }
             if (c > best) { best = c; bnx = nx; bnz = nz; bd = d; }
         }
         best *= 2;
@@ -77,7 +83,7 @@ final class WallGuess {
         if (facing < 0.5f) { why.append("the plane ahead is seen too edge-on (").append(Math.round(Math.toDegrees(Math.acos(Math.min(1, facing))))).append(" deg)"); return null; }
         // refit on the inliers (least squares on the direction along the wall, still vertical)
         double sx = 0, sz = 0, sxx = 0, szz = 0, sxz = 0; int k = 0;
-        for (int q = 0; q < m; q++) { int i = idx[q]; float x = P.x(i), z = P.z(i); if (Math.abs(bnx * x + bnz * z - bd) < 0.04f) { sx += x; sz += z; sxx += x * x; szz += z * z; sxz += x * z; k++; } }
+        for (int q = 0; q < m; q++) { int i = idx[q]; float x = P.x(i), z = P.z(i); if (Math.abs(bnx * x + bnz * z - bd) < BAND) { sx += x; sz += z; sxx += x * x; szz += z * z; sxz += x * z; k++; } }
         double mx = sx / k, mz = sz / k, cxx = sxx / k - mx * mx, czz = szz / k - mz * mz, cxz = sxz / k - mx * mz;
         double ang = 0.5 * Math.atan2(2 * cxz, cxx - czz);   // principal direction = along the wall
         float ux = (float) Math.cos(ang), uz = (float) Math.sin(ang);
@@ -89,7 +95,7 @@ final class WallGuess {
         float t = (d - nx * px - nz * pz) / den; if (t <= 0) { why.append("the wall is behind"); return null; }
         float hitX = px + fx * t, hitZ = pz + fz * t;
         // along-wall profile, 10 cm bins within 5 m either side: points on the plane, and points seen through it
-        int B = 100, half = 50; int[] on = new int[B], behind = new int[B]; float topOn = floorY;
+        int B = 100, half = 50; int[] on = new int[B], behind = new int[B], rise = new int[B]; float topOn = floorY;
         long rs = 0, gs = 0, bs = 0; int cs = 0; java.util.ArrayList<Integer> cols = new java.util.ArrayList<>();
         for (int i = 0; i < n; i += Math.max(1, step)) {
             float x = P.x(i), y = P.y(i), z = P.z(i);
@@ -97,8 +103,9 @@ final class WallGuess {
             float s = (x - hitX) * ux + (z - hitZ) * uz;
             int bin = (int) Math.floor(s / 0.1f) + half; if (bin < 0 || bin >= B) continue;
             float h = y - floorY; if (h < 0.1f || h > (ceilY > floorY + 1.8f ? ceilY - floorY - 0.1f : 2.6f)) continue;
-            if (Math.abs(off) < 0.05f) { on[bin]++; if (y > topOn) topOn = y; if (h > 0.5f && h < 2.0f && cols.size() < 20000) cols.add(P.rgb(i)); }
-            else if (off < -0.25f && h > 0.3f && h < 1.9f) behind[bin]++;   // seen through: an opening
+            if (Math.abs(off) < ON_BAND && h > 0.3f) { rise[bin] |= 1 << Math.min(15, (int) ((h - 0.3f) / 0.2f)); }
+            if (Math.abs(off) < ON_BAND) { on[bin]++; if (y > topOn) topOn = y; if (h > 0.5f && h < 2.0f && cols.size() < 20000) cols.add(P.rgb(i)); }
+            else if (off < -BEHIND && h > 0.3f && h < 1.9f) behind[bin]++;   // seen through: an opening
         }
         // grow from the hit while the wall goes on: stop at an opening (seen through, nothing on the wall) or where the
         // wall's points end (fewer than 5 in a 10 cm column) for more than 0.4 m
@@ -106,9 +113,11 @@ final class WallGuess {
         // doesn't end it unless it runs over 1 m (open space, offline on the 21:30 scan); an opening ends it (seen through:
         // points well behind the plane). It reaches the outermost columns with wall points (>= 5) on each side, at most 5 m; it must have such columns within 1.5 m of where the
         // camera looks, so it never spans open space on nothing.
-        int lo = half, hi = half; boolean nearL = on[half] >= 5, nearR = on[half] >= 5;
-        for (int b = half - 1; b >= 0; b--) { if (behind[b] >= 3 && on[b] < 3) break; if (on[b] >= 5) { lo = b; if (half - b <= 15) nearL = true; } else if (lo - b > 10) break; }
-        for (int b = half + 1; b < B; b++) { if (behind[b] >= 3 && on[b] < 3) break; if (on[b] >= 5) { hi = b; if (b - half <= 15) nearR = true; } else if (b - hi > 10) break; }
+        boolean[] wall = new boolean[B];
+        for (int b = 0; b < B; b++) wall[b] = on[b] >= 5 && Integer.bitCount(rise[b]) >= 3;   // points up the wall, not floor or skirting only (21:47 scan)
+        int lo = half, hi = half; boolean nearL = wall[half], nearR = wall[half];
+        for (int b = half - 1; b >= 0; b--) { if (behind[b] >= 5 && behind[b] >= on[b]) break; if (wall[b]) { lo = b; if (half - b <= 15) nearL = true; } else if (lo - b > 10) break; }
+        for (int b = half + 1; b < B; b++) { if (behind[b] >= 5 && behind[b] >= on[b]) break; if (wall[b]) { hi = b; if (b - half <= 15) nearR = true; } else if (b - hi > 10) break; }
         if (!nearL && !nearR) { why.append("no wall points within 1.5 m of where the camera looks"); return null; }
         float s0 = (lo - half) * 0.1f, s1 = (hi - half + 1) * 0.1f, width = s1 - s0;
         if (width < 0.6f) { why.append("too narrow (").append(String.format(java.util.Locale.US, "%.2f", width)).append(" m)"); return null; }

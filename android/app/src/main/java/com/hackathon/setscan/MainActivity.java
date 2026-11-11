@@ -794,8 +794,8 @@ public class MainActivity extends Activity {
             uwB.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)));
             Button fillB = new Button(this);
             ScanRenderer.FILL_WALL = sp.getBoolean("abFillWall", true);
-            fillB.setText(ScanRenderer.FILL_WALL ? "Fill the plain wall: on" : "Fill the plain wall: off");
-            fillB.setOnClickListener(v -> { ScanRenderer.FILL_WALL = !ScanRenderer.FILL_WALL; sp.edit().putBoolean("abFillWall", ScanRenderer.FILL_WALL).apply(); fillB.setText(ScanRenderer.FILL_WALL ? "Fill the plain wall: on" : "Fill the plain wall: off"); });
+            fillB.setText(ScanRenderer.FILL_WALL ? "Guess the plain wall: on" : "Guess the plain wall: off");
+            fillB.setOnClickListener(v -> { ScanRenderer.FILL_WALL = !ScanRenderer.FILL_WALL; sp.edit().putBoolean("abFillWall", ScanRenderer.FILL_WALL).apply(); fillB.setText(ScanRenderer.FILL_WALL ? "Guess the plain wall: on" : "Guess the plain wall: off"); });
             Button noteB = new Button(this);
             ScanRenderer.STANDING_NOTE = sp.getBoolean("abStandingNote", true);
             noteB.setText(ScanRenderer.STANDING_NOTE ? "Standing notice: on" : "Standing notice: off");
