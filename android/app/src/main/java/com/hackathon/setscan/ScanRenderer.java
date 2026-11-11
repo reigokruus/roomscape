@@ -1223,6 +1223,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         new Thread(() -> {
             try {
                 ScanStore.Data d = ScanStore.load(dir);
+                // the dots' confidence (dot-confidence.bin, since 263152158), when it matches these points: for the greys
+                // in the Points view of a reopened scan (rk 22:03; before, reopened dots had none and all showed mid grey)
+                byte[] dc = null;
+                File dcf = new File(dir, "dot-confidence.bin");
+                if (dcf.exists() && appendSimplify <= 0) try (java.io.DataInputStream in = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(dcf)))) {
+                    int m = in.readInt(); if (m == d.n) { dc = new byte[m * 3]; in.readFully(dc); }
+                } catch (Exception e) { logError("dot-confidence.bin", e); }
+                final byte[] dotConf = dc;
                 if (appendSimplify > 0) simplifyLoaded(d, appendSimplify);
                 if (currentName == null || replaceMarks) currentName = d.name;
                 loadedAny = true;
@@ -1239,6 +1247,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         voxels.put(vk, count);
                         addPoint(x, y, z, rgb);
                         obs[count - 1] = 2;
+                        if (dotConf != null) { confBest[count - 1] = dotConf[i * 3]; nearCm[count - 1] = (short) (((dotConf[i * 3 + 1] & 255) << 8) | (dotConf[i * 3 + 2] & 255)); }
                         if (d.seg != null && i < d.seg.length) seg[count - 1] = d.seg[i];
                     }
                     uploaded = 0;
