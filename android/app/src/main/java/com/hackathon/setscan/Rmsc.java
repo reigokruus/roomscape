@@ -323,6 +323,7 @@ final class Rmsc {
             copyIf(z, new File(f, "gpu-selftest.txt"), "android/diagnostics/gpu-selftest.txt");
             copyIf(z, new File(f, "crash-last.txt"), "android/diagnostics/crash-last.txt");
             copyIf(z, new File(f, "app-log.txt"), "android/diagnostics/app-log.txt");
+            copyIf(z, new File(f, "app-log-history.txt"), "android/diagnostics/app-log-history.txt");   // earlier sessions
         }
     }
 

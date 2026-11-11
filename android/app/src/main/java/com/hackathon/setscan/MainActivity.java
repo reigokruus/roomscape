@@ -299,6 +299,9 @@ public class MainActivity extends Activity {
 
     /** Share: send to a nearby phone, or share the .rmsc file through another app. */
     private void shareMenu() {
+        act("Share");
+        // the log up to now goes with whatever is shared (a .rmsc carries it in android/diagnostics/)
+        if (renderer != null) try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(getFilesDir(), "app-log.txt"))) { o.write(renderer.logText().getBytes("UTF-8")); } catch (Exception ignored) { }
         File dir = renderer.currentDir;
         if (dir == null) { toast("The scan saves itself a moment after Done. Try Share again in a few seconds."); return; }
         File video = new File(dir, "recording.mp4"), screen = new File(dir, "screen.mp4");
@@ -310,6 +313,7 @@ public class MainActivity extends Activity {
         new android.app.AlertDialog.Builder(this).setTitle("Share room")
                 .setItems(items.toArray(new String[0]), (d, which) -> {
                     String it = items.get(which);
+                    act("Share: " + it);
                     if (which == 0) nearby.showSendDialog(dir); else if (which == 1) saveRmsc(); else if (which == 2) shareRmsc();
                     else if (it.startsWith("Share screen")) shareUri("Packing the video...", "video/mp4", "Share screen video",
                             () -> Rmsc.exportVideo(this, dir, name, "screen.mp4", "-screen.mp4"));
@@ -525,6 +529,7 @@ public class MainActivity extends Activity {
             ScanRenderer.SCREEN_VIDEO = sp0.getBoolean("abScreen", !guestBuild());
         }
         Rmsc.appFiles = getFilesDir();
+        keepLogHistory();
         installCrashLog();
         writeDeviceInfo();
         adoptStrayRecordings();
@@ -588,6 +593,7 @@ public class MainActivity extends Activity {
         lightButton.setText("Lighting");
         lightButton.setVisibility(View.GONE);
         lightButton.setOnClickListener(v -> {
+            act("Lighting");
             // panel closed while lighting is still on: the button just brings the panel back
             if (renderer.lighting.enabled && lightPanel.getVisibility() != View.VISIBLE) { lightPanel.setVisibility(View.VISIBLE); lightingSelected(); return; }
             glView.queueEvent(() -> {
@@ -599,7 +605,7 @@ public class MainActivity extends Activity {
         objButton = new Button(this);
         objButton.setText("Objects");
         objButton.setVisibility(View.GONE);
-        objButton.setOnClickListener(v -> setObjectMode(objPanel.getVisibility() != View.VISIBLE));
+        objButton.setOnClickListener(v -> { act("Objects"); setObjectMode(objPanel.getVisibility() != View.VISIBLE); });
         bar.addView(objButton);
         catalogButton = new Button(this); catalogButton.setText("Catalog"); catalogButton.setOnClickListener(v -> nativePlanning.showCatalog()); bar.addView(catalogButton);
         scannedItemsButton = new Button(this); scannedItemsButton.setText("Scanned items"); scannedItemsButton.setOnClickListener(v -> nativePlanning.showScanned()); bar.addView(scannedItemsButton);
@@ -980,13 +986,50 @@ public class MainActivity extends Activity {
         super.onBackPressed();
     }
 
+    /** The app log survives restarts (11 Nov): the last session's app-log.txt is appended to app-log-history.txt
+     *  (the newest 400 KB kept), which goes into the diagnostics and every .rmsc. */
+    private void keepLogHistory() {
+        try {
+            File last = new File(getFilesDir(), "app-log.txt"), hist = new File(getFilesDir(), "app-log-history.txt");
+            if (!last.exists() || last.length() == 0) return;
+            byte[] old = hist.exists() ? java.nio.file.Files.readAllBytes(hist.toPath()) : new byte[0];
+            byte[] add = java.nio.file.Files.readAllBytes(last.toPath());
+            String head = "\n===== session ending " + new java.util.Date(last.lastModified()) + " =====\n";
+            java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+            b.write(old); b.write(head.getBytes("UTF-8")); b.write(add);
+            byte[] all = b.toByteArray();
+            int from = Math.max(0, all.length - 400_000);
+            java.nio.file.Files.write(hist.toPath(), java.util.Arrays.copyOfRange(all, from, all.length));
+            last.delete();
+        } catch (Exception ignored) { }
+    }
+
+    /** Every user action into the app log (11 Nov: a teammate's empty scan couldn't be explained from the log): what was
+     *  tapped, with the screen and the heap at that moment. Nothing personal: labels and counts only. */
+    void act(String what) {
+        if (renderer == null) return;
+        Runtime rt = Runtime.getRuntime();
+        String screen = homeShown() ? "home" : renderer.isViewing() ? (walkState == 1 ? "result: picking a spot" : walkState == 2 ? "result: in the room" : "result") : "scanning";
+        renderer.log(String.format(java.util.Locale.US, "user: %s [%s, %d points, heap %d MB]", what, screen, renderer.pointCount(), (rt.totalMemory() - rt.freeMemory()) >> 20));
+    }
+
     private void onMainButton() {
+        act("tapped \"" + mainButton.getText() + "\"");
         if (!renderer.isViewing()) stopRecordingIfAny(); // Done ends the recording
         if (renderer.isViewing()) {
-            // Rescan: a new scan from scratch
-            glView.queueEvent(() -> renderer.startNewScan());
-            scanUi();
-            resumeSession();
+            // Rescan: a new scan from scratch. Asked first (11 Nov: a tap here emptied the view and the next "name"
+            // saved the empty state as a new scan); the scan on screen stays saved either way.
+            new android.app.AlertDialog.Builder(this).setTitle("Start a new scan?")
+                    .setMessage("The scan you're looking at stays saved in your list.")
+                    .setPositiveButton("New scan", (d, w) -> {
+                        act("new scan: confirmed");
+                        glView.queueEvent(() -> renderer.startNewScan());
+                        setRoomSize(null);
+                        nameValue.setText("Add a name");
+                        scanUi();
+                        resumeSession();
+                    })
+                    .setNegativeButton("Cancel", (d, w) -> act("new scan: cancelled")).show();
         } else {
             glView.queueEvent(() -> {
                 renderer.finishScan();
@@ -1207,7 +1250,8 @@ public class MainActivity extends Activity {
             t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
             t.setGravity(Gravity.CENTER);
             t.setPadding(dp(16), dp(6), dp(16), dp(6));
-            t.setOnClickListener(v -> { renderer.setStyle(s); updateStyleSwitch(); splatButton.setText(renderer.styleLabel()); });
+            final String tabName = names[i];
+            t.setOnClickListener(v -> { act("view tab \"" + tabName + "\""); renderer.setStyle(s); updateStyleSwitch(); splatButton.setText(renderer.styleLabel()); });
             styleTabs[i] = t;
             styleSwitch.addView(t);
         }
@@ -1397,7 +1441,7 @@ public class MainActivity extends Activity {
         measureButton = new Button(this);
         measureButton.setText("Measure");
         Ios.textButton(measureButton);
-        measureButton.setOnClickListener(v -> setMeasuring(!measuring));
+        measureButton.setOnClickListener(v -> { act("Measure"); setMeasuring(!measuring); });
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
         mlp.leftMargin = dp(8);
         bar.addView(measureButton, mlp);
@@ -1511,6 +1555,7 @@ public class MainActivity extends Activity {
 
     /** 0 = back to orbiting, 1 = "tap the floor", 2 = standing in the room. */
     private void setWalk(int state) {
+        act(state == 1 ? "Enter the room (pick a spot)" : state == 2 ? "standing in the room" : "left Enter the room");
         walkState = state;
         setGyroSensor(state == 2 && renderer.gyroLook);
         if (state == 0) glView.queueEvent(renderer::exitWalk);
@@ -2028,6 +2073,7 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
+        act("home screen");
         stopRecordingIfAny();
         attachRecording(); // leaving keeps the scan (autosaved), so its recording too
         if (walkState != 0) setWalk(0);
@@ -2204,6 +2250,7 @@ public class MainActivity extends Activity {
     }
 
     private void openScan(ScanStore.Entry e) {
+        act("opened scan " + e.dir.getName());
         hideHome();
         if (session != null) session.pause();
         // Straight to the scan view (never the scanning card, bars or buttons): same reset as scanUi, but viewing.
@@ -2220,6 +2267,7 @@ public class MainActivity extends Activity {
     /** The result's Name row: renames the scan that is open (11 Nov: on a teammate's phone it saved the app's current,
      *  empty state as a new scan "Corrigo office" with 0 points; the real scan stayed under its date). */
     private void nameScan() {
+        act("Name row");
         File dir = renderer.currentDir;
         if (!renderer.isViewing() || dir == null) { saveScan(); return; }
         String cur = renderer.currentName != null ? renderer.currentName : "";
@@ -2233,6 +2281,7 @@ public class MainActivity extends Activity {
     }
 
     private void saveScan() {
+        act("Save scan as");
         String def = renderer.currentName != null ? renderer.currentName
                 : "Room " + android.text.format.DateFormat.format("d MMM yyyy, HH:mm", System.currentTimeMillis());
         askName("Save scan as", def, name -> {
@@ -2674,8 +2723,15 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        act("system asked to free memory (level " + level + ")");
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        act("app resumed (onResume)");
         // the phone's rotation and shaking while scanning: the held view and the "stand still" hint when tracking is lost
         try {
             android.hardware.SensorManager sm = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE);
@@ -2787,6 +2843,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        act("app paused (onPause)");
         try { android.hardware.SensorManager sm = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE); if (sm != null && renderer != null) sm.unregisterListener(renderer.scanRotListener); } catch (Exception ignored) { }
         // The app's event log, for "Share diagnostics" even when no scan was finished.
         if (renderer != null) try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(getFilesDir(), "app-log.txt"))) { o.write(renderer.logText().getBytes("UTF-8")); } catch (Exception ignored) { }
@@ -2802,6 +2859,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        act("app closed (onDestroy, finishing " + isFinishing() + ")");
         if (nativePlanning != null) nativePlanning.close();
         if (pilotIntake != null) pilotIntake.close();
         if (session != null) { session.close(); session = null; }

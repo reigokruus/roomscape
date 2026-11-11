@@ -137,6 +137,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     synchronized String logText() { return log.toString(); }
+    int pointCount() { return count; }
 
     /** The app's event log as scan-log.txt in the scan folder (diagnostics in the .rmsc). */
     void saveLogInto(File dir) {
