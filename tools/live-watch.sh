@@ -51,6 +51,10 @@ while true; do
     # remember which scan is being saved; its logs and screen video are in place once "perf log kept" is written
     if [[ $line == *"saved '"*"/files/scans/"* ]]; then last=${line##*/files/scans/}; last=${last%%[[:space:]]*}; fi
     # (newer builds name the folder in that line; older ones: the last one saved)
+    if [[ $line == *"ultrawide recording saved: "* ]]; then   # the experiment's recordings (rk's home: Mac only)
+      rd=${line##*recording saved: }; rd=${rd%% (*}; mkdir -p $REPO/recordings/s24/ultrawide; sleep 2
+      if A pull "$rd" $REPO/recordings/s24/ultrawide/ >/dev/null 2>&1; then echo "$(date +%H:%M:%S) copied ${rd##*/}"; else echo "$(date +%H:%M:%S) copying ${rd##*/} failed"; fi
+    fi
     if [[ $line == *"perf log kept with the scan"* ]]; then
       s=$(print -r -- "$line" | grep -o 'scan_[0-9]*' | head -1); sleep 3; pull_scan "${s:-$last}"
     fi

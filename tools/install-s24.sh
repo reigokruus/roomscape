@@ -1,11 +1,11 @@
 #!/bin/zsh
 # Installs the current debug APK on the S24 (for rk to run). USB if plugged in, else Wi-Fi; one phone can show up
 # twice over Wi-Fi, so one entry is picked. Never uninstalls, never downgrades, never starts the app.
-#   ~/DEV/shootlocal/tools/install-s24.sh
+#   ~/DEV/shootlocal/tools/install-s24.sh [apk]
 set -e
 ADB=~/Library/Android/sdk/platform-tools/adb
 AAPT=$(ls -d ~/Library/Android/sdk/build-tools/*/aapt | tail -1)
-APK=${0:A:h:h}/android/app/build/outputs/apk/debug/app-debug.apk
+APK=${1:-${0:A:h:h}/android/app/build/outputs/apk/debug/app-debug.apk}   # or an APK given as the first argument
 P=com.hackathon.setscan
 [ -f $APK ] || { echo "no APK at $APK"; exit 1; }
 # S24 entries (model SM_S921B), USB first (serials without ':' or '._adb-tls'), emulators ignored

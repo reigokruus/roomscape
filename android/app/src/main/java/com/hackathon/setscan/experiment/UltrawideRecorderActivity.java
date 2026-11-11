@@ -185,6 +185,7 @@ public class UltrawideRecorderActivity extends Activity implements SensorEventLi
         if (f != null) synchronized (f) { f.close(); }
         if (m != null) synchronized (m) { m.close(); }
         status.setText("Saved: " + dir.getAbsolutePath() + " (" + frameCount + " frames)");
+        android.util.Log.i("RoomScape", "ultrawide recording saved: " + dir.getAbsolutePath() + " (" + frameCount + " frames)");   // the Mac watcher copies it
         if (camera != null) startSession(null);
     }
 
