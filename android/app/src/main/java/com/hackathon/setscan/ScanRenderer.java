@@ -7467,7 +7467,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Full-screen stripes, `a` opaque, under everything (no depth). */
     /** With grey dots the background is blue (stripes and plain), so black and white dots both stand out. */
     static final float[] GREY_BG_LIGHT = {0.22f, 0.34f, 0.52f}, GREY_BG_DARK = {0.15f, 0.25f, 0.40f};
-    private void clearBg() { if (greyNow()) GLES20.glClearColor(0.15f, 0.25f, 0.40f, 1f); else clearBg(); }
+    private void clearBg() { if (greyNow()) GLES20.glClearColor(0.15f, 0.25f, 0.40f, 1f); else GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f); }
 
     private void drawZebra(float a) {
         if (zebraProg == 0) zebraProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
