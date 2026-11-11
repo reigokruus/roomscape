@@ -18,7 +18,9 @@ final class Realign {
 
     /** Builds the centroid cells from points (x, y, z triples), at most ~400k of them. */
     Realign(float[] xyz, int n) {
-        int step = Math.max(1, n / 400000);
+        // at most ~250k points (was 400k): on a 512 MB phone (Galaxy S23 Ultra, 11 Nov) a 1M-point scan ran out of
+        // memory here after a tracking loss; the cells are 2-12 cm apart, so fewer points change little
+        int step = Math.max(1, n / 250000);
         for (int i = 0; i < n; i += step) add(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]);
         finish();
     }
@@ -35,8 +37,14 @@ final class Realign {
         for (float[] c : coarse.values()) { c[0] /= c[3]; c[1] /= c[3]; c[2] /= c[3]; }
         for (float[] c : mid.values()) { c[0] /= c[3]; c[1] /= c[3]; c[2] /= c[3]; }
         for (float[] c : fine.values()) { c[0] /= c[3]; c[1] /= c[3]; c[2] /= c[3]; }
-        tCoarse = new Cells(coarse); tMid = new Cells(mid); tFine = new Cells(fine);
+        // the flat tables replace the maps (only the flat ones are searched): each map is dropped as soon as its table
+        // is built, so the two never all sit in memory together
+        nCoarse = coarse.size(); nFine = fine.size();
+        tCoarse = new Cells(coarse); coarse.clear();
+        tMid = new Cells(mid); mid.clear();
+        tFine = new Cells(fine); fine.clear();
     }
+    int nCoarse, nFine;
 
     /** The cells again as flat arrays (open addressing on the cell key): the matching looks up ~10 million cells per
      *  try, and HashMap<Long> boxing made a try take 6-12 s on the S24 (rk 10 Nov 14:58 scan). */
@@ -44,7 +52,8 @@ final class Realign {
         final long[] keys; final float[] xyz; final int mask;
         static final long EMPTY = Long.MIN_VALUE;
         Cells(HashMap<Long, float[]> m) {
-            int cap = Integer.highestOneBit(Math.max(16, m.size() * 2)) * 2; mask = cap - 1;
+            // a power of two at least 1.4x the cells (was 2-4x: 40 MB for the fine cells of a big scan)
+            int cap = Integer.highestOneBit(Math.max(16, m.size())); while (cap < m.size() * 1.4f) cap <<= 1; mask = cap - 1;
             keys = new long[cap]; xyz = new float[cap * 3]; Arrays.fill(keys, EMPTY);
             for (java.util.Map.Entry<Long, float[]> e : m.entrySet()) {
                 long k = e.getKey(); int i = slot(k);

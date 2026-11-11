@@ -2088,7 +2088,9 @@ public class MainActivity extends Activity {
 
     /** Cancel while scanning: throw the scan away, as on the iPhone (asks first after a minute of scanning). */
     private void cancelScan() {
+        act("Cancel (while scanning)");
         Runnable discard = () -> {
+            act("Cancel: scan discarded");
             // Cancel discards the scan, and its recording with it.
             stopRecordingIfAny();
             if (finishedRecording != null) { finishedRecording.delete(); finishedRecording = null; }
@@ -2101,9 +2103,9 @@ public class MainActivity extends Activity {
         };
         if (System.currentTimeMillis() - scanStartedMs < 60_000) { discard.run(); return; }
         new android.app.AlertDialog.Builder(this)
-                .setTitle("Discard this scan?")
-                .setMessage(renderer.isImproving() ? "The new pass is thrown away. The saved room stays as it was." : "Everything scanned so far is thrown away.")
-                .setPositiveButton("Discard", (d, w) -> discard.run())
+                .setTitle("Stop this scan?")
+                .setMessage(renderer.isImproving() ? "The new pass is thrown away. The saved room stays as it was." : "It stops here. What's scanned so far stays in your list, marked (cancelled).")
+                .setPositiveButton("Stop", (d, w) -> discard.run())
                 .setNegativeButton("Keep scanning", null)
                 .show();
     }

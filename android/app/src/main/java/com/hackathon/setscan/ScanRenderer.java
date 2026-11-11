@@ -30,7 +30,9 @@ import javax.microedition.khronos.opengles.GL10;
 
 /** Scans the room with ARCore depth into a colored voxel point cloud, then shows it in an orbit viewer. */
 public class ScanRenderer implements GLSurfaceView.Renderer {
-    private static final int MAX_POINTS = 2_000_000;
+    // Fewer points on phones with a 512 MB app limit (Galaxy S23 Ultra, 11 Nov: out of memory with 1.2 million): each
+    // point costs ~30 bytes held all the time (position, colour, counters)
+    private static final int MAX_POINTS = Runtime.getRuntime().maxMemory() >= 700L * 1048576 ? 2_000_000 : 1_200_000;
     private static final float VOXEL = 0.02f;
     private static final int MAX_PATH = 20_000;
     /** The camera timestamp of the previous tracked frame (ns), for telling a map jump from a pause between frames. */
@@ -1338,6 +1340,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         idle = true; // no more autosaves
         if (saving) { glTasks.add(() -> discardScan(after)); return; }
         File dir = improveDir == null ? currentDir : null;
+        // Data is gold (11 Nov: a teammate's 1-million-point scans were deleted by Cancel): a scan with real content is
+        // kept in the list as "<name> (cancelled)"; only a short one is deleted.
+        if (dir != null && count >= 50000) {
+            String nm = (currentName != null ? currentName : dir.getName()) + " (cancelled)";
+            try { ScanStore.rename(dir, nm); } catch (Exception e) { logError("keep cancelled scan", e); }
+            log("scan cancelled: kept as '" + nm + "' (" + count + " points) in " + dir.getName());
+            dir = null;
+        }
         log(dir != null ? "scan cancelled: deleting its autosave " + dir.getName() : improveDir != null ? "continue scan cancelled: saved scan kept as it was" : "scan cancelled");
         perf.stop(); if (perf.file() != null) { perf.file().delete(); new File(perf.file().getParent(), perf.file().getName().replace(".jsonl", ".summary.json")).delete(); }
         reset();
@@ -5107,8 +5117,24 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         colorGain += (target - colorGain) * 0.3f; // smooth so colours don't flicker between frames
     }
 
+    /** Heap past ~85% of the app's limit: the scan stops growing (it's saved as it is) instead of crashing. */
+    private volatile boolean memoryFull;
+    private long memoryCheckAt;
+    private boolean memoryFull() {
+        long now = System.currentTimeMillis();
+        if (now - memoryCheckAt > 1000) {
+            memoryCheckAt = now;
+            Runtime rt = Runtime.getRuntime();
+            boolean full = rt.totalMemory() - rt.freeMemory() > rt.maxMemory() * 0.85;
+            if (full && !memoryFull) log(String.format(java.util.Locale.US, "memory nearly full (%d of %d MB, %d points): the scan stops growing",
+                    (rt.totalMemory() - rt.freeMemory()) >> 20, rt.maxMemory() >> 20, count));
+            memoryFull = full;
+        }
+        return memoryFull;
+    }
+
     private void integrate(Frame frame, Camera camera) {
-        if (count >= MAX_POINTS) return;
+        if (count >= MAX_POINTS || memoryFull()) return;
         if (!depthSupported) {
             integrateFeaturePoints(frame, camera);
             return;
@@ -5308,7 +5334,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Depth thread: one frame's pixels into the points, the surface samples and the carving. */
     private void processDepth(DepthJob j) {
-        if (count >= MAX_POINTS) return;
+        if (count >= MAX_POINTS || memoryFull) return;
         stampFrame++;
         final int dw = j.dw, dh = j.dh; final float fx = j.fx, fy = j.fy, cx = j.cx, cy = j.cy, ifx = j.ifx, ify = j.ify, icx = j.icx, icy = j.icy;
         final float[] m = j.m;
@@ -6138,10 +6164,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // The cells take ~3 s for a big scan (10:44 scan: 2.8 s on the drawing thread): built aside; nothing is fused
         // meanwhile (realigned() waits for them).
         new Thread(() -> {
-            Realign r = new Realign(xyz, n);
-            r.buildPlan(xyz, n, floorNow);
+            Realign r;
+            // out of memory here killed the app on a 512 MB phone (S23 Ultra, 11 Nov): skip this try instead
+            try { r = new Realign(xyz, n); r.buildPlan(xyz, n, floorNow); }
+            catch (OutOfMemoryError e) {
+                // an empty matcher: nothing lines up, so nothing is fused from an unchecked pose, and "Carry on from
+                // here" (offered after 30 s) still works
+                r = new Realign(); r.finish();
+                log("ERROR realign snapshot: out of memory (" + n + " points, heap " + (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / 1048576 + " MB); waiting for the user");
+            }
             realign = r; realignBuilding = false;
-            log("realign snapshot: " + r.coarse.size() + " / " + r.fine.size() + " cells in " + (System.currentTimeMillis() - t0) + " ms");
+            log("realign snapshot: " + r.nCoarse + " / " + r.nFine + " cells in " + (System.currentTimeMillis() - t0) + " ms");
         }, "realign-snapshot").start();
     }
 
@@ -6512,6 +6545,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
             }
             realignOk = ok && (realignOk == 0 || drift < 0.08f) ? realignOk + 1 : (ok ? 1 : 0);
+            // Shadow rule (11 Nov, S23 Ultra: ~100 tries over 73 s agreed on one correction, 55-70% on the scan, but were
+            // all refused as "implausible" against where ARCore said it was, and ARCore can be badly off after a loss):
+            // count tries refused only as implausible that agree with each other; logged, not applied yet.
+            if (!ok && !implausible.isEmpty() && res.fit.inliers >= 0.55f && res.fit.median < 0.02f && !res.ambiguous) {
+                agreeRun = agreePrev != null && Realign.away(F, agreePrev) < 0.06f ? agreeRun + 1 : 1;
+                agreePrev = F.clone();
+                if (agreeRun == 5) log(String.format(java.util.Locale.US, "  (shadow) agreement rule: 5 tries in a row agree on %.2f, %.2f m %.0f deg, refused only as implausible: would accept",
+                        F[12], F[14], Math.toDegrees(Math.atan2(F[2], F[0]))));
+            } else if (ok) { agreeRun = 0; agreePrev = null; }
             System.arraycopy(F, 0, fixPrev, 0, 16);
             if (ok) fixTry = F;
             log(String.format(java.util.Locale.US, "re-align attempt (%s): %d%% on the scan, median %.1f cm, correction %.2f, %.2f, %.2f m %.0f deg%s%s -> %s",
@@ -7837,6 +7879,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private boolean notAdding; private long notAddingSince;
+    private int agreeRun; private float[] agreePrev;
 
     private void postHud(TrackingState ts) {
         int level; String hint, sub = null;
@@ -7878,6 +7921,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else if (d < SPOT_DONE) { level = 1; hint = LIVE_MESH ? "Good. Keep swaying gently here a little longer" : "Good. Keep swaying gently here until the middle is green"; }
         else { level = 0; hint = LIVE_POINTS ? "This spot is done. Move on" : LIVE_MESH ? "This spot is done. Move on to the next orange area" : "This spot is done. Move on to the next red area"; }
         if (System.currentTimeMillis() - clearedAtMs < 3000) { hint = "Cleared, scan that spot again"; level = 1; }
+        if (memoryFull || count >= MAX_POINTS) { hint = "The scan is full: tap Done to keep it"; level = 1; }   // (11 Nov: out of memory on a 512 MB phone)
         if (improveDir != null && contAuto) sub = improveT != null ? "✓ Saved room recognised. Keep scanning, the saved part is shown in blue"
                 : contBase == null ? "Loading the saved scan…" : "Point at a part you scanned before so it can find its place" + (contScore > 0 ? String.format(java.util.Locale.US, " (best match %.0f%%)", contScore * 100) : "");
         else if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
