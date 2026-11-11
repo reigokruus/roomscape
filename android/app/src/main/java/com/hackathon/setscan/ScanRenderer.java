@@ -131,6 +131,27 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  farther or equal one (rk 10 Nov), so repeated looks settle instead of churning. Sideways only the reading's own
      *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
     static volatile boolean CLOSEST_WINS = true;
+    // ---- Phone load (rk 23:34: "free up the cpu", "a cpu reading so I know to slow down") ----
+    /** ARCore's depth is late: none for over 300 ms while tracking. Our extra passes wait. */
+    boolean depthLate() { return lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 300; }
+    private long cpuAtMs = 0, cpuAt = 0; private volatile float cpuCores; private int lateEvents; private boolean lateNow;
+    volatile int thermal = -1;
+    /** 0 green, 1 amber, 2 red: how late ARCore's depth is, the phone's heat, and the app's processor use. */
+    int loadLevel() {
+        long now = System.currentTimeMillis();
+        if (now - cpuAtMs >= 1000) {
+            long c = android.os.Process.getElapsedCpuTime();
+            if (cpuAtMs > 0) cpuCores = (c - cpuAt) / (float) (now - cpuAtMs);
+            cpuAt = c; cpuAtMs = now;
+        }
+        long age = lastNewDepthMs > 0 && !viewing ? now - lastNewDepthMs : 0;
+        boolean late = age > 300; if (late && !lateNow) lateEvents++; lateNow = late;
+        if (age > 1500 || thermal >= 3) return 2;
+        if (age > 400 || thermal >= 2 || cpuCores > 3.2f) return 1;
+        return 0;
+    }
+    String loadNumbers() { long age = lastNewDepthMs > 0 ? System.currentTimeMillis() - lastNewDepthMs : -1;
+        return String.format(java.util.Locale.US, "cpu %.1f cores, depth %d ms old, heat %d", cpuCores, age, thermal); }
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
     static volatile boolean AUTO_ERASE = true;
     /** Debug tools "Merge flat areas" (rk 11 Nov 23:20: "smooth over some areas where the dots make a coherent shape"):
@@ -143,14 +164,23 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private int mergeCursor, mergedAway; private long mergeAt;
     private final int[] mergeMem = new int[64];
     private void maybeMergeFlat(long nowMs) {
-        if (!MERGE_FLAT || nowMs - mergeAt < 2000 || count < 5000) return;
+        if (!MERGE_FLAT || nowMs - mergeAt < 2000 || count < 5000 || depthLate()) return;
         mergeAt = nowMs;
-        int n = count, budget = Math.min(n, 40000), away = 0;
+        int n = count, budget = Math.min(n, 15000), away = 0;
+        final boolean nearCap = n > MAX_POINTS * 0.9f; final float[] cm = lastGoodCam;
         for (int it = 0; it < budget; it++) {
             int i = mergeCursor++; if (mergeCursor >= n) mergeCursor = 0;
             if (obs[i] == 0 || mergedDot[i] != 0 || !(nearCm[i] > 0 && nearCm[i] < FINE_NEAR_M * 100)) continue;   // fine dots only
-            if ((col.get(i * 4 + 3) & 0xFF) < 200) continue;   // settled: seen enough times
+            if ((col.get(i * 4 + 3) & 0xFF) < 200) continue;   // settled: seen in 4+ separate depth frames
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            // Not under the user's eyes (rk 23:36): only dots out of the camera's view and untouched for ~4 s (30 depth
+            // frames); near the cap (90%) anything settled, so it still catches up before the limit matters.
+            if (!nearCap) {
+                if (stampFrame - seenStamp[i] < 30) continue;
+                float dx = x - cm[12], dy = y - cm[13], dz = z - cm[14];
+                float xc = cm[0] * dx + cm[1] * dy + cm[2] * dz, yc = cm[4] * dx + cm[5] * dy + cm[6] * dz, zc = cm[8] * dx + cm[9] * dy + cm[10] * dz;
+                if (zc < -0.05f && Math.abs(xc) < -zc * 0.8f && Math.abs(yc) < -zc * 1.1f) continue;   // in view
+            }
             float bx = (float) Math.floor(x / VOXEL) * VOXEL, by = (float) Math.floor(y / VOXEL) * VOXEL, bz = (float) Math.floor(z / VOXEL) * VOXEL;
             int m = 0;
             int ix0 = (int) Math.floor(bx / VOXEL_FINE), ix1 = (int) Math.floor((bx + VOXEL - 1e-4f) / VOXEL_FINE);
@@ -397,6 +427,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     synchronized String logText() { return log.toString(); }
     int pointCount() { return count; }
+    int maxPoints() { return MAX_POINTS; }
 
     /** The app's event log as scan-log.txt in the scan folder (diagnostics in the .rmsc). */
     void saveLogInto(File dir) {
@@ -4025,7 +4056,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
         removed = null; removedN = 0; compactAt = 0;
-        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0; mergedAway = 0; mergeCursor = 0; java.util.Arrays.fill(mergedDot, (byte) 0); java.util.Arrays.fill(zoneAll, 0); java.util.Arrays.fill(zoneSure, 0);
+        anchors.clear(); clearGoal(); anchorOfferAt = 0; lateEvents = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0; mergedAway = 0; mergeCursor = 0; java.util.Arrays.fill(mergedDot, (byte) 0); java.util.Arrays.fill(zoneAll, 0); java.util.Arrays.fill(zoneSure, 0);
         filledWall = null; wallCand = null; wallCandHits = 0; guessCells = null; shownSet = false; guessWeight = 0; guessUpdates = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
@@ -5662,7 +5693,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private final java.util.concurrent.ExecutorService depthExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
         // A little below normal: ARCore's own tracking threads come first (a plain wall is hard enough for it).
-        Thread t = new Thread(() -> { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT + 2); r.run(); }, "depth-points"); return t; });
+        Thread t = new Thread(() -> { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT + 4); r.run(); }, "depth-points"); return t; });   // below ARCore (rk 23:34: ARCore comes first)
     private final java.util.concurrent.atomic.AtomicInteger depthQueued = new java.util.concurrent.atomic.AtomicInteger();
     private volatile java.util.concurrent.Future<?> depthLast;
     /** Depth frames done on the depth thread whose GPU part waits for the drawing thread. */
@@ -5974,7 +6005,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         Matrix.invertM(v, 0, m, 0);
         // 60k points per depth frame, round robin (the whole cloud every few frames): 250k with the 3x3 footprint
         // check took ~50 ms of the drawing thread (rk 10 Nov 10:31 scan: 19 fps).
-        int budget = Math.min(n, 60000), removed = 0;
+        if (depthLate()) return;   // ARCore first: no extra pass while its frames come late
+        int budget = Math.min(n, 20000), removed = 0;   // (was 60k: ~10 ms a frame on the 23:29 scan)
         for (int it = 0; it < budget; it++) {
             int i = carveCursor++;
             if (carveCursor >= n) carveCursor = 0;
@@ -6271,7 +6303,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- surface fusion thread (rk 10 Nov: the S24's drawing thread spent 73% of its time fusing depth) ----
     private final java.util.concurrent.ExecutorService fuseExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "tsdf-fuse"); t.setPriority(Thread.NORM_PRIORITY); return t; });
+        Thread t = new Thread(() -> { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run(); }, "tsdf-fuse"); return t; });
     private volatile java.util.concurrent.Future<?> fuseLast;
     private float[] fuseBuf = new float[5 * 16384];
     private int fuseN;
@@ -6751,7 +6783,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 + goalOffText());
         syncedBricks = 0; syncFull = 0;
         newDepthSince = 0; staleSince0 = depthStale; notYetSince0 = depthNotYet;
-        if (memLogAt == 0 || nowMs - memLogAt >= 30000) { logMemory(memLogAt == 0 ? "scan start" : "every 30 s"); memLogAt = nowMs; }
+        if (memLogAt == 0 || nowMs - memLogAt >= 30000) { logMemory(memLogAt == 0 ? "scan start" : "every 30 s"); memLogAt = nowMs;
+            log(String.format(java.util.Locale.US, "load: app %.1f processor cores busy (ARCore included), depth late %d times so far, heat %d", cpuCores, lateEvents, thermal)); }
     }
 
     // ---- Evidence for the alignment after map jumps (rk 10 Nov 15:13): depth frames around every jump, loss and
@@ -7048,7 +7081,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** GL thread, about every 1.5 s while scanning normally: is the camera looking at a plain wall it can fill? From
      *  the points already in the scan (a good look from afar is enough), never on top of an opening, one wall only. */
     private void maybeFillWall(long nowMs) {
-        if (!FILL_WALL || wallChecking || nowMs - wallCheckAt < 1500 || count < 20000 || needRealign || !haveGoodCam) return;
+        if (!FILL_WALL || wallChecking || nowMs - wallCheckAt < 3000 || count < 20000 || needRealign || !haveGoodCam || depthLate()) return;
         wallCheckAt = nowMs; wallChecking = true;
         final float[] cam = lastGoodCam.clone(); final float floorY = walkFloorY(), ceilY = roomReady && room.ceilingY > room.floorY + 1.8f ? room.ceilingY : 0;
         final int n = count; final boolean warned = nowMs < plainWarnUntil + 10000; final int featNow = featuresNow;

@@ -1981,7 +1981,18 @@ public class MainActivity extends Activity {
             hudDetailPct.setText(Math.round(detail * 100) + "%");
             hudRoom.setProgress(Math.round(room * 1000));
             hudRoomPct.setText(Math.round(room * 100) + "%");
-            if (hudTimer != null) hudTimer.setText(String.format(java.util.Locale.US, "%d:%02d", scanSeconds / 60, scanSeconds % 60));
+            if (hudTimer != null) {   // time · dots against the cap · phone load (rk 23:34), small and quiet
+                if (android.os.Build.VERSION.SDK_INT >= 29) try { renderer.thermal = ((android.os.PowerManager) getSystemService(POWER_SERVICE)).getCurrentThermalStatus(); } catch (Exception ignored) { }
+                int lvl = renderer.loadLevel(), cap = renderer.maxPoints();
+                String dots = String.format(java.util.Locale.US, "Dots %dk / %.1fM", points / 1000, cap / 1e6f);
+                String t = String.format(java.util.Locale.US, "%d:%02d  ·  %s  ·  ", scanSeconds / 60, scanSeconds % 60, dots);
+                android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder(t);
+                if (points >= cap * 0.9f) sb.setSpan(new android.text.style.ForegroundColorSpan(0xFFFFB020), t.indexOf("Dots"), t.indexOf("Dots") + dots.length(), 0);
+                int st = sb.length(); sb.append("● Phone load");
+                sb.setSpan(new android.text.style.ForegroundColorSpan(lvl == 2 ? 0xFFFF5040 : lvl == 1 ? 0xFFFFB020 : 0xFF40D070), st, st + 1, 0);
+                if (debug) sb.append("  (").append(renderer.loadNumbers()).append(")");
+                hudTimer.setText(sb);
+            }
         });
     }
 
