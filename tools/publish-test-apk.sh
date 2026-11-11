@@ -27,8 +27,18 @@ if [ -z "$ID" ]; then
   REL=$(curl -sS --fail-with-body -X POST -H "Authorization: token $TOK" -H "Accept: application/vnd.github+json" $API/releases -d "$BODY")
   ID=$(print -r -- "$REL" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read(), strict=False)["id"])')
 else echo "the release is there already (id $ID)"; fi
-echo "uploading the APK (69 MB)…"; curl -sS --fail-with-body -X POST -H "Authorization: token $TOK" -H "Content-Type: application/vnd.android.package-archive" --data-binary @$APK \
-  "https://uploads.github.com/repos/reigokruus/roomscape/releases/$ID/assets?name=RoomScape-android-$V.apk" >/dev/null
+# a half-finished upload from an earlier try (GitHub keeps it as "starter"): remove it first
+OLD=$(curl -s -H "Authorization: token $TOK" $API/releases/$ID/assets | python3 -c 'import json,sys;print(" ".join(str(a["id"]) for a in json.loads(sys.stdin.read(),strict=False) if a["name"].endswith(".apk")))')
+for A in ${=OLD}; do echo "removing an earlier unfinished upload"; curl -sS -X DELETE -H "Authorization: token $TOK" $API/releases/assets/$A; done
+# the upload can time out on a slow line (GitHub answers 408): up to 3 tries
+for TRY in 1 2 3; do
+echo "uploading the APK (69 MB, try $TRY)…"; curl -sS --fail-with-body --max-time 900 -X POST -H "Authorization: token $TOK" -H "Content-Type: application/vnd.android.package-archive" --data-binary @$APK \
+  "https://uploads.github.com/repos/reigokruus/roomscape/releases/$ID/assets?name=RoomScape-android-$V.apk" >/dev/null && break
+  echo "the upload didn't finish; trying again"; sleep 5
+done
+SIZE=$(stat -f %z $APK)
+STATE=$(curl -s -H "Authorization: token $TOK" $API/releases/$ID/assets | python3 -c 'import json,sys;s=int(sys.argv[1]);a=[x for x in json.loads(sys.stdin.read(),strict=False) if x["name"].endswith(".apk")];print("ok" if a and a[0]["state"]=="uploaded" and a[0]["size"]==s else "not finished")' $SIZE)
+[ "$STATE" = ok ] || { echo "the APK isn't fully on GitHub yet: run this again"; exit 1; }
 URL=https://github.com/reigokruus/roomscape/releases/download/android-test-$V/RoomScape-android-$V.apk
 echo "release page: https://github.com/reigokruus/roomscape/releases/tag/android-test-$V"
 echo "direct download: $URL"
