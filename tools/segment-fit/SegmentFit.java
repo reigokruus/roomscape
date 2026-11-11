@@ -159,7 +159,12 @@ public class SegmentFit {
                 second == null ? "" : String.format(Locale.US, "; next %s %.0f%% (score %.0f vs %.0f)", desc(second[0]), second[1][1] * 100, second[1][0], best[1][0]));
         if (best[1][3] < 300) { res.why = "too little overlap"; return res; }
         if (best[1][1] < 0.6f || best[1][2] > 0.03f) { res.why = "fits poorly"; return res; }
-        if (second != null && second[1][0] > 0.8f * best[1][0]) { res.why = String.format(Locale.US, "ambiguous: next %.2f away, %.0f%% of the score", Realign.away(second[0], best[0]), 100 * second[1][0] / best[1][0]); return res; }
+        // Prior: where "carry on" left the part (ARCore's own frame; in the app also the rotation sensor's heading). When two
+        // placements score alike, the one near the prior wins if it is clearly nearer (ARCore usually comes back close).
+        float[] id = Realign.identity();
+        boolean priorBreaksTie = second != null && Realign.away(best[0], id) < 0.6f && Realign.away(second[0], id) > Realign.away(best[0], id) + 0.25f;
+        if (priorBreaksTie && second[1][0] > 0.8f * best[1][0]) res.text += String.format(Locale.US, "; tie broken by the prior (%.2f vs %.2f from it)", Realign.away(best[0], id), Realign.away(second[0], id));
+        if (second != null && second[1][0] > 0.8f * best[1][0] && !priorBreaksTie) { res.why = String.format(Locale.US, "ambiguous: next %.2f away, %.0f%% of the score", Realign.away(second[0], best[0]), 100 * second[1][0] / best[1][0]); return res; }
         // two agreeing fits: each half of the part on its own, from the best placement
         List<float[]> h1 = new ArrayList<>(), h2 = new ArrayList<>();
         for (int i = 0; i < pts.size(); i++) (i % 2 == 0 ? h1 : h2).add(pts.get(i));
