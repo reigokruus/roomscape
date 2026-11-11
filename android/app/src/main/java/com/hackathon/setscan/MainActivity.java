@@ -819,8 +819,8 @@ public class MainActivity extends Activity {
             Button paintB = new Button(this);
             ScanRenderer.PAINT_MIN = sp.getInt("abPaintMin2", 242);
             paintB.setText("Paint from confidence: " + Math.round(ScanRenderer.PAINT_MIN * 100 / 255f) + "%");
-            paintB.setOnClickListener(v -> {   // 95% -> 90% -> 80% -> 50% -> all (the old 55) -> 95%
-                int[] steps = {242, 230, 204, 128, 55}; int k = 0; for (int i = 0; i < steps.length; i++) if (steps[i] == ScanRenderer.PAINT_MIN) k = (i + 1) % steps.length;
+            paintB.setOnClickListener(v -> {   // 95% -> 100% (255 only) -> 90% -> 80% -> 50% -> all (the old 55) -> 95%
+                int[] steps = {242, 255, 230, 204, 128, 55}; int k = 0; for (int i = 0; i < steps.length; i++) if (steps[i] == ScanRenderer.PAINT_MIN) k = (i + 1) % steps.length;
                 ScanRenderer.PAINT_MIN = steps[k]; sp.edit().putInt("abPaintMin2", steps[k]).apply();
                 paintB.setText("Paint from confidence: " + Math.round(ScanRenderer.PAINT_MIN * 100 / 255f) + "%");
             });
