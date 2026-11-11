@@ -114,6 +114,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Debug tools "Confidence greys": dots drawn in grey by their confidence (white = ARCore most sure, black = least);
      *  display only, the real colours are kept and saved as always. */
     static volatile boolean CONF_GREY = true;
+    /** Greys while scanning only; the result and the gallery show the real colours (rk 11 Nov 22:18: "I want to see what
+     *  it picked up"). */
+    private boolean greyNow() { return CONF_GREY && !viewing; }
     private boolean greyShown; private int paintShown = -1;
     private final ByteBuffer greyBuf = offHeap(MAX_POINTS * 4, "greys");
     private int curConf = 0, curMm = 0;     // the reading being added (depth thread), for addPoint/refine
@@ -130,7 +133,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             int c = confBest[i] & 0xFF, a = col.get(i * 4 + 3) & 0xFF;
             int alpha = a == 0 || (c > 0 && c < PAINT_MIN) ? 0 : 255;
             int r, g, b;
-            if (!CONF_GREY) { r = col.get(i * 4) & 0xFF; g = col.get(i * 4 + 1) & 0xFF; b = col.get(i * 4 + 2) & 0xFF; }
+            if (!greyNow()) { r = col.get(i * 4) & 0xFF; g = col.get(i * 4 + 1) & 0xFF; b = col.get(i * 4 + 2) & 0xFF; }
             else if (c == 0) { r = g = b = 0; }   // no rating: solid black
             else { r = g = b = c; }
             greyBuf.put(i * 4, (byte) r); greyBuf.put(i * 4 + 1, (byte) g); greyBuf.put(i * 4 + 2, (byte) b); greyBuf.put(i * 4 + 3, (byte) alpha);
@@ -6912,7 +6915,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         if (k == 0) return;
         float r = ((w.rgb >> 16) & 255) / 255f, g = ((w.rgb >> 8) & 255) / 255f, bl = (w.rgb & 255) / 255f;
-        if (CONF_GREY) { r = g = bl = 0.04f; }   // guessed, not measured: no ARCore confidence at all, so black in the greys
+        if (greyNow()) { r = g = bl = 0.04f; }   // guessed, not measured: no ARCore confidence at all, so black in the greys
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         planDraw(m, k == guessVerts.length ? guessVerts : java.util.Arrays.copyOf(guessVerts, k), GLES20.GL_POINTS, new float[]{r, g, bl, 1f}, 7f);
     }
@@ -7263,7 +7266,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---------------- drawing ----------------
 
     private void uploadNew() {
-        if (greyShown != CONF_GREY || paintShown != PAINT_MIN) { greyShown = CONF_GREY; paintShown = PAINT_MIN; refined = true; refineCursor = 0; }   // switched: send every dot's colour again
+        if (greyShown != greyNow() || paintShown != PAINT_MIN) { greyShown = greyNow(); paintShown = PAINT_MIN; refined = true; refineCursor = 0; }   // switched: send every dot's colour again
         // Re-send a slice of already-uploaded points each frame so refined positions/colours show up.
         if (refined && uploaded > 0) {
             int slice = Math.min(uploaded, 40000);
@@ -7425,7 +7428,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Full-screen stripes, `a` opaque, under everything (no depth). */
     /** With grey dots the background is blue (stripes and plain), so black and white dots both stand out. */
     static final float[] GREY_BG_LIGHT = {0.22f, 0.34f, 0.52f}, GREY_BG_DARK = {0.15f, 0.25f, 0.40f};
-    private static void clearBg() { if (CONF_GREY) GLES20.glClearColor(0.15f, 0.25f, 0.40f, 1f); else clearBg(); }
+    private void clearBg() { if (greyNow()) GLES20.glClearColor(0.15f, 0.25f, 0.40f, 1f); else clearBg(); }
 
     private void drawZebra(float a) {
         if (zebraProg == 0) zebraProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
@@ -7439,8 +7442,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUseProgram(zebraProg);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zebraProg, "uW"), ZEBRA_DP * activity.getResources().getDisplayMetrics().density);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zebraProg, "uA"), a);
-        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uL"), 1, CONF_GREY ? GREY_BG_LIGHT : ZEBRA_LIGHT, 0);
-        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uD"), 1, CONF_GREY ? GREY_BG_DARK : ZEBRA_DARK, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uL"), 1, greyNow() ? GREY_BG_LIGHT : ZEBRA_LIGHT, 0);
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(zebraProg, "uD"), 1, greyNow() ? GREY_BG_DARK : ZEBRA_DARK, 0);
         int aPos = GLES20.glGetAttribLocation(zebraProg, "aPos");
         quad.position(0);
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad);
