@@ -25,11 +25,15 @@ A scan from either phone can be shared as a **.rmsc** file and opened on the oth
 | Views | Photo, Points, Mesh; walk through the room | Photo, Points, Mesh, RoomPlan model; walk through |
 | Larger spaces | one scan for several rooms; rooms are split at doorways | carries on past RoomPlan's ~9 × 9 m limit with points and tiles (new, not tried on a big space yet) |
 | Continue scan | add to a saved scan later | the same |
+| Power sockets | found in the scan's photos by Claude and marked in the scan, so a crew knows where to plug in | the same |
 | Sharing | .rmsc (Share, Save to device, send to a nearby phone) | the same |
 
-On both phones there are also **objects** (furniture boxes, and lamps and sockets found by Claude), a **lighting
-preview**, and planning tools (**Storyboard**, **Plan a Shoot**). Claude features need your own Claude API key on the
-phone. Everything else works offline.
+On both phones there are also **objects** (furniture boxes, and lamps found by Claude), a **lighting preview** with
+cable runs to the nearest socket, and planning tools (**Storyboard**, **Plan a Shoot**). Claude features (sockets,
+lamps, "Set it up with Claude") need your own Claude API key on the phone. Everything else works offline.
+
+**Scans are private.** A scan holds photos and a 3D copy of the room, and the phones can keep a camera recording and a
+screen video with it. Share .rmsc files only with the people who need them.
 
 ## How to scan a room well
 
@@ -49,8 +53,9 @@ to the right place fixes that.
 
 ### Android
 - **Test build for the pilot:** [releases](https://github.com/reigokruus/roomscape/releases). Open the link on the
-  phone, download the APK, open it and allow installing from that source once. Play Store installs Google Play
-  Services for AR (ARCore) if the phone doesn't have it.
+  phone, download the APK, open it and allow installing from that source once. On Samsung phones with **Auto
+  Blocker** on (Settings › Security and privacy › Auto Blocker), turn it off for the install. Play Store installs
+  Google Play Services for AR (ARCore) if the phone doesn't have it.
 - **Builds from `main`:** every push that changes `android/` is built by GitHub and published as a release
   (`releases/latest/download/CineX-android.apk`). Work that isn't pushed yet isn't in it.
 - All builds use the same signing key (`android/app/debug.keystore`, committed on purpose) and package ID
