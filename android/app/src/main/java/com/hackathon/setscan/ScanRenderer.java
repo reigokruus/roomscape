@@ -149,7 +149,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         long age = lastNewDepthMs > 0 && !viewing ? now - lastNewDepthMs : 0;
         boolean late = age > 300; if (late && !lateNow) lateEvents++; lateNow = late;
         if (age > 1500 || thermal >= 3) return 2;
-        if (age > 400 || thermal >= 2 || cpuCores > 3.2f) return 1;
+        if (age > 400 || thermal >= 2 || cpuCores > 3.2f || tooFast) return 1;   // (rk 23:50: moving a lot preceded the pause)
         return 0;
     }
     String loadNumbers() { long age = lastNewDepthMs > 0 ? System.currentTimeMillis() - lastNewDepthMs : -1;
@@ -7045,7 +7045,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
     }
 
-    static final class RealignResult { Realign.Fit fit; boolean good, ambiguous, quick; String source = "", detail = ""; }
+    static final class RealignResult { Realign.Fit fit; boolean good, ambiguous, quick; int samples; String source = "", detail = ""; }
     private volatile RealignResult realignResult;
     private volatile boolean realignRunning;
     private long realignLastStart; private int realignAttempts;
@@ -7218,7 +7218,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static boolean STOP_ON_LOSS = true;
     static final long LOSS_GRACE_MS = 1000; private long lossStopAt;
     /** Each frame: tracking lost and not back within the grace: the scan ends as if Done was tapped (kept, processed). */
+    static final long RESTART_PROOF_MS = 8000;   // from the restart: ARCore itself takes ~3 s to come back, so about 5 s to prove the line-up
     private void checkLossStop(TrackingState ts, long nowMs) {
+        if (STOP_ON_LOSS && sessionRestarted && needRealign && realignSince > 0 && nowMs - realignSince > RESTART_PROOF_MS && !viewing) {
+            realignSince = 0;
+            log("no proven line-up " + RESTART_PROOF_MS / 1000 + " s after the AR restart: the scan stops here and is kept (nothing from the unproven part added)");
+            activity.stopOnLoss();
+            return;
+        }
         if (lossStopAt == 0) return;
         if (ts == TrackingState.TRACKING) { lossStopAt = 0; log("tracking back within " + LOSS_GRACE_MS + " ms: the scan goes on"); return; }
         if (nowMs < lossStopAt) return;
@@ -7482,6 +7489,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 log(String.format(java.util.Locale.US, "  tile check (shadow): %.0f%% of %d samples on the old tiles with this correction, %.0f%% with the one before%s",
                         withF[0] * 100, (int) withF[1], withOld[0] * 100, veto ? " -> the tiles would refuse it" : ""));
             }
+            // After an AR session restart (a depth pause), strict proof only (rk 23:50: it carried on "quite a bit off"):
+            // two agreeing tries in a row, each with at least 600 sure depth samples (the 23:50 resume began on a try with
+            // 112), never a single strong one. Without proof within RESTART_PROOF_MS the scan stops (checkLossStop).
+            if (sessionRestarted && STOP_ON_LOSS) {
+                strong = false;
+                if (ok && res.samples < 600) { ok = false; realignOk = 0; log("  (after the restart: only " + res.samples + " sure samples, needs 600)"); }
+            }
             if (realignOk >= (res.quick || strong ? 1 : 2)) {
                 System.arraycopy(F, 0, poseFix, 0, 16);
                 evMark(); shadowRealign = realign; shadowUntil = nowMs + 20000; shadowFrom = nowMs;   // check the alignment for 20 s (shadow, not applied)
@@ -7536,6 +7550,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     r.fit = f;
                     r.good = f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN;
                     r.quick = !restarted && r.good && Realign.away(f.fix, oldFix) < 0.05f;
+                    r.samples = all.size();
                     r.detail += (r.detail.isEmpty() ? "" : "; ") + (System.currentTimeMillis() - ra0) + " ms, " + all.size() + " samples";
                     realignResult = r;
                 } catch (Throwable e) { logError("re-align", new RuntimeException(e)); }
