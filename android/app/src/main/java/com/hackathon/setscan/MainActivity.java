@@ -803,6 +803,15 @@ public class MainActivity extends Activity {
             Button uwB = new Button(this);   // EXPERIMENT (remove with experiment/): records the ultrawide without ARCore
             uwB.setText("Ultrawide recorder (experiment)");
             uwB.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)));
+            Button sphB = new Button(this);
+            ScanRenderer.SPHERE_R = sp.getFloat("abSphereR", 0.15f);
+            sphB.setText("Rescan sphere: " + Math.round(ScanRenderer.SPHERE_R * 100) + " cm");
+            sphB.setOnClickListener(v -> {   // 15 -> 25 -> 10 cm radius
+                float[] steps = {0.15f, 0.25f, 0.10f}; int k = 0;
+                for (int i = 0; i < steps.length; i++) if (Math.abs(steps[i] - ScanRenderer.SPHERE_R) < 0.005f) k = (i + 1) % steps.length;
+                ScanRenderer.SPHERE_R = steps[k]; sp.edit().putFloat("abSphereR", steps[k]).apply();
+                sphB.setText("Rescan sphere: " + Math.round(ScanRenderer.SPHERE_R * 100) + " cm");
+            });
             Button fineB = new Button(this);
             ScanRenderer.FINE_NEAR = sp.getBoolean("abFineNear", true);
             fineB.setText(ScanRenderer.FINE_NEAR ? "Fine dots up close: on" : "Fine dots up close: off");
@@ -880,7 +889,7 @@ public class MainActivity extends Activity {
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB, greyB, stopB, paintB, closeB, dotB, camB, fineB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB, greyB, stopB, paintB, closeB, dotB, camB, fineB, sphB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }
@@ -1811,14 +1820,15 @@ public class MainActivity extends Activity {
         scanRow = new LinearLayout(this);
         scanRow.setOrientation(LinearLayout.HORIZONTAL);
         scanRow.setGravity(Gravity.CENTER);
-        Button cancel = new Button(this), done = new Button(this);
-        cancel.setText("Cancel"); done.setText("Done");
+        Button cancel = new Button(this), done = new Button(this), rescan = new Button(this);
+        cancel.setText("Cancel"); done.setText("Done"); rescan.setText("Rescan");
         Ios.pill(cancel); cancel.setTextColor(Ios.ACCENT);
+        Ios.pill(rescan); rescan.setTextColor(0xFFFFB020);
         Ios.filled(done);
-        for (Button b : new Button[]{cancel, done}) {
+        for (Button b : new Button[]{cancel, rescan, done}) {
             b.setAllCaps(false);
             b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-            b.setMinWidth(dp(110)); b.setMinimumWidth(dp(110)); b.setMinHeight(0); b.setMinimumHeight(0);
+            b.setMinWidth(dp(96)); b.setMinimumWidth(dp(96)); b.setMinHeight(0); b.setMinimumHeight(0);
             b.setPadding(dp(22), 0, dp(22), 0);
             android.graphics.drawable.Drawable d = b.getBackground();
             if (d instanceof android.graphics.drawable.RippleDrawable) {
@@ -1830,6 +1840,14 @@ public class MainActivity extends Activity {
             scanRow.addView(b, lp);
         }
         cancel.setOnClickListener(v -> cancelScan());
+        // Hold "Rescan" (rk 11 Nov 22:54): a sphere in front of the phone; every dot inside it that was placed before the
+        // press is cleared and only fresh sure readings fill it again, until the button is let go.
+        rescan.setOnTouchListener((v, e) -> {
+            int a = e.getActionMasked();
+            if (a == android.view.MotionEvent.ACTION_DOWN) { v.setPressed(true); haptic(false); act("rescan held"); renderer.setRescan(true); return true; }
+            if (a == android.view.MotionEvent.ACTION_UP || a == android.view.MotionEvent.ACTION_CANCEL) { v.setPressed(false); act("rescan let go"); renderer.setRescan(false); return true; }
+            return true;
+        });
         done.setOnClickListener(v -> onMainButton());
         done.setOnLongClickListener(v -> mainButton.performLongClick());
         FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);

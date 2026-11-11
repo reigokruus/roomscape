@@ -131,6 +131,66 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  farther or equal one (rk 10 Nov), so repeated looks settle instead of churning. Sideways only the reading's own
      *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
     static volatile boolean CLOSEST_WINS = true;
+    // ---- Hold "Rescan": a sphere in front of the phone where old dots are cleared and refilled by fresh readings ----
+    static volatile float SPHERE_R = 0.15f;   // sphere radius, m (debug tools "Rescan sphere size")
+    private volatile boolean rescanOn; private int rescanFromStamp; private volatile float centerDepth = 1f;
+    private int rescanCleared; private long rescanStartMs;
+    private final float[] rescanC = new float[3];
+    void setRescan(boolean on) {
+        if (on && !rescanOn) { rescanFromStamp = stampFrame; rescanCleared = 0; rescanStartMs = System.currentTimeMillis(); }
+        if (!on && rescanOn) log(String.format(java.util.Locale.US, "rescan sphere: %.1f s, %d old dots cleared inside it (refilled by fresh sure readings)", (System.currentTimeMillis() - rescanStartMs) / 1000f, rescanCleared));
+        rescanOn = on;
+    }
+    /** GL thread, every frame while held: the sphere sits on what the middle of the screen looks at (the depth there,
+     *  0.4-2 m); dots inside it not seen since the press are cleared, so the readings coming in now place them again. */
+    private void rescanStep(float[] cam) {
+        if (!rescanOn || viewing) return;
+        float d = Math.max(0.4f, Math.min(2f, centerDepth));
+        rescanC[0] = cam[12] - cam[8] * d; rescanC[1] = cam[13] - cam[9] * d; rescanC[2] = cam[14] - cam[10] * d;
+        if (frameNo % 3 != 0) return;
+        float R = SPHERE_R, r2 = R * R; int n = count, cleared = 0;
+        float px = cam[12], py = cam[13], pz = cam[14], fx = rescanC[0] - px, fy = rescanC[1] - py, fz = rescanC[2] - pz, fl = (float) Math.sqrt(fx * fx + fy * fy + fz * fz); fx /= fl; fy /= fl; fz /= fl;
+        for (int i = 0; i < n; i++) {
+            if (obs[i] == 0 || seenStamp[i] >= rescanFromStamp) continue;
+            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
+            float dx = x - rescanC[0], dy = y - rescanC[1], dz = z - rescanC[2];
+            boolean inside = dx * dx + dy * dy + dz * dz <= r2;
+            if (!inside) {   // or floating between the phone and the sphere, inside the cone the camera looks through
+                float vx = x - px, vy = y - py, vz = z - pz, t = vx * fx + vy * fy + vz * fz;
+                if (t < 0.1f || t > fl - R) continue;
+                float ox = vx - fx * t, oy = vy - fy * t, oz = vz - fz * t, rr = R * t / fl;
+                if (ox * ox + oy * oy + oz * oz > rr * rr) continue;
+            }
+            obs[i] = 0; col.put(i * 4 + 3, (byte) 0); cleared++;
+        }
+        if (cleared > 0) { rescanCleared += cleared; refined = true; refineCursor = 0; }
+        // guessed wall dots inside the sphere go too
+        WallGuess.Wall w = filledWall; boolean[] cells = guessCells;
+        if (w != null && cells != null) {
+            int cw = Math.max(1, (int) (w.width / GUESS_STEP)), ch = Math.max(1, (int) (w.height / GUESS_STEP));
+            float ux = (w.corners[3] - w.corners[0]) / Math.max(1e-3f, w.width), uz = (w.corners[5] - w.corners[2]) / Math.max(1e-3f, w.width);
+            if (cells.length == cw * ch) for (int b = 0; b < ch; b++) for (int a = 0; a < cw; a++) {
+                float sx = (a + 0.5f) * GUESS_STEP, gx = w.corners[0] + ux * sx, gz = w.corners[2] + uz * sx, gy = w.corners[1] + (b + 0.5f) * GUESS_STEP;
+                float dx = gx - rescanC[0], dy = gy - rescanC[1], dz = gz - rescanC[2];
+                if (dx * dx + dy * dy + dz * dz <= r2) cells[b * cw + a] = true;
+            }
+        }
+    }
+    /** The sphere: three amber rings (around each axis), so it reads as a ball in 3D. */
+    private void drawRescanSphere(float[] m) {
+        if (!rescanOn || viewing) return;
+        int N = 48; float[] v = new float[3 * N * 2 * 3]; int k = 0;
+        for (int ring = 0; ring < 3; ring++) for (int i = 0; i < N; i++) for (int e = 0; e < 2; e++) {
+            double a = 2 * Math.PI * (i + e) / N; float c = (float) Math.cos(a) * SPHERE_R, sn = (float) Math.sin(a) * SPHERE_R;
+            float x = ring == 0 ? c : ring == 1 ? c : 0, y = ring == 0 ? sn : ring == 1 ? 0 : c, z = ring == 0 ? 0 : ring == 1 ? sn : sn;
+            v[k++] = rescanC[0] + x; v[k++] = rescanC[1] + y; v[k++] = rescanC[2] + z;
+        }
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glLineWidth(4f);
+        planDraw(m, v, GLES20.GL_LINES, new float[]{1f, 0.69f, 0.13f, 1f}, 1f);
+        GLES20.glLineWidth(1f);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+    }
     /** Debug tools "Fine dots up close": readings from under FINE_NEAR_M get 0.8 cm cells instead of 2 cm. */
     static volatile boolean FINE_NEAR = true;
     static final float FINE_NEAR_M = 1.0f;
@@ -5058,7 +5118,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
                 if (LIVE_POINTS) {
                     drawFilledWall(mvp); if (trackingNow) maybeFillWall(nowMs);
+                    if (trackingNow && haveGoodCam) rescanStep(lastGoodCam);
                     consumeLiveMesh(); drawPoints(mvp, 0.6f);   // smaller: close up they were big soft blobs
+                    drawRescanSphere(mvp);
                     if (FLAT_TILES) { maybeTiles(frame, camera, nowMs); flatTiles.draw(mvp); }
                 }   // rk 10 Nov 15:20: "only points, no triangles no photo"
                 else drawLiveMesh(mvp);
@@ -5391,6 +5453,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 dbuf = ShortBuffer.wrap(md); dRow = dw; dPix = 1;
             }
 
+            {   // what the middle of the screen looks at (for the Rescan sphere): median of the sure depth around the centre
+                int[] vals = new int[49]; int nv = 0;
+                for (int b = -3; b <= 3; b++) for (int a = -3; a <= 3; a++) { int mm = dbuf.get((dh / 2 + b * 2) * dRow + (dw / 2 + a * 2) * dPix) & 0xFFFF; if (mm >= 200 && mm < 4000) vals[nv++] = mm; }
+                if (nv >= 5) { java.util.Arrays.sort(vals, 0, nv); centerDepth = vals[nv / 2] / 1000f; }
+            }
             float[] m = new float[16];
             camera.getPose().toMatrix(m, 0);
             evCapture(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m, depth.getTimestamp());
