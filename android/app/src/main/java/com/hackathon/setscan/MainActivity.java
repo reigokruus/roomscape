@@ -2115,6 +2115,11 @@ public class MainActivity extends Activity {
         col.addView(Ios.footer(this, "Open a room scanned with RoomScape on another phone. Or send one from a nearby phone: open a scan there and tap Share → Send to nearby phone."));
         col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_list, "Item catalog", false, true, v -> nativePlanning.showCatalog())));
         col.addView(Ios.footer(this, "Lights, stands and grip you can place in a room, with sizes and power draw. Works offline."));
+        if (!guestBuild()) {   // EXPERIMENT (remove with experiment/): never in guest builds
+            col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_scan, "Ultrawide recorder (experiment)", false, true,
+                    v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)))));
+            col.addView(Ios.footer(this, "Records the wide lens without ARCore, to test whether it could track plain walls. Nothing is scanned."));
+        }
 
         col.addView(Ios.header(this, "Saved scans"));
         homeList = new LinearLayout(this);
