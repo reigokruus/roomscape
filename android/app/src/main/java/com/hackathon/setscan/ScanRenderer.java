@@ -32,7 +32,8 @@ import javax.microedition.khronos.opengles.GL10;
 public class ScanRenderer implements GLSurfaceView.Renderer {
     // Fewer points on phones with a 512 MB app limit (Galaxy S23 Ultra, 11 Nov: out of memory with 1.2 million): each
     // point costs ~30 bytes held all the time (position, colour, counters)
-    private static final int MAX_POINTS = Runtime.getRuntime().maxMemory() >= 700L * 1048576 ? 2_000_000 : 1_200_000;
+    static final boolean LOW_MEMORY = Runtime.getRuntime().maxMemory() < 700L * 1048576;
+    private static final int MAX_POINTS = LOW_MEMORY ? 1_200_000 : 2_000_000;
     private static final float VOXEL = 0.02f;
     private static final int MAX_PATH = 20_000;
     /** The camera timestamp of the previous tracked frame (ns), for telling a map jump from a pause between frames. */
@@ -48,9 +49,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final ByteBuffer col = ByteBuffer.allocateDirect(MAX_POINTS * 4).order(ByteOrder.nativeOrder());
     private int count, uploaded;
     private final LongIntMap voxels = new LongIntMap(1 << 22);
-    private final Tsdf tsdf = new Tsdf(1_500_000, 0.04f, 0.12f, 99f); // carve along the whole ray
+    // The surface tables are allocated up front: ~132 MB at these sizes (the hash table is 2-4x the voxels). On a 512 MB
+    // phone that was half the memory before anything was scanned (S23 Ultra, 11 Nov): smaller there. A room's surface
+    // is ~0.3 M voxels at 4 cm (S24 scans), so 1 M still leaves a big flat or several rooms.
+    private final Tsdf tsdf = new Tsdf(LOW_MEMORY ? 1_000_000 : 1_500_000, 0.04f, 0.12f, 99f); // carve along the whole ray
     /** Fine surface for the detail zones the user tapped (shoes, the table top...). */
-    private final Tsdf detail = new Tsdf(1_000_000, 0.012f, 0.04f, 0.2f);
+    private final Tsdf detail = new Tsdf(LOW_MEMORY ? 500_000 : 1_000_000, 0.012f, 0.04f, 0.2f);
     { tsdf.minW = 3; tsdf.minComponent = 200; tsdf.carveWeight = 2f; detail.minComponent = 60; } // fewer one-off and floating flakes
     private final java.util.ArrayList<float[]> zones = new java.util.ArrayList<>(); // x, y, z, radius
     private static final float VOXEL_FINE = 0.008f;
@@ -4844,8 +4848,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 }
                 if (ts == TrackingState.TRACKING) { System.arraycopy(view, 0, heldView, 0, 16); haveHeldView = true; synchronized (scanRot) { System.arraycopy(scanRot, 0, heldRot, 0, 9); heldRotOk = scanRotOk; } }
             }
+            if (holding && !wasHolding) holdStartMs = nowMs;
             wasHolding = holding;
             System.arraycopy(view, 0, prevShown, 0, 16);
+            // While lost, the drawn camera eases 1.5 m back and 0.3 m up over 0.8 s, so the scanned room stays in sight
+            // even when the phone points at a part not scanned yet (11 Nov, S23 Ultra: only the striped background showed
+            // under "Still can't find where you are"; rk: the scanned overlay always stays in view). Back on track it
+            // eases in again with the 0.3 s blend above.
+            if (holding) {
+                float k = Math.min(1f, (nowMs - holdStartMs) / 800f); k = k * k * (3 - 2 * k);
+                float[] t = new float[16], v2 = new float[16];
+                Matrix.setIdentityM(t, 0); Matrix.translateM(t, 0, 0, -0.3f * k, -1.5f * k);
+                Matrix.multiplyMM(v2, 0, t, 0, view, 0); System.arraycopy(v2, 0, view, 0, 16);
+                System.arraycopy(view, 0, lastShownView, 0, 16);
+            }
             Matrix.multiplyMM(mvp, 0, proj, 0, view, 0);
             System.arraycopy(mvp, 0, realMvp, 0, 16);
             if (OVERVIEW) overviewCamera(ts == TrackingState.TRACKING, nowMs);
@@ -6182,6 +6198,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     // ---- the held view while lost ----
     private final float[] heldView = new float[16], heldRot = new float[9];
+    private long holdStartMs;
     private boolean haveHeldView, heldRotOk, holding, wasHolding;
     private final float[] lastShownView = new float[16], prevShown = new float[16], rawView = new float[16], relRaw = new float[16], relShown = new float[16]; private long holdEndMs;
     private boolean relAnchored; private volatile int heldMode;   // 0 live, 1 held by the rotation sensor, 2 held + ARCore's movement
