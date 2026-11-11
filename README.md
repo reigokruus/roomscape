@@ -1,83 +1,89 @@
 # RoomScape
 
-**A set-up assistant for real rooms.** Scan your room with an iPhone, tell the app what gear you own, pick the kind of scene you want, and it shows you where to put the person, the camera and the lights. It's built for everyday creators, not film crews. (The project started as CineX; the iPhone app is now called RoomScape.)
+**Scan a real room with a phone and get its measurements, a 3D view you can walk through, and a file you can share.**
+Built for a pilot with a film production: scanning rooms and locations so the crew knows their size, height, doors and
+surfaces before the shoot day, and can plan cameras, lights and set-ups around them.
 
-## What the iPhone app does
-- **Scan** a room with RoomPlan and LiDAR, with a live surface mesh while you walk. You get walls, doors, windows and furniture, plus the LiDAR points and photos of the room.
-- **See the room** as splats in the scanned colours (Photo), a white mesh with a grid (Mesh), or RoomPlan's model. **Sharpen** trains the splats against the scan's photos on the phone's GPU.
-- **Objects:** RoomPlan's furniture, plus lamps, ceiling lights and power sockets that Claude finds in the photos. Remove, move and turn things to plan around them.
-- **Lighting preview:** place the person and your own lights (from My Gear) in the scanned room and see the light on their face, the exposure and a camera's-eye view. The room's own lights and windows count, and cable runs to the nearest socket are shown. **Set it up with Claude** plans a whole shot (pose, lights, camera, lens) from the floor plan and your gear.
-- **Storyboard:** a measured top-down plan of the room with several views, each with its own camera, lens, kit and budget, and a frame preview rendered from the scan.
-- **Plan a Shoot:** plain-language placement tips for talking heads, interviews, vlogs, product shots and lifestyle scenes.
+Two native apps share one file format:
 
-Claude features need your own Claude API key, kept in the phone's Keychain. Everything else works offline.
+- **Android** (`android/`): ARCore phones, tested on a Galaxy S24. The main app for the pilot.
+- **iPhone** (`CineX.swiftpm/`, the app is called RoomScape): LiDAR iPhones (12 Pro or newer Pro) on iOS 17+.
 
-## Test a native app now
+A scan from either phone can be shared as a **.rmsc** file and opened on the other ([format](docs/rmsc-format.md)).
 
-See [Android APK install/build instructions and the iOS hardware/build gate](docs/testable-app.md) and [actual compile/test evidence](docs/testable-build-evidence.md). The Android APK is native ARCore code, not the browser prototype; the iOS Swift storyboard additions are a separate feature set and are not in that APK.
+## What you get from a scan
 
-## Internet-sourced item catalog and scanned-item planning (Android)
+| | Android | iPhone |
+|---|---|---|
+| Live scan view | coloured points (2 cm), flat camera-picture tiles on walls and floor | RoomPlan with LiDAR; points-only and flat tiles as test switches |
+| Losing tracking | an amber "Lost track" notice with the direction back, a vibration, then it lines up with the scan again | RoomPlan's own handling |
+| Room size and height | width × length along the walls, height from the ceiling | RoomPlan's walls, doors and windows |
+| Floor area | per room, split at doorways; tap a room for its own m² | – |
+| Correcting walls | drag a wall line in the result (for curtains, furniture against a wall); Reset walls | – |
+| Measure | tap two points: distance, height of a point | the same |
+| Doorways | width and height of openings | RoomPlan's doors |
+| Views | Photo, Points, Mesh; walk through the room | Photo, Points, Mesh, RoomPlan model; walk through |
+| Larger spaces | one scan for several rooms; rooms are split at doorways | carries on past RoomPlan's ~9 × 9 m limit with points and tiles (new, not tried on a big space yet) |
+| Continue scan | add to a saved scan later | the same |
+| Sharing | .rmsc (Share, Save to device, send to a nearby phone) | the same |
 
-[Catalog / scanned-item feature and validation guide](docs/catalog-and-scanned-items.md): offline searchable real-model dimensions with provenance, explicit internet JSON-feed/local-file imports, physical-size placement/manual overrides, and non-destructive hide/restore/undo of detected furniture shapes in a separate planning view. Original fused scans/photos are preserved; no mesh erasure, unseen-surface reconstruction or iOS feature-parity claim.
+On both phones there are also **objects** (furniture boxes, and lamps and sockets found by Claude), a **lighting
+preview**, and planning tools (**Storyboard**, **Plan a Shoot**). Claude features need your own Claude API key on the
+phone. Everything else works offline.
 
+## How to scan a room well
 
-## Optional paid-pilot interest (Android)
+- Move slowly, and keep within about **1–3 m of the walls**: the S24's depth doesn't reach further than ~3.5 m.
+- Sweep every wall **from the floor to above head height**, and include the corners. A side counts as a wall only when
+  the scan sees it reach above ~1.6 m.
+- Curtains and furniture against a wall are measured as the wall. Pull curtains aside, or drag that wall line in the
+  result.
+- If the amber "Lost track" notice appears, stop and point back where it says. Scanning carries on by itself.
+- Tap **Done**. The size, height and floor area appear at the top and in the room card.
 
-[Local demo notebook and phone acceptance guide](docs/pilot-interest.md): explicit paid-follow-up opt-in, named demo host, editable contacts, revoke/delete, and deliberate consent-only CSV/JSON export. Encrypted app-private storage; **no central collection or automatic team receipt**, payments or tracking. Personal data is separate from room/scan exports. This is interest, not a confirmed paying customer.
+How accurate it is so far (Galaxy S24, tape-measured rooms): the width is within a few cm, room heights within
+about 10 cm, and floor areas are typically 5–10 % low where a wall or the floor along it wasn't seen. Dragging the walls
+to the right place fixes that.
+
+## Install
+
+### Android
+- **Test build for the pilot:** [releases](https://github.com/reigokruus/roomscape/releases). Open the link on the
+  phone, download the APK, open it and allow installing from that source once. Play Store installs Google Play
+  Services for AR (ARCore) if the phone doesn't have it.
+- **Builds from `main`:** every push that changes `android/` is built by GitHub and published as a release
+  (`releases/latest/download/CineX-android.apk`). Work that isn't pushed yet isn't in it.
+- All builds use the same signing key (`android/app/debug.keystore`, committed on purpose) and package ID
+  (`com.hackathon.setscan`), so they install over each other and scans are kept.
+
+Develop: open the `android` folder in [Android Studio](https://developer.android.com/studio), or
+`cd android && ./gradlew assembleDebug`. The APK is in `android/app/build/outputs/apk/debug/`.
+
+### iPhone
+1. Open **CineX.swiftpm** in Xcode (15 or newer; tested with 27).
+2. Connect the iPhone by cable, tap **Trust**, and turn on Settings › Privacy & Security › **Developer Mode**.
+3. In **Signing & Capabilities**, choose your Apple ID as the Team (a free Apple ID works).
+4. Press ▶︎ Run. The first time, approve the developer account on the iPhone under Settings › General › VPN & Device
+   Management.
+
+Apps signed with a free Apple ID stop working after 7 days; run again to reinstall.
+
+## For developers
+
+- [.rmsc format](docs/rmsc-format.md): points, photos, depth, mesh, flat tiles, floor area. Version 1, optional
+  fields only.
+- [Test harness](docs/test-harness.md): the apps' own code run on the Mac on synthetic rooms and on real recordings
+  (`tools/harness`).
+- [Recordings](docs/recordings.md): what each phone keeps with a scan for replaying and fixing problems (camera
+  recording, screen video, logs). These stay on the phone and the Mac; they are never in a .rmsc.
+- [Android → iPhone handoff](docs/android-to-ios-handoff.md), [native planning](docs/native-planning.md),
+  [catalogue and scanned items](docs/catalog-and-scanned-items.md), [positioning](docs/positioning.md).
 
 ## Status
-**v0.1 (hackathon prototype).** The iPhone app builds with Xcode 26 and runs on LiDAR iPhones. The shared planning and splat-training logic is covered by `swift test` from the repository root (it needs full Xcode selected, e.g. `sudo xcode-select -s /Applications/Xcode.app`: the Command Line Tools alone have no XCTest). The storyboard's items are measured planning envelopes, not photorealistic assets, and catalog dimensions and rates are estimates. See [native planning notes](docs/native-planning.md) and [verification evidence](docs/native-planning-verification.md).
 
-## Why not Previs Pro (or similar apps)?
-Previs Pro is a **pro storyboarding tool**. You build virtual sets from a library and plan shots for a script. It doesn't scan your room, know your gear or suggest where to put things. RoomScape starts from the **real room and the gear you actually own**. See [docs/positioning.md](docs/positioning.md) for the full comparison, including WATT-IF, Polycam, Scaniverse, Photo Studio AR and Shot Designer. Polycam and Scaniverse capture rooms very well, but they stop at the scan. RoomScape uses the scan to plan the shoot.
+**v0.1, a working prototype for the pilot.** The Android app is used daily on a Galaxy S24; other ARCore phones (such
+as the Galaxy S23+) haven't been tried yet. Measurements are estimates until checked against a tape. The planning tools'
+items are measured envelopes, not photorealistic assets.
 
-## iPhone version (main)
-Porting the Android features to iPhone? Start with [docs/android-to-ios-handoff.md](docs/android-to-ios-handoff.md).
-
-This is the `CineX.swiftpm` folder (the app inside is RoomScape). It requires an **iPhone with LiDAR** (iPhone 12 Pro or newer Pro / Pro Max) on iOS 17+, and a Mac with **Xcode 15 or newer**.
-
-### Build and install on an iPhone
-1. Download this repo (green **Code** button › **Download ZIP**) and unzip it.
-2. Double-click **CineX.swiftpm**. It opens in Xcode.
-3. Connect the iPhone by cable and tap **Trust**. On the iPhone, turn on Settings › Privacy & Security › **Developer Mode** (the phone restarts).
-4. In Xcode, pick the iPhone as the run destination at the top. In the project's **Signing & Capabilities**, choose your Apple ID as the Team (add it under Xcode › Settings › Accounts first; a free Apple ID works).
-5. Press ▶︎ Run. The first time, approve the developer account on the iPhone under Settings › General › VPN & Device Management, then run again.
-
-Apps signed with a free Apple ID stop working after 7 days. Just press Run again to reinstall.
-
-
-## Team work in this repo
-- **Frame check (shot fit):** [`FrameCheck/`](FrameCheck/). See [README_framecheck.md](FrameCheck/README_framecheck.md).
-- **Browser planning prototype:** [`hackathon/ui_prototype.html`](hackathon/ui_prototype.html) covers the storyboard, kit budgets, presets and scale-aware placement on a sample room. Run `node hackathon/verify_v3.mjs` to test it.
-- **Pitch pack:** [`hackathon/pitch_deck.html`](hackathon/pitch_deck.html) and [`hackathon/pitch_script.md`](hackathon/pitch_script.md).
-- **iPhone app additions:** gear inventory, shoot planner, and the mesh overlay while scanning, all in `CineX.swiftpm`.
-- **Integrated native planning:** [`CineX.swiftpm/Planning/`](CineX.swiftpm/Planning/); [build/validation handoff](docs/native-planning.md). Export formats are native JSON (not the older browser-prototype format); no hosted sync or photorealistic lighting is claimed.
-- **Synthetic UI test fixture:** [`Tests/Fixtures/synthetic-room.json`](Tests/Fixtures/synthetic-room.json), importable via Planning projects without LiDAR; explicitly not a real scan.
-
-## Android version (Samsung and other ARCore phones)
-This is the `android/` folder: a separate Android Studio project, so you can develop on Windows or Linux without a Mac. The iPhone version above is unaffected.
-
-Android has no equivalent of Apple's RoomPlan, so this version uses ARCore depth to capture the room as a coloured 3D point cloud. You can rotate it and switch to a top-down view, and it shows the path you walked. It works on ARCore depth-capable phones such as the Galaxy S24. LiDAR isn't required.
-
-### Develop on a Windows/Linux laptop
-1. Install [Android Studio](https://developer.android.com/studio).
-2. **File › Open** the `android` folder (not the repo root), and let Gradle sync.
-3. On the phone, turn on Developer options (Settings › About phone › Software information › tap **Build number** 7 times), then turn on **USB debugging**.
-4. Plug the phone in, accept the prompt, pick it in the device list and press ▶︎ Run.
-
-From the command line: `cd android && ./gradlew assembleDebug` (on Windows, `gradlew.bat assembleDebug`). The APK ends up in `android/app/build/outputs/apk/debug/`.
-
-### Get new builds on the phone automatically
-Every push that changes `android/` is built by GitHub and published as a release, so the phone can always download the newest build from **https://github.com/reigokruus/shootlocal/releases/latest/download/CineX-android.apk**.
-
-For hands-free updates, install [Obtainium](https://github.com/ImranR98/Obtainium) on the phone and add `https://github.com/reigokruus/shootlocal`. It notifies you of each new build and installs it with one tap.
-
-(The Android package ID stays `com.hackathon.setscan` on purpose so already-installed builds keep updating.)
-
-All builds, whether from GitHub or from Android Studio, use the same signing key (`android/app/debug.keystore`, a debug key committed on purpose), so they install over each other. If Android refuses to install, uninstall the old CineX once and try again.
-
-On first launch, the phone may ask to install or update **Google Play Services for AR**.
-
-## Competitor research
-
-[Shootlocal competitor research page](https://cursor.com/canvas/store-da409d30-ab83-48e7-b175-2e0183165750/65ee7be5-f0df-44b1-93ff-f27a3643bda4) — the previously approved team research link, preserved alongside the native build handoff.
+Other work in this repo: [`FrameCheck/`](FrameCheck/) (shot fit), [`hackathon/`](hackathon/) (browser planning
+prototype and pitch pack).
