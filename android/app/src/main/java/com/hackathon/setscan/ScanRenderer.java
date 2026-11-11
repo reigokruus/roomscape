@@ -2455,6 +2455,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 perf.stop();
                 if (dir != null && tilesSaved != null) saveTiles(dir, tilesSaved);
                 if (dir != null && removedAtDone[0] != null) saveRemoved(dir, removedAtDone[0]);
+                if (dir != null) saveFilledWall(dir);
                 if (dir != null) { saveEvents(dir); saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
             };
         }
@@ -3518,7 +3519,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     long t0 = System.currentTimeMillis();
                     FloorArea.Result fa = FloorArea.compute(pos, count, room.floorY);
                     floorArea = fa; selectedRoom = 0; selectedRoomVerts = null;
-                    loadWallEdits(fa);
+                    loadWallEdits(fa); if (!scanningNowForWall()) { if (!loadedFromThisSession()) filledWall = null; loadFilledWall(currentDir); }
                     saveFloorAreaJson();
                     StringBuilder rs = new StringBuilder();
                     for (int i = 0; i < fa.rooms.size(); i++) rs.append(i == 0 ? "" : "; ").append(fa.rooms.get(i).text(i));
@@ -3766,6 +3767,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
         anchors.clear(); clearGoal(); anchorOfferAt = 0;
+        filledWall = null; wallCand = null; wallCandHits = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
@@ -4938,6 +4940,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 long lmT0 = System.nanoTime();
                 if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
                 if (LIVE_POINTS) {
+                    drawFilledWall(mvp); if (trackingNow) maybeFillWall(nowMs);
                     consumeLiveMesh(); drawPoints(mvp, 0.6f);   // smaller: close up they were big soft blobs
                     if (FLAT_TILES) { maybeTiles(frame, camera, nowMs); flatTiles.draw(mvp); }
                 }   // rk 10 Nov 15:20: "only points, no triangles no photo"
@@ -6685,6 +6688,89 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private final float[] lastGoodCam = new float[16];
 
+    // ---- One plain wall filled as a rectangle (WallGuess; rk 11 Nov 21:40) ----
+    static boolean FILL_WALL = true;        // debug tools "Fill the plain wall"
+    static boolean STANDING_NOTE = true;    // debug tools "Standing notice"
+    static final String STANDING_TEXT = "Keep corners, edges or furniture in view. On a plain wall the phone loses track and the scan fails.";
+    static final float PLAIN_SPREAD = 60f;  // brightness spread of a plain wall's points (offline: hall wall 32-52, curtains 68-84, cabinets 124-145)
+    volatile WallGuess.Wall filledWall;
+    private WallGuess.Wall wallCand; private int wallCandHits; private long wallCheckAt; private volatile boolean wallChecking;
+
+    /** GL thread, about every 1.5 s while scanning normally: is the camera looking at a plain wall it can fill? From
+     *  the points already in the scan (a good look from afar is enough), never on top of an opening, one wall only. */
+    private void maybeFillWall(long nowMs) {
+        if (!FILL_WALL || wallChecking || nowMs - wallCheckAt < 1500 || count < 20000 || needRealign || !haveGoodCam) return;
+        wallCheckAt = nowMs; wallChecking = true;
+        final float[] cam = lastGoodCam.clone(); final float floorY = walkFloorY(), ceilY = roomReady && room.ceilingY > room.floorY + 1.8f ? room.ceilingY : 0;
+        final int n = count; final boolean warned = nowMs < plainWarnUntil + 5000;
+        new Thread(() -> {
+            try {
+                WallGuess.Pts P = new WallGuess.Pts() {
+                    public float x(int i) { return pos.get(i * 3); } public float y(int i) { return pos.get(i * 3 + 1); } public float z(int i) { return pos.get(i * 3 + 2); }
+                    public int rgb(int i) { return (col.get(i * 4) & 255) << 16 | (col.get(i * 4 + 1) & 255) << 8 | (col.get(i * 4 + 2) & 255); }
+                };
+                StringBuilder why = new StringBuilder();
+                WallGuess.Wall w = WallGuess.find(P, n, cam, floorY, ceilY, why);
+                boolean ok = w != null && w.lumSpread <= PLAIN_SPREAD && w.distance <= 3.5f;
+                if (!ok) { wallCandHits = 0; wallCand = null; return; }
+                // the same plane twice in a row before it's shown (one look isn't enough)
+                WallGuess.Wall c = wallCand;
+                boolean same = c != null && Math.abs(c.d - w.d) < 0.1f && c.nx * w.nx + c.nz * w.nz > 0.996f;
+                wallCand = w; wallCandHits = same ? wallCandHits + 1 : 1;
+                if (wallCandHits < 2) return;
+                WallGuess.Wall cur = filledWall;
+                boolean curSame = cur != null && Math.abs(cur.d - w.d) < 0.1f && cur.nx * w.nx + cur.nz * w.nz > 0.996f;
+                if (cur != null && !curSame && !warned) return;   // one wall only: another replaces it only where the plain-wall warning pointed
+                if (curSame && w.width <= cur.width + 0.05f) return;   // grows, never shrinks
+                filledWall = w;
+                log(String.format(java.util.Locale.US, "filled wall (generated, not scanned): %.2f x %.2f m, %.2f m away, %d points on it, %.0f%% of its width had points, brightness spread %.0f%s",
+                        w.width, w.height, w.distance, w.support, w.scannedShare * 100, w.lumSpread, cur == null ? "" : curSame ? " (wider)" : " (replaces the one before)"));
+                File d = currentDir; if (d != null) saveFilledWall(d);
+            } catch (Throwable e) { logError("wall fill", new RuntimeException(e)); }
+            finally { wallChecking = false; }
+        }, "wall-fill").start();
+    }
+
+    /** filled-wall.json: the generated rectangle (corners x, y, z), colour and the plane; never written as points. */
+    private boolean scanningNowForWall() { return !viewing; }
+    private boolean loadedFromThisSession() { return loadedAny ? false : true; }
+
+    void saveFilledWall(File d) {
+        WallGuess.Wall w = filledWall; if (w == null) return;
+        try {
+            org.json.JSONObject j = new org.json.JSONObject().put("generated", true).put("note", "filled in by the app, not scanned")
+                    .put("width", w.width).put("height", w.height).put("rgb", String.format("#%06x", w.rgb & 0xFFFFFF));
+            org.json.JSONArray c = new org.json.JSONArray(); for (float v : w.corners) c.put((double) v); j.put("corners", c);
+            j.put("plane", new org.json.JSONArray().put((double) w.nx).put((double) w.nz).put((double) w.d));
+            java.nio.file.Files.write(new File(d, "filled-wall.json").toPath(), j.toString(1).getBytes("UTF-8"));
+        } catch (Exception e) { logError("filled-wall.json", e); }
+    }
+
+    void loadFilledWall(File d) {
+        File f = d == null ? null : new File(d, "filled-wall.json"); if (f == null || !f.exists()) return;   // (none saved yet: keep the one in memory, e.g. right after Done)
+        try {
+            org.json.JSONObject j = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(f.toPath()), "UTF-8"));
+            WallGuess.Wall w = new WallGuess.Wall(); org.json.JSONArray c = j.getJSONArray("corners");
+            for (int i = 0; i < 12; i++) w.corners[i] = (float) c.getDouble(i);
+            org.json.JSONArray pl = j.getJSONArray("plane"); w.nx = (float) pl.getDouble(0); w.nz = (float) pl.getDouble(1); w.d = (float) pl.getDouble(2);
+            w.width = (float) j.getDouble("width"); w.height = (float) j.getDouble("height"); w.rgb = Integer.parseInt(j.getString("rgb").substring(1), 16);
+            filledWall = w;
+        } catch (Exception e) { logError("filled-wall.json", e); }
+    }
+
+    /** The filled wall, a flat rectangle in its colour, 2 cm behind the wall so the scan's own points stay in front. */
+    private void drawFilledWall(float[] m) {
+        WallGuess.Wall w = filledWall; if (w == null || !FILL_WALL) return;
+        float[] v = new float[12];
+        for (int i = 0; i < 4; i++) { v[i * 3] = w.corners[i * 3] - w.nx * 0.02f; v[i * 3 + 1] = w.corners[i * 3 + 1]; v[i * 3 + 2] = w.corners[i * 3 + 2] - w.nz * 0.02f; }
+        float r = ((w.rgb >> 16) & 255) / 255f, g = ((w.rgb >> 8) & 255) / 255f, b = (w.rgb & 255) / 255f;
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        planDraw(m, v, GLES20.GL_TRIANGLE_FAN, new float[]{r, g, b, 0.92f}, 1f);
+        GLES20.glLineWidth(3f);   // a thin amber edge: it's generated, not scanned
+        planDraw(m, v, GLES20.GL_LINE_LOOP, new float[]{1f, 0.69f, 0.13f, 0.8f}, 1f);
+        GLES20.glLineWidth(1f);
+    }
+
     // ---- Good spots (Anchors): views with many features and 3D shape, to send the user to after a loss ----
     /** Debug tools "Good spot after a loss" (on by default). */
     static boolean GOOD_SPOTS = true;
@@ -8303,6 +8389,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         else { level = 0; hint = LIVE_POINTS ? "This spot is done. Move on" : LIVE_MESH ? "This spot is done. Move on to the next orange area" : "This spot is done. Move on to the next red area"; }
         if (System.currentTimeMillis() - clearedAtMs < 3000) { hint = "Cleared, scan that spot again"; level = 1; }
         if (memoryFull || count >= MAX_POINTS) { hint = "The scan is full: tap Done to keep it"; level = 1; }   // (11 Nov: out of memory on a 512 MB phone)
+        // The standing line (rk 11 Nov 21:42: "a warning always on screen ... makes the promise more honest"): it replaces
+        // the ordinary guidance; anything more urgent (plain wall, lost track, scan full) still takes its place.
+        else if (STANDING_NOTE && level <= 1 && count >= 3000 && System.currentTimeMillis() - clearedAtMs >= 3000) { hint = STANDING_TEXT; level = 1; }
         if (improveDir != null && contAuto) sub = improveT != null ? "✓ Saved room recognised. Keep scanning, the saved part is shown in blue"
                 : contBase == null ? "Loading the saved scan…" : "Point at a part you scanned before so it can find its place" + (contScore > 0 ? String.format(java.util.Locale.US, " (best match %.0f%%)", contScore * 100) : "");
         else if (improveDir != null) sub = improveCorners.size() < 2 ? "Saved scan has no corners to match: this will be kept as a new scan" : "Tap 2 room corners (where floor meets walls) to match the saved scan";
@@ -8422,7 +8511,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             photos.draw(mvp, cutaway && cutActive, roomCenter, cutDirX, cutDirZ, cutD, cutDir2X, cutDir2Z, cutD2, cutFloor, cutCeil);
         else if (style == 3 && !lighting.enabled && meshTris > 0) drawBareMesh(mvp);
         else if ((style == 1 || lighting.enabled) && surfCount > 0 && !depthRunning) drawSurfels(mvp);
-        else { drawPoints(mvp, roomReady ? 0.9f : 1f); if (FLAT_TILES) flatTiles.draw(mvp); }
+        else { drawFilledWall(mvp); drawPoints(mvp, roomReady ? 0.9f : 1f); if (FLAT_TILES) flatTiles.draw(mvp); }
         // A thumbnail frame shows just the room: no labels, markers or props.
         boolean clean = photoThumbWanted && style == 2 && !walking && count > 0 && currentDir != null;
         if (!clean) {

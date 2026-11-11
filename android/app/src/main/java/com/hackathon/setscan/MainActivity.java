@@ -792,6 +792,14 @@ public class MainActivity extends Activity {
             Button uwB = new Button(this);   // EXPERIMENT (remove with experiment/): records the ultrawide without ARCore
             uwB.setText("Ultrawide recorder (experiment)");
             uwB.setOnClickListener(v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)));
+            Button fillB = new Button(this);
+            ScanRenderer.FILL_WALL = sp.getBoolean("abFillWall", true);
+            fillB.setText(ScanRenderer.FILL_WALL ? "Fill the plain wall: on" : "Fill the plain wall: off");
+            fillB.setOnClickListener(v -> { ScanRenderer.FILL_WALL = !ScanRenderer.FILL_WALL; sp.edit().putBoolean("abFillWall", ScanRenderer.FILL_WALL).apply(); fillB.setText(ScanRenderer.FILL_WALL ? "Fill the plain wall: on" : "Fill the plain wall: off"); });
+            Button noteB = new Button(this);
+            ScanRenderer.STANDING_NOTE = sp.getBoolean("abStandingNote", true);
+            noteB.setText(ScanRenderer.STANDING_NOTE ? "Standing notice: on" : "Standing notice: off");
+            noteB.setOnClickListener(v -> { ScanRenderer.STANDING_NOTE = !ScanRenderer.STANDING_NOTE; sp.edit().putBoolean("abStandingNote", ScanRenderer.STANDING_NOTE).apply(); noteB.setText(ScanRenderer.STANDING_NOTE ? "Standing notice: on" : "Standing notice: off"); });
             Button pullB = new Button(this);
             ScanRenderer.PULL_BACK = sp.getBoolean("abPullBack", false);
             pullB.setText(ScanRenderer.PULL_BACK ? "Pulled-back view: on" : "Pulled-back view: off");
@@ -819,7 +827,7 @@ public class MainActivity extends Activity {
             scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off");
             scrB.setOnClickListener(v -> { ScanRenderer.SCREEN_VIDEO = !ScanRenderer.SCREEN_VIDEO; sp.edit().putBoolean("abScreen", ScanRenderer.SCREEN_VIDEO).apply(); scrB.setText(ScanRenderer.SCREEN_VIDEO ? "Screen video: on" : "Screen video: off"); toast("From the next scan"); });
             capB.setOnClickListener(v -> { renderer.fpsCap30 = !renderer.fpsCap30; sp.edit().putBoolean("abCap30v2", renderer.fpsCap30).apply(); capB.setText(renderer.fpsCap30 ? "Draw: 15 fps" : "Draw: 60 fps"); });
-            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB}) {
+            for (Button bt : new Button[]{gpuB, testB, recB, focB, capB, scrB, liveB, photoB, tilesB, dropB, wallsB, lowB, spotB, warnB, uwB, pullB, fillB, noteB}) {
                 bt.setAllCaps(false); bt.setMinHeight(0); bt.setMinimumHeight(0); bt.setMinWidth(0); bt.setMinimumWidth(0);
                 bt.setPadding(dp(12), dp(8), dp(12), dp(8)); Ios.pill(bt); bars.addView(bt);
             }
@@ -2119,11 +2127,7 @@ public class MainActivity extends Activity {
         col.addView(Ios.footer(this, "Open a room scanned with RoomScape on another phone. Or send one from a nearby phone: open a scan there and tap Share → Send to nearby phone."));
         col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_list, "Item catalog", false, true, v -> nativePlanning.showCatalog())));
         col.addView(Ios.footer(this, "Lights, stands and grip you can place in a room, with sizes and power draw. Works offline."));
-        if (!guestBuild()) {   // EXPERIMENT (remove with experiment/): never in guest builds
-            col.addView(Ios.card(this, Ios.row(this, R.drawable.ic_scan, "Ultrawide recorder (experiment)", false, true,
-                    v -> startActivity(new android.content.Intent(this, com.hackathon.setscan.experiment.UltrawideRecorderActivity.class)))));
-            col.addView(Ios.footer(this, "Records the wide lens without ARCore, to test whether it could track plain walls. Nothing is scanned."));
-        }
+        // (the ultrawide recorder experiment is off the home screen: rk 11 Nov 21:40, "they won't help us"; still in debug tools)
 
         col.addView(Ios.header(this, "Saved scans"));
         homeList = new LinearLayout(this);
