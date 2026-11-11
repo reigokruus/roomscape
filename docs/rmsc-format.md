@@ -48,6 +48,13 @@ metres in the package's frame (the floor shift doesn't change them); absent when
 `area` is the seen floor). `handSet`: the user moved walls in the result (the scan's own numbers are then replaced).
 `wallSides`: how many of the 4 sides the scan found a wall on (fewer: "about"). Readers that don't know it ignore it.
 
+The iPhone writes it too (from 11 Nov 2026). When its points show two rooms or more, they are split at doorways with
+the Android app's method and written the same way. A single room comes from RoomPlan's floor outline instead: its
+`outline` has as many corners as the room has (an L-shaped room has six), `area` is the area inside it, and `width` ×
+`length` is the smallest rectangle around it that lines up with one of its sides; it has no `wallSides`. `handSet`
+and the moved `outline` follow the walls the user dragged. A reader should accept an outline with any number of
+corners (three or more).
+
 ### Flat tiles (`tiles.json` + `tiles.png`, optional)
 
 ```json

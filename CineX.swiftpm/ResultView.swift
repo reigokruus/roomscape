@@ -75,6 +75,11 @@ struct ResultView: View {
     @State private var lighting: LightingSetup?
     @State private var lightingScene: LightingScene?
     @State private var shell: RoomShell?
+    /// The floor's rooms (area, size, tap a room, drag its walls), as on the Android app; see `FloorRooms`.
+    @State private var floorRooms: FloorRooms?
+    @State private var selectedRoom: Int?
+    @State private var dragSide: Int?
+    private let floorRoomsNode = FloorRoomsNode()
     /// Objects (RoomPlan's furniture, plus what Claude finds in the photos): edited in the Objects panel.
     @State private var objectsOn = false
     @State private var objects: [RoomObject] = []
@@ -119,11 +124,12 @@ struct ResultView: View {
             ZStack(alignment: .top) {
                 if let scene {
                     RoomSceneView(scene: scene, topView: topView, topTurn: room.map(Self.squaringTurn) ?? 0,
-                                  floorY: (lightingOn || objectsOn || walk == .choosing) ? walkFloorY : nil,
+                                  floorY: (lightingOn || objectsOn || walk == .choosing || measuringRooms) ? walkFloorY : nil,
                                   onFloorTap: floorTapped,
                                   onTapRay: pickingAreas ? areaTapped : objectsOn ? objectTapped : nil,
                                   onTwist: objectsOn && selectedMovable ? objectTwisted : nil,
                                   onObjectDrag: objectsOn && selectedMovable ? objectDragged : nil,
+                                  onFloorDrag: measuringRooms ? wallDragged : nil,
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove, walkStrafe: walkStrafe, gyroLook: walkGyro,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)),
                                   measuring: measuring && walk.standingAt != nil, measureClear: measureClear,
@@ -155,6 +161,12 @@ struct ResultView: View {
                 .padding(10)
                 // One row or two: the large camera view starts below them.
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controlsHeight = $0 }
+            }
+            .overlay(alignment: .top) {
+                // The picked room's line, and Reset walls once a wall was dragged (Android: next to the size line).
+                if measuringRooms, let rooms = floorRooms, selectedRoom != nil || dragSide != nil || rooms.anyEdited {
+                    roomBar(rooms).padding(.top, controlsHeight + 6).padding(.horizontal, 12)
+                }
             }
             .overlay(alignment: .bottomLeading) {
                 if pickingAreas { areaBar.padding(12) }
@@ -194,6 +206,7 @@ struct ResultView: View {
                                 newTitle = current.title ?? ""
                                 renaming = true
                             }, capture: capture, foundWindows: foundWindows, objects: objects, improved: improved,
+                            floorRooms: floorRooms,
                             onImprove: WorldMapStore.exists(scan) ? onImprove : nil, outletCount: outlets.count,
                             recordingBytes: recordingBytes,
                             onScanArea: WorldMapStore.exists(scan) && onImprove != nil ? { startPickingAreas() } : nil)
@@ -210,7 +223,7 @@ struct ResultView: View {
         }
         // A title menu here would push Plan a Shoot and Share into an overflow menu; rooms are named on Home.
         .navigationTitle(current.title ?? scan.date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
-        .modifier(ImprovedSubtitle(date: improved.last))
+        .modifier(RoomSubtitle(text: subtitle))
         .navigationBarTitleDisplayMode(.inline)
         // Black bar above the black 3D view, with light title, buttons and status bar in light mode too.
         .toolbarBackground(Color.black, for: .navigationBar)
@@ -298,6 +311,7 @@ struct ResultView: View {
             if lighting != nil { refreshRoomLight() }
             RoomObjects.save(ObjectsFile(claudeChecked: claudeChecked, objects: objects), for: scan)
         }
+        .onChange(of: measuringRooms) { _, _ in showFloorRooms() }
         .onChange(of: selectedObject) { _, id in
             objectsScene?.apply(objects, selected: id)
         }
@@ -595,7 +609,102 @@ struct ResultView: View {
         return best
     }
 
+    // MARK: Rooms on the floor (area, tap a room, drag its walls)
+
+    /// The plain 3D view (no panel, not standing in the room or marking areas): rooms can be tapped, walls dragged.
+    private var measuringRooms: Bool {
+        floorRooms != nil && walk == .off && !lightingOn && !objectsOn && !pickingAreas
+    }
+
+    /// The room whose walls show and can be dragged: the picked one, else the first (as on Android).
+    private var adjustableRoom: Int { selectedRoom ?? 0 }
+
+    private var subtitle: String? {
+        var parts: [String] = []
+        if let floorRooms {
+            parts.append(floorRooms.titleText(selected: selectedRoom, wallSize: room.flatMap(RoomSummary.wallSize).map { ($0.long, $0.short) }))
+        }
+        if let last = improved.last, selectedRoom == nil {
+            parts.append("Improved \(last.formatted(.dateTime.day().month(.abbreviated).hour().minute()))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The picked room's numbers, and Reset walls.
+    private func roomBar(_ rooms: FloorRooms) -> some View {
+        HStack(spacing: 8) {
+            if selectedRoom != nil || dragSide != nil {
+                let i = adjustableRoom
+                Text(rooms.rooms.count >= 2 ? "Room \(i + 1): " + rooms.roomText(i) : rooms.roomText(i))
+                    .font(.callout.monospacedDigit())
+                    .lineLimit(2)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+            }
+            if rooms.anyEdited, dragSide == nil {
+                Button("Reset walls") { resetWalls() }
+                    .buttonStyle(.bordered)
+                    .font(.callout)
+            }
+        }
+    }
+
+    /// Shows the rooms' lines and the picked room in the 3D view (hidden while a panel is open).
+    private func showFloorRooms() {
+        guard let scene, let floorRooms else { return }
+        if floorRoomsNode.root.parent == nil { scene.rootNode.addChildNode(floorRoomsNode.root) }
+        floorRoomsNode.update(floorRooms, selected: selectedRoom, adjustable: adjustableRoom, dragging: dragSide)
+        floorRoomsNode.root.isHidden = !measuringRooms
+    }
+
+    private func resetWalls() {
+        guard var rooms = floorRooms else { return }
+        rooms.edits = rooms.rooms.map { [Double](repeating: 0, count: $0.outline.count) }
+        floorRooms = rooms
+        saveFloorRooms()
+        showFloorRooms()
+    }
+
+    private func saveFloorRooms() {
+        guard let rooms = floorRooms else { return }
+        let scan = scan
+        Task.detached(priority: .utility) { rooms.save(scan) }
+    }
+
+    /// One finger that starts on a wall line moves that wall along the floor (1 cm steps); else it turns the view.
+    private func wallDragged(_ phase: Int, _ origin: SIMD3<Float>, _ dir: SIMD3<Float>) -> Bool {
+        guard var rooms = floorRooms, abs(dir.y) > 1e-4 else { return false }
+        let t = (rooms.floorY - origin.y) / dir.y
+        guard t > 0 else { return phase != 0 }
+        let hit = origin + dir * t
+        let p = FloorPoint(x: Double(hit.x), z: Double(hit.z))
+        switch phase {
+        case 0:
+            // Within about a finger's width on screen: wider the further the floor is from the camera.
+            let tolerance = max(0.12, Double(t) * 0.05)
+            guard let side = rooms.side(near: p, room: adjustableRoom, tolerance: tolerance) else { return false }
+            dragSide = side
+        case 1:
+            guard let side = dragSide else { return false }
+            rooms.drag(room: adjustableRoom, side: side, to: p)
+            floorRooms = rooms
+        default:
+            guard dragSide != nil else { return false }
+            dragSide = nil
+            saveFloorRooms()
+        }
+        showFloorRooms()
+        return true
+    }
+
     private func floorTapped(_ p: SIMD3<Float>) {
+        if measuringRooms, let rooms = floorRooms {
+            // A tap on a room's floor picks it (its numbers show, its walls can be dragged); again, or outside, lets go.
+            let hit = rooms.room(at: FloorPoint(x: Double(p.x), z: Double(p.z)))
+            selectedRoom = hit == selectedRoom ? nil : hit
+            showFloorRooms()
+            return
+        }
         if walk == .choosing {
             walk = .inside(p)
         } else if objectsOn {
@@ -647,6 +756,19 @@ struct ResultView: View {
             modelGroup = group
         case .failure(let error):
             loadError = "Could not open the 3D model: \(error.localizedDescription)"
+        }
+
+        // The floor's rooms (area, size, tap a room, drag its walls): measured alongside the rest of the loading.
+        if let room = loaded.0 {
+            Task {
+                let made = await Task.detached(priority: .userInitiated) {
+                    FloorRooms.make(room: room, points: ScanStore.loadPoints(scan), scan: scan)
+                }.value
+                floorRooms = made
+                // floor-area.json, the numbers a shared .rmsc carries.
+                if let made { Task.detached(priority: .utility) { made.save(scan) } }
+                showFloorRooms()
+            }
         }
 
         // Windows from the photos and LiDAR: RoomPlan misses many (curtained ones especially). Shown on the walls
@@ -1292,6 +1414,8 @@ struct RoomSceneView: UIViewRepresentable {
     /// Objects mode: a one-finger drag that starts on the selected object moves it (0 began, 1 moved, 2 ended), as a
     /// ray (origin, unit direction); the began call returns true when it took the drag (the view doesn't turn then).
     var onObjectDrag: ((Int, SIMD3<Float>, SIMD3<Float>) -> Bool)? = nil
+    /// The same for a room's wall lines on the floor (used when no object can be dragged).
+    var onFloorDrag: ((Int, SIMD3<Float>, SIMD3<Float>) -> Bool)? = nil
     /// Standing in the room (first person) at this floor point; nil = the orbit or top view.
     var standAt: SIMD3<Float>? = nil
     /// The floor, for walking to a double-tapped spot.
@@ -1348,7 +1472,7 @@ struct RoomSceneView: UIViewRepresentable {
         @objc func orbitPanned(_ g: UIPanGestureRecognizer) {
             guard let view = g.view else { return }
             // Objects mode: a drag that starts on the selected object slides it along the floor instead.
-            if let scn = view as? SCNView, let onObjectDrag, standing == nil {
+            if let scn = view as? SCNView, let onObjectDrag = onObjectDrag ?? onFloorDrag, standing == nil {
                 let t = g.translation(in: view), at = g.location(in: view)
                 if g.state == .began, let (o, d) = ray(CGPoint(x: at.x - t.x, y: at.y - t.y), in: scn), onObjectDrag(0, o, d) {
                     draggingObject = true
@@ -1468,6 +1592,7 @@ struct RoomSceneView: UIViewRepresentable {
         var onTapRay: ((SIMD3<Float>, SIMD3<Float>) -> Bool)?
         var onTwist: ((Int, Float) -> Void)?
         var onObjectDrag: ((Int, SIMD3<Float>, SIMD3<Float>) -> Bool)?
+        var onFloorDrag: ((Int, SIMD3<Float>, SIMD3<Float>) -> Bool)?
         private var draggingObject = false
 
         func ray(_ p: CGPoint, in view: SCNView) -> (SIMD3<Float>, SIMD3<Float>)? {
@@ -1961,6 +2086,7 @@ struct RoomSceneView: UIViewRepresentable {
         context.coordinator.onTapRay = onTapRay
         context.coordinator.onTwist = onTwist
         context.coordinator.onObjectDrag = onObjectDrag
+        context.coordinator.onFloorDrag = onFloorDrag
         context.coordinator.walkFloorY = walkFloorY
         context.coordinator.viewHeight = view.bounds.height
         context.coordinator.walkMove = walkMove
@@ -1993,6 +2119,7 @@ struct SourceManifest {
     var walls: [[Double]] { (room?["walls"] as? [[NSNumber]])?.map { $0.map(\.doubleValue) } ?? [] }
     var corners: [[Double]] { (room?["corners"] as? [[NSNumber]])?.map { $0.map(\.doubleValue) } ?? [] }
     var ceilingY: Double? { (json["ceilingY"] as? NSNumber)?.doubleValue }
+    var floorArea: PackageFloorArea? { PackageFloorArea(json["floorArea"]) }
     var device: String? { (json["source"] as? [String: Any])?["device"] as? String }
     var platform: String? { (json["source"] as? [String: Any])?["platform"] as? String }
     var created: Date? { (json["created"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } }
@@ -2022,6 +2149,17 @@ struct ImportedRoomSummary: View {
                 }
                 .tint(.primary)
                 LabeledContent("Approx. size", value: sizeText)
+                if let floor = manifest?.floorArea {
+                    LabeledContent("Floor area", value: floor.text)
+                    if floor.rooms.count >= 2 {
+                        ForEach(floor.rooms.indices, id: \.self) { i in
+                            LabeledContent("Room \(i + 1)", value: PackageFloorArea.text(floor.rooms[i]))
+                        }
+                    }
+                } else if let corners = manifest?.corners, corners.count >= 3 {
+                    let area = FloorOutline.area(corners.filter { $0.count >= 3 }.map { FloorPoint(x: $0[0], z: $0[2]) })
+                    if area >= 0.5 { LabeledContent("Floor area", value: FloorOutline.text(area: area, rough: true)) }
+                }
                 if let walls = manifest?.walls, !walls.isEmpty { LabeledContent("Walls", value: "\(walls.count)") }
                 if outletCount > 0 { LabeledContent("Power outlets", value: "\(outletCount)") }
             }
@@ -2086,6 +2224,8 @@ struct RoomSummary: View {
     /// The Objects panel's list, with the user's edits. Empty for scans without points: then RoomPlan's own objects.
     var objects: [RoomObject] = []
     var improved: [Date] = []
+    /// The floor's rooms as measured (and maybe set by hand) in the 3D view; nil: RoomPlan's floor outline only.
+    var floorRooms: FloorRooms? = nil
     var onImprove: (() -> Void)?
     /// Power outlets found in the room (synced from the Android app's search).
     var outletCount = 0
@@ -2121,7 +2261,7 @@ struct RoomSummary: View {
                     }
                 }
             }
-            Section("Room") {
+            Section {
                 if let onRename {
                     Button(action: onRename) {
                         LabeledContent("Name") {
@@ -2137,7 +2277,23 @@ struct RoomSummary: View {
                     }
                     .tint(.primary)
                 }
-                LabeledContent("Approx. size", value: sizeText)
+                if let rooms = floorRooms, rooms.rooms.count == 1, rooms.isEdited(0) {
+                    let s = rooms.size(0)
+                    LabeledContent("Size", value: String(format: "%.2f × %.2f m, %.2f m high (walls set by hand)", s.length, s.width,
+                                                         Self.wallSize(room)?.height ?? 0))
+                } else {
+                    LabeledContent("Approx. size", value: sizeText)
+                }
+                if let rooms = floorRooms {
+                    LabeledContent("Floor area", value: rooms.areaText)
+                    if rooms.rooms.count >= 2 {
+                        ForEach(rooms.rooms.indices, id: \.self) { i in
+                            LabeledContent("Room \(i + 1)", value: rooms.roomText(i))
+                        }
+                    }
+                } else if let floor = RoomFloor(room: room) {
+                    LabeledContent("Floor area", value: floor.text)
+                }
                 LabeledContent("Walls", value: "\(room.walls.count)")
                 LabeledContent("Windows (natural light)", value: "\(room.windows.count + missedWindows.count)")
                 LabeledContent("Doors", value: "\(room.doors.count)")
@@ -2146,6 +2302,13 @@ struct RoomSummary: View {
                 }
                 if !room.openings.isEmpty {
                     LabeledContent("Openings", value: "\(room.openings.count)")
+                }
+            } header: {
+                Text("Room")
+            } footer: {
+                if let rooms = floorRooms {
+                    Text((rooms.rooms.count >= 2 ? "Tap a room's floor in the 3D view for its own size. " : "")
+                         + "A curtain or a cupboard against a wall is measured as the wall: drag the amber line on the floor to where the wall really is.")
                 }
             }
             if !missedWindows.isEmpty {
@@ -2208,9 +2371,14 @@ struct RoomSummary: View {
         return counts.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
-    /// Length and width measured along the room's longest wall, so a room scanned at an angle isn't overstated.
     private var sizeText: String {
-        guard let longest = room.walls.max(by: { $0.dimensions.x < $1.dimensions.x }) else { return "–" }
+        guard let s = Self.wallSize(room) else { return "–" }
+        return String(format: "%.2f × %.2f m, %.2f m high", s.long, s.short, s.height)
+    }
+
+    /// Length and width measured along the room's longest wall, so a room scanned at an angle isn't overstated.
+    static func wallSize(_ room: CapturedRoom) -> (long: Double, short: Double, height: Double)? {
+        guard let longest = room.walls.max(by: { $0.dimensions.x < $1.dimensions.x }) else { return nil }
         let along = simd_normalize(simd_float3(longest.transform.columns.0.x, 0, longest.transform.columns.0.z))
         let across = simd_float3(-along.z, 0, along.x)
         var minA = Float.greatestFiniteMagnitude, maxA = -Float.greatestFiniteMagnitude
@@ -2227,8 +2395,7 @@ struct RoomSummary: View {
             }
             height = max(height, wall.dimensions.y)
         }
-        let (long, short) = (max(maxA - minA, maxB - minB), min(maxA - minA, maxB - minB))
-        return String(format: "%.2f × %.2f m, %.2f m high", long, short, height)
+        return (Double(max(maxA - minA, maxB - minB)), Double(min(maxA - minA, maxB - minB)), Double(height))
     }
 }
 
@@ -2326,13 +2493,14 @@ private struct TrainingStatus: View {
     }
 }
 
-/// "Improved 7 Nov at 17:05" under the title (iOS 26 and later; the Capture section says it on every version).
-private struct ImprovedSubtitle: ViewModifier {
-    let date: Date?
+/// The line under the title: the room's size and floor area (or the picked room's), and "Improved 7 Nov at 17:05"
+/// (iOS 26 and later; the Room and Capture sections say the same on every version).
+private struct RoomSubtitle: ViewModifier {
+    let text: String?
 
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *), let date {
-            content.navigationSubtitle("Improved \(date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))")
+        if #available(iOS 26.0, *), let text {
+            content.navigationSubtitle(text)
         } else {
             content
         }
