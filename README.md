@@ -120,6 +120,8 @@ Apps signed with a free Apple ID stop working after 7 days; run again to reinsta
 
 ## For developers
 
+- [CLAUDE.md](CLAUDE.md): how to work in this code (layout, builds, tests, the rules that matter, open work). Claude Code,
+  including the VS Code extension, reads it automatically.
 - [.rmsc format](docs/rmsc-format.md): points, photos, depth, mesh, flat tiles, floor area. Version 1, optional
   fields only.
 - [Test harness](docs/test-harness.md): the apps' own code run on the Mac on synthetic rooms and on real recordings
