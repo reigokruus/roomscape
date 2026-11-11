@@ -4907,7 +4907,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // visible on the S24": the window was placed from the pulled-back camera, so it filled the same part of the
             // screen and the pull-back looked like nothing happened).
             Matrix.multiplyMM(realMvp, 0, proj, 0, view, 0);
-            if (holding) {
+            if (holding && PULL_BACK) {
                 float k = Math.min(1f, (nowMs - holdStartMs) / 800f); k = k * k * (3 - 2 * k);
                 // Not through a scanned wall behind the phone (a small room: 1.5 m back put the camera behind the wall,
                 // looking at its back): back as far as there's room, then up instead.
@@ -7050,6 +7050,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // ---- Wide overview while scanning (as on the iPhone, ScanOverview.swift) ----
     /** Turn the overview off here: the scan screen is then the camera view as before. */
     static final boolean OVERVIEW = true;
+    /** Debug tools "Pulled-back view": the scan view's camera sits behind the phone (0.6 m, wider) and pulls further back
+     *  while lost. Off (rk 11 Nov 21:28: "don't pull back at all", to try scanning with plain walls kept in sight from
+     *  further away): the view is the phone's own. */
+    static boolean PULL_BACK = false;
     /** Virtual camera: metres behind and above the phone, vertical field of view; the camera window's distance and opacity. */
     // rk 9 Nov "the pullback is a bit too much": 0.6 m and 85° (were 0.9 m, 100°) show the camera's area ~1.5x bigger.
     static final float OV_PULL = 0.6f, OV_LIFT = 0.2f, OV_FOV = 85f, OV_WINDOW = 1.2f, OV_OPACITY = 0.7f;
@@ -7064,7 +7068,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Each scan frame: eases in once there's mesh, then replaces mvp with the pulled-back camera's. */
     private void overviewCamera(boolean tracking, long nowMs) {
-        if (viewing) { overviewBlend = 0; ovEaseStart = -1; ovPos = null; return; }
+        if (viewing || !PULL_BACK) { overviewBlend = 0; ovEaseStart = -1; ovPos = null; return; }
         if (ovEaseStart < 0 && tracking && (liveMeshTriVerts >= OV_MIN_VERTS || (LIVE_POINTS && count > 20000))) ovEaseStart = nowMs;
         if (ovEaseStart < 0) return;
         float t = Math.min(1f, (nowMs - ovEaseStart) / (float) OV_EASE_MS);
