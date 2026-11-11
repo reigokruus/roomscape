@@ -121,6 +121,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  230 of 255 or more. A spot with only weaker readings isn't drawn, doesn't count as scanned, and isn't saved as a
      *  scan point (lowconf-points.bin keeps it aside); a sure reading later paints it. Debug tools "Paint from confidence". */
     static volatile int PAINT_MIN = 230;
+    private long depthKeptPx, depthAllPx;   // depth pixels at PAINT_MIN or more, of all (for the finish line)
     static boolean painted(int conf) { return conf == 0 || conf >= PAINT_MIN; }   // 0 = no rating (older scans, other sources)
     /** What's drawn: the real colour or the confidence grey; dots below PAINT_MIN hidden (alpha 0); unrated dots black
      *  in the greys. The real colours stay in col, untouched. */
@@ -2488,7 +2489,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         log(String.format(java.util.Locale.US, "tracking health: %d losses, %d pose jumps, fewest features %s, longest exposure %.0f ms; video %s, focus %s, draw %s",
                     healthLosses, poseJumps, healthMinFeatures == Integer.MAX_VALUE ? "-" : String.valueOf(healthMinFeatures), healthMaxExposureNs / 1e6,
                     MainActivity.recordWanted ? "on" : "off", FIXED_FOCUS ? "fixed" : "auto", fpsCap30 ? "30 fps" : "60 fps"));
-            log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through");
+            log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through"
+                    + (depthAllPx > 0 ? String.format(java.util.Locale.US, "; depth pixels sure enough (confidence %d+): %.0f%%", PAINT_MIN, 100.0 * depthKeptPx / depthAllPx) : ""));
         perf.stage("after Done");
         // The logs, video and diagnostics go into THIS scan's folder: a minute after Done (the after-Done steps take well
         // under a minute), or at once when another scan is started or opened first (rk 10 Nov 15:04-15:06: three quick
@@ -3820,7 +3822,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void reset() {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
-        anchors.clear(); clearGoal(); anchorOfferAt = 0;
+        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0;
         filledWall = null; wallCand = null; wallCandHits = 0; guessCells = null; shownSet = false; guessWeight = 0; guessUpdates = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
@@ -5315,6 +5317,19 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (conf != null) {
                 Image.Plane cp = conf.getPlanes()[0];
                 cbuf = cp.getBuffer(); cRow = cp.getRowStride(); cPix = cp.getPixelStride();
+            }
+            // Unsure depth is discarded at the door (rk 11 Nov 22:12: "I don't want them put on the scan at all ...
+            // unconfident spots are built on other unconfident spots, which is garbage"): every reading under PAINT_MIN
+            // becomes "no depth" here, before the dots, the surface, the line-up after a loss, see-through clearing,
+            // the depth fit and the event frames ever see it. (At the setting "all", the old 40/55 rules apply.)
+            if (cbuf != null && PAINT_MIN > 55) {
+                short[] md = new short[dw * dh]; int kept = 0;
+                for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) {
+                    int c = cbuf.get(v * cRow + u * cPix) & 0xFF;
+                    if (c >= PAINT_MIN) { md[v * dw + u] = dbuf.get(v * dRow + u * dPix); kept++; }
+                }
+                depthKeptPx += kept; depthAllPx += dw * dh;
+                dbuf = ShortBuffer.wrap(md); dRow = dw; dPix = 1;
             }
 
             float[] m = new float[16];
