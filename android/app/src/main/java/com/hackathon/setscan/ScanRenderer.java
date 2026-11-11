@@ -3758,6 +3758,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void reset() {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
+        anchors.clear(); clearGoal(); anchorOfferAt = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
         synchronized (this) { evRing.clear(); evKept.clear(); evUntil = 0; } trackN = 0; shadowRealign = null;
@@ -5237,6 +5238,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             applyFix(m);
             shadowCheck(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, rawM, nowMsFrame);
             System.arraycopy(m, 0, lastGoodCam, 0, 16); haveGoodCam = true;   // where the phone was, for a re-alignment guess
+            if (GOOD_SPOTS && nowMsFrame - anchorOfferAt >= 1000 && featuresNow >= Anchors.MIN_FEATURES) { anchorOfferAt = nowMsFrame; offerAnchor(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m); }
             int[] rgb = new int[3];
             frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
             depthPixelsFrame = 0; nearPixelsFrame = 0; nearSum[0] = nearSum[1] = nearSum[2] = 0;
@@ -6207,6 +6209,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         fixTry = poseFix.clone();
         stayGuess = null;
         realign = null; realignBuilding = true;
+        synchronized (goalTried) { goalTried.clear(); }
+        pickGoal("lost");
         // The cells take ~3 s for a big scan (10:44 scan: 2.8 s on the drawing thread): built aside; nothing is fused
         // meanwhile (realigned() waits for them).
         new Thread(() -> {
@@ -6580,6 +6584,59 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean newPartOffered;
 
     private final float[] lastGoodCam = new float[16];
+
+    // ---- Good spots (Anchors): views with many features and 3D shape, to send the user to after a loss ----
+    /** Debug tools "Good spot after a loss" (on by default). */
+    static boolean GOOD_SPOTS = true;
+    final Anchors anchors = new Anchors();
+    private volatile Anchors.Anchor goal; private volatile long goalSince; private long anchorOfferAt;
+    private final java.util.Set<Anchors.Anchor> goalTried = new java.util.HashSet<>();
+
+    private void offerAnchor(ShortBuffer dbuf, int dRow, int dPix, int dw, int dh, float fx, float fy, float cx, float cy, float[] m) {
+        try {
+            short[] d = new short[dw * dh];
+            for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) d[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+            float[] s = Anchors.shapeScore(d, dw, dh, fx, fy, cx, cy);
+            int f = featuresNow;
+            if (!Anchors.good(f, s)) return;
+            Anchors.Anchor a = Anchors.make(m, System.currentTimeMillis(), f, s);
+            Image img = cpuImage;
+            if (img != null) {   // a small grey picture of what the camera saw (the Y plane, ~160 wide)
+                Image.Plane yp = img.getPlanes()[0]; ByteBuffer yb = yp.getBuffer();
+                int iw = img.getWidth(), ih = img.getHeight(), step = Math.max(1, iw / 160), gw = iw / step, gh = ih / step, yRow = yp.getRowStride(), yPix = yp.getPixelStride();
+                byte[] g = new byte[gw * gh];
+                for (int v = 0; v < gh; v++) for (int u = 0; u < gw; u++) g[v * gw + u] = yb.get(v * step * yRow + u * step * yPix);
+                a.gray = g; a.gw = gw; a.gh = gh;
+            }
+            anchors.keep(a);
+        } catch (Throwable e) { logError("good spot", new RuntimeException(e)); }
+    }
+
+    /** Picks the good spot to send the user to (after a loss, or the next one when one didn't work). */
+    private void pickGoal(String why) {
+        if (!GOOD_SPOTS || !haveGoodCam) { clearGoal(); return; }
+        float[] o = new float[3]; long now = System.currentTimeMillis();
+        Anchors.Anchor a;
+        synchronized (goalTried) {
+            a = anchors.pick(lastGoodCam, now, goalTried, o);
+            if (a == null && goal != null) { goalSince = now; return; }   // no other: keep showing this one
+            if (a != null) goalTried.add(a);
+        }
+        goal = a; goalSince = now;
+        if (a != null) {
+            log(String.format(java.util.Locale.US, "good spot (%s): the view from %.0f s ago, %.1f m from where it was lost, turn %.0f deg, %d features, shape %.2f, score %.2f; %d spots kept",
+                    why, (now - a.ms) / 1000f, o[0], o[1], a.features, a.shape, o[2], anchors.size()));
+            activity.showSpot(a.gray, a.gw, a.gh);
+        } else {
+            log("good spot (" + why + "): none of the " + anchors.size() + " kept fits; pointing back where it was lost");
+            activity.showSpot(null, 0, 0);
+        }
+    }
+
+    private void clearGoal() {
+        if (goal != null) activity.showSpot(null, 0, 0);
+        goal = null;
+    }
     private boolean haveGoodCam;
     private volatile boolean realignBuilding;
     /** Second start for the re-alignment: the phone hasn't moved since the loss (its last good place, turned only
@@ -6588,6 +6645,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     private float[] stayGuessFor(float[] m) {
         if (!haveGoodCam) return null;
+        return guessFor(lastGoodCam, m);
+    }
+
+    /** The correction (turn about the vertical + shift) that puts the camera m where ref was. */
+    private static float[] guessFor(float[] ref, float[] m) {
+        float[] lastGoodCam = ref;
         float[] inv = new float[16], g = new float[16];
         if (!android.opengl.Matrix.invertM(inv, 0, m, 0)) return null;
         android.opengl.Matrix.multiplyMM(g, 0, lastGoodCam, 0, inv, 0);
@@ -6617,7 +6680,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // Never lined up after 30 s: the user decides (a first-time user mustn't be stuck with a scan that stopped
         // growing). Carrying on is a new part of the scan (its own segment, droppable later), never silent.
         if (forceResume) {
-            forceResume = false; needRealign = false; realign = null; segment++;
+            forceResume = false; needRealign = false; realign = null; segment++; clearGoal();
             log(String.format(java.util.Locale.US, "carrying on as a new part after %.1f s (the user chose it); segment %d", (nowMs - realignSince) / 1000f, segment));
             return true;
         }
@@ -6707,6 +6770,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 System.arraycopy(F, 0, poseFix, 0, 16);
                 evMark(); shadowRealign = realign; shadowUntil = nowMs + 20000; shadowFrom = nowMs;   // check the alignment for 20 s (shadow, not applied)
                 hasFix = true; needRealign = false; realign = null; recentPts.clear(); jumpGuess = null;
+                if (goal != null) log(String.format(java.util.Locale.US, "good spot: back on track %.1f s after showing it (%s)", (nowMs - goalSince) / 1000f, res.source));
+                clearGoal();
                 havePrevPose = false;   // the new correction moves the pose: not a jump (13:52: "pose jump 0.20 m" right after resuming)
                 segment++;
                 log(String.format(java.util.Locale.US, "back on track after %.1f s: correction %.3f, %.3f, %.3f m, %.1f deg; %d%% of the view on the scan, median %.1f cm; segment %d",
@@ -6723,6 +6788,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // at most ~1,200 samples: each attempt took 8-11 s on the phone with all of them (rk 10 Nov 13:36)
             if (all.size() > 1200) { java.util.ArrayList<float[]> sub = new java.util.ArrayList<>(1200); float st = all.size() / 1200f; for (int i = 0; i < 1200; i++) sub.add(all.get((int) (i * st))); all.clear(); all.addAll(sub); }
             final float[] tryFix = fixTry.clone(), stay = stayGuess == null ? null : stayGuess.clone(), oldFix = poseFix.clone();
+            final Anchors.Anchor gs = goal; final float[] atSpot = gs == null ? null : guessFor(gs.cam, m);   // as if the phone stood where the good spot was seen
             final float pivX = haveGoodCam ? lastGoodCam[12] : Float.NaN, pivZ = haveGoodCam ? lastGoodCam[14] : Float.NaN;
             final boolean restarted = sessionRestarted; final Realign rl = realign; final int attempt = ++realignAttempts;
             new Thread(() -> {
@@ -6734,6 +6800,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && stay != null) {
                         Realign.Fit f2 = rl.solve(all, stay);
                         if (f2.inliers > f.inliers) { f = f2; r.source = "where it was lost"; }
+                    }
+                    if (!(f.inliers >= 0.5f && f.median < Realign.MAX_MEDIAN) && atSpot != null) {
+                        Realign.Fit f4 = rl.solve(all, atSpot);
+                        if (f4.inliers > f.inliers) { f = f4; r.source = "at the good spot"; }
                     }
                     // The whole search (seconds on the phone) only when the quick attempts keep failing: every 4th attempt
                     // from the 3rd on, so the quick ones come about once a second.
@@ -7978,15 +8048,26 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private String backTo() {
-        if (!haveGoodCam) return "point at an area you already scanned";
+        Anchors.Anchor sp = goal;
+        if (!haveGoodCam && sp == null) return "point at an area you already scanned";
         float[] g = lastGoodCam;
         float tx = g[12] - g[8] * 1.5f, ty = g[13] - g[9] * 1.5f, tz = g[14] - g[10] * 1.5f;   // 1.5 m ahead of it
+        if (sp != null) { tx = sp.tx; ty = sp.ty; tz = sp.tz; }   // the good spot instead (rk 11 Nov: not the plain wall that lost it)
         float[] c = new float[4]; Matrix.multiplyMV(c, 0, viewMvp, 0, new float[]{tx, ty, tz, 1}, 0);
         boolean behind = c[3] <= 0.05f;
         float nx = behind ? -Math.signum(c[0] == 0 ? 1 : c[0]) * 2 : c[0] / c[3], ny = behind ? 0 : c[1] / c[3];
         if (!behind && Math.abs(nx) < 0.35f && Math.abs(ny) < 0.35f) return "hold still here a moment";
         String h = Math.abs(nx) >= Math.abs(ny) || behind ? (nx < 0 ? "turn left" : "turn right") : (ny > 0 ? "tilt up" : "tilt down");
         return h + (behind ? " (it's behind you)" : "") + ", back to where you last scanned";
+    }
+
+    /** The lost-track instruction: at the good spot when there is one (its picture shows under the hint), else back
+     *  where it was. A spot that hasn't worked in GIVE_UP_MS gives way to the next best. */
+    private String lostHint() {
+        Anchors.Anchor sp = goal;
+        if (sp != null && System.currentTimeMillis() - goalSince > Anchors.GIVE_UP_MS) { pickGoal("next"); sp = goal; }
+        return sp != null ? "Lost track. Stop and point at the spot in the picture" + backToSuffix()
+                : "Lost track. Stop and point back at where you were" + backToSuffix();
     }
 
     private boolean notAdding; private long notAddingSince;
@@ -8003,18 +8084,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // A quiet pause (rk 10 Nov 15:58: never "lost", no red, the scan stays in view): one calm hint.
             // rk 10 Nov 16:45: an immediate, clear notice so the user knows exactly when to stop moving
             level = 3;   // amber
-            hint = "Lost track. Stop and point back at where you were" + backToSuffix();
+            hint = lostHint();
         }
         else if (everTracked && lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 3000 && !needRealign) {
             // ARCore stopped giving new depth (15:23 scan: 8 s at the end, nothing added, nothing said)
             level = 3;
-            hint = "Lost track. Stop and point back at where you were" + backToSuffix();
+            hint = lostHint();
         }
         else if (needRealign && everTracked) {
             // tracking again but not yet lined up with the scan: nothing is added (14:58 scan: "Good. Keep swaying" showed
             // for 24 s while nothing was being scanned)
             level = 3;   // still not adding: the same notice until data is fused again
-            hint = "Lost track. Stop and point back at where you were" + backToSuffix();
+            hint = lostHint();
         }
         else if (ts != TrackingState.TRACKING) {
             level = 2;
