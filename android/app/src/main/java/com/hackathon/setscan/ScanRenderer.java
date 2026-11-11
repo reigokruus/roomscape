@@ -124,6 +124,40 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  230 of 255 or more. A spot with only weaker readings isn't drawn, doesn't count as scanned, and isn't saved as a
      *  scan point (lowconf-points.bin keeps it aside); a sure reading later paints it. Debug tools "Paint from confidence". */
     static volatile int PAINT_MIN = 230;
+    /** Debug tools "Closest sure look wins" (rk 11 Nov 22:25: wrong dots on the chair legs should "retry"): a sure
+     *  reading taken clearly closer than a dot's closest look replaces the dots along its line of sight within
+     *  +-SUPERSEDE_ALONG (2 cells of 2 cm: the S24's 90%+ depth scatters ~1-2 cm at 1 m) instead of landing beside them.
+     *  Only a clearly closer look (under 80% of the stored closest distance and at least 15 cm closer) wins, never a
+     *  farther or equal one (rk 10 Nov), so repeated looks settle instead of churning. Sideways only the reading's own
+     *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
+    static volatile boolean CLOSEST_WINS = true;
+    static final int SUPERSEDE_ALONG = 2;
+    private int supersededTotal;
+    /** Depth thread. Returns true when the reading took over its own cell's dot (nothing more to do for it). */
+    private boolean supersede(float wx, float wy, float wz, float cx, float cy, float cz, int mm, int[] rgb) {
+        int newCm = mm / 10;
+        float dx = wx - cx, dy = wy - cy, dz = wz - cz, l = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (l < 1e-3f) return false;
+        dx /= l; dy /= l; dz /= l;
+        boolean tookOwn = false;
+        for (int k = -SUPERSEDE_ALONG; k <= SUPERSEDE_ALONG; k++) {
+            float px = wx + dx * k * VOXEL, py = wy + dy * k * VOXEL, pz = wz + dz * k * VOXEL;
+            int idx = voxels.get(key(px, py, pz));
+            if (idx < 0 || idx >= count || obs[idx] == 0) continue;
+            int old = nearCm[idx];
+            if (old <= 0 || newCm >= old * 0.8f || old - newCm < 15) continue;   // not clearly closer: leave it
+            if (k == 0) {   // its own cell: the dot starts again from this closer, sure reading
+                pos.put(idx * 3, wx); pos.put(idx * 3 + 1, wy); pos.put(idx * 3 + 2, wz);
+                col.put(idx * 4, (byte) rgb[0]); col.put(idx * 4 + 1, (byte) rgb[1]); col.put(idx * 4 + 2, (byte) rgb[2]); col.put(idx * 4 + 3, (byte) seenAlpha(1));
+                obs[idx] = 1; thru[idx] = 0; seenStamp[idx] = stampFrame; confBest[idx] = (byte) curConf; nearCm[idx] = (short) Math.min(32767, newCm);
+                refined = true; tookOwn = true;
+            } else {        // in front of or behind the new surface on the same line: superseded (cleared, kept aside at Done)
+                obs[idx] = 0; col.put(idx * 4 + 3, (byte) 0); refined = true;
+            }
+            supersededTotal++;
+        }
+        return tookOwn;
+    }
     private long depthKeptPx, depthAllPx;   // depth pixels at PAINT_MIN or more, of all (for the finish line)
     static boolean painted(int conf) { return conf == 0 || conf >= PAINT_MIN; }   // 0 = no rating (older scans, other sources)
     /** What's drawn: the real colour or the confidence grey; dots below PAINT_MIN hidden (alpha 0); unrated dots black
@@ -2493,7 +2527,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     healthLosses, poseJumps, healthMinFeatures == Integer.MAX_VALUE ? "-" : String.valueOf(healthMinFeatures), healthMaxExposureNs / 1e6,
                     MainActivity.recordWanted ? "on" : "off", FIXED_FOCUS ? "fixed" : "auto", fpsCap30 ? "30 fps" : "60 fps"));
             log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through"
-                    + (depthAllPx > 0 ? String.format(java.util.Locale.US, "; depth pixels sure enough (confidence %d+): %.0f%%", PAINT_MIN, 100.0 * depthKeptPx / depthAllPx) : ""));
+                    + (depthAllPx > 0 ? String.format(java.util.Locale.US, "; depth pixels sure enough (confidence %d+): %.0f%%", PAINT_MIN, 100.0 * depthKeptPx / depthAllPx) : "")
+                    + (CLOSEST_WINS ? "; dots replaced by a closer sure look: " + supersededTotal : ""));
         perf.stage("after Done");
         // The logs, video and diagnostics go into THIS scan's folder: a minute after Done (the after-Done steps take well
         // under a minute), or at once when another scan is started or opened first (rk 10 Nov 15:04-15:06: three quick
@@ -3825,7 +3860,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     void reset() {
         synchronized (this) { logScanStart = log.length(); }   // the next scan's log starts here
         memLogAt = 0;
-        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0;
+        anchors.clear(); clearGoal(); anchorOfferAt = 0; depthKeptPx = 0; depthAllPx = 0; supersededTotal = 0;
         filledWall = null; wallCand = null; wallCandHits = 0; guessCells = null; shownSet = false; guessWeight = 0; guessUpdates = 0;
         flatTiles.clear(); tilesJob = null;
         lastLiveMesh = null;
@@ -5586,6 +5621,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (weak) continue;
                     if (hit < 0 || seenStamp[hit] != stampFrame) frameHits++;
                     curConf = cv; curMm = mm;
+                    if (CLOSEST_WINS && painted(cv) && supersede(wx, wy, wz, m[12], m[13], m[14], mm, rgb)) { curConf = 0; curMm = 0; continue; }
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); curConf = 0; curMm = 0; continue; }
                     voxels.put(vk, count);
                     addPoint(wx, wy, wz, rgb); curConf = 0; curMm = 0;
