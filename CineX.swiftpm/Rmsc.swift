@@ -167,8 +167,12 @@ enum Rmsc {
                 "doors": room?.doors.count ?? 0,
             ]
         }
-        // Floor area: from RoomPlan's floor outline; a room from another phone passes its own on (x, z don't move).
-        if let floor = room.flatMap(RoomFloor.init) {
+        // Floor area: as the result screen last measured it (rooms, walls set by hand: floor-area.json), else from
+        // RoomPlan's floor outline; a room from another phone passes its own on (x, z don't move).
+        if room != nil, let data = try? Data(contentsOf: FloorRooms.areaURL(scan)),
+           let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any], saved["rooms"] != nil {
+            manifest["floorArea"] = saved
+        } else if let floor = room.flatMap(RoomFloor.init) {
             manifest["floorArea"] = floor.manifest
         } else if shell == nil, let passed = SourceManifest.load(scan)?.json["floorArea"] {
             manifest["floorArea"] = passed

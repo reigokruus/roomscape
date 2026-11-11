@@ -64,9 +64,11 @@ This file is how to work in the code.
   that follows the walls instead of one rectangle per room; a manual split (draw a line across the floor). Ask for a
   few test scans: they're kept off the repo because they show a private home.
 - Android tracking loss on plain walls; the tile check (`tile check (shadow)` lines in `scan-log.txt`) only logs.
-- iPhone: floor area is one number per scan from RoomPlan's floor outline (`RoomFloor.swift`, maths in
-  `Planning/Core/FloorOutline.swift` with tests); tap-a-room and wall dragging aren't built; the carry-on past
-  RoomPlan's limit is untested.
+- iPhone floor area (`FloorRooms.swift`): two rooms or more from the points with `Planning/Core/RoomSplit.swift` (a
+  line-for-line port of `FloorArea.java`: keep the two in step; `RoomSplitTests` compares them on scans when
+  `CINEX_FLOOR_SCANS` is set), else RoomPlan's floor outline; tap a room, drag its sides (`floor-edits.json`),
+  numbers in `floor-area.json` and the .rmsc. Outline maths in `Planning/Core/FloorOutline.swift`, with tests.
+- iPhone: the carry-on past RoomPlan's limit is untested.
 - Other phones (e.g. Galaxy S23+) not tried yet.
 
 ## Reading a scan (Android)
