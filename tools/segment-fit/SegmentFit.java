@@ -69,7 +69,18 @@ public class SegmentFit {
             for (int i = 0; i < n; i++) if ((seg[i] & 255) == k && (c++ % step == 0)) pts.add(apply(undo, p[i * 3], p[i * 3 + 1], p[i * 3 + 2]));
             long t0 = System.currentTimeMillis();
             float[] expect = inv(undo);
-            Result r2 = fitV2(rest, nr, floorY, pts);
+            Result r2;
+            if (cnt > nr && System.getenv("SEGFIT_NOSWAP") == null) {
+                // the part is bigger than the rest: fit the rest onto the part, then turn the answer round
+                float[] part = new float[cnt * 3]; int q2 = 0;
+                for (int i = 0; i < n; i++) if ((seg[i] & 255) == k) { float[] w = apply(undo, p[i * 3], p[i * 3 + 1], p[i * 3 + 2]); part[q2++] = w[0]; part[q2++] = w[1]; part[q2++] = w[2]; }
+                List<float[]> rs = new ArrayList<>(); int stp = Math.max(1, nr / 3000);
+                for (int i = 0; i < nr; i += stp) rs.add(new float[]{rest[i * 3], rest[i * 3 + 1], rest[i * 3 + 2]});
+                r2 = fitV2(part, cnt, floorY, rs);
+                if (r2.fix != null) r2.fix = inv(r2.fix);
+                if (r2.best != null) r2.best = inv(r2.best);
+                r2.text = "(swapped) " + r2.text;
+            } else r2 = fitV2(rest, nr, floorY, pts);
             float err = live == null || r2.fix == null ? Float.NaN : Realign.away(r2.fix, expect);
             String verdict = r2.fix == null ? "LEFT SEPARATE (" + r2.why + ")" : live == null ? "placed" : err < 0.1f ? "RIGHT" : err < 0.25f ? "CLOSE" : "WRONG";
             System.out.printf(Locale.US, "  segment %d: %d points; carry-on offset %s; %s%s; %d ms%n",
@@ -98,12 +109,13 @@ public class SegmentFit {
         Result res = new Result();
         Realign rl = new Realign(rest, nr);
         // occupied voxels of the rest (3 cm) and its footprint (25 cm cells, any height)
-        HashSet<Long> vox = new HashSet<>(), foot = new HashSet<>(), wall = new HashSet<>();
+        HashMap<Long, float[]> vox = new HashMap<>(); HashSet<Long> foot = new HashSet<>(), wall = new HashSet<>();
         for (int i = 0; i < nr; i++) {
             float x = rest[i * 3], y = rest[i * 3 + 1], z = rest[i * 3 + 2];
-            vox.add(key(x, y, z, 0.03f)); foot.add(key(x, 0, z, 0.25f));
+            float[] cc = vox.computeIfAbsent(key(x, y, z, 0.02f), kk -> new float[4]); cc[0] += x; cc[1] += y; cc[2] += z; cc[3]++; foot.add(key(x, 0, z, 0.25f));
             if (y - floorY > 0.3f && y - floorY < 1.9f) wall.add(key(x, 0, z, 0.10f));
         }
+        for (float[] cc : vox.values()) { cc[0] /= cc[3]; cc[1] /= cc[3]; cc[2] /= cc[3]; }
         // upright samples of the part, for the 2D search
         List<float[]> up = new ArrayList<>();
         for (float[] q : pts) if (q[1] - floorY > 0.3f && q[1] - floorY < 1.9f) up.add(q);
@@ -142,17 +154,19 @@ public class SegmentFit {
         float[][] best = fits.get(0);
         res.best = best[0];
         float[][] second = null;
-        for (float[][] f : fits.subList(1, fits.size())) if (Realign.away(f[0], best[0]) > 0.3f) { second = f; break; }
+        for (float[][] f : fits.subList(1, fits.size())) if (Realign.away(f[0], best[0]) > 0.3f) { second = f; break; }   // (0.3: a few cm and degrees count as the same place)
         res.text = String.format(Locale.US, "best %s: overlap %.0f pts, %.0f%% on the scan, median %.1f cm%s", desc(best[0]), best[1][3], best[1][1] * 100, best[1][2] * 100,
                 second == null ? "" : String.format(Locale.US, "; next %s %.0f%% (score %.0f vs %.0f)", desc(second[0]), second[1][1] * 100, second[1][0], best[1][0]));
         if (best[1][3] < 300) { res.why = "too little overlap"; return res; }
-        if (best[1][1] < 0.6f || best[1][2] > 0.02f) { res.why = "fits poorly"; return res; }
-        if (second != null && second[1][0] > 0.8f * best[1][0]) { res.why = "ambiguous"; return res; }
+        if (best[1][1] < 0.6f || best[1][2] > 0.03f) { res.why = "fits poorly"; return res; }
+        if (second != null && second[1][0] > 0.8f * best[1][0]) { res.why = String.format(Locale.US, "ambiguous: next %.2f away, %.0f%% of the score", Realign.away(second[0], best[0]), 100 * second[1][0] / best[1][0]); return res; }
         // two agreeing fits: each half of the part on its own, from the best placement
         List<float[]> h1 = new ArrayList<>(), h2 = new ArrayList<>();
         for (int i = 0; i < pts.size(); i++) (i % 2 == 0 ? h1 : h2).add(pts.get(i));
         Realign.Fit a1 = rl.solve(h1, best[0]), a2 = rl.solve(h2, best[0]);
-        if (Realign.away(a1.fix, a2.fix) > 0.1f || Realign.away(a1.fix, best[0]) > 0.1f) { res.why = "halves disagree"; return res; }
+        float hd = Math.max(Realign.away(a1.fix, a2.fix), Math.max(Realign.away(a1.fix, best[0]), Realign.away(a2.fix, best[0])));
+        res.text += String.format(Locale.US, "; halves %.2f apart", hd);
+        if (hd > 0.15f) { res.why = "halves disagree"; return res; }
         res.fix = best[0];
         return res;
     }
@@ -179,19 +193,24 @@ public class SegmentFit {
 
     /** Score on the overlap only: the part's points that land on the rest's footprint; of those, the share within 3 cm
      *  (a filled voxel or a neighbour) and their median distance proxy. {score, inliers, median, overlap count} */
-    static float[] overlapScore(float[] F, List<float[]> pts, HashSet<Long> vox, HashSet<Long> foot) {
-        int ov = 0, in = 0;
+    static float[] overlapScore(float[] F, List<float[]> pts, HashMap<Long, float[]> vox, HashSet<Long> foot) {
+        int ov = 0, in = 0; float[] ds = new float[pts.size()];
         for (float[] q : pts) {
             float[] w = apply(F, q[0], q[1], q[2]);
             if (!foot.contains(key(w[0], 0, w[2], 0.25f))) continue;
-            ov++;
-            boolean hit = false;
-            for (int dx = -1; dx <= 1 && !hit; dx++) for (int dy = -1; dy <= 1 && !hit; dy++) for (int dz = -1; dz <= 1 && !hit; dz++)
-                if (vox.contains(key(w[0] + dx * 0.03f, w[1] + dy * 0.03f, w[2] + dz * 0.03f, 0.03f))) hit = true;
-            if (hit) in++;
+            float best = 0.08f;
+            for (int dx = -2; dx <= 2; dx++) for (int dy = -2; dy <= 2; dy++) for (int dz = -2; dz <= 2; dz++) {
+                float[] c = vox.get(key(w[0] + dx * 0.02f, w[1] + dy * 0.02f, w[2] + dz * 0.02f, 0.02f));
+                if (c == null) continue;
+                float d = (float) Math.sqrt((c[0] - w[0]) * (c[0] - w[0]) + (c[1] - w[1]) * (c[1] - w[1]) + (c[2] - w[2]) * (c[2] - w[2]));
+                if (d < best) best = d;
+            }
+            ds[ov++] = best;
+            if (best < 0.05f) in++;   // ARCore depth points scatter 2-3 cm: 5 cm counts as on the surface
         }
         float inl = ov == 0 ? 0 : (float) in / ov;
-        return new float[]{in, inl, inl > 0.5f ? 0.015f : 0.03f, ov};
+        float med = 0.06f; if (ov > 0) { float[] d2 = Arrays.copyOf(ds, ov); Arrays.sort(d2); med = d2[ov / 2]; }
+        return new float[]{in, inl, med, ov};
     }
 
     static long key(float x, float y, float z, float s) {
