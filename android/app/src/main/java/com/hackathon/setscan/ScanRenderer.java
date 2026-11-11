@@ -45,8 +45,26 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private volatile boolean viewing;
 
     // Point storage
-    private final FloatBuffer pos = ByteBuffer.allocateDirect(MAX_POINTS * 12).order(ByteOrder.nativeOrder()).asFloatBuffer();
-    private final ByteBuffer col = ByteBuffer.allocateDirect(MAX_POINTS * 4).order(ByteOrder.nativeOrder());
+    // The points live in memory-mapped scratch files, not on the Java heap (rk 11 Nov: "dump the data to storage so
+    // memory doesn't fill up"): on Android allocateDirect counts against the app's heap limit (512 MB on a Galaxy S23
+    // Ultra), a mapped file doesn't, and the system can page it out. The scratch file is unlinked at once, so it goes
+    // with the app; the scan itself is saved as before (autosave, ScanStore). Falls back to a direct buffer.
+    private final FloatBuffer pos = offHeap(MAX_POINTS * 12, "points").asFloatBuffer();
+    private final ByteBuffer col = offHeap(MAX_POINTS * 4, "colours");
+
+    private static ByteBuffer offHeap(int bytes, String what) {
+        try {
+            File f = File.createTempFile("scan-" + what + "-", ".buf");
+            try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw")) {
+                raf.setLength(bytes);
+                ByteBuffer b = raf.getChannel().map(java.nio.channels.FileChannel.MapMode.READ_WRITE, 0, bytes);
+                return b.order(ByteOrder.nativeOrder());
+            } finally { f.delete(); }   // the mapping stays valid; the file goes when the app does
+        } catch (Throwable e) {
+            android.util.Log.w("RoomScape", "off-heap " + what + " failed, on the heap instead: " + e);
+            return ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+        }
+    }
     private int count, uploaded;
     private final LongIntMap voxels = new LongIntMap(1 << 22);
     // The surface tables are allocated up front: ~132 MB at these sizes (the hash table is 2-4x the voxels). On a 512 MB
