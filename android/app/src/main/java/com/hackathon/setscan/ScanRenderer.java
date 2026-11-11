@@ -133,7 +133,17 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static volatile boolean CLOSEST_WINS = true;
     /** Debug tools "Dot size" (rk 11 Nov 22:26: "can you make the dots smaller"): a factor on the drawn dot size (dots
      *  are drawn in world size, smaller on screen further away). 0.5 = about 1.4 cm across (was 2.8 cm). Display only. */
-    static volatile float DOT_SCALE = 0.5f;
+    static volatile float DOT_SCALE = 1f;   // (rk 22:40: smaller dots showed the gaps between them: back to full size)
+    /** Debug tools "Camera opacity" (rk 11 Nov 22:40): the live camera picture at 30% so the sure dots show better. */
+    static volatile float CAMERA_OPACITY = 0.3f;
+    private void dimCamera() {
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        planDraw(IDENTITY, SCREEN_QUAD, GLES20.GL_TRIANGLES, new float[]{0.04f, 0.04f, 0.05f, 1f - CAMERA_OPACITY}, 1);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+    }
     static final int SUPERSEDE_ALONG = 2;
     private int supersededTotal;
     /** Depth thread. Returns true when the reading took over its own cell's dot (nothing more to do for it). */
@@ -4808,7 +4818,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
                 if (overviewBlend < 0.999f) drawBackground(); // fading in: the picture fades into the stripes
                 drawZebra(overviewBlend);
-            } else drawBackground();
+            } else {
+                drawBackground();
+                if (!viewing && CAMERA_OPACITY < 0.99f) dimCamera();   // the camera faint, so the dots stand out (rk 22:40)
+            }
         }
 
         TrackingState ts = camera.getTrackingState();
