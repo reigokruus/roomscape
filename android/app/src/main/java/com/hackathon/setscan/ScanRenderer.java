@@ -126,6 +126,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final long t0 = System.currentTimeMillis();
     private final java.util.Set<String> loggedErrors = new java.util.HashSet<>();
 
+    private int linkErrorsLogged;
+    /** Shader programs that failed to link (logged once each, as ERROR lines in scan-log.txt). */
+    private void logLinkErrors() { while (linkErrorsLogged < linkErrors.size()) log("ERROR shader program didn't link: " + linkErrors.get(linkErrorsLogged++)); }
+
     synchronized void log(String msg) {
         android.util.Log.i("RoomScape", msg); // also in logcat, for checking from the Mac
         if (log.length() > 300000) { log.delete(0, 150000); logScanStart = Math.max(0, logScanStart - 150000); }   // keep the latest part (it goes out with the diagnostics)
@@ -6172,6 +6176,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  was fused and the re-align never ran) restarts the AR session, then re-aligns like after a loss. 8 s, and not in
      *  the first 10 s after tracking returns (14:01 scan: at 4 s it restarted twice; the second restart cost 15 s). */
     private void logState(TrackingState ts, long nowMs) {
+        logLinkErrors();
         if (viewing || !everTracked) return;
         if (ts == TrackingState.TRACKING && lastNewDepthMs > 0 && nowMs - lastNewDepthMs > 8000 && nowMs - trackingBackMs > 10000 && featuresNow >= 50 && depthSupported && recoveries < 10 && count > 2000) {   // (not on a plain view: there depth just has nothing to see, and a restart loses the map; 15:56 scan)
             recoveries++;
@@ -7184,6 +7189,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private FloatBuffer bareTri, bareLines; private ByteBuffer bareShade; private int bareTriVerts, bareLineVerts;
 
     private void drawBareMesh(float[] m) {
+        logLinkErrors();
         FloatBuffer mp = meshPosAll != null ? meshPosAll : tsdf.meshPos;
         int verts = meshPosAll != null ? meshVerts : tsdf.meshVerts;
         if (mp == null || verts < 3) return;
@@ -8183,8 +8189,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glAttachShader(p, v);
         GLES20.glAttachShader(p, f);
         GLES20.glLinkProgram(p);
+        // a program that doesn't link draws nothing, silently (a first S23+ result showed an empty Mesh view, 11 Nov):
+        // remember it for the scan log
+        int[] ok = new int[1]; GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, ok, 0);
+        if (ok[0] == 0) linkErrors.add(GLES20.glGetProgramInfoLog(p) + " | " + vs.substring(0, Math.min(80, vs.length())));
         return p;
     }
+    static final java.util.List<String> linkErrors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     private static int shader(int type, String src) {
         int s = GLES20.glCreateShader(type);
