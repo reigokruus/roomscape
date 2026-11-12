@@ -170,7 +170,8 @@ for (const f of files) {
   b.textContent = /\.ply$/i.test(f) ? f + '  (full size: too heavy for this Mac)' : f;
   if (/_10000-light/.test(f)) b.textContent += '  (older, a third trained)';
   const pp = f.match(/phone-preview-(\d+)/); if (pp) b.textContent += `  (phone-quality preview, ${pp[1] / 1000}k steps)`;
-  if (f === 'ios-splat/splat-light.splat') b.textContent += '  (full version, Legion)';
+  if (f === 'ios-splat/splat-light.splat') b.textContent += '  (full version, Legion, gsplat)';
+  if (/brush-30000-light/.test(f)) b.textContent += '  (full version, Legion, Brush)';
 }
 const want = new URLSearchParams(location.search).get('file');
 const light = files.find(f => /light\.splat$/.test(f));
