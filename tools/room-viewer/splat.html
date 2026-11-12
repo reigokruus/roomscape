@@ -31,6 +31,9 @@ import * as GaussianSplats3D from './vendor/gaussian-splats-3d.module.js';
 const base = '../../recordings/rebuild/';
 const $ = id => document.getElementById(id);
 let viewer = null;
+// ?file=<room>-splat/x.splat&cam=x,y,z&look=x,y,z
+const sp = new URLSearchParams(location.search), q = {};
+for (const k of ['cam', 'look']) if (sp.get(k)) q[k] = sp.get(k).split(',').map(Number);
 
 // find splat files: the folders ending in -splat (http.server lists directories)
 async function listing(path) {
@@ -58,7 +61,7 @@ async function show(file) {
   viewer = new GaussianSplats3D.Viewer({
     rootElement: $('view'),
     // ARKit / ARCore world: y up
-    cameraUp: [0, 1, 0], initialCameraPosition: [3, 2.5, 3], initialCameraLookAt: [0, 0, 0],
+    cameraUp: [0, 1, 0], initialCameraPosition: q.cam || [3, 2.5, 3], initialCameraLookAt: q.look || [0, 0, 0],
     sharedMemoryForWorkers: false,   // python's http.server sends no cross-origin isolation headers
     dynamicScene: false, sphericalHarmonicsDegree: 1,
   });
@@ -75,7 +78,8 @@ for (const f of files) {
   const b = document.createElement('button'); b.textContent = f; b.dataset.f = f; b.onclick = () => show(f); $('list').appendChild(b);
 }
 const want = new URLSearchParams(location.search).get('file');
-if (want || files.length) show(want || files[files.length - 1]);
+const light = files.find(f => /light\.splat$/.test(f));
+if (want || files.length) show(want || light || files[files.length - 1]);
 </script>
 </body>
 </html>
