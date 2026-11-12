@@ -251,7 +251,13 @@ private enum log {
             log.info("processing \(item.scan): \(item.job.rawValue)")
             // Hardware use while processing (PerfLog), kept with the scan.
             let perf = PerfLog()
-            perf.start(scan.captureURL.appendingPathComponent("perf-processing-\(item.job.rawValue).jsonl"), stage: "starting")
+            // keep the previous run's samples (a run that the system stopped is the one worth reading, 12 Nov 21:53)
+            let perfURL = scan.captureURL.appendingPathComponent("perf-processing-\(item.job.rawValue).jsonl")
+            if FileManager.default.fileExists(atPath: perfURL.path) {
+                let stamp = Int(((try? FileManager.default.attributesOfItem(atPath: perfURL.path)[.modificationDate]) as? Date ?? Date()).timeIntervalSince1970)
+                try? FileManager.default.moveItem(at: perfURL, to: scan.captureURL.appendingPathComponent("perf-processing-\(item.job.rawValue)-\(stamp).jsonl"))
+            }
+            perf.start(perfURL, stage: "starting")
             PerfLog.processing = perf
             defer { perf.stop(); PerfLog.processing = nil }
             // Full speed (performance cores) while the app is open; background work goes to the efficiency cores.
