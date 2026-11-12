@@ -422,13 +422,6 @@ struct ResultView: View {
             .pickerStyle(.segmented)
             .fixedSize()
         }
-        // The photo-real preview, once made: its own obvious button here, not only in Share (rk 12 Nov: "it finished
-        // the render but i cant see the brush marks anywhere")
-        if SplatPreview.hasResult(current) {
-            Button { showingSplat = true } label: { Label("Photo-real", systemImage: "cube.transparent") }
-                .buttonStyle(.borderedProminent)
-                .fixedSize()
-        }
         Picker("View", selection: $topView) {
             Image(systemName: "rotate.3d").accessibilityLabel("3D view").tag(false)
             Image(systemName: "square.grid.3x3").accessibilityLabel("Top view").tag(true)
@@ -1166,14 +1159,23 @@ struct ResultView: View {
     @ViewBuilder private var walkControls: some View {
         switch walk {
         case .off:
-            Button {
-                if lightingOn { toggleLighting() }
-                if objectsOn { toggleObjects() }
-                walk = .choosing
-            } label: {
-                Label("Enter the room", systemImage: "figure.walk")
+            HStack(spacing: 8) {
+                Button {
+                    if lightingOn { toggleLighting() }
+                    if objectsOn { toggleObjects() }
+                    walk = .choosing
+                } label: {
+                    Label("Enter the room", systemImage: "figure.walk")
+                }
+                .buttonStyle(.borderedProminent)
+                // The photo-real preview, once made: an obvious button on the room view, not only in Share (rk 12 Nov:
+                // "i cant see the brush marks anywhere"). Here, not in the switch row above: there it made that row wider
+                // than the screen (rk 16:09).
+                if SplatPreview.hasResult(current) {
+                    Button { showingSplat = true } label: { Label("Photo-real", systemImage: "cube.transparent") }
+                        .buttonStyle(.borderedProminent)
+                }
             }
-            .buttonStyle(.borderedProminent)
         case .choosing:
             HStack(spacing: 8) {
                 Label("Tap the floor where you want to stand", systemImage: "hand.tap")
