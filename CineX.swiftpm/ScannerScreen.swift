@@ -12,6 +12,7 @@ private let log = Logger(subsystem: "SetScan", category: "scan")
 /// our code, and the UI can never get stuck waiting for a callback that doesn't come.
 @MainActor
 final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate {
+    deinit { ProcessingQueue.logMemory("scanner freed") }
     enum Phase: Equatable {
         /// Improve scan: waiting for ARKit to recognise the saved room before RoomPlan starts.
         case relocalizing

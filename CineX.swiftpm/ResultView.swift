@@ -344,7 +344,7 @@ struct ResultView: View {
             if newStyle == .model, objectsOn { toggleObjects() }
             showStyle(newStyle)
         }
-        .task { await loadRoom() }
+        .task { ProcessingQueue.logMemory("room screen opened"); await loadRoom() }
         // The photo-real preview needs the memory the 3D room holds (12 Nov 22:08): let it go while that runs, load it
         // again when it's done
         .modifier(ReleaseDuringPreview(busy: processing.gpuJob, release: releaseRoom, reload: { await loadRoom() }))

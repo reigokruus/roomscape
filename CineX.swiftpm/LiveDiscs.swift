@@ -8,6 +8,9 @@ import SwiftUI
 /// RoomCaptureView stops working when someone else takes those over.
 @MainActor
 final class LiveCapture {
+    // Diagnostics (12 Nov 23:27): after a scan the app kept about 1.2 GB that the photo-real preview then lacked;
+    // these lines show whether the live capture is actually freed when the scanner closes.
+    deinit { ProcessingQueue.logMemory("live capture freed") }
     let device: MTLDevice?
     let cloud: LiveCloud?
     /// The live mesh fused from LiDAR depth, drawn instead of the discs once it has triangles.

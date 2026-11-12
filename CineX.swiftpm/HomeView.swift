@@ -208,7 +208,12 @@ struct HomeView: View {
                 )
                 // a photo-real preview pauses while scanning (stops at its last save, carries on after)
                 .onAppear { ProcessingQueue.shared.scanningStarted() }
-                .onDisappear { ProcessingQueue.shared.scanningEnded() }
+                .onDisappear {
+                    ProcessingQueue.shared.scanningEnded()
+                    ProcessingQueue.logMemory("scanner closed")
+                    // and once more a little later, when the scanner's objects should have gone
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { ProcessingQueue.logMemory("5 s after the scanner closed") }
+                }
             }
         }
         // A nearby phone wants to send a scan: asked once per phone (Always allow), then they just arrive.
