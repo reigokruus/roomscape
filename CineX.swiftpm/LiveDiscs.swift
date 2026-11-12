@@ -33,6 +33,38 @@ final class LiveCapture {
     private let worker = DispatchQueue(label: "CineX.live-cloud", qos: .utility, autoreleaseFrequency: .workItem)
     private var busy = false
     private var lastFrameTime: TimeInterval = 0
+    /// The pose-jump guard (PoseJump): the last frame with normal tracking, and until when a jump is watched for.
+    private var lastGood: (pose: simd_float4x4, time: TimeInterval)?
+    private var guardUntil: TimeInterval = 0
+    private var guardArmed = false
+
+    /// ARKit is about to be run again on this session (RoomPlan stopped at its size limit): for the next 15 s, frames
+    /// are held while tracking settles, and a world-frame jump is undone with setWorldOrigin (22:37 scan, 12 Nov).
+    func armPoseGuard() {
+        guardArmed = true
+        guardUntil = 0   // set from the first frame's time after the re-run
+        perf?.mark("pose guard armed")
+    }
+
+    /// True if this frame may be used. Holds frames while the guard waits for normal tracking, and corrects a jump.
+    private func passesPoseGuard(_ frame: ARFrame) -> Bool {
+        let pose = frame.camera.transform, time = frame.timestamp
+        guard case .normal = frame.camera.trackingState else { return !guardArmed }
+        if guardArmed {
+            if guardUntil == 0 { guardUntil = time + 15 }
+            if time > guardUntil { guardArmed = false }
+            else if let last = lastGood, PoseJump.isJump(from: last.pose, to: pose, seconds: time - last.time) {
+                let c = PoseJump.correction(from: pose, to: last.pose)
+                session.setWorldOrigin(relativeTransform: c.inverse)
+                recorder?.poseJump(time: time, correction: c)
+                perf?.mark("pose jump corrected: \(String(format: "%.2f", simd_distance(SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z), SIMD3(last.pose.columns.3.x, last.pose.columns.3.y, last.pose.columns.3.z)))) m")
+                guardArmed = false
+                return false   // this frame still has the old frame's pose; the next ones come corrected
+            }
+        }
+        lastGood = (pose, time)
+        return true
+    }
 
     init(session: ARSession) {
         self.session = session
@@ -269,6 +301,7 @@ final class LiveCapture {
         guard !busy, let cloud, let frame = session.currentFrame, frame.timestamp != lastFrameTime else { return }
         if lastFrameTime > 0, frame.timestamp - lastFrameTime > 0.25 { perf?.gap() }
         lastFrameTime = frame.timestamp
+        guard passesPoseGuard(frame) else { return }
         recorder?.append(frame)
         busy = true
         // One frame at a time, released as soon as it's read, so ARKit never runs short of camera buffers.

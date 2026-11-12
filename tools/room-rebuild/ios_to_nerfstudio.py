@@ -18,6 +18,9 @@ def opt(n, d):
     return d
 maxf = int(opt('--max-frames', 300)); scale = float(opt('--scale', 0.5)); maxp = int(opt('--max-points', 400000))
 cap_dir, out = args
+# a recording whose world frame jumped mid-scan (RoomPlan's size limit, 12 Nov) is repaired first (posefix.py)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import posefix
+cap_dir = posefix.checked_capture(cap_dir)
 rec = os.path.join(cap_dir, 'recording')
 os.makedirs(os.path.join(out, 'images'), exist_ok=True)
 

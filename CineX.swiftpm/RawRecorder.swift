@@ -90,6 +90,20 @@ final class RawRecorder: @unchecked Sendable {
         }
     }
 
+    /// ARKit's world frame jumped and was corrected (LiveCapture's pose guard): from `time` on the recorded poses are
+    /// already corrected, and the frames in between were not recorded. Kept as recording/pose-jump.json for the tools.
+    func poseJump(time: TimeInterval, correction: simd_float4x4) {
+        queue.async { [self] in
+            let m = [correction.columns.0, correction.columns.1, correction.columns.2, correction.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
+            let entry: [String: Any] = ["time": time, "correction": m, "applied": "live (ARSession.setWorldOrigin)"]
+            var list = (try? JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("pose-jump.json")))) as? [[String: Any]] ?? []
+            list.append(entry)
+            if let d = try? JSONSerialization.data(withJSONObject: list, options: .prettyPrinted) {
+                try? d.write(to: folder.appendingPathComponent("pose-jump.json"))
+            }
+        }
+    }
+
     /// Finishes the files; calls back with the folder and its size in bytes.
     func finish(_ done: @escaping (URL, Int64) -> Void) {
         queue.async { [self] in

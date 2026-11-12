@@ -25,6 +25,9 @@ def opt(name, default):
     return default
 every = float(opt('--every', 0.5)); jw = int(opt('--jpg-width', 960))
 rec, out = args; os.makedirs(out, exist_ok=True)
+# a recording whose world frame jumped mid-scan (RoomPlan's size limit, 12 Nov) is repaired first (posefix.py)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import posefix
+rec = os.path.join(posefix.checked_capture(os.path.dirname(os.path.abspath(rec.rstrip('/')))), 'recording')
 
 # frames.bin
 fb = open(os.path.join(rec, 'frames.bin'), 'rb').read(); n = len(fb) // 120

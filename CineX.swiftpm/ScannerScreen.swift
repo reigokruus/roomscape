@@ -466,7 +466,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             let configuration = ARWorldTrackingConfiguration()
             if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) { configuration.frameSemantics = [.sceneDepth] }
             configuration.worldAlignment = .gravity
-            session.run(configuration)   // no reset options: the same coordinates, the scan carries on
+            // ARKit can come back in a different world frame here (22:37 scan: 4.2 m and 80° off): the live capture
+            // holds frames until tracking settles and undoes such a jump with setWorldOrigin (PoseJump)
+            live.armPoseGuard()
+            session.run(configuration)   // no reset options: meant to keep the same coordinates; the guard checks
             log.info("RoomPlan reached its size limit: scanning on with ARKit only")
             live.perf?.mark("RoomPlan size limit: scanning on without it")
             return
