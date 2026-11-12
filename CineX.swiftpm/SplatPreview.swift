@@ -40,8 +40,11 @@ enum SplatPreview {
     /// What trains the splat from the dataset folder (transforms.json, images/, points.ply) into `output`.
     protocol Trainer: Sendable {
         var name: String { get }
-        /// `progress` gets the steps done so far (0…steps).
-        func train(dataset: URL, output: URL, steps: Int, progress: @escaping @Sendable (Int) -> Void) async throws
+        /// Trains `steps` steps in all, carrying on from `resume` (a checkpoint in output's folder) if given, and saving
+        /// a checkpoint there every `SplatPacing.checkpointEvery` steps. `progress` gets the steps done in all
+        /// (resume.step…steps) and a note when heat is holding it back (nil when not).
+        func train(dataset: URL, output: URL, steps: Int, resume: SplatPacing.Checkpoint?,
+                   progress: @escaping @Sendable (Int, String?) -> Void) async throws
     }
 
     /// The trainer in use: Brush when its library is linked in, else the stand-in.
@@ -74,18 +77,34 @@ enum SplatPreview {
         let trainer = self.trainer
         let started = Date()
         let partial = dir.appendingPathComponent("preview-training.ply")
-        progress(.init(stage: "Making the photo-real preview", fraction: 0.25, note: nil))
-        try await trainer.train(dataset: dataset, output: partial, steps: steps) { done in
-            let f = Double(done) / Double(steps)
+        // Carries on from the last checkpoint if the app was closed or left mid-way (rk 12 Nov: it always restarted
+        // from zero), and says so on the card.
+        let resume = SplatPacing.Checkpoint.load(from: dir, steps: steps)
+        let from = resume?.step ?? 0
+        if let resume { log.info("preview resumes from step \(resume.step) of \(steps)") }
+        progress(.init(stage: SplatPacing.stage(step: from, of: steps, minutesLeft: nil), fraction: 0.25 + 0.73 * Float(from) / Float(steps), note: nil))
+        if let resume { note("Carrying on from step \(resume.step) (saved before RoomScape closed)") }
+        // the heat note when it changes; the "carrying on" note stays for the first 200 steps
+        let noteState = OSAllocatedUnfairLock<(last: String?, resumeShown: Bool)>(initialState: (nil, resume != nil))
+        try await trainer.train(dataset: dataset, output: partial, steps: steps, resume: resume) { done, heat in
+            // time left from this run's own pace (it includes the rests for heat)
+            let f = Double(done - from) / Double(max(1, steps - from))
             let left = SplatDataset.minutesLeft(fraction: f, elapsed: Date().timeIntervalSince(started))
-            progress(.init(stage: "Making the photo-real preview" + (left.map { " · about \($0) min left" } ?? ""),
-                           fraction: 0.25 + 0.73 * Float(f), note: nil))
+            progress(.init(stage: SplatPacing.stage(step: done, of: steps, minutesLeft: left),
+                           fraction: 0.25 + 0.73 * Float(done) / Float(steps), note: nil))
+            let say = noteState.withLock { st -> Bool in
+                if st.resumeShown, done < from + 200, heat == nil { return false }
+                defer { st.last = heat; st.resumeShown = false }
+                return st.last != heat || st.resumeShown
+            }
+            if say { note(heat) }
         }
         try Task.checkCancellation()
         progress(.init(stage: "Saving the preview", fraction: 0.99, note: nil))
         if fm.fileExists(atPath: result(scan).path) { try fm.removeItem(at: result(scan)) }
         try fm.moveItem(at: partial, to: result(scan))
         try? fm.removeItem(at: dataset.appendingPathComponent("images"))   // made again from the recording if needed
+        SplatPacing.Checkpoint.clear(in: dir)
         log.info("preview ready for \(scan.name, privacy: .public) (\(trainer.name, privacy: .public), \(Int(Date().timeIntervalSince(started))) s)")
     }
 
@@ -223,7 +242,8 @@ enum SplatPreview {
 /// progress, viewer and .rmsc can be tried end to end. Not photo-real.
 struct DotsTrainer: SplatPreview.Trainer {
     var name: String { "stand-in (dots as blobs)" }
-    func train(dataset: URL, output: URL, steps: Int, progress: @escaping @Sendable (Int) -> Void) async throws {
+    func train(dataset: URL, output: URL, steps: Int, resume: SplatPacing.Checkpoint?,
+               progress: @escaping @Sendable (Int, String?) -> Void) async throws {
         let ply = try Data(contentsOf: dataset.appendingPathComponent("points.ply"))
         guard let end = ply.range(of: Data("end_header\n".utf8)) else { throw NSError(domain: "SplatPreview", code: 4) }
         let body = ply[end.upperBound...]
@@ -235,7 +255,7 @@ struct DotsTrainer: SplatPreview.Trainer {
                 for k in 0..<3 { rgb[i * 3 + k] = raw[i * 15 + 12 + k] }
             }
         }
-        for s in stride(from: 0, through: steps, by: max(1, steps / 20)) { try Task.checkCancellation(); progress(s); try await Task.sleep(nanoseconds: 50_000_000) }
+        for s in stride(from: 0, through: steps, by: max(1, steps / 20)) { try Task.checkCancellation(); progress(s, nil); try await Task.sleep(nanoseconds: 50_000_000) }
         try SplatDataset.dotsSplatPLY(xyz: xyz, rgb: rgb, maxPoints: SplatPreview.maxPoints).write(to: output)
     }
 }
