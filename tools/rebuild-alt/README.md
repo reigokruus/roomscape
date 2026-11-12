@@ -40,15 +40,27 @@ or the Python scripts directly (`--help` lists the options). Useful options:
 
 For a fair score against Brush, train Brush with the same hold-out (every 8th picture) or compare pictures by eye.
 
-## Checked so far
+## Results so far
 
-- On a synthetic 4 × 3 m room (`make_test_room.py`, 80 frames, 5 mm pose noise), CPU, in the cloud:
-  option 1 runs end to end (depth fusion: 43 s, 97 % of triangles textured, held-out 28.8 dB on the surface it
-  covers, 21.8 dB over the whole picture because the unseen ceiling is black; Poisson from points: 23 s).
-- Options 2 and 3: data loading, training loop, densification hook-up, export, dataset_plus and reports were
-  run on CPU with a stand-in renderer and a stand-in for Difix. **The real gsplat rasteriser and the Difix
-  model have not run yet**; that needs the GPU PC.
-- Nothing has been run on a real scan yet.
+First real test, 12 Nov 2026, LEGION (RTX 4070 laptop, 8 GB), rk's 17:05 scan (phone-match dataset: 199 pictures
+960x720, 92k start points, no depth), the same 25 pictures held out for every method:
+
+| Method | Held-out mean | Time |
+|---|---|---|
+| Brush, phone recipe (5k steps, 200k splats, 720 px) | 20.83 dB | 46 s |
+| Brush, 15k steps, 200k splats, 720 px | 21.27 dB | 126 s |
+| Brush, 15k steps, 400k splats, 960 px | 21.21 dB | 240 s |
+| 2: flat splats, depth guide from start points | 20.80 dB | 641 s |
+| 2: flat splats, no depth guide | 20.73 dB | 642 s |
+| 1: textured mesh, Poisson from start points | 15.35 dB | 51 s |
+| 3: Brush 5k + Difix (512 px) | 20.68 dB (before 20.74) | 279 s |
+
+None beats Brush on this scan. Option 1 suffers from building the surface out of sparse points (patchwork,
+gaps); option 2 gives clean surfaces but smears small clutter; Difix makes off-path views look much cleaner but
+invents detail and does not move held-out pictures toward the truth. Not tried yet: options 1 and 2 with the
+phone's real depth (`depth/`) or the app's own mesh, and Difix's "distil back" Brush run on `dataset_plus/`.
+
+LEGION ran gsplat 1.5.0 (1.5.3 has no Windows wheel); `setup.cmd` was not used there.
 
 ## Pictures of real homes
 
