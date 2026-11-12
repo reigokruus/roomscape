@@ -165,7 +165,7 @@ $('b-orbit').onclick = () => { if (mode === 'orbit') return; mode = 'orbit'; $('
 // per room: light copies first (newest training step first), the heavy full-size .ply files last
 const rank = f => (/\.ply$/i.test(f) ? 1 : 0);
 // the newest full versions on top (coordinator 12 Nov), then per room as before
-const PIN = ['ios-1112-1255-splat/ios-1112-1255-legion-full-light.splat', 'ios-1112-1255-splat/ios-1112-1255-5060-full-light.splat'];
+const PIN = ['ios-1112-1255-splat/ios-1112-1255-legion-full-light.splat', 'ios-1112-1255-splat/ios-1112-1255-5060-full-light.splat', 'ios-1112-1255-splat/ios-1112-1255-runpod-full-light.splat'];
 const pin = f => (PIN.includes(f) ? PIN.indexOf(f) : PIN.length);
 const files = (await findSplats()).sort((a, b) => pin(a) - pin(b) || a.split('/')[0].localeCompare(b.split('/')[0]) || rank(a) - rank(b) || b.localeCompare(a, undefined, { numeric: true }));
 $('list').innerHTML = '';
@@ -180,6 +180,7 @@ for (const f of files) {
   if (f === 'ios-1112-1255-splat/preview_7000-light.splat') b.textContent = 'New scan 12:55 (preview, 5060 PC)';
   if (f === PIN[0]) b.textContent = 'New scan 12:55 (full version, Legion)';
   if (f === PIN[1]) b.textContent = 'New scan 12:55 (full version, 5060 PC)';
+  if (f === PIN[2]) b.textContent = 'New scan 12:55 (full version, RunPod 4090)';
   if (f === 'ios-phone-preview-1348-splat/preview-light.splat') b.textContent = 'iPhone on-phone preview 13:48';
 }
 const want = new URLSearchParams(location.search).get('file');
