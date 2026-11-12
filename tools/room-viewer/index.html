@@ -29,7 +29,7 @@
 <body>
 <div id="panel">
   <h1>Room rebuild · 12 Nov 09:17</h1>
-  <div class="row"><button id="b-replay" class="on">Replay (depth)</button><button id="b-dots">Dots only</button></div>
+  <div class="row"><button id="b-replay" class="on">Replay (depth)</button><button id="b-wall">Replay + sharp wall</button><button id="b-dots">Dots only</button></div>
   <div class="row"><button id="b-orbit" class="on">Orbit</button><button id="b-walk">Walk</button><button id="b-top">Top</button></div>
   <div class="row"><button id="b-labels" class="on">Labels</button></div>
   <label>Cut ceiling <input id="cut" type="range" min="0.8" max="3" step="0.05" value="2.0"></label>
@@ -43,7 +43,9 @@ import * as THREE from 'three';
 import { OrbitControls } from './vendor/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from './vendor/jsm/loaders/GLTFLoader.js';
 
-const ROOMS = { replay: '../../recordings/rebuild/0917-replay/', dots: '../../recordings/rebuild/0917-dots/' };
+const ROOMS = { replay: '../../recordings/rebuild/0917-replay/', wall: '../../recordings/rebuild/0917-replay/', dots: '../../recordings/rebuild/0917-dots/' };
+// sharp wall textures (tools/room-rebuild/wall_texture.py): single video frames projected onto a fitted wall plane
+const WALLS = { wall: ['wall-01'] };
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
 renderer.localClippingEnabled = true;
@@ -59,7 +61,7 @@ const $ = id => document.getElementById(id);
 
 function setCut() { clip.constant = floorY + parseFloat($('cut').value); }
 async function load(key) {
-  which = key; $('b-replay').classList.toggle('on', key === 'replay'); $('b-dots').classList.toggle('on', key === 'dots');
+  which = key; ['replay', 'wall', 'dots'].forEach(k => $('b-' + k).classList.toggle('on', k === key));
   $('status').textContent = 'loading ' + key + '…';
   const gltf = await loader.loadAsync(ROOMS[key] + 'room.glb');
   if (room) { scene.remove(room); room.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
@@ -73,6 +75,33 @@ async function load(key) {
     tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
   } });
   scene.add(room);
+  for (const w of (WALLS[key] || [])) {
+    const info = await (await fetch(ROOMS[key] + w + '.json')).json();
+    const tex = await new THREE.TextureLoader().loadAsync(ROOMS[key] + w + '.png');
+    tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+    const n = new THREE.Vector3(...info.normal).multiplyScalar(0.004);   // 4 mm in front of the model's wall
+    const c = info.corners.map(p => new THREE.Vector3(...p).add(n));
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([...c[0].toArray(), ...c[1].toArray(), ...c[2].toArray(), ...c[3].toArray()], 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2)); g.setIndex([0, 1, 2, 0, 2, 3]);
+    room.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide, clippingPlanes: [clip] })));
+    // the model's own wall is a few cm thick and bumpy: hide its triangles behind the painted part (within 6 cm of the
+    // plane, where the texture has paint), so they don't poke through
+    const cv = document.createElement('canvas'); cv.width = tex.image.width; cv.height = tex.image.height;
+    const cx = cv.getContext('2d'); cx.drawImage(tex.image, 0, 0); const A = cx.getImageData(0, 0, cv.width, cv.height).data;
+    const o = new THREE.Vector3(...info.corners[0]), ex = new THREE.Vector3(...info.corners[1]).sub(o), ey = new THREE.Vector3(...info.corners[3]).sub(o);
+    const lx = ex.length(), ly = ey.length(); ex.normalize(); ey.normalize(); const nn = new THREE.Vector3(...info.normal);
+    room.traverse(m => { if (!m.isMesh || !m.geometry.index || m.material.map) return;
+      const P = m.geometry.attributes.position, I = m.geometry.index.array, keep = [], q = new THREE.Vector3();
+      for (let t = 0; t < I.length; t += 3) {
+        q.set(0, 0, 0); for (let k = 0; k < 3; k++) q.x += P.getX(I[t + k]) / 3, q.y += P.getY(I[t + k]) / 3, q.z += P.getZ(I[t + k]) / 3;
+        const r = q.clone().sub(o), dn = r.dot(nn), u = r.dot(ex) / lx, v = r.dot(ey) / ly;
+        let hide = false;
+        if (Math.abs(dn) < 0.06 && u > 0 && u < 1 && v > 0 && v < 1) { const px = Math.floor(u * cv.width), py = Math.floor((1 - v) * cv.height); hide = A[(py * cv.width + px) * 4 + 3] > 128; }
+        if (!hide) keep.push(I[t], I[t + 1], I[t + 2]);
+      }
+      m.geometry.setIndex(keep); });
+  }
   const box = new THREE.Box3().setFromObject(room);
   // floor: the lowest 2% of vertices
   const ys = []; room.traverse(o => { if (o.isMesh) { const p = o.geometry.attributes.position; for (let i = 0; i < p.count; i += 7) ys.push(p.getY(i)); } });
@@ -80,7 +109,7 @@ async function load(key) {
   if (!camera.userData.placed) { const c = box.getCenter(new THREE.Vector3()); orbit.target.set(c.x, floorY + 0.5, c.z); camera.position.set(c.x + 5, floorY + 6, c.z + 6); camera.userData.placed = true; }
   try { labels = await (await fetch(ROOMS[key] + 'labels.json')).json(); } catch (e) { labels = []; }
   buildLabels();
-  $('status').textContent = `${key === 'replay' ? 'Replay: real depth + camera pictures' : 'Dots only + video pictures'} · ${Math.round(tris / 1000)}k triangles`;
+  $('status').textContent = `${{ replay: 'Replay: real depth + camera pictures', wall: 'Replay + one wall painted from a single sharp video frame', dots: 'Dots only + video pictures' }[key]} · ${Math.round(tris / 1000)}k triangles`;
 }
 function buildLabels() {
   tags.forEach(t => t.el.remove()); tags = []; pins.clear(); $('list').innerHTML = '';
@@ -113,7 +142,7 @@ function setMode(m) {
   $('help').textContent = m === 'walk' ? 'Walk: W A S D or arrows to move (Shift = faster), drag to look around. Eye height 1.6 m.'
     : 'Orbit: drag to turn, right-drag to move, scroll to zoom. Click a name in the list to fly there.';
 }
-$('b-replay').onclick = () => load('replay'); $('b-dots').onclick = () => load('dots');
+$('b-replay').onclick = () => load('replay'); $('b-wall').onclick = () => load('wall'); $('b-dots').onclick = () => load('dots');
 $('b-orbit').onclick = () => setMode('orbit'); $('b-walk').onclick = () => setMode('walk'); $('b-top').onclick = () => setMode('top');
 $('b-labels').onclick = () => { showLabels = !showLabels; $('b-labels').classList.toggle('on', showLabels); pins.visible = showLabels; };
 $('cut').oninput = setCut;
@@ -138,7 +167,10 @@ function tick() {
   }
   requestAnimationFrame(tick);
 }
-setMode('orbit'); load('replay'); tick();
+// a link can open a version and a view: #wall or #wall@x,y,z,tx,ty,tz (camera, target)
+const [hk, hv] = location.hash.slice(1).split('@');
+if (hv) { const a = hv.split(',').map(Number); camera.position.set(a[0], a[1], a[2]); orbit.target.set(a[3], a[4], a[5]); camera.userData.placed = true; }
+setMode('orbit'); load(ROOMS[hk] ? hk : 'replay'); tick();
 </script>
 </body>
 </html>
