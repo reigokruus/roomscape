@@ -160,7 +160,9 @@ requestAnimationFrame(flyTick);
 $('b-fly').onclick = () => { if (mode === 'fly') return; mode = 'fly'; $('b-fly').classList.add('on'); $('b-orbit').classList.remove('on'); if (current) show(current); };
 $('b-orbit').onclick = () => { if (mode === 'orbit') return; mode = 'orbit'; $('b-orbit').classList.add('on'); $('b-fly').classList.remove('on'); flyCam = null; if (current) show(current); };
 
-const files = (await findSplats()).sort((a, b) => a.split('/')[0].localeCompare(b.split('/')[0]) || b.localeCompare(a, undefined, { numeric: true }));
+// per room: light copies first (newest training step first), the heavy full-size .ply files last
+const rank = f => (/\.ply$/i.test(f) ? 1 : 0);
+const files = (await findSplats()).sort((a, b) => a.split('/')[0].localeCompare(b.split('/')[0]) || rank(a) - rank(b) || b.localeCompare(a, undefined, { numeric: true }));
 $('list').innerHTML = '';
 if (!files.length) $('list').textContent = 'No splats yet. Copy a trained .ply into recordings/rebuild/<room>-splat/ and reload.';
 for (const f of files) {
