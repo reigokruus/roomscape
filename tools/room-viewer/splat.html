@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room Splat Viewer</title>
+<!-- Local only: served from this Mac on 127.0.0.1 (tools/room-viewer/serve.sh). Shows Gaussian splats (.ply / .splat /
+     .ksplat) trained on the Legion or the 5060 PC and copied to recordings/rebuild/<room>-splat/. Nothing is uploaded. -->
+<style>
+  :root { --bg: #1c1d21; --panel: rgba(28,29,33,0.88); --ink: #eceae6; --muted: #a3a09a; --accent: #e8a33d; --line: rgba(255,255,255,0.12); }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; overflow: hidden; }
+  #panel { position: fixed; top: 12px; left: 12px; z-index: 10; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; width: 300px; }
+  #panel h1 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
+  button { background: #2c2d33; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; margin: 2px 0; display: block; width: 100%; text-align: left; }
+  button.on { background: var(--accent); color: #1c1d21; border-color: var(--accent); }
+  .help, #status { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  #view { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="panel">
+  <h1>Room splats</h1>
+  <div id="list">looking for splats…</div>
+  <div id="status"></div>
+  <div class="help">Drag to turn, right-drag to move, scroll to zoom. Splats are in recordings/rebuild/&lt;room&gt;-splat/. <a href="./" style="color:var(--accent)">Mesh viewer</a></div>
+</div>
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
+<script type="module">
+import * as GaussianSplats3D from './vendor/gaussian-splats-3d.module.js';
+const base = '../../recordings/rebuild/';
+const $ = id => document.getElementById(id);
+let viewer = null;
+
+// find splat files: the folders ending in -splat (http.server lists directories)
+async function listing(path) {
+  const r = await fetch(path); if (!r.ok) return [];
+  const html = await r.text();
+  return [...html.matchAll(/href="([^"]+)"/g)].map(m => decodeURIComponent(m[1]));
+}
+async function findSplats() {
+  const out = [];
+  for (const d of (await listing(base)).filter(n => /-splat\/$/.test(n))) {
+    const walk = async (p, depth) => {
+      for (const f of await listing(base + p)) {
+        if (/\.(ply|splat|ksplat)$/i.test(f)) out.push(p + f);
+        else if (f.endsWith('/') && depth < 3) await walk(p + f, depth + 1);
+      }
+    };
+    await walk(d, 0);
+  }
+  return out;
+}
+async function show(file) {
+  [...$('list').children].forEach(b => b.classList.toggle('on', b.dataset.f === file));
+  $('status').textContent = 'loading ' + file + '…';
+  if (viewer) { await viewer.dispose(); viewer = null; $('view').innerHTML = ''; }
+  viewer = new GaussianSplats3D.Viewer({
+    rootElement: $('view'),
+    // ARKit / ARCore world: y up
+    cameraUp: [0, 1, 0], initialCameraPosition: [3, 2.5, 3], initialCameraLookAt: [0, 0, 0],
+    sharedMemoryForWorkers: false,   // python's http.server sends no cross-origin isolation headers
+    dynamicScene: false, sphericalHarmonicsDegree: 1,
+  });
+  try {
+    await viewer.addSplatScene(base + file, { splatAlphaRemovalThreshold: 5, showLoadingUI: true, progressiveLoad: false });
+    viewer.start();
+    $('status').textContent = file;
+  } catch (e) { $('status').textContent = 'could not load: ' + e; }
+}
+const files = await findSplats();
+$('list').innerHTML = '';
+if (!files.length) $('list').textContent = 'No splats yet. Copy a trained .ply into recordings/rebuild/<room>-splat/ and reload.';
+for (const f of files) {
+  const b = document.createElement('button'); b.textContent = f; b.dataset.f = f; b.onclick = () => show(f); $('list').appendChild(b);
+}
+const want = new URLSearchParams(location.search).get('file');
+if (want || files.length) show(want || files[files.length - 1]);
+</script>
+</body>
+</html>
