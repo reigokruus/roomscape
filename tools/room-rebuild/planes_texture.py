@@ -29,6 +29,8 @@ def opt(name, default):
     return default
 MM = float(opt('--mm', 2)); MAXT = int(opt('--max-tex', 2048)); MINA = float(opt('--min-area', 0.3))
 OUT = opt('--out', None); STEP = int(opt('--step', 1)); TILE = float(opt('--tile', 0)); SPLITN = '--split-normals' in args
+COMPLETE = '--complete' in args   # rk 12 Nov: fill holes fully enclosed by a flat surface (doors, walls, cupboard fronts)
+if COMPLETE: args.remove('--complete')
 if SPLITN: args.remove('--split-normals')
 rdir, video, allcsv = args
 odir = OUT or rdir; os.makedirs(odir, exist_ok=True)
@@ -76,6 +78,15 @@ for rest in groups:
         occ = np.zeros((gj.max() - j0 + 1, gi.max() - i0 + 1), np.uint8); occ[gj - j0, gi - i0] = 1
         k = int(0.16 / C) | 1
         occ = cv2.morphologyEx(occ, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        scanned = occ.copy()
+        if COMPLETE:
+            # holes the flat surface surrounds on every side (the depth sensor skipped a glossy door panel, the camera saw
+            # it): filled, up to 1.5 m2 each. Openings that reach the surface's edge (a doorway, the end of a wall) stay open.
+            pad = np.pad(occ, 1); ff = pad.copy(); cv2.floodFill(ff, np.zeros((ff.shape[0] + 2, ff.shape[1] + 2), np.uint8), (0, 0), 1)
+            holes = (ff == 0)[1:-1, 1:-1].astype(np.uint8)
+            nh, hl, hs, _ = cv2.connectedComponentsWithStats(holes, 8)
+            for h_ in range(1, nh):
+                if hs[h_, cv2.CC_STAT_AREA] * C * C <= 1.5: occ[hl == h_] = 1
         ncomp, lab, stats, _ = cv2.connectedComponentsWithStats(occ, 8)
         for q in range(1, ncomp):
             area = stats[q, cv2.CC_STAT_AREA] * C * C
@@ -87,10 +98,11 @@ for rest in groups:
                 for tx in range(nx):
                     x0, y0_ = X0 + tx * tw, Y0 + ty * th_; w, h = min(tw, X0 + Wc - x0), min(th_, Y0 + Hc - y0_)
                     mask = (lab[y0_:y0_ + h, x0:x0 + w] == q).astype(np.uint8)
+                    filledm = mask & (1 - scanned[y0_:y0_ + h, x0:x0 + w])   # completed, not scanned
                     if mask.sum() * C * C < min(MINA, 0.1): continue
                     s0, s1 = (i0 + x0) * C, (i0 + x0 + w) * C; ya, yb = (j0 + y0_) * C, (j0 + y0_ + h) * C
                     kind = ('floor' if c[1] < floorY + 0.15 else 'top') if horiz else 'wall'
-                    patches.append(dict(n=n, d=d, c=c, h=hdir, v=vdir, s0=s0, s1=s1, y0=ya, y1=yb, mask=mask, area=mask.sum() * C * C, kind=kind))
+                    patches.append(dict(n=n, d=d, c=c, h=hdir, v=vdir, s0=s0, s1=s1, y0=ya, y1=yb, mask=mask, filledm=filledm, area=mask.sum() * C * C, kind=kind))
 print(f"{len(patches)} flat patches over {MINA} m2: " + ", ".join(f"{p['kind']} {p['area']:.1f}" for p in patches))
 
 # texel grids (texel centres in 3D are recomputed when needed, not kept: a big floor is millions of texels)
@@ -111,6 +123,7 @@ for p in patches:
     infront = (th < 0.96).reshape(TH, TW)
     infront = cv2.dilate(infront.astype(np.uint8), np.ones((int(30 / mm) | 1,) * 2, np.uint8)).astype(bool)
     p['valid'] = m.astype(bool) & ~infront
+    p['filledT'] = cv2.resize(np.flipud(p['filledm']), (TW, TH), interpolation=cv2.INTER_NEAREST).astype(bool) & p['valid']
     p['sub'] = np.nonzero(p['valid'].reshape(-1))[0][::max(1, int(p['valid'].sum() // 1500))]
     p['Tsub'] = T3[p['sub']]; del T3
     p['corners'] = [p['c'] + s * p['h'] + y * p['v'] for s, y in ((p['s0'], p['y0']), (p['s1'], p['y0']), (p['s1'], p['y1']), (p['s0'], p['y1']))]
@@ -212,11 +225,15 @@ for pi, p in enumerate(patches):
                 t2 = np.clip(t2.astype(np.float32) * np.clip(gain, 0.6, 1.6), 0, 255).astype(np.uint8)
         new = v2 & ~alpha & p['valid']; tex[new] = t2[new]; alpha |= new; used[s['vi']] = int(new.sum())
     name = f"tex-{len(out) + 1:02d}"
-    cv2.imwrite(os.path.join(odir, name + '.png'), np.dstack([tex, (alpha * 255).astype(np.uint8)]))
+    # alpha 255 = scanned surface painted from a still; 200 = a completed hole (no depth there, but painted from the
+    # stills that saw it); 0 = nothing. The viewer draws a flat sheet behind completed areas, where the mesh has a hole.
+    a8 = np.where(alpha, np.where(p['filledT'], 200, 255), 0).astype(np.uint8)
+    cv2.imwrite(os.path.join(odir, name + '.png'), np.dstack([tex, a8]))
     info = dict(kind=p['kind'], corners=[list(map(float, q)) for q in p['corners']], normal=list(map(float, p['n'])),
                 size_m=[float(p['s1'] - p['s0']), float(p['y1'] - p['y0'])], mm_per_texel=round(p['mm'], 2),
                 best=dict(frame=best['vi'], distance_m=round(best['z'], 2), picture_mm_per_px=round(best['z'] / byvi_fx * 1000, 2) if (byvi_fx := float(byvi[best['vi']][20])) else None),
-                frames_used={str(k): v for k, v in used.items()}, covered=round(float(alpha.mean()), 3))
+                frames_used={str(k): v for k, v in used.items()}, covered=round(float(alpha.mean()), 3),
+                completed_m2=round(float((alpha & p['filledT']).sum()) * (p['mm'] / 1000) ** 2, 3))
     json.dump(info, open(os.path.join(odir, name + '.json'), 'w'), indent=1)
     out.append(name)
     print(f"{name}: {p['kind']} {p['size_m'] if 'size_m' in p else ''}{p['s1'] - p['s0']:.1f} x {p['y1'] - p['y0']:.1f} m at {p['mm']:.1f} mm/texel; best frame {best['vi']} at {best['z']:.2f} m "
