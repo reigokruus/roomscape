@@ -256,7 +256,7 @@ def seam_gains(tris, label, comp, pairs, small, gains, reg: float = 0.05):
     return ta, tb, vid, sample
 
 
-def solve_chart_gains(mesh, label, comp, pairs, small, gains, reg: float = 0.05):
+def solve_chart_gains(mesh, label, comp, pairs, small, gains, reg: float = 0.2, max_gain: float = 1.25):
     tris = np.asarray(mesh.triangles)
     verts = np.asarray(mesh.vertices)
     r = seam_gains(tris, label, comp, pairs, small, gains, reg)
@@ -280,7 +280,12 @@ def solve_chart_gains(mesh, label, comp, pairs, small, gains, reg: float = 0.05)
     for ch in range(3):
         rhs = np.r_[np.log(cb[:, ch]) - np.log(ca[:, ch]), np.zeros(n)]
         out[:, ch] = lsqr(A, rhs, atol=1e-6, btol=1e-6, iter_lim=2000)[0]
-    g = np.exp(np.clip(out, np.log(0.5), np.log(2.0)))
+    # anchor: the typical patch keeps its own picture's tone (no global drift), and no patch moves far
+    weight = np.bincount(np.r_[ia, ib], minlength=n)
+    for ch in range(3):
+        o = np.argsort(out[:, ch]); cw = np.cumsum(weight[o])
+        out[:, ch] -= out[o[np.searchsorted(cw, cw[-1] / 2)], ch]
+    g = np.exp(np.clip(out, np.log(max_gain) * -1, np.log(max_gain)))
     return dict(zip(ids.tolist(), g))
 
 
