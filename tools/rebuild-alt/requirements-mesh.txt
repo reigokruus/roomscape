@@ -3,5 +3,6 @@ numpy
 scipy
 pillow
 plyfile
+pyliblzfse       # add_depth.py: reads the iPhone recording's depth.bin
 open3d>=0.18
 trimesh
