@@ -37,7 +37,9 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "AppModule",
-            path: "."
+            path: ".",
+            // the in-app photo-real preview viewer (SplatViewerView): page, scripts, licences
+            resources: [.copy("SplatViewer")]
         )
     ]
 )
