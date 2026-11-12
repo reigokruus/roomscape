@@ -35,3 +35,38 @@ Send the .ply (LAN server with a random path and SHA256SUMS.txt, as before). On 
     tools/room-viewer/ply2splat.py <file>.ply <name>-light.splat --max 1500000
 
 Then it's listed in http://127.0.0.1:8765/tools/room-viewer/splat.html (fly with W A S D).
+
+## From the iPhone's Share menu: "For a PC rebuild (.zip)"
+
+On location there's no Mac in between: the phone's room screen → Share → For a PC rebuild (.zip) → Quick or Full
+quality, sent with the share sheet (AirDrop, Files, Google Drive). Made by `CineX.swiftpm/PCRebuildShare.swift`; the
+scan itself is only read. Files are stored uncompressed (video and JPEGs are compressed already). **No top-level
+folder**: the entries sit at the zip's root, so unzip into a folder of its own.
+
+Name: `RoomScape-<yyyy-MM-dd_HH-mm-ss>-for-PC-quick.zip` or `…-for-PC-full.zip` (the scan's time, from
+`Scan_<yyyy-MM-dd_HH-mm-ss>`).
+
+Quick (about 30-40 MB): the phone's own preview dataset, ready for Brush as it is (`brush <unzipped folder> …`):
+
+    README.txt          what it is, a Brush example line
+    transforms.json     Nerfstudio: "camera_model": "PERSPECTIVE", "ply_file_path": "points.ply", "frames": [
+                        { "file_path": "images/00014.jpg", "transform_matrix": 4x4 rows (ARKit camera-to-world =
+                          OpenGL/Nerfstudio), "fl_x", "fl_y", "cx", "cy", "w", "h" (per frame, at the image size) } ]
+    points.ply          starting points: binary_little_endian, x y z float + red green blue uchar (15 bytes each),
+                        at most 300,000 (the phone's setting; subsample to 200,000 for benchmark run A parity)
+    images/NNNNN.jpg    up to 300 sharpest frames at half size (960x720); NNNNN = the frame's index in the
+                        recording, 5 digits
+
+Full quality (100-500 MB): the raw recording, for `ios_to_nerfstudio.py` (section 1) with any frame count and size:
+
+    README.txt
+    Scan_<time>.capture/recording/video.mov    1920x1440 HEVC
+    Scan_<time>.capture/recording/frames.bin   120 bytes per video frame (time, pose, lens, size, tracking)
+    Scan_<time>.capture/recording/depth.bin    LiDAR depth (LZFSE), when recorded
+    Scan_<time>.capture/points.bin             the scan's dots
+    Scan_<time>.capture/meta.json              when present
+
+    python ios_to_nerfstudio.py <unzipped>/Scan_<time>.capture ds-full --max-frames 1000 --scale 1.0 --max-points 1000000
+
+No manifest or hash file inside: the zip's own CRC-32 per entry checks the transfer (`unzip -t` / Python
+`zipfile.testzip()`).
