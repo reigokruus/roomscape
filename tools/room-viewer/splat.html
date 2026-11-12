@@ -34,11 +34,17 @@ import * as GaussianSplats3D from './vendor/gaussian-splats-3d.module.js';
 const base = '../../recordings/rebuild/';
 const $ = id => document.getElementById(id);
 let viewer = null, mode = 'fly', current = null;
-const FLY_HELP = 'Fly: W A S D move · Space up · Ctrl or C down (also E up, Q down) · Shift faster · drag to look';
+const FLY_HELP = 'Fly: W A S D move · Space up · Ctrl or C down (also E up, Q down) · Shift faster · look: drag, arrow keys or two-finger swipe';
 const ORBIT_HELP = 'Orbit: drag to turn, right-drag to move, scroll to zoom';
 // ?file=<room>-splat/x.splat&cam=x,y,z&look=x,y,z
 const sp = new URLSearchParams(location.search), q = {};
 for (const k of ['cam', 'look']) if (sp.get(k)) q[k] = sp.get(k).split(',').map(Number);
+// a level start view per room, at eye height (floor about y -1.4 in both): standing in the room, looking along it
+const START = { 's24-splat': { cam: [1.6, 0.15, -1.0], look: [-1.0, 0.0, -4.6] }, 'ios-splat': { cam: [-0.99, 0.26, -0.20], look: [-0.34, -0.2, -2.37] } };
+function startFor(file) {
+  if (file === sp.get('file') && q.cam) return q;
+  return START[file.split('/')[0]] || { cam: [3, 2.5, 3], look: [0, 0, 0] };
+}
 
 // find splat files: the folders ending in -splat (http.server lists directories)
 async function listing(path) {
@@ -68,7 +74,7 @@ async function show(file) {
   viewer = new GaussianSplats3D.Viewer({
     rootElement: $('view'),
     // ARKit / ARCore world: y up
-    cameraUp: [0, 1, 0], initialCameraPosition: q.cam || [3, 2.5, 3], initialCameraLookAt: q.look || [0, 0, 0],
+    cameraUp: [0, 1, 0], initialCameraPosition: startFor(file).cam, initialCameraLookAt: startFor(file).look,
     sharedMemoryForWorkers: false,   // python's http.server sends no cross-origin isolation headers
     dynamicScene: false, sphericalHarmonicsDegree: 1,
     useBuiltInControls: mode === 'orbit',   // fly mode: our own WASD + look (below) moves the camera
@@ -85,7 +91,8 @@ async function show(file) {
 // Ctrl / C / Q down; Shift = faster (1.5 m/s walking, 4 m/s with Shift); drag to look around. Ctrl+W still closes the
 // tab (the browser keeps that one), hence C and Q as the down keys too.
 const keys = new Set(); let yaw = 0, pitch = 0, flyCam = null, last = 0, drag = null;
-const FLY_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ControlLeft', 'ControlRight', 'KeyC', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight']);
+const FLY_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ControlLeft', 'ControlRight', 'KeyC', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight',
+                          'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 addEventListener('keydown', e => {
   if (mode !== 'fly' || !FLY_KEYS.has(e.code) || e.metaKey) return;
   keys.add(e.code); e.preventDefault();        // no page scroll on Space, no Ctrl+S / Ctrl+D save or bookmark dialogs
@@ -98,13 +105,24 @@ function startFly(cam) {
   yaw = Math.atan2(-d.x, -d.z); pitch = Math.asin(Math.max(-1, Math.min(1, d.y)));
   last = performance.now();
 }
-$('view').addEventListener('pointerdown', e => { if (mode === 'fly') { drag = [e.clientX, e.clientY]; $('view').setPointerCapture(e.pointerId); } });
-$('view').addEventListener('pointerup', () => { drag = null; });
-$('view').addEventListener('pointermove', e => {
+// mouse look: listened for on the window, before the splat library's own canvas handlers can swallow the events
+// (rk 11:53: dragging did nothing); the panel on the left keeps its clicks
+window.addEventListener('pointerdown', e => {
+  if (mode !== 'fly' || $('panel').contains(e.target) || e.button !== 0) return;
+  drag = [e.clientX, e.clientY]; e.preventDefault();
+}, { capture: true });
+window.addEventListener('pointerup', () => { drag = null; }, { capture: true });
+window.addEventListener('pointermove', e => {
   if (mode !== 'fly' || !drag) return;
+  if (e.buttons === 0) { drag = null; return; }
   yaw -= (e.clientX - drag[0]) * 0.0035; pitch = Math.max(-1.5, Math.min(1.5, pitch - (e.clientY - drag[1]) * 0.0035));
   drag = [e.clientX, e.clientY];
-});
+}, { capture: true });
+// a trackpad's two-finger swipe (wheel events) also looks around in Fly mode
+window.addEventListener('wheel', e => {
+  if (mode !== 'fly' || $('panel').contains(e.target)) return;
+  yaw -= e.deltaX * 0.003; pitch = Math.max(-1.5, Math.min(1.5, pitch - e.deltaY * 0.003)); e.preventDefault();
+}, { capture: true, passive: false });
 function flyTick(now) {
   requestAnimationFrame(flyTick);
   if (mode !== 'fly' || !flyCam) return;
@@ -117,6 +135,9 @@ function flyTick(now) {
   if (keys.has('Space') || keys.has('KeyE')) move.y += 1;
   if (keys.has('ControlLeft') || keys.has('ControlRight') || keys.has('KeyC') || keys.has('KeyQ')) move.y -= 1;
   if (move.lengthSq() > 0) flyCam.position.addScaledVector(move.normalize(), speed);
+  const turn = 1.4 * dt;   // arrow keys: look around (rad/s), for a trackpad without click-drag
+  if (keys.has('ArrowLeft')) yaw += turn; if (keys.has('ArrowRight')) yaw -= turn;
+  if (keys.has('ArrowUp')) pitch = Math.min(1.5, pitch + turn); if (keys.has('ArrowDown')) pitch = Math.max(-1.5, pitch - turn);
   flyCam.up.set(0, 1, 0);
   flyCam.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
 }
