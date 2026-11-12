@@ -29,7 +29,7 @@
 <body>
 <div id="panel">
   <h1>Room rebuild · 12 Nov 09:17</h1>
-  <div class="row"><button id="b-replay" class="on">Replay (depth)</button><button id="b-wall">Replay + sharp wall</button><button id="b-dots">Dots only</button><button id="b-ios">iPhone 10 Nov 20:09</button></div>
+  <div class="row"><button id="b-replay" class="on">Replay (depth)</button><button id="b-wall">Replay + sharp wall</button><button id="b-dots">Dots only</button><button id="b-ios">iPhone 10 Nov 20:09</button><button id="b-legion">Whole room from stills</button></div>
   <div class="row"><button id="b-orbit" class="on">Orbit</button><button id="b-walk">Walk</button><button id="b-top">Top</button></div>
   <div class="row"><button id="b-labels" class="on">Labels</button></div>
   <label>Cut ceiling <input id="cut" type="range" min="0.8" max="3" step="0.05" value="2.0"></label>
@@ -43,7 +43,7 @@ import * as THREE from 'three';
 import { OrbitControls } from './vendor/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from './vendor/jsm/loaders/GLTFLoader.js';
 
-const ROOMS = { replay: '../../recordings/rebuild/0917-replay/', wall: '../../recordings/rebuild/0917-replay/', dots: '../../recordings/rebuild/0917-dots/', ios: '../../recordings/rebuild/ios-2009/' };
+const ROOMS = { replay: '../../recordings/rebuild/0917-replay/', wall: '../../recordings/rebuild/0917-replay/', dots: '../../recordings/rebuild/0917-dots/', ios: '../../recordings/rebuild/ios-2009/', legion: '../../recordings/rebuild/0917-legion/' };
 // sharp wall textures (tools/room-rebuild/wall_texture.py): single video frames projected onto a fitted wall plane
 const WALLS = { wall: ['wall-01'] };
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -61,7 +61,7 @@ const $ = id => document.getElementById(id);
 
 function setCut() { clip.constant = floorY + parseFloat($('cut').value); }
 async function load(key) {
-  which = key; ['replay', 'wall', 'dots', 'ios'].forEach(k => $('b-' + k).classList.toggle('on', k === key));
+  which = key; ['replay', 'wall', 'dots', 'ios', 'legion'].forEach(k => $('b-' + k).classList.toggle('on', k === key));
   $('status').textContent = 'loading ' + key + '…';
   const gltf = await loader.loadAsync(ROOMS[key] + 'room.glb');
   if (room) { scene.remove(room); room.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
@@ -70,6 +70,7 @@ async function load(key) {
   room.traverse(o => { if (o.isMesh) {
     // Open3D writes the vertex colours as plain sRGB; three.js reads vertex colours as linear: convert, or it all looks washed out
     const col = o.geometry.attributes.color;
+    if (o.material.map) { o.material = new THREE.MeshBasicMaterial({ map: o.material.map, side: THREE.DoubleSide, clippingPlanes: [clip] }); tris += o.geometry.index.count / 3; return; }
     if (col && !col.userData?.lin) { const c = new THREE.Color(); for (let i = 0; i < col.count; i++) { c.setRGB(col.getX(i), col.getY(i), col.getZ(i)); c.convertSRGBToLinear(); col.setXYZ(i, c.r, c.g, c.b); } col.needsUpdate = true; }
     o.material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, clippingPlanes: [clip] });
     tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
@@ -87,7 +88,7 @@ async function load(key) {
     const cx = cv.getContext('2d'); cx.drawImage(tex.image, 0, 0); const A = cx.getImageData(0, 0, cv.width, cv.height).data;
     const o = new THREE.Vector3(...info.corners[0]), ex = new THREE.Vector3(...info.corners[1]).sub(o), ey = new THREE.Vector3(...info.corners[3]).sub(o);
     const wpos = [], wuv = []; const lx = ex.length(), ly = ey.length(); ex.normalize(); ey.normalize(); const nn = new THREE.Vector3(...info.normal);
-    room.traverse(m => { if (!m.isMesh || !m.geometry.index || m.material.map) return;
+    room.traverse(m => { if (!m.isMesh || !m.geometry.index || m.userData.plane) return;
       const P = m.geometry.attributes.position, I = m.geometry.index.array, keep = [], q = new THREE.Vector3();
       for (let t = 0; t < I.length; t += 3) {
         q.set(0, 0, 0); for (let k = 0; k < 3; k++) q.x += P.getX(I[t + k]) / 3, q.y += P.getY(I[t + k]) / 3, q.z += P.getZ(I[t + k]) / 3;
@@ -101,7 +102,7 @@ async function load(key) {
       m.geometry.setIndex(keep); });
     const wg = new THREE.BufferGeometry();
     wg.setAttribute('position', new THREE.Float32BufferAttribute(wpos, 3)); wg.setAttribute('uv', new THREE.Float32BufferAttribute(wuv, 2));
-    room.add(new THREE.Mesh(wg, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, clippingPlanes: [clip] })));
+    const wm = new THREE.Mesh(wg, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, clippingPlanes: [clip] })); wm.userData.plane = true; room.add(wm);
   }
   const box = new THREE.Box3().setFromObject(room);
   // floor: the lowest 2% of vertices
@@ -110,7 +111,7 @@ async function load(key) {
   if (!camera.userData.placed) { const c = box.getCenter(new THREE.Vector3()); orbit.target.set(c.x, floorY + 0.5, c.z); camera.position.set(c.x + 5, floorY + 6, c.z + 6); camera.userData.placed = true; }
   try { labels = await (await fetch(ROOMS[key] + 'labels.json')).json(); } catch (e) { labels = []; }
   buildLabels();
-  $('status').textContent = `${{ replay: 'Replay: real depth + camera pictures', wall: 'Replay + one wall: its own triangles painted with a single sharp video still', dots: 'Dots only + video pictures', ios: 'iPhone LiDAR + flat surfaces painted from single sharp frames' }[key]} · ${Math.round(tris / 1000)}k triangles`;
+  $('status').textContent = `${{ replay: 'Replay: real depth + camera pictures', wall: 'Replay + one wall: its own triangles painted with a single sharp video still', dots: 'Dots only + video pictures', ios: 'iPhone LiDAR + flat surfaces painted from single sharp frames', legion: 'Whole room painted from the best single video stills: flat areas + furniture atlas' }[key]} · ${Math.round(tris / 1000)}k triangles`;
 }
 function buildLabels() {
   tags.forEach(t => t.el.remove()); tags = []; pins.clear(); $('list').innerHTML = '';
@@ -143,7 +144,7 @@ function setMode(m) {
   $('help').textContent = m === 'walk' ? 'Walk: W A S D or arrows to move (Shift = faster), drag to look around. Eye height 1.6 m.'
     : 'Orbit: drag to turn, right-drag to move, scroll to zoom. Click a name in the list to fly there.';
 }
-$('b-replay').onclick = () => load('replay'); $('b-wall').onclick = () => load('wall'); $('b-dots').onclick = () => load('dots'); $('b-ios').onclick = () => { camera.userData.placed = false; load('ios'); };
+$('b-replay').onclick = () => load('replay'); $('b-wall').onclick = () => load('wall'); $('b-dots').onclick = () => load('dots'); $('b-ios').onclick = () => { camera.userData.placed = false; load('ios'); }; $('b-legion').onclick = () => load('legion');
 $('b-orbit').onclick = () => setMode('orbit'); $('b-walk').onclick = () => setMode('walk'); $('b-top').onclick = () => setMode('top');
 $('b-labels').onclick = () => { showLabels = !showLabels; $('b-labels').classList.toggle('on', showLabels); pins.visible = showLabels; };
 $('cut').oninput = setCut;
