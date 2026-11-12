@@ -32,6 +32,17 @@ print(f'pictures: {len(mine)}' + ('' if phone is None else f'; the phone used {l
       + ('' if mine == phone else f' (only here {len(set(mine)-set(phone))}, only on the phone {len(set(phone)-set(mine))})')))
 PYEOF
 mv $R/dataset/plan.json $R/dataset/brush-args.txt $R/
+# The phone's own dataset, if it's still there (it's deleted after a finished preview): exactly what the phone trained
+# on, so it replaces the rebuilt one (17:05 scan: 44 of 199 picked frames differed between the two)
+mkdir -p $R/phone-dataset
+if xcrun devicectl device copy from --device $DEV --domain-type appDataContainer --domain-identifier $B \
+     --source Documents/$SCAN.capture/splat/dataset --destination $R/phone-dataset >/dev/null 2>&1 && [ -d $R/phone-dataset/images ] \
+     && [ "$(ls $R/phone-dataset/images | wc -l)" -gt 0 ]; then
+  rm -f $R/phone-dataset/export.done; mv $R/dataset $R/dataset-regenerated; mv $R/phone-dataset $R/dataset
+  echo "using the phone's own dataset ($(ls $R/dataset/images | wc -l | tr -d ' ') pictures)"
+else
+  rm -rf $R/phone-dataset; echo "the phone's dataset is gone (preview finished): using the rebuilt one"
+fi
 (cd $R/dataset && rm -f ../dataset.zip && zip -q -0 -r ../dataset.zip transforms.json points.ply images)
 (cd $R && shasum -a 256 dataset.zip plan.json brush-args.txt > SHA256SUMS.txt && cat SHA256SUMS.txt)
 sed "s/ios-2009/race-$STAMP/g; s/47814/47816/" recordings/handoff/serve-ios-2009.sh > recordings/handoff/serve-race-$STAMP.sh
