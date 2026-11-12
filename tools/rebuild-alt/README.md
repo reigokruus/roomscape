@@ -60,6 +60,22 @@ gaps); option 2 gives clean surfaces but smears small clutter; Difix makes off-p
 invents detail and does not move held-out pictures toward the truth. Not tried yet: options 1 and 2 with the
 phone's real depth (`depth/`) or the app's own mesh, and Difix's "distil back" Brush run on `dataset_plus/`.
 
+Second test, same night: rk's 12 Nov 12:55 iPhone scan (714 pictures 1920x1440) with real LiDAR depth added by
+`add_depth.py` (pose match 0.00 cm), 90 pictures held out:
+
+| Method | Held-out mean | Time |
+|---|---|---|
+| Brush 5k steps, 720 px | 19.91 dB | 168 s |
+| Brush 15k steps, 720 px | 21.67 dB | 748 s |
+| Brush 30k steps, 720 px | 23.24 dB | 1,521 s |
+| Brush 15k steps, 1920 px | 21.45 dB | 1,392 s |
+| 1: textured mesh, depth fusion, no levelling | 16.08 dB | 392 s |
+| 1: same with seam levelling (default) | 15.73 dB | 396 s |
+
+Real depth gives the mesh the right shape, but it stays near 16 dB (torn surfaces at depth edges, visible patch
+edges); seam levelling smooths walls by eye but does not raise the score. Flat splats with real depth were not run
+(LEGION was switched off); the dataset with `depth/` is kept on LEGION for a later try.
+
 LEGION ran gsplat 1.5.0 (1.5.3 has no Windows wheel); `setup.cmd` was not used there.
 
 ## Pictures of real homes
