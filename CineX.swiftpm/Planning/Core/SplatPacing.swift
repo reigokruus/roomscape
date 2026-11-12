@@ -4,14 +4,14 @@ import Foundation
 /// with less performance but cooler"), and how a stopped training carries on. Pure logic, tested in
 /// SplatPacingTests; the trainer (BrushTrainer) applies it.
 public enum SplatPacing {
-    /// Rest after each training step, by ProcessInfo.ThermalState raw value (0 nominal, 1 fair, 2 serious,
-    /// 3 critical). nil: pause until the phone cools. A step takes about 0.14 s on an iPhone 15 Pro, so these are
-    /// about 10%, 40% and 180% slower; slower total time is fine (rk).
-    public static func restSeconds(thermal: Int) -> Double? {
+    /// Rest after training, as a share of the time the training itself just took, by ProcessInfo.ThermalState raw
+    /// value (0 nominal, 1 fair, 2 serious, 3 critical); nil: pause until the phone cools. Serious = half speed at
+    /// most (rk 12 Nov 16:41: the earlier fixed 0.25 s a step was about 14 of the 16 minutes on a small scan).
+    public static func restFactor(thermal: Int) -> Double? {
         switch thermal {
-        case ...0: return 0.015
-        case 1: return 0.06
-        case 2: return 0.25
+        case ...0: return 0.1
+        case 1: return 0.4
+        case 2: return 1.0
         default: return nil
         }
     }
@@ -21,7 +21,7 @@ public enum SplatPacing {
         switch thermal {
         case ...0: return nil
         case 1: return "Running a little slower to keep the phone cool"
-        case 2: return "Running slowly to keep the phone cool"
+        case 2: return "Running at half speed to keep the phone cool"
         default: return "Paused: the phone is hot, carries on when it cools"
         }
     }

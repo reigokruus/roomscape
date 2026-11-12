@@ -122,6 +122,19 @@ enum SplatPreview {
         try fm.moveItem(at: partial, to: result(scan))
         try? fm.removeItem(at: dataset.appendingPathComponent("images"))   // made again from the recording if needed
         SplatPacing.Checkpoint.clear(in: dir)
+        // Measured (rk 12 Nov 16:41: read, not estimated): training vs heat rests vs pauses, summed over this preview's
+        // runs (a resume is a new run), into the processing log
+        if let text = try? String(contentsOf: dir.appendingPathComponent("train-times.jsonl"), encoding: .utf8) {
+            var train = 0.0, rest = 0.0, paused = 0.0, runs = 0
+            for line in text.split(separator: "\n") {
+                guard let d = line.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
+                train += o["train"] as? Double ?? 0; rest += o["rest"] as? Double ?? 0; paused += o["paused"] as? Double ?? 0; runs += 1
+            }
+            let summary = "Preview times: training \(Int(train)) s, heat rests \(Int(rest)) s, paused \(Int(paused)) s, \(runs) run(s), \(Int(Date().timeIntervalSince(started))) s this run"
+            log.info("\(summary, privacy: .public)")
+            note(summary); note(nil)
+            try? fm.removeItem(at: dir.appendingPathComponent("train-times.jsonl"))
+        }
         // Share link (switch "Share links (test)"): put the preview online at the scan's link. A failed upload
         // doesn't fail the preview; the room's Share menu can try again.
         if RoomLink.enabled, RoomLink.Keychain.uploadKey != nil {

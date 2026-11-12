@@ -3,10 +3,11 @@ import XCTest
 
 final class SplatPacingTests: XCTestCase {
     func testRestGrowsWithHeatAndPausesAtCritical() {
-        let r = (0...2).map { SplatPacing.restSeconds(thermal: $0)! }
+        let r = (0...2).map { SplatPacing.restFactor(thermal: $0)! }
         XCTAssertGreaterThan(r[0], 0)              // paced from the start
         XCTAssertLessThan(r[0], r[1]); XCTAssertLessThan(r[1], r[2])
-        XCTAssertNil(SplatPacing.restSeconds(thermal: 3))
+        XCTAssertLessThanOrEqual(r[2], 1.0)        // serious: at least half speed
+        XCTAssertNil(SplatPacing.restFactor(thermal: 3))
         XCTAssertNil(SplatPacing.note(thermal: 0))
         XCTAssertNotNil(SplatPacing.note(thermal: 2))
     }

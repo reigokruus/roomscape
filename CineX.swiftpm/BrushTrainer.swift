@@ -13,7 +13,7 @@ import UIKit
 ///
 /// Heat and restarts (rk 12 Nov: the app closed by itself mid-training, at thermal state serious, and always started
 /// again from zero; "if heat is the problem just run it with less performance but cooler"):
-/// - paced: after every step the Brush thread rests (`SplatPacing.restSeconds`: a little at nominal, more at fair,
+/// - paced: after every report the Brush thread rests a share of the time training just took (`SplatPacing.restFactor`: a little at nominal, more at fair,
 ///   a lot at serious, paused at critical). Brush's message stream only moves on when the step's message is taken,
 ///   so resting in the callback holds training back without changing Brush.
 /// - checkpoints: Brush exports the splat every `SplatPacing.checkpointEvery` steps; each finished export becomes
@@ -49,20 +49,37 @@ struct BrushTrainer: SplatPreview.Trainer {
         /// Brush reports every 5th step (`iter` counts from 1 in this run; brush-process UPDATE_EVERY) and exports
         /// (export_every) before it reports that step.
         private var lastIter = 0
+        /// Measured, for the processing log: seconds Brush spent training, resting for heat, and paused (critical,
+        /// or the app losing focus). The clock starts at Brush's first report (loading the pictures isn't counted).
+        private(set) var trainSeconds = 0.0, restSeconds = 0.0, pausedSeconds = 0.0, lastStepDone = 0
+        private var lastReport: Date?
         func step(_ iter: Int) {
             let done = from + iter
+            lastStepDone = done
             let thermal = ProcessInfo.processInfo.thermalState.rawValue
+            let now = Date()
+            // time since the last report, minus nothing: rests and pauses happen after the report, below
+            let worked = lastReport.map { now.timeIntervalSince($0) } ?? 0
+            trainSeconds += worked
             progress(done, SplatPacing.note(thermal: thermal))
             if iter % SplatPacing.checkpointEvery == 0, done < steps { checkpoint(localStep: iter) }
-            // rest for heat, per step since the last report; at critical wait (in short naps, so cancelling still
-            // works) until it cools
+            var t = Date()
             while hold.pointee != 0, cancel.pointee == 0 { Thread.sleep(forTimeInterval: 0.1) }
-            let n = max(1, iter - lastIter); lastIter = iter
-            if let rest = SplatPacing.restSeconds(thermal: thermal) { Thread.sleep(forTimeInterval: rest * Double(n)); return }
-            while cancel.pointee == 0, SplatPacing.restSeconds(thermal: ProcessInfo.processInfo.thermalState.rawValue) == nil {
-                progress(done, SplatPacing.note(thermal: 3))
-                Thread.sleep(forTimeInterval: 2)
+            lastIter = iter
+            if let factor = SplatPacing.restFactor(thermal: thermal) {
+                // rest a share of the time the last steps took (serious: as long again = half speed)
+                pausedSeconds += Date().timeIntervalSince(t)
+                let rest = min(2.0, factor * worked)
+                if rest > 0 { Thread.sleep(forTimeInterval: rest); restSeconds += rest }
+            } else {
+                // critical: wait (in short naps, so cancelling still works) until it cools
+                while cancel.pointee == 0, SplatPacing.restFactor(thermal: ProcessInfo.processInfo.thermalState.rawValue) == nil {
+                    progress(done, SplatPacing.note(thermal: 3))
+                    Thread.sleep(forTimeInterval: 2)
+                }
+                pausedSeconds += Date().timeIntervalSince(t)
             }
+            t = Date(); lastReport = t
         }
 
         private func checkpoint(localStep: Int) {
@@ -139,6 +156,14 @@ struct BrushTrainer: SplatPreview.Trainer {
             }
         } onCancel: {
             box.cancel.pointee = 1
+        }
+        // this run's measured times, kept with the scan (SplatPreview sums them into the processing log)
+        let times: [String: Any] = ["from": from, "to": box.lastStepDone, "train": (box.trainSeconds * 10).rounded() / 10,
+                                    "rest": (box.restSeconds * 10).rounded() / 10, "paused": (box.pausedSeconds * 10).rounded() / 10]
+        if let line = try? JSONSerialization.data(withJSONObject: times) {
+            let url = folder.appendingPathComponent("train-times.jsonl")
+            if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line + Data("\n".utf8)); try? h.close() }
+            else { try? (line + Data("\n".utf8)).write(to: url) }
         }
         try Task.checkCancellation()
         if left.pointee {
