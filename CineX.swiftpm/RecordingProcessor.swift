@@ -22,7 +22,8 @@ enum RecordingProcessor {
 
     /// What a job makes: `rebuild` the whole scan (surface, points, photos, text) from the recording, `text` only
     /// the sharp text patches (after Done while the live scan stays the main result).
-    enum Job: String, Codable, Sendable { case rebuild, text }
+    /// `splat`: the photo-real room preview (SplatPreview), trained on the phone from the recording.
+    enum Job: String, Codable, Sendable { case rebuild, text, splat }
 
     typealias DepthFrame = (time: Double, w: Int, h: Int, mm: [UInt16], conf: [UInt8])
 
@@ -38,6 +39,7 @@ enum RecordingProcessor {
     /// Cancelling throws CancellationError and leaves the scan as it was. Only the last step swaps the new files in,
     /// and the files they replace move into a backup folder first (`before-rebuild`, `before-rebuild-2`, …).
     static func run(_ job: Job, on scan: SavedScan, progress: @escaping @Sendable (Progress) -> Void) async throws {
+        if job == .splat { return try await SplatPreview.run(on: scan, progress: progress) }
         let fm = FileManager.default
         let rec = scan.captureURL.appendingPathComponent("recording")
         let work = scan.captureURL.appendingPathComponent("processing-\(job.rawValue)")

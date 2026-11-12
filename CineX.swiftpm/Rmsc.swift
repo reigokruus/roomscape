@@ -132,6 +132,8 @@ enum Rmsc {
         let objectsURL = RoomObjects.url(scan)
         if FileManager.default.fileExists(atPath: objectsURL.path) { try zip.add("ios/objects.json", file: objectsURL) }
         try zip.add("ios/shift.json", data: try JSONSerialization.data(withJSONObject: ["floorY": floorY]))
+        // The photo-real preview (SplatPreview), optional: a Gaussian splat PLY in the scan's own (ARKit) coordinates.
+        if SplatPreview.hasResult(scan) { try zip.add("ios/splat-preview.ply", file: SplatPreview.result(scan)) }
         // Flat tiles (docs/rmsc-format.md "Flat tiles"): the floor moved to 0 like everything else.
         let tilesJSON = folder.appendingPathComponent("tiles.json"), tilesPNG = folder.appendingPathComponent("tiles.png")
         if let data = try? Data(contentsOf: tilesJSON), let moved = FlatTiles.shifted(data, dy: -floorY), FileManager.default.fileExists(atPath: tilesPNG.path) {

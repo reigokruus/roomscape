@@ -99,6 +99,13 @@ Each tile is a flat square (`tileSize` metres a side). `corners` are its four co
 
 Only `format`, `version` and `name` are required; everything else is optional. `objects` is the shared form: a box per movable object, with yaw in radians around +Y (right-handed, +Y up). `center` and `yaw` are where it is now; `original` is where the scan had it (absent = never moved). `size` is width (the box's own x), height, depth (its own z). `id` is stable across phones and syncs; `removed` objects stay in the list (so they can be put back). Readers merge by `id`: a newer package's version of an object wins, and objects the package lacks are kept — an import never drops objects. `source` is `roomPlan`, `claude`, `android` or `catalogue`. Richer per-platform object data (lights, sockets, a catalogue item's own points) goes in `ios/` or `android/`.
 
+### Photo-real preview (`ios/splat-preview.ply`, optional)
+
+A Gaussian splat of the room made on the iPhone after the scan (SplatPreview.swift), when the "Photo-real preview" switch
+is on. Standard 3DGS PLY layout (binary little-endian: `x y z`, `f_dc_0..2` colour, `opacity` as a logit, `scale_0..2`
+as logs, `rot_0..3` quaternion w x y z, optionally `f_rest_*`), in the scan's own ARKit coordinates (not shifted: move it
+by `ios/shift.json`'s `floorY` to line it up with the rest). Any splat viewer reads it. Readers that don't know it ignore it.
+
 ### photos.json
 
 ```json

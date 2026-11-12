@@ -111,6 +111,8 @@ private enum log {
     func scanSaved(_ scan: SavedScan) {
         guard RecordingProcessor.hasRecording(scan) else { return }
         add(scan, Self.recordThenProcess ? .rebuild : .text)
+        // The photo-real preview (switch "Photo-real preview"): after the scan's own job, so the scan is complete first.
+        if SplatPreview.enabled { add(scan, .splat) }
     }
 
     func add(_ scan: SavedScan, _ job: RecordingProcessor.Job) {
@@ -260,6 +262,7 @@ private enum log {
                 try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
                 items.removeAll { $0 == item }
                 finished = Finished(scan: item.scan, job: item.job, error: nil)
+                if item.job == .splat { SplatPreview.notifyReady(scan) }
                 log.info("processed \(item.scan)")
             } catch is CancellationError {
                 return stopped()
@@ -298,7 +301,7 @@ private enum log {
         guard #available(iOS 26.0, *), let task = systemTask as? BGContinuedProcessingTask, let progress else { return }
         task.progress.completedUnitCount = Int64(max(0, min(1, progress.fraction)) * 1000)
         let waiting = items.count > 1 ? " · \(items.count - 1) more waiting" : ""
-        task.updateTitle(current?.job == .rebuild ? "Building room scan" : "Finding text in room scan",
+        task.updateTitle(current?.job == .rebuild ? "Building room scan" : current?.job == .splat ? "Making room preview" : "Finding text in room scan",
                          subtitle: (progress.note ?? progress.stage) + waiting)
     }
 
@@ -318,7 +321,7 @@ struct ProcessingCard: View {
     var body: some View {
         if let current = queue.current, scan == nil || current.scan == scan, let p = queue.progress {
             VStack(alignment: .leading, spacing: 6) {
-                Text(current.job == .rebuild ? "Building from the recording" : "Finding text in the scan").font(.headline)
+                Text(current.job == .rebuild ? "Building from the recording" : current.job == .splat ? "Photo-real room preview" : "Finding text in the scan").font(.headline)
                 if scan == nil { Text(current.scan).font(.caption).foregroundStyle(.secondary) }
                 ProgressView(value: max(0, min(1, p.fraction))) {
                     Text(p.stage.isEmpty ? "Working…" : p.stage).font(.footnote)
@@ -326,7 +329,8 @@ struct ProcessingCard: View {
                 if let note = p.note {
                     Label(note, systemImage: "thermometer.medium").font(.footnote).foregroundStyle(.orange)
                 }
-                Text(queue.items.count > 1 ? "\(queue.items.count - 1) more waiting. Keeps going if you leave the app." : "Keeps going if you leave the app.")
+                let keeps = current.job == .splat ? "Needs RoomScape open: pauses while you're in another app." : "Keeps going if you leave the app."
+                Text(queue.items.count > 1 ? "\(queue.items.count - 1) more waiting. " + keeps : keeps)
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -352,6 +356,7 @@ struct ProcessingSection: View {
     @State private var livePoints = LivePreview.livePoints
     @State private var s24Look = LivePreview.s24Look
     @State private var depthConfidence = LivePreview.depthConfidence
+    @State private var splat = SplatPreview.enabled
     @State private var flatTiles = FlatTiles.enabled
     @State private var screenVideo = ScreenVideo.enabled
 
@@ -375,6 +380,10 @@ struct ProcessingSection: View {
                 Toggle("Points-only live view (test)", isOn: $livePoints)
                     .onChange(of: livePoints) { _, on in LivePreview.livePoints = on }
             }
+            // rk 12 Nov: the photo-real preview made on the phone after Done (off until the real trainer is linked in)
+            Toggle("Photo-real preview after a scan (test)", isOn: $splat)
+                .onChange(of: splat) { _, on in SplatPreview.enabled = on; if on { SplatPreview.askForNotifications() } }
+            NavigationLink("Licences (photo-real preview)") { SplatLicencesView() }
             Toggle("Flat tiles (test)", isOn: $flatTiles)
                 .onChange(of: flatTiles) { _, on in FlatTiles.enabled = on }
             Toggle("Screen video (test)", isOn: $screenVideo)

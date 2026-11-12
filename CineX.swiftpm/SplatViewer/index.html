@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Room preview</title>
+<!-- The in-app photo-real room preview (SplatViewerView.swift): served by the app itself under roomscape-splat://,
+     offline. scene.ply is the scan's splat; ?cam=x,y,z&look=x,y,z where the camera starts (splat/view.json). -->
+<style>
+  html, body { margin: 0; height: 100%; background: #111214; color: #eceae6; font: 14px -apple-system, sans-serif; overflow: hidden; }
+  #view { position: fixed; inset: 0; }
+  #status { position: fixed; left: 12px; bottom: 12px; color: #a3a09a; font-size: 13px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="status">Loading the room…</div>
+<script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
+<script type="module">
+import * as GaussianSplats3D from './gaussian-splats-3d.module.js';
+const q = new URLSearchParams(location.search);
+const vec = k => q.get(k) ? q.get(k).split(',').map(Number) : null;
+const viewer = new GaussianSplats3D.Viewer({
+  rootElement: document.getElementById('view'),
+  cameraUp: [0, 1, 0],                      // ARKit / ARCore world: y up
+  initialCameraPosition: vec('cam') || [0, 1.5, 3], initialCameraLookAt: vec('look') || [0, 0, 0],
+  sharedMemoryForWorkers: false, dynamicScene: false, sphericalHarmonicsDegree: 0,
+  useBuiltInControls: true,                 // touch: one finger turns, two fingers move and zoom
+});
+const status = document.getElementById('status');
+try {
+  await viewer.addSplatScene('scene.ply', { splatAlphaRemovalThreshold: 5, showLoadingUI: false, progressiveLoad: false,
+    format: GaussianSplats3D.SceneFormat.Ply,
+    onProgress: p => { status.textContent = `Loading the room… ${Math.round(p)}%`; } });
+  viewer.start();
+  status.textContent = 'One finger to turn, two to move and zoom';
+  setTimeout(() => { status.textContent = ''; }, 4000);
+} catch (e) { status.textContent = 'Could not show the preview: ' + (e && e.message ? e.message : e); }
+</script>
+</body>
+</html>

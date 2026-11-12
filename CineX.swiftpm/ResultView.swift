@@ -67,6 +67,7 @@ struct ResultView: View {
     @State private var glbFile: SharedFile?
     @State private var glbError: String?
     @State private var sendingNearby = false
+    @State private var showingSplat = false
     @State private var buildingSplats = false
     /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
     @State private var lightingOn = false
@@ -249,6 +250,12 @@ struct ResultView: View {
                 ProgressView()
             } else if photoRoom != nil || capture != nil {
                 Menu {
+                    // The photo-real preview (SplatPreview): open it, or make it (queued after the scan's own jobs)
+                    if SplatPreview.hasResult(current) {
+                        Button { showingSplat = true } label: { Label("Photo-real preview", systemImage: "cube.transparent") }
+                    } else if SplatPreview.enabled, recordingBytes != nil {
+                        Button { ProcessingQueue.shared.add(current, .splat) } label: { Label("Make photo-real preview", systemImage: "cube.transparent") }
+                    }
                     Button { sendingNearby = true } label: { Label("Send to nearby phone", systemImage: "iphone.radiowaves.left.and.right") }
                     Button { exportRmsc(save: true) } label: { Label("Save to Files…", systemImage: "folder") }
                     Button { exportRmsc(save: false) } label: { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }
@@ -268,6 +275,7 @@ struct ResultView: View {
             }
         }
         .sheet(isPresented: $sendingNearby) { SendNearbySheet(scan: current) }
+        .fullScreenCover(isPresented: $showingSplat) { SplatPreviewSheet(scan: current) }
         .overlay(alignment: .center) {
             ProcessingOverlay(scan: current.name, done: $rebuildDone)
         }
