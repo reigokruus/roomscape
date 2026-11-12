@@ -20,9 +20,31 @@ enum LivePreview {
     /// "Points-only live view" (test, off by default; rk 10 Nov, as on Android): while scanning only the coloured 2 cm
     /// points are drawn, never the live mesh (it's still built in the background); finished scans open in Points.
     nonisolated static var livePoints: Bool {
-        get { UserDefaults.standard.bool(forKey: "livePoints") || ProcessInfo.processInfo.arguments.contains("-livePoints") }
+        get { s24Look || UserDefaults.standard.bool(forKey: "livePoints") || ProcessInfo.processInfo.arguments.contains("-livePoints") }
         set { UserDefaults.standard.set(newValue, forKey: "livePoints") }
     }
+    /// The Android (S24) scan look, the default since 12 Nov (rk: "use the same view as we set on s24"): only the
+    /// dots, in their real colour, over the camera picture at 30% on near-black; fine dots up close; no hints, no
+    /// "lost track" prompts; a lost track for over 1 s ends the scan and saves it like Done; a small status line
+    /// (time, dots, phone load). Switch "S24 scan look" on the home screen off for the previous iPhone look.
+    nonisolated static var s24Look: Bool {
+        get { !UserDefaults.standard.bool(forKey: "classicScanLook") }
+        set { UserDefaults.standard.set(!newValue, forKey: "classicScanLook") }
+    }
+    /// The camera picture's opacity under the dots in the S24 look (Android: CAMERA_OPACITY 0.3).
+    static let cameraOpacity: Float = 0.3
+    /// Which LiDAR depth makes dots: 2 = high confidence only (default, about 75% of depth pixels on a 15 Pro),
+    /// 1 = medium and high (about 93%), 0 = all. Below that the depth is discarded at the door, as on Android.
+    nonisolated static var depthConfidence: Int {
+        get { (UserDefaults.standard.object(forKey: "depthConfidence") as? Int) ?? 2 }
+        set { UserDefaults.standard.set(newValue, forKey: "depthConfidence") }
+    }
+    /// Fine dots up close (as the S24's VOXEL_FINE / FINE_NEAR): 0.8 cm cells for depth under 1 m, 2 cm beyond. The
+    /// 15 Pro's LiDAR is 256 × 192, ~0.56 cm per pixel at 1 m, so every depth pixel is used under 1 m (every second
+    /// one beyond, as before). A fine dot replaces the 2 cm dot of the same spot (the closer look wins).
+    nonisolated static var fineNear: Bool { s24Look }
+    static let fineVoxel: Float = 0.008
+    static let fineNearMetres: Float = 1.0
     /// The camera picture's brightness under the preview, 0…1 (when it's shown).
     static let dim: Float = 0.38
     /// Tentative surface (seen a few times) and solid surface, as RGBA.

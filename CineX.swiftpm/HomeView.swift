@@ -29,6 +29,11 @@ struct HomeView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
+                // Which build this is, above the logo (as on Android, rk 11 Nov: "show me the version on the app header").
+                Text(BuildStamp.text)
+                    .font(.headline.monospacedDigit())
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
                 // The logo stands in for a title; its asset has a dark-lettered version for light mode.
                 Image("Logo")
                     .resizable()

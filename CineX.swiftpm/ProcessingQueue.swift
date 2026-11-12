@@ -350,6 +350,8 @@ struct ProcessingSection: View {
     @State private var fromRecording = ProcessingQueue.recordThenProcess
     @State private var fine = ProcessingQueue.fineSurface
     @State private var livePoints = LivePreview.livePoints
+    @State private var s24Look = LivePreview.s24Look
+    @State private var depthConfidence = LivePreview.depthConfidence
     @State private var flatTiles = FlatTiles.enabled
     @State private var screenVideo = ScreenVideo.enabled
 
@@ -360,8 +362,19 @@ struct ProcessingSection: View {
                 .onChange(of: fromRecording) { _, on in ProcessingQueue.recordThenProcess = on }
             Toggle("Finer surface for thin things (test)", isOn: $fine)
                 .onChange(of: fine) { _, on in ProcessingQueue.fineSurface = on }
-            Toggle("Points-only live view (test)", isOn: $livePoints)
-                .onChange(of: livePoints) { _, on in LivePreview.livePoints = on }
+            // rk 12 Nov: the S24's scan look is the default; off = the previous iPhone look (hints, mesh, zebra).
+            Toggle("S24 scan look (dots over a dim camera, no hints)", isOn: $s24Look)
+                .onChange(of: s24Look) { _, on in LivePreview.s24Look = on; livePoints = LivePreview.livePoints }
+            Picker("Depth that makes dots", selection: $depthConfidence) {
+                Text("Sure only").tag(2)
+                Text("Sure + medium").tag(1)
+                Text("All").tag(0)
+            }
+            .onChange(of: depthConfidence) { _, v in LivePreview.depthConfidence = v }
+            if !s24Look {
+                Toggle("Points-only live view (test)", isOn: $livePoints)
+                    .onChange(of: livePoints) { _, on in LivePreview.livePoints = on }
+            }
             Toggle("Flat tiles (test)", isOn: $flatTiles)
                 .onChange(of: flatTiles) { _, on in FlatTiles.enabled = on }
             Toggle("Screen video (test)", isOn: $screenVideo)

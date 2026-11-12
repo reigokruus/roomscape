@@ -387,6 +387,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         var cell: Float
         /// 1: points-only look (round dots facing the camera, opaque), 0: the white grid squares on the surface
         var points: Float = 0
+        /// Half size of a fine (0.8 cm) dot (LivePreview.fineNear).
+        var fineHalf: Float = 0
     }
 
     init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?, ghost: LiveGhost, tiles: FlatTiles? = nil) {
@@ -492,7 +494,10 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
             let realView = camera.viewMatrix(for: .portrait)
             let realProjection = camera.projectionMatrix(for: .portrait, viewportSize: view.bounds.size, zNear: 0.05, zFar: 50)
-            if LivePreview.showCamera {
+            if LivePreview.s24Look {
+                // The S24 look (rk 12 Nov): the camera picture at 30% on near-black under the dots, edge to edge.
+                meshRenderer?.encodeDim(encoder, alpha: 1 - LivePreview.cameraOpacity)
+            } else if LivePreview.showCamera {
                 if overviewView != nil { window?.encodeZebra(encoder, alpha: overview.blend) }
                 // The live preview: the camera picture dimmed, so only what's been scanned (and photographed) is bright.
                 meshRenderer?.encodeDim(encoder, alpha: (1 - LivePreview.dim) * (overviewView != nil ? 1 - overview.blend : 1))
@@ -544,7 +549,8 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             var uniforms = Uniforms(viewProjection: projection * viewMatrix,
                                     cameraPosition: viewMatrix.inverse.columns.3,
                                     halfSize: LivePreview.livePoints ? cloud.voxelSize * 0.6 : cloud.voxelSize * 0.7, cell: Self.cell,
-                                    points: LivePreview.livePoints ? 1 : 0)   // points: round 2.4 cm dots on the 2 cm grid
+                                    points: LivePreview.livePoints ? 1 : 0,   // points: round 2.4 cm dots on the 2 cm grid
+                                    fineHalf: LivePreview.fineVoxel * 0.6)    // fine dots: 0.96 cm on the 0.8 cm grid
             encoder.setVertexBuffer(cloud.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(cloud.normalBuffer, offset: 0, index: 1)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
@@ -576,6 +582,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float halfSize;
         float cell;
         float points;
+        float fineHalf;
     };
     struct TileOut {
         float4 position [[position, invariant]];
@@ -608,6 +615,9 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
                 }
             }
         }
+        // The normal's 4th byte: 1 = a fine (0.8 cm) dot, 2 = a 2 cm dot replaced by fine ones (not drawn).
+        if (normals[iid].w == 2) hidden = true;
+        float hs = (normals[iid].w == 1) ? u.fineHalf : u.halfSize;
         float3 n = float3(normals[iid].xyz) / 127.0;
         // No normal yet: a tile facing the camera.
         n = dot(n, n) > 0.25 ? normalize(n) : normalize(u.cameraPosition.xyz - c);
@@ -617,7 +627,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float3 t1 = normalize(cross(a, n));
         float3 t2 = cross(n, t1);
         float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
-        float3 world = c + (t1 * corner.x + t2 * corner.y) * u.halfSize;
+        float3 world = c + (t1 * corner.x + t2 * corner.y) * hs;
         TileOut out;
         out.position = hidden ? float4(0.0, 0.0, -2.0, 1.0) : u.viewProjection * float4(world, 1.0);   // hidden: outside the view
         out.world = world;
