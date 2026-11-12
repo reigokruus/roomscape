@@ -28,6 +28,13 @@ final class SplatPacingTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: export.path))   // moved, not copied
         XCTAssertEqual(SplatPacing.Checkpoint.load(from: dir, steps: 6000), .init(step: 1500, steps: 6000))
         XCTAssertNil(SplatPacing.Checkpoint.load(from: dir, steps: 7000))       // other training length: start over
+        // other trainer settings: start over (a 400k checkpoint must not start a 200k-cap training)
+        try Data("ply".utf8).write(to: export)
+        try SplatPacing.Checkpoint(step: 1500, steps: 6000, setup: "brush 720px 200k sh1").save(ply: export, to: dir)
+        XCTAssertNil(SplatPacing.Checkpoint.load(from: dir, steps: 6000, setup: "brush 960px 400k sh1"))
+        XCTAssertEqual(SplatPacing.Checkpoint.load(from: dir, steps: 6000, setup: "brush 720px 200k sh1")?.step, 1500)
+        try Data("ply".utf8).write(to: export)
+        try SplatPacing.Checkpoint(step: 1500, steps: 6000).save(ply: export, to: dir)
         // a newer one replaces it
         try Data("ply2".utf8).write(to: export)
         try SplatPacing.Checkpoint(step: 2000, steps: 6000).save(ply: export, to: dir)

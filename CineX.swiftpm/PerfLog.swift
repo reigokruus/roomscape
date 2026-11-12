@@ -182,6 +182,8 @@ final class PerfLog: @unchecked Sendable {
                     "appCPU": (cpuDelta / max(0.001, dt) * 100).rounded() / 100,
                     "gpuMs": (s.gpu * 1000).rounded(), "frames": s.frames, "gaps": s.gaps,
                     "thermal": thermal, "lowPower": lowPower, "memMB": memory.rounded(),
+                    // headroom before iOS stops the app for memory (footprint + this = the app's limit)
+                    "availMB": (Double(os_proc_available_memory()) / 1_048_576).rounded(),
                     "battery": battery.0, "charging": battery.1 == 2 || battery.1 == 3]
             if !notes.isEmpty { line["timedMs"] = notes }
             var sums = s.sums[s.stage] ?? Sums()

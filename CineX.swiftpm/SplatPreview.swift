@@ -40,6 +40,8 @@ enum SplatPreview {
     /// What trains the splat from the dataset folder (transforms.json, images/, points.ply) into `output`.
     protocol Trainer: Sendable {
         var name: String { get }
+        /// Its settings, kept with checkpoints (a checkpoint from other settings is not carried on).
+        var setup: String { get }
         /// Trains `steps` steps in all, carrying on from `resume` (a checkpoint in output's folder) if given, and saving
         /// a checkpoint there every `SplatPacing.checkpointEvery` steps. `progress` gets the steps done in all
         /// (resume.step…steps) and a note when heat is holding it back (nil when not).
@@ -79,7 +81,7 @@ enum SplatPreview {
         let partial = dir.appendingPathComponent("preview-training.ply")
         // Carries on from the last checkpoint if the app was closed or left mid-way (rk 12 Nov: it always restarted
         // from zero), and says so on the card.
-        let resume = SplatPacing.Checkpoint.load(from: dir, steps: steps)
+        let resume = SplatPacing.Checkpoint.load(from: dir, steps: steps, setup: trainer.setup)
         let from = resume?.step ?? 0
         if let resume { log.info("preview resumes from step \(resume.step) of \(steps)") }
         progress(.init(stage: SplatPacing.stage(step: from, of: steps, minutesLeft: nil), fraction: 0.25 + 0.73 * Float(from) / Float(steps), note: nil))
@@ -242,6 +244,7 @@ enum SplatPreview {
 /// progress, viewer and .rmsc can be tried end to end. Not photo-real.
 struct DotsTrainer: SplatPreview.Trainer {
     var name: String { "stand-in (dots as blobs)" }
+    var setup: String { "dots" }
     func train(dataset: URL, output: URL, steps: Int, resume: SplatPacing.Checkpoint?,
                progress: @escaping @Sendable (Int, String?) -> Void) async throws {
         let ply = try Data(contentsOf: dataset.appendingPathComponent("points.ply"))

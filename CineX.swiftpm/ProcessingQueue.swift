@@ -189,8 +189,10 @@ private enum log {
     private func runInSystemTask(_ task: BGTask) {
         log.info("system task started: \(task.identifier) (\(type(of: task)))")
         systemTask = task
+        // BackgroundTasks calls this on one of its own queues, not the main thread (crash report 12 Nov 12:44Z:
+        // MainActor.assumeIsolated trapped here), so hop to the main actor.
         task.expirationHandler = { [weak self] in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 log.info("background time is over: stopping, resumes later")
                 self?.runner?.cancel()
                 self?.inner?.cancel()
@@ -294,7 +296,15 @@ private enum log {
     private func update(_ p: RecordingProcessor.Progress) {
         guard current != nil else { return }
         if p.fraction < 0, p.note != progress?.note { log.info("note: \(p.note ?? "continuing")") }
-        if p.fraction >= 0, !p.stage.isEmpty, p.stage != progress?.stage { log.info("stage: \(p.stage)"); PerfLog.processing?.stage(p.stage) }
+        // Stage changes go to the processing log and PerfLog, but not every changing number (the photo-real
+        // preview's "Step N of 6,000 · about M min left" changes every 5 steps): only when the words change, plus a
+        // progress line every 5%.
+        if p.fraction >= 0, !p.stage.isEmpty, p.stage != progress?.stage {
+            let words = { (s: String) in s.filter { !$0.isNumber } }
+            let oldF = progress?.fraction ?? 0
+            if words(p.stage) != words(progress?.stage ?? "") { log.info("stage: \(p.stage)"); PerfLog.processing?.stage(words(p.stage)) }
+            else if Int(p.fraction * 20) != Int(oldF * 20) { log.info("stage: \(p.stage)") }
+        }
         if p.fraction < 0 { progress?.note = p.note } else { progress = .init(stage: p.stage, fraction: p.fraction, note: progress?.note) }
         report()
     }

@@ -23,7 +23,13 @@ import UIKit
 ///   less sharp than one in one go; much better than starting from zero.
 struct BrushTrainer: SplatPreview.Trainer {
     var name: String { "Brush" }
-    static let maxResolution: UInt32 = 960, maxSplats: UInt32 = 400_000, shDegree: UInt32 = 1
+    var setup: String { Self.setup }
+    /// Memory (12 Nov 13:04Z, measured on the phone): the footprint peaks at Brush's refine steps (every 200 steps)
+    /// and the peak grows with the splat count: 2.26 GB loading, 2.66 GB at step 1,200, 2.97 GB at step 1,600 with
+    /// 960 px and a 400k cap; the app was stopped by iOS each time at about step 1,400-1,600. So 720 px pictures and
+    /// at most 200k splats on the phone (the PC's full version has millions).
+    static let maxResolution: UInt32 = 720, maxSplats: UInt32 = 200_000, shDegree: UInt32 = 1
+    static let setup = "brush \(maxResolution)px \(maxSplats / 1000)k sh\(shDegree)"
 
     /// Everything the Brush thread's callback needs (it runs on that thread, for every step).
     private final class Box: @unchecked Sendable {
@@ -64,7 +70,7 @@ struct BrushTrainer: SplatPreview.Trainer {
             let plys = ((try? fm.contentsOfDirectory(at: outDir, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "ply" }
             guard let ply = plys.first(where: { Self.number($0) == localStep }) else { return }
             do {
-                try SplatPacing.Checkpoint(step: from + localStep, steps: steps).save(ply: ply, to: folder)
+                try SplatPacing.Checkpoint(step: from + localStep, steps: steps, setup: BrushTrainer.setup).save(ply: ply, to: folder)
                 SplatPreview.log.info("checkpoint at step \(self.from + localStep)")
             } catch {
                 SplatPreview.log.error("checkpoint not saved: \(error.localizedDescription, privacy: .public)")

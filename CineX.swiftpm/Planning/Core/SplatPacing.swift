@@ -40,13 +40,16 @@ public enum SplatPacing {
     public struct Checkpoint: Codable, Equatable {
         public var step: Int
         public var steps: Int
-        public init(step: Int, steps: Int) { self.step = step; self.steps = steps }
+        /// The trainer's settings it was made with (e.g. "brush 720px 200k"): a checkpoint from other settings isn't
+        /// carried on (a 400k-splat checkpoint would start above a 200k cap).
+        public var setup: String?
+        public init(step: Int, steps: Int, setup: String? = nil) { self.step = step; self.steps = steps; self.setup = setup }
 
         /// The checkpoint to carry on from, if it fits this training (same length, part-way, its .ply present).
-        public static func load(from folder: URL, steps: Int) -> Checkpoint? {
+        public static func load(from folder: URL, steps: Int, setup: String? = nil) -> Checkpoint? {
             guard let d = try? Data(contentsOf: folder.appendingPathComponent("checkpoint.json")),
                   let c = try? JSONDecoder().decode(Checkpoint.self, from: d),
-                  c.steps == steps, c.step > 0, c.step < steps,
+                  c.steps == steps, c.setup == setup, c.step > 0, c.step < steps,
                   FileManager.default.fileExists(atPath: folder.appendingPathComponent("checkpoint.ply").path) else { return nil }
             return c
         }
