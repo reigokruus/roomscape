@@ -10,3 +10,14 @@
                  alloc::vec![Backend::Metal]
              } else {
                  alloc::vec![Backend::Vulkan, Backend::Dx12, Backend::Gl]
+--- a/crates/cubecl-core/src/lib.rs	2026-11-12 17:15:36
++++ b/crates/cubecl-core/src/lib.rs	2026-11-12 17:15:36
+@@ -26,6 +26,8 @@
+ use cubecl_ir::VectorSize;
+ use cubecl_runtime::client::Client;
+ pub use cubecl_runtime::memory_management::MemoryConfiguration;
++// RoomScape change (12 Nov 2026): the pool types too, so Brush can pick a Direct pool on iOS (brush-process burn_options)
++pub use cubecl_runtime::memory_management::{MemoryPoolOptions, PoolType};
+ use cubecl_runtime::server::CubeCountSelection;
+ pub use frontend::cmma;
+ 

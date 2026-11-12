@@ -121,6 +121,39 @@ index c5a8a0e..3903ed1 100644
 +    }
      result.unwrap_or(TrainExitCode::Error)
  }
+diff --git a/crates/brush-process/src/lib.rs b/crates/brush-process/src/lib.rs
+index 2cac236..c26bd53 100644
+--- a/crates/brush-process/src/lib.rs
++++ b/crates/brush-process/src/lib.rs
+@@ -30,7 +30,27 @@ use tokio_stream::{Stream, StreamExt};
+ fn burn_options() -> RuntimeOptions {
+     RuntimeOptions {
+         tasks_max: 64,
+-        memory_config: burn_wgpu::MemoryConfiguration::ExclusivePages,
++        memory_config: memory_config(),
++    }
++}
++
++/// RoomScape change (12 Nov 2026): on iOS an app gets about 3.4 GB in all, and with `ExclusivePages` (one page per
++/// allocation in exponentially spaced size buckets, kept for reuse) the refine steps' big temporaries pushed the
++/// footprint about 2 GB over its 1 GB baseline, to 3.0 GB, and iOS stopped the app. A `Direct` pool allocates exact
++/// sizes and gives free memory back to the driver once more than `RECLAIM_AT` is reserved. Elsewhere unchanged unless
++/// `BRUSH_DIRECT_POOL=1` (to measure the difference on a Mac).
++fn memory_config() -> burn_wgpu::MemoryConfiguration {
++    const RECLAIM_AT: u64 = 1 << 30;
++    let direct = cfg!(target_os = "ios") || std::env::var("BRUSH_DIRECT_POOL").is_ok_and(|v| v == "1");
++    if direct {
++        burn_wgpu::MemoryConfiguration::Custom {
++            pool_options: vec![burn::cubecl::MemoryPoolOptions {
++                pool_type: burn::cubecl::PoolType::Direct { reclaim_at: Some(RECLAIM_AT) },
++                dealloc_period: None,
++            }],
++        }
++    } else {
++        burn_wgpu::MemoryConfiguration::ExclusivePages
+     }
+ }
+ 
 diff --git a/crates/brush-rerun/Cargo.toml b/crates/brush-rerun/Cargo.toml
 index 8a48e37..b4b32bb 100644
 --- a/crates/brush-rerun/Cargo.toml

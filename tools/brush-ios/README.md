@@ -29,3 +29,11 @@ read Rust's newer LLVM bitcode). brush-c also gets a splat cap, a spherical-harm
 (BrushTrainOptions in include/brush_c.h). Built and linked 12 Nov 2026 (app executable 3.7 -> 92.5 MB).
 
 Not yet: run on a phone, the memory limit (increased-memory-limit entitlement), a cancel switch in brush-c.
+
+## Memory (12 Nov 2026)
+
+On the iPhone the app may use about 3.4 GB in all. With cubecl's `ExclusivePages` pool (Brush's default) every refine
+step pushed the footprint from about 1 GB to about 3.0 GB, and iOS stopped the app. `brush-ios.patch` makes
+brush-process use a `Direct` pool on iOS (exact-size allocations, free memory returned once over 1 GB reserved);
+`cubecl-ios-metal.patch` re-exports `MemoryPoolOptions` / `PoolType` from cubecl-core for that. On other platforms
+`BRUSH_DIRECT_POOL=1` turns it on, to compare on a Mac.
