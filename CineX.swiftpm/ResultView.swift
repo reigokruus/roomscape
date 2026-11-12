@@ -422,6 +422,13 @@ struct ResultView: View {
             .pickerStyle(.segmented)
             .fixedSize()
         }
+        // The photo-real preview, once made: its own obvious button here, not only in Share (rk 12 Nov: "it finished
+        // the render but i cant see the brush marks anywhere")
+        if SplatPreview.hasResult(current) {
+            Button { showingSplat = true } label: { Label("Photo-real", systemImage: "cube.transparent") }
+                .buttonStyle(.borderedProminent)
+                .fixedSize()
+        }
         Picker("View", selection: $topView) {
             Image(systemName: "rotate.3d").accessibilityLabel("3D view").tag(false)
             Image(systemName: "square.grid.3x3").accessibilityLabel("Top view").tag(true)

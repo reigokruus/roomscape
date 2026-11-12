@@ -29,7 +29,7 @@ struct BrushTrainer: SplatPreview.Trainer {
     /// 960 px and a 400k cap; the app was stopped by iOS each time at about step 1,400-1,600. So 720 px pictures and
     /// at most 200k splats on the phone (the PC's full version has millions).
     static let maxResolution: UInt32 = 720, maxSplats: UInt32 = 200_000, shDegree: UInt32 = 1
-    static let setup = "brush \(maxResolution)px \(maxSplats / 1000)k sh\(shDegree)"
+    static let setup = "brush \(maxResolution)px sh\(shDegree)"   // + the plan's splat cap (SplatPreview.run)
 
     /// Everything the Brush thread's callback needs (it runs on that thread, for every step).
     private final class Box: @unchecked Sendable {
@@ -39,9 +39,9 @@ struct BrushTrainer: SplatPreview.Trainer {
         /// idle by the time iOS puts the app in the background (12:31Z: a GPU "firmware-detected lockup" report 3 s
         /// after the app was left mid-step).
         let hold = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
-        let from: Int, steps: Int, folder: URL, outDir: URL
-        init(progress: @escaping @Sendable (Int, String?) -> Void, from: Int, steps: Int, folder: URL, outDir: URL) {
-            self.progress = progress; self.from = from; self.steps = steps; self.folder = folder; self.outDir = outDir
+        let from: Int, steps: Int, folder: URL, outDir: URL, setup: String
+        init(progress: @escaping @Sendable (Int, String?) -> Void, from: Int, steps: Int, folder: URL, outDir: URL, setup: String) {
+            self.progress = progress; self.from = from; self.steps = steps; self.folder = folder; self.outDir = outDir; self.setup = setup
             cancel.pointee = 0; hold.pointee = 0
         }
         deinit { cancel.deallocate(); hold.deallocate() }
@@ -70,7 +70,7 @@ struct BrushTrainer: SplatPreview.Trainer {
             let plys = ((try? fm.contentsOfDirectory(at: outDir, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "ply" }
             guard let ply = plys.first(where: { Self.number($0) == localStep }) else { return }
             do {
-                try SplatPacing.Checkpoint(step: from + localStep, steps: steps, setup: BrushTrainer.setup).save(ply: ply, to: folder)
+                try SplatPacing.Checkpoint(step: from + localStep, steps: steps, setup: setup).save(ply: ply, to: folder)
                 SplatPreview.log.info("checkpoint at step \(self.from + localStep)")
             } catch {
                 SplatPreview.log.error("checkpoint not saved: \(error.localizedDescription, privacy: .public)")
@@ -83,7 +83,7 @@ struct BrushTrainer: SplatPreview.Trainer {
         }
     }
 
-    func train(dataset: URL, output: URL, steps: Int, resume: SplatPacing.Checkpoint?,
+    func train(dataset: URL, output: URL, steps: Int, maxSplats: Int, setup: String, resume: SplatPacing.Checkpoint?,
                progress: @escaping @Sendable (Int, String?) -> Void) async throws {
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
@@ -96,7 +96,8 @@ struct BrushTrainer: SplatPreview.Trainer {
         if resume != nil { try fm.copyItem(at: folder.appendingPathComponent("checkpoint.ply"), to: initPly) }
         defer { try? fm.removeItem(at: initPly) }
         let from = resume?.step ?? 0
-        let box = Box(progress: progress, from: from, steps: steps, folder: folder, outDir: outDir)
+        let box = Box(progress: progress, from: from, steps: steps, folder: folder, outDir: outDir, setup: setup)
+        let cap = UInt32(min(Int(Self.maxSplats), maxSplats))
         // iOS stops GPU work in the background: when the app is left, Brush is stopped cleanly (cancel byte) and the
         // job waits in the queue, starting again when the app is back (rk 14:20).
         let left = UnsafeMutablePointer<Bool>.allocate(capacity: 1); left.pointee = false
@@ -121,7 +122,7 @@ struct BrushTrainer: SplatPreview.Trainer {
                             var options = BrushTrainOptions(total_train_steps: UInt32(steps - from), refine_every: 200,
                                                             max_resolution: Self.maxResolution,
                                                             export_every: UInt32(SplatPacing.checkpointEvery),
-                                                            output_path: op, max_splats: Self.maxSplats,
+                                                            output_path: op, max_splats: cap,
                                                             sh_degree: Self.shDegree, cancel: UnsafePointer(box.cancel))
                             return train_and_save(ds, &options, { message, userData in
                                 guard let userData, message.tag == BrushTraining.rawValue else { return }

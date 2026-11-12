@@ -46,3 +46,33 @@ final class SplatPacingTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("checkpoint.json").path))
     }
 }
+
+final class SplatPlanTests: XCTestCase {
+    func testScalesWithTheScan() {
+        let small = SplatPacing.plan(points: 100_000, frames: 3000)
+        XCTAssertEqual(small, .init(steps: 3000, pictures: 150, maxSplats: 150_000, startPoints: 75_000))
+        let room = SplatPacing.plan(points: 600_000, frames: 4000)
+        XCTAssertEqual(room, .init(steps: 6000, pictures: 250, maxSplats: 200_000, startPoints: 100_000))
+        let big = SplatPacing.plan(points: 3_000_000, frames: 9000)
+        XCTAssertEqual(big, .init(steps: 9000, pictures: 300, maxSplats: 200_000, startPoints: 100_000))
+        let mid = SplatPacing.plan(points: 375_000, frames: 4000)
+        XCTAssertEqual(mid.steps, 4500)          // halfway between small and typical
+        XCTAssertEqual(mid.pictures, 200)
+    }
+
+    func testAlwaysInsideTheSafeLimits() {
+        for pts in stride(from: 0, through: 5_000_000, by: 37_000) {
+            let p = SplatPacing.plan(points: pts, frames: 2000)
+            XCTAssertTrue((3000...9000).contains(p.steps))
+            XCTAssertEqual(p.steps % 500, 0)
+            XCTAssertLessThanOrEqual(p.maxSplats, 200_000)
+            XCTAssertLessThan(p.startPoints, p.maxSplats)   // Brush's cap only holds when the start is below it
+            XCTAssertTrue((20...300).contains(p.pictures))
+        }
+    }
+
+    func testShortRecordingLimitsPictures() {
+        XCTAssertEqual(SplatPacing.plan(points: 600_000, frames: 400).pictures, 100)   // one picture in 4 frames
+        XCTAssertEqual(SplatPacing.plan(points: 600_000, frames: 40).pictures, 20)
+    }
+}

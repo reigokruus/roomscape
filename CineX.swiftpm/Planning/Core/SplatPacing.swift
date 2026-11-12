@@ -26,6 +26,30 @@ public enum SplatPacing {
         }
     }
 
+    /// How much training a scan gets on the phone (rk 12 Nov: "scale the work to the scan … tie the step limit to how
+    /// many points the scan registered"). Inside today's memory-safe limits: 720 px pictures and at most 200k splats
+    /// (refine peaks were 2.97 GB with 400k at 960 px); starting points at most half the splat cap, so the cap holds.
+    public struct Plan: Equatable, CustomStringConvertible {
+        public var steps: Int, pictures: Int, maxSplats: Int, startPoints: Int
+        public var description: String { "\(steps) steps, \(pictures) pictures, \(maxSplats / 1000)k splats, \(startPoints / 1000)k start points" }
+    }
+
+    /// `points`: the scan's registered dots; `frames`: the recording's video frames (a sanity bound: at most one
+    /// picture in 4 frames). Small scan (≤ 150k dots) 3,000 steps and 150 pictures; a typical room (about 600k)
+    /// 6,000 and 250; large (≥ 1.5 M) 9,000 and 300. Linear in between, steps in 500s.
+    public static func plan(points: Int, frames: Int) -> Plan {
+        func lerp(_ x: Double, _ x0: Double, _ x1: Double, _ y0: Double, _ y1: Double) -> Double {
+            y0 + (y1 - y0) * min(1, max(0, (x - x0) / (x1 - x0)))
+        }
+        let p = Double(max(0, points))
+        let steps = p <= 600_000 ? lerp(p, 150_000, 600_000, 3000, 6000) : lerp(p, 600_000, 1_500_000, 6000, 9000)
+        let pics = p <= 600_000 ? lerp(p, 150_000, 600_000, 150, 250) : lerp(p, 600_000, 1_500_000, 250, 300)
+        let maxSplats = p <= 150_000 ? 150_000 : 200_000
+        let pictures = max(20, min(Int(pics.rounded()), frames > 0 ? max(20, frames / 4) : Int(pics)))
+        return Plan(steps: Int((steps / 500).rounded()) * 500, pictures: pictures, maxSplats: maxSplats,
+                    startPoints: min(maxSplats / 2, max(1, points)))
+    }
+
     /// How often the trainer saves where it is (a .ply of the splat so far), so a closed app carries on from there.
     public static let checkpointEvery = 500
 

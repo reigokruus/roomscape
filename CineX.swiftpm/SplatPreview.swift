@@ -29,9 +29,19 @@ enum SplatPreview {
     }
 
     /// Lightweight settings (rk 12 Nov): half-size pictures, a few hundred frames, a few hundred thousand splats.
+    /// Defaults for the PC's quick dataset ("For a PC rebuild"): the three-computer benchmark's dataset A. On the phone
+    /// the job sizes itself to the scan (`SplatPacing.plan`).
     static let maxFrames = 300
-    static let maxPoints = 300_000
-    static let steps = 6000
+    static let maxPoints = 200_000
+
+    /// The phone's plan for this scan: from its registered dots (points.bin, 16 bytes each) and video frames
+    /// (frames.bin, 120 bytes each).
+    static func plan(for scan: SavedScan) -> SplatPacing.Plan {
+        func size(_ name: String) -> Int {
+            ((try? FileManager.default.attributesOfItem(atPath: scan.captureURL.appendingPathComponent(name).path)[.size]) as? Int) ?? 0
+        }
+        return SplatPacing.plan(points: size("points.bin") / 16, frames: size("recording/frames.bin") / 120)
+    }
 
     static func folder(_ scan: SavedScan) -> URL { scan.captureURL.appendingPathComponent("splat") }
     static func result(_ scan: SavedScan) -> URL { folder(scan).appendingPathComponent("preview.ply") }
@@ -45,7 +55,7 @@ enum SplatPreview {
         /// Trains `steps` steps in all, carrying on from `resume` (a checkpoint in output's folder) if given, and saving
         /// a checkpoint there every `SplatPacing.checkpointEvery` steps. `progress` gets the steps done in all
         /// (resume.step…steps) and a note when heat is holding it back (nil when not).
-        func train(dataset: URL, output: URL, steps: Int, resume: SplatPacing.Checkpoint?,
+        func train(dataset: URL, output: URL, steps: Int, maxSplats: Int, setup: String, resume: SplatPacing.Checkpoint?,
                    progress: @escaping @Sendable (Int, String?) -> Void) async throws
     }
 
@@ -66,9 +76,13 @@ enum SplatPreview {
         try fm.createDirectory(at: dataset, withIntermediateDirectories: true)
         let note: @Sendable (String?) -> Void = { n in progress(.init(stage: "", fraction: -1, note: n)) }
         let exported = dataset.appendingPathComponent("export.done")
+        let plan = plan(for: scan)
+        let steps = plan.steps
+        log.info("preview plan for \(scan.name, privacy: .public): \(plan.description, privacy: .public)")
         if !fm.fileExists(atPath: exported.path) {
             progress(.init(stage: "Picking sharp pictures", fraction: 0.01, note: nil))
-            try await exportDataset(scan: scan, to: dataset, pace: { await ThermalGovernor.pace(note: note) }) { f in
+            try await exportDataset(scan: scan, to: dataset, maxFrames: plan.pictures, maxPoints: plan.startPoints,
+                                    pace: { await ThermalGovernor.pace(note: note) }) { f in
                 progress(.init(stage: "Picking sharp pictures", fraction: 0.01 + 0.24 * f, note: nil))
             }
             fm.createFile(atPath: exported.path, contents: Data())
@@ -81,14 +95,15 @@ enum SplatPreview {
         let partial = dir.appendingPathComponent("preview-training.ply")
         // Carries on from the last checkpoint if the app was closed or left mid-way (rk 12 Nov: it always restarted
         // from zero), and says so on the card.
-        let resume = SplatPacing.Checkpoint.load(from: dir, steps: steps, setup: trainer.setup)
+        let setup = trainer.setup + " \(plan.maxSplats / 1000)k"
+        let resume = SplatPacing.Checkpoint.load(from: dir, steps: steps, setup: setup)
         let from = resume?.step ?? 0
         if let resume { log.info("preview resumes from step \(resume.step) of \(steps)") }
         progress(.init(stage: SplatPacing.stage(step: from, of: steps, minutesLeft: nil), fraction: 0.25 + 0.73 * Float(from) / Float(steps), note: nil))
         if let resume { note("Carrying on from step \(resume.step) (saved before RoomScape closed)") }
         // the heat note when it changes; the "carrying on" note stays for the first 200 steps
         let noteState = OSAllocatedUnfairLock<(last: String?, resumeShown: Bool)>(initialState: (nil, resume != nil))
-        try await trainer.train(dataset: dataset, output: partial, steps: steps, resume: resume) { done, heat in
+        try await trainer.train(dataset: dataset, output: partial, steps: steps, maxSplats: plan.maxSplats, setup: setup, resume: resume) { done, heat in
             // time left from this run's own pace (it includes the rests for heat)
             let f = Double(done - from) / Double(max(1, steps - from))
             let left = SplatDataset.minutesLeft(fraction: f, elapsed: Date().timeIntervalSince(started))
@@ -132,8 +147,8 @@ enum SplatPreview {
     // MARK: Dataset
 
     /// The recording's sharpest frames (half size) with poses and lens, and the scan's dots as starting points.
-    static func exportDataset(scan: SavedScan, to dataset: URL, pace: () async -> Void,
-                              progress: (Float) -> Void) async throws {
+    static func exportDataset(scan: SavedScan, to dataset: URL, maxFrames: Int = maxFrames, maxPoints: Int = maxPoints,
+                              pace: () async -> Void, progress: (Float) -> Void) async throws {
         let rec = scan.captureURL.appendingPathComponent("recording")
         let frames = try RecordingProcessor.readFrames(rec.appendingPathComponent("frames.bin"))
         guard frames.count > 10 else { throw NSError(domain: "SplatPreview", code: 1, userInfo: [NSLocalizedDescriptionKey: "the recording is too short"]) }
@@ -253,7 +268,7 @@ enum SplatPreview {
 struct DotsTrainer: SplatPreview.Trainer {
     var name: String { "stand-in (dots as blobs)" }
     var setup: String { "dots" }
-    func train(dataset: URL, output: URL, steps: Int, resume: SplatPacing.Checkpoint?,
+    func train(dataset: URL, output: URL, steps: Int, maxSplats: Int, setup: String, resume: SplatPacing.Checkpoint?,
                progress: @escaping @Sendable (Int, String?) -> Void) async throws {
         let ply = try Data(contentsOf: dataset.appendingPathComponent("points.ply"))
         guard let end = ply.range(of: Data("end_header\n".utf8)) else { throw NSError(domain: "SplatPreview", code: 4) }
