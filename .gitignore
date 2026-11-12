@@ -6,3 +6,6 @@
 tools/ui-shots/
 recordings/
 tools/heavy-queue.log
+tools/rebuild-alt/.venv/
+tools/rebuild-alt/Difix3D/
+tools/rebuild-alt/__pycache__/

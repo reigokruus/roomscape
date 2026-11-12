@@ -1,0 +1,13 @@
+# Options 2 and 3 (need an NVIDIA GPU). Install torch with CUDA first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# gsplat compiles its CUDA code on first use unless a prebuilt wheel matches
+# (Windows: CUDA toolkit + Visual Studio Build Tools needed for that compile).
+gsplat==1.5.3
+imageio
+imageio-ffmpeg
+# Option 3 only (Difix3D's pinned versions):
+diffusers==0.25.1
+transformers==4.38.0
+huggingface-hub==0.25.1
+peft==0.9.0
+einops

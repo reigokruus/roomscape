@@ -1,0 +1,7 @@
+# Option 1 (textured mesh): CPU only
+numpy
+scipy
+pillow
+plyfile
+open3d>=0.18
+trimesh
