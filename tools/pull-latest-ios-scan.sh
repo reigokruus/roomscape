@@ -72,7 +72,14 @@ cp -R $OUT $H/scan-$SCAN
 [ -d $FR ] && cp -R $FR $H/rebuild-frames
 (cd $REPO && tar cf $H/code/tools-room-rebuild-and-viewer.tar tools/room-rebuild tools/room-viewer)
 cp $REPO/CineX.swiftpm/RawRecorder.swift $REPO/CineX.swiftpm/ScanCapture.swift $H/code/
-sed "s/10 Nov, 20:09/$SCAN/; s/Scan_2026-11-10_20-09-19/$SCAN/g" $REPO/recordings/handoff/ios-2009/README.md > $H/README.md 2>/dev/null || true
+{ echo "# iPhone scan $SCAN: rebuild package"; echo
+  echo "Private: this shows rk's home. Home network and local disks only; don't upload it anywhere or commit it."; echo
+  echo "- scan-$SCAN/: the scan as the app saved it (recording/: video.mov, frames.bin, depth.bin; points.bin; mesh.bin; RoomPlan room)"
+  echo "- rebuild-frames/: every 0.4 s, rebuild.py's layout (if present); code/: the tools and the app code that writes the files"
+  echo "- PC-STEPS.md: dataset and Brush commands for a preview and the full version"; echo
+  echo "File formats, coordinates and units (as for the 10 Nov 20:09 scan; RawRecorder.swift and ScanCapture.swift are in code/):"; echo
+  sed -n '/^## Coordinates and units/,/^## rebuild-frames/p' $REPO/recordings/handoff/ios-2009/README.md | sed '$d'
+} > $H/README.md
 cp $REPO/docs/pc-splat-rebuild.md $H/PC-STEPS.md
 (cd $H && find . -type f ! -name SHA256SUMS.txt | sort | xargs -I{} shasum -a 256 "{}" > SHA256SUMS.txt)
 sed "s/ios-2009/ios-$STAMP/g; s/47814/47815/" $REPO/recordings/handoff/serve-ios-2009.sh > $REPO/recordings/handoff/serve-ios-$STAMP.sh
