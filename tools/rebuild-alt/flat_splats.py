@@ -132,7 +132,8 @@ def render(params, view, sh_degree, mode="RGB+ED", distloss=False):
         means=params["means"], quats=params["quats"], scales=torch.exp(params["scales"]),
         opacities=torch.sigmoid(params["opacities"]), colors=colors,
         viewmats=view["w2c"][None], Ks=view["K"][None], width=view["w"], height=view["h"],
-        sh_degree=sh_degree, near_plane=0.05, far_plane=100.0, render_mode=mode, distloss=distloss)
+        sh_degree=sh_degree, near_plane=0.05, far_plane=100.0, render_mode=mode, distloss=distloss,
+        backgrounds=torch.zeros((1, 3), device=params["means"].device))  # gsplat 1.5.0 crashes on None with RGB+ED
 
 
 def ssim(a, b):
