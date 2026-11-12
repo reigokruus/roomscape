@@ -304,6 +304,11 @@ private enum log {
             let oldF = progress?.fraction ?? 0
             if words(p.stage) != words(progress?.stage ?? "") { log.info("stage: \(p.stage)"); PerfLog.processing?.stage(words(p.stage)) }
             else if Int(p.fraction * 20) != Int(oldF * 20) { log.info("stage: \(p.stage)") }
+            // the photo-real preview's first 500 steps every 50, so a run that dies early is located (12 Nov 17:05)
+            else if let n = Int(p.stage.drop(while: { !$0.isNumber }).prefix(while: { $0.isNumber || $0 == "\u{a0}" || $0 == " " || $0 == "," })
+                                  .filter(\.isNumber)), p.stage.hasPrefix("Step "), n < 500, n % 50 == 0 {
+                log.info("stage: \(p.stage)")
+            }
         }
         if p.fraction < 0 { progress?.note = p.note } else { progress = .init(stage: p.stage, fraction: p.fraction, note: progress?.note) }
         report()

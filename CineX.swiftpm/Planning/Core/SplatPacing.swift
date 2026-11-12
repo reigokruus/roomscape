@@ -51,7 +51,9 @@ public enum SplatPacing {
     }
 
     /// How often the trainer saves where it is (a .ply of the splat so far), so a closed app carries on from there.
-    public static let checkpointEvery = 500
+    /// Every 150 steps: the first save comes before Brush's first refine (step 200), where the memory peaks are, so a
+    /// run that dies there carries on from 150, not 0 (12 Nov 17:05 scan: it died before step 250 with nothing saved).
+    public static let checkpointEvery = 150
 
     /// The card's training line: "Step 1,200 of 6,000 · about 9 min left".
     public static func stage(step: Int, of steps: Int, minutesLeft: Int?) -> String {
