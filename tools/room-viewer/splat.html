@@ -40,7 +40,8 @@ const ORBIT_HELP = 'Orbit: drag to turn, right-drag to move, scroll to zoom';
 const sp = new URLSearchParams(location.search), q = {};
 for (const k of ['cam', 'look']) if (sp.get(k)) q[k] = sp.get(k).split(',').map(Number);
 // a level start view per room, at eye height (floor about y -1.4 in both): standing in the room, looking along it
-const START = { 's24-splat': { cam: [1.6, 0.15, -1.0], look: [-1.0, 0.0, -4.6] }, 'ios-splat': { cam: [-0.99, 0.26, -0.20], look: [-0.34, -0.2, -2.37] } };
+const START = { 's24-splat': { cam: [1.6, 0.15, -1.0], look: [-1.0, 0.0, -4.6] }, 'ios-splat': { cam: [-0.99, 0.26, -0.20], look: [-0.34, -0.2, -2.37] },
+                'ios-1112-1255-splat': { cam: [-0.30, 0.04, 0.07], look: [-0.46, -0.26, -1.93] } };   // its first camera
 function startFor(file) {
   if (file === sp.get('file') && q.cam) return q;
   return START[file.split('/')[0]] || { cam: [3, 2.5, 3], look: [0, 0, 0] };
@@ -172,6 +173,7 @@ for (const f of files) {
   const pp = f.match(/phone-preview-(\d+)/); if (pp) b.textContent += `  (phone-quality preview, ${pp[1] / 1000}k steps)`;
   if (f === 'ios-splat/splat-light.splat') b.textContent += '  (full version, Legion, gsplat)';
   if (/brush-30000-light/.test(f)) b.textContent += '  (full version, Legion, Brush)';
+  if (f === 'ios-1112-1255-splat/preview_7000-light.splat') b.textContent = 'New scan 12:55 (preview, 5060 PC)';
 }
 const want = new URLSearchParams(location.search).get('file');
 const light = files.find(f => /light\.splat$/.test(f));
