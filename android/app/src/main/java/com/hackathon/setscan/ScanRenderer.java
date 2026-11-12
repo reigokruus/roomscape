@@ -119,7 +119,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private boolean greyNow() { return CONF_GREY && !viewing; }
     private boolean greyShown, mergedShown; private int paintShown = -1;
     /** Debug tools "Show merged areas": dots standing for merged flat cells drawn blue, live and in saved scans. */
-    static volatile boolean SHOW_MERGED = false;
+    static final boolean SHOW_MERGED = false;
     private final ByteBuffer greyBuf = offHeap(MAX_POINTS * 4, "greys");
     private int curConf = 0, curMm = 0;     // the reading being added (depth thread), for addPoint/refine
     /** Only sure readings paint a dot (rk 11 Nov 22:09: "make only points above 90% paint"): ARCore depth confidence
@@ -155,7 +155,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     String loadNumbers() { long age = lastNewDepthMs > 0 ? System.currentTimeMillis() - lastNewDepthMs : -1;
         return String.format(java.util.Locale.US, "cpu %.1f cores, depth %d ms old, heat %d", cpuCores, age, thermal); }
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
-    static volatile boolean AUTO_ERASE = true;
+    static final boolean AUTO_ERASE = false;   // removed 12 Nov: the slower see-through rule stays
     // ---- Rebuild frames: picture + pose + intrinsics + raw depth with confidence, twice a second (rk 12 Nov) ----
     static volatile boolean SAVE_REBUILD = true;
     private long rebuildAt; private int rebuildN; private File rebuildTmp;
@@ -213,161 +213,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  under 12) become one dot there: the average position and colour, the best confidence, the closest distance.
      *  Offline on the 23:07 scan: 30% of its dots were in such cells, ~26% fewer dots. Later readings in those cells are
      *  averaged into the merged dot. Display and dot count only; nothing else about the scan changes. */
-    static volatile boolean MERGE_FLAT = true;
+    static final boolean MERGE_FLAT = false;   // removed 12 Nov (see above)
     private final byte[] mergedDot = new byte[MAX_POINTS];   // 1 = this dot stands for a merged flat cell
     private int mergeCursor, mergedAway; private long mergeAt, mergeLogAt;
     private int mergeRounds, mergeLateSkips, mergeRoundAway, mergeCells, mergeNotSettled, mergeRecent, mergeInView, mergeNotFlat;
     private final int[] mergeMem = new int[64];
-    private void maybeMergeFlat(long nowMs) {
-        if (!MERGE_FLAT || nowMs - mergeAt < 2000 || count < 5000) return;
-        if (depthLate()) { mergeLateSkips++; mergeAt = nowMs; return; }
-        mergeAt = nowMs; mergeRounds++;
-        int n = count, budget = Math.min(n, 15000), away = 0;
-        final boolean nearCap = n > MAX_POINTS * 0.9f; final float[] cm = lastGoodCam;
-        for (int it = 0; it < budget; it++) {
-            int i = mergeCursor++; if (mergeCursor >= n) mergeCursor = 0;
-            if (obs[i] == 0 || mergedDot[i] != 0 || !(nearCm[i] > 0 && nearCm[i] < FINE_NEAR_M * 100)) continue;   // fine dots only
-            if ((col.get(i * 4 + 3) & 0xFF) < 200) { mergeNotSettled++; continue; }   // settled: seen in 4+ separate depth frames
-            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
-            // Not under the user's eyes (rk 23:36): only dots out of the camera's view and untouched for ~4 s (30 depth
-            // frames); near the cap (90%) anything settled, so it still catches up before the limit matters.
-            if (!nearCap) {
-                if (stampFrame - seenStamp[i] < 30) { mergeRecent++; continue; }
-                float dx = x - cm[12], dy = y - cm[13], dz = z - cm[14];
-                float xc = cm[0] * dx + cm[1] * dy + cm[2] * dz, yc = cm[4] * dx + cm[5] * dy + cm[6] * dz, zc = cm[8] * dx + cm[9] * dy + cm[10] * dz;
-                if (zc < -0.05f && Math.abs(xc) < -zc * 0.8f && Math.abs(yc) < -zc * 1.1f) { mergeInView++; continue; }   // in view
-            }
-            float bx = (float) Math.floor(x / VOXEL) * VOXEL, by = (float) Math.floor(y / VOXEL) * VOXEL, bz = (float) Math.floor(z / VOXEL) * VOXEL;
-            int m = 0;
-            int ix0 = (int) Math.floor(bx / VOXEL_FINE), ix1 = (int) Math.floor((bx + VOXEL - 1e-4f) / VOXEL_FINE);
-            int iy0 = (int) Math.floor(by / VOXEL_FINE), iy1 = (int) Math.floor((by + VOXEL - 1e-4f) / VOXEL_FINE);
-            int iz0 = (int) Math.floor(bz / VOXEL_FINE), iz1 = (int) Math.floor((bz + VOXEL - 1e-4f) / VOXEL_FINE);
-            for (int a = ix0; a <= ix1; a++) for (int b = iy0; b <= iy1; b++) for (int c = iz0; c <= iz1; c++) {
-                int j = voxels.get(fineKey((a + 0.5f) * VOXEL_FINE, (b + 0.5f) * VOXEL_FINE, (c + 0.5f) * VOXEL_FINE));
-                if (j < 0 || j >= n || obs[j] == 0 || mergedDot[j] != 0 || m >= mergeMem.length) continue;
-                float jx = pos.get(j * 3), jy = pos.get(j * 3 + 1), jz = pos.get(j * 3 + 2);
-                if (jx < bx || jx >= bx + VOXEL || jy < by || jy >= by + VOXEL || jz < bz || jz >= bz + VOXEL) continue;
-                boolean dup = false; for (int q = 0; q < m; q++) if (mergeMem[q] == j) { dup = true; break; }
-                if (!dup) mergeMem[m++] = j;
-            }
-            if (m < 3) continue;
-            double mx = 0, my = 0, mz = 0, cr = 0, cg = 0, cb = 0;
-            for (int q = 0; q < m; q++) { int j = mergeMem[q]; mx += pos.get(j * 3); my += pos.get(j * 3 + 1); mz += pos.get(j * 3 + 2); cr += col.get(j * 4) & 0xFF; cg += col.get(j * 4 + 1) & 0xFF; cb += col.get(j * 4 + 2) & 0xFF; }
-            mx /= m; my /= m; mz /= m; cr /= m; cg /= m; cb /= m;
-            double xx = 0, yy = 0, zz = 0, xy = 0, xz = 0, yz = 0, sr = 0, sg = 0, sb = 0;
-            for (int q = 0; q < m; q++) {
-                int j = mergeMem[q]; double dx = pos.get(j * 3) - mx, dy = pos.get(j * 3 + 1) - my, dz = pos.get(j * 3 + 2) - mz;
-                xx += dx * dx; yy += dy * dy; zz += dz * dz; xy += dx * dy; xz += dx * dz; yz += dy * dz;
-                double r = (col.get(j * 4) & 0xFF) - cr, g = (col.get(j * 4 + 1) & 0xFF) - cg, bl = (col.get(j * 4 + 2) & 0xFF) - cb;
-                sr += r * r; sg += g * g; sb += bl * bl;
-            }
-            double[] ev = Anchors.eig3(xx / m, yy / m, zz / m, xy / m, xz / m, yz / m);
-            double thick = Math.sqrt(Math.max(0, ev[2])), cs = (Math.sqrt(sr / m) + Math.sqrt(sg / m) + Math.sqrt(sb / m)) / 3;
-            if (thick >= 0.004 || cs >= 12) { mergeNotFlat++; continue; }   // shape or colour change: the fine dots stay
-            mergeCells++;
-            int k = mergeMem[0]; int conf = 0, near = 32767, ob = 0, al = 0;
-            for (int q = 0; q < m; q++) { int j = mergeMem[q]; conf = Math.max(conf, confBest[j] & 0xFF); if (nearCm[j] > 0) near = Math.min(near, nearCm[j]); ob = Math.max(ob, obs[j] & 0xFF); al = Math.max(al, col.get(j * 4 + 3) & 0xFF); }
-            for (int q = 1; q < m; q++) {
-                int j = mergeMem[q];
-                voxels.put(fineKey(pos.get(j * 3), pos.get(j * 3 + 1), pos.get(j * 3 + 2)), k);   // later readings there average into the merged dot
-                obs[j] = 0; col.put(j * 4 + 3, (byte) 0); away++;
-            }
-            pos.put(k * 3, (float) mx); pos.put(k * 3 + 1, (float) my); pos.put(k * 3 + 2, (float) mz);
-            col.put(k * 4, (byte) Math.round(cr)); col.put(k * 4 + 1, (byte) Math.round(cg)); col.put(k * 4 + 2, (byte) Math.round(cb)); col.put(k * 4 + 3, (byte) al);
-            confBest[k] = (byte) conf; nearCm[k] = (short) near; obs[k] = (byte) ob; mergedDot[k] = 1;
-        }
-        if (away > 0) { mergedAway += away; refined = true; }
-        mergeRoundAway += away;
-        if (nowMs - mergeLogAt >= 15000) {   // one summary line every 15 s (rk 23:44: when did it merge, what held it back)
-            mergeLogAt = nowMs;
-            log(String.format(java.util.Locale.US, "merge (last 15 s): %d rounds, %d skipped (depth late); %d fine dots merged into %d cells; passed over: %d not settled, %d seen in the last ~4 s, %d in view, %d not flat or even",
-                    mergeRounds, mergeLateSkips, mergeRoundAway, mergeCells, mergeNotSettled, mergeRecent, mergeInView, mergeNotFlat));
-            mergeRounds = mergeLateSkips = mergeRoundAway = mergeCells = mergeNotSettled = mergeRecent = mergeInView = mergeNotFlat = 0;
-        }
-    }
-    // ---- Hold "Rescan": a sphere in front of the phone where old dots are cleared and refilled by fresh readings ----
-    static volatile float SPHERE_R = 0.15f;   // sphere radius, m (debug tools "Rescan sphere")
-    /** Debug tools "Rescan sphere distance": its centre this far straight in front of the phone (m). */
-    static volatile float SPHERE_DIST = 0.6f;
-    private volatile boolean rescanOn; private int rescanFromStamp; private volatile float centerDepth = 1f;
-    private int rescanCleared; private long rescanStartMs;
-    private final float[] rescanC = new float[3];
-    void setRescan(boolean on) {
-        if (on && !rescanOn) { rescanFromStamp = stampFrame; rescanCleared = 0; rescanStartMs = System.currentTimeMillis(); }
-        if (!on && rescanOn) log(String.format(java.util.Locale.US, "rescan sphere: %.1f s, %d old dots cleared inside it (refilled by fresh sure readings)", (System.currentTimeMillis() - rescanStartMs) / 1000f, rescanCleared));
-        rescanOn = on;
-    }
-    /** GL thread, every frame while held: the sphere sits on what the middle of the screen looks at (the depth there,
-     *  0.4-2 m); dots inside it not seen since the press are cleared, so the readings coming in now place them again. */
-    private void rescanStep(float[] cam) {
-        if (!rescanOn || viewing) return;
-        float d = SPHERE_DIST;   // free floating at a fixed distance in front of the phone, moving with it (rk 23:00: not stuck to surfaces)
-        rescanC[0] = cam[12] - cam[8] * d; rescanC[1] = cam[13] - cam[9] * d; rescanC[2] = cam[14] - cam[10] * d;
-        if (frameNo % 3 != 0) return;
-        float R = SPHERE_R, r2 = R * R; int n = count, cleared = 0;
-        float px = cam[12], py = cam[13], pz = cam[14], fx = rescanC[0] - px, fy = rescanC[1] - py, fz = rescanC[2] - pz, fl = (float) Math.sqrt(fx * fx + fy * fy + fz * fz); fx /= fl; fy /= fl; fz /= fl;
-        for (int i = 0; i < n; i++) {
-            if (obs[i] == 0 || seenStamp[i] >= rescanFromStamp) continue;
-            float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
-            float dx = x - rescanC[0], dy = y - rescanC[1], dz = z - rescanC[2];
-            boolean inside = dx * dx + dy * dy + dz * dz <= r2;
-            if (!inside) {   // or floating between the phone and the sphere, inside the cone the camera looks through
-                float vx = x - px, vy = y - py, vz = z - pz, t = vx * fx + vy * fy + vz * fz;
-                if (t < 0.1f || t > fl - R) continue;
-                float ox = vx - fx * t, oy = vy - fy * t, oz = vz - fz * t, rr = R * t / fl;
-                if (ox * ox + oy * oy + oz * oz > rr * rr) continue;
-            }
-            obs[i] = 0; col.put(i * 4 + 3, (byte) 0); cleared++;
-        }
-        if (cleared > 0) { rescanCleared += cleared; refined = true; refineCursor = 0; }
-        // guessed wall dots inside the sphere go too
-        WallGuess.Wall w = filledWall; boolean[] cells = guessCells;
-        if (w != null && cells != null) {
-            int cw = Math.max(1, (int) (w.width / GUESS_STEP)), ch = Math.max(1, (int) (w.height / GUESS_STEP));
-            float ux = (w.corners[3] - w.corners[0]) / Math.max(1e-3f, w.width), uz = (w.corners[5] - w.corners[2]) / Math.max(1e-3f, w.width);
-            if (cells.length == cw * ch) for (int b = 0; b < ch; b++) for (int a = 0; a < cw; a++) {
-                float sx = (a + 0.5f) * GUESS_STEP, gx = w.corners[0] + ux * sx, gz = w.corners[2] + uz * sx, gy = w.corners[1] + (b + 0.5f) * GUESS_STEP;
-                float dx = gx - rescanC[0], dy = gy - rescanC[1], dz = gz - rescanC[2];
-                if (dx * dx + dy * dy + dz * dz <= r2) cells[b * cw + a] = true;
-            }
-        }
-    }
-    /** The sphere: a see-through painted ball (about 20-30% opaque, a little stronger towards the rim so it reads round),
-     *  no lines; depth-tested against the dots without hiding them, so what's in front, inside and behind shows. */
-    private int sphereProg; private java.nio.FloatBuffer sphereMesh; private int sphereVerts;
-    private void drawRescanSphere(float[] m) {
-        if (!rescanOn || viewing) return;
-        if (sphereProg == 0) {
-            sphereProg = program("uniform mat4 uMvp; uniform vec3 uC; uniform float uR; uniform vec3 uEye; attribute vec3 aN; varying float vRim;" +
-                    "void main(){ vec3 p = uC + aN * uR; vec3 v = normalize(uEye - p); vRim = 1.0 - abs(dot(aN, v)); gl_Position = uMvp * vec4(p, 1.0); }",
-                    "precision mediump float; varying float vRim; uniform vec4 uCol;" +
-                    "void main(){ float a = uCol.a * (0.6 + 0.4 * vRim * vRim); gl_FragColor = vec4(uCol.rgb, a); }");
-            int LAT = 18, LON = 32; float[] v = new float[LAT * LON * 6 * 3]; int k = 0;
-            for (int i = 0; i < LAT; i++) for (int j = 0; j < LON; j++) {
-                double t0 = Math.PI * i / LAT, t1 = Math.PI * (i + 1) / LAT, p0 = 2 * Math.PI * j / LON, p1 = 2 * Math.PI * (j + 1) / LON;
-                double[][] q = {{t0, p0}, {t1, p0}, {t1, p1}, {t0, p0}, {t1, p1}, {t0, p1}};
-                for (double[] e : q) { v[k++] = (float) (Math.sin(e[0]) * Math.cos(e[1])); v[k++] = (float) Math.cos(e[0]); v[k++] = (float) (Math.sin(e[0]) * Math.sin(e[1])); }
-            }
-            sphereMesh = ByteBuffer.allocateDirect(v.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer(); sphereMesh.put(v).position(0); sphereVerts = v.length / 3;
-        }
-        GLES20.glUseProgram(sphereProg);
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(sphereProg, "uMvp"), 1, false, m, 0);
-        GLES20.glUniform3f(GLES20.glGetUniformLocation(sphereProg, "uC"), rescanC[0], rescanC[1], rescanC[2]);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(sphereProg, "uR"), SPHERE_R);
-        GLES20.glUniform3f(GLES20.glGetUniformLocation(sphereProg, "uEye"), lastGoodCam[12], lastGoodCam[13], lastGoodCam[14]);
-        GLES20.glUniform4f(GLES20.glGetUniformLocation(sphereProg, "uCol"), 1f, 0.69f, 0.13f, 0.3f);
-        int aN = GLES20.glGetAttribLocation(sphereProg, "aN");
-        sphereMesh.position(0);
-        GLES20.glVertexAttribPointer(aN, 3, GLES20.GL_FLOAT, false, 0, sphereMesh);
-        GLES20.glEnableVertexAttribArray(aN);
-        GLES20.glEnable(GLES20.GL_BLEND); GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST); GLES20.glDepthMask(false);   // dots in front stay in front; the ball doesn't hide what's inside
-        GLES20.glEnable(GLES20.GL_CULL_FACE); GLES20.glCullFace(GLES20.GL_BACK);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, sphereVerts);
-        GLES20.glDisable(GLES20.GL_CULL_FACE);
-        GLES20.glDepthMask(true); GLES20.glDisable(GLES20.GL_BLEND);
-        GLES20.glDisableVertexAttribArray(aN);
-    }
+    private volatile float centerDepth = 1f;   // the depth straight ahead (m)
+    // Merging flat areas live, the Rescan sphere and the automatic eraser were removed on 12 Nov (rk 10:24: "not
+    // reliable live; these smaller fixes will be done by Claude and local machines from now"). Old scans with
+    // merged-dots.bin still open: mergedDot is read and kept (SHOW_MERGED stays off).
     /** Debug tools "Fine dots up close": readings from under FINE_NEAR_M get 0.8 cm cells instead of 2 cm. */
     static volatile boolean FINE_NEAR = true;
     static final float FINE_NEAR_M = 1.0f;
@@ -5313,10 +5167,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 long lmT0 = System.nanoTime();
                 if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
                 if (LIVE_POINTS) {
-                    drawFilledWall(mvp); if (trackingNow) { maybeFillWall(nowMs); maybeMergeFlat(nowMs); }
-                    if (trackingNow && haveGoodCam) rescanStep(lastGoodCam);
+                    drawFilledWall(mvp); if (trackingNow) maybeFillWall(nowMs);
                     consumeLiveMesh(); drawPoints(mvp, 0.6f);   // smaller: close up they were big soft blobs
-                    drawRescanSphere(mvp);
                     if (FLAT_TILES) { maybeTiles(frame, camera, nowMs); flatTiles.draw(mvp); }
                 }   // rk 10 Nov 15:20: "only points, no triangles no photo"
                 else drawLiveMesh(mvp);
