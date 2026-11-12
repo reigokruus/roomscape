@@ -124,6 +124,11 @@ final class LiveCloud: @unchecked Sendable {
     var photoStore: LivePhotoStore?
     /// Since when tracking has been normal without a break (worker only).
     private var trackingNormalSince: TimeInterval?
+    /// Settings read at `reset` (worker only): the lowest LiDAR confidence that makes dots, and fine dots up close.
+    private var minConfidence = UInt8(ARConfidenceLevel.high.rawValue)
+    private var fineOn = false
+    /// 2 cm cells that have fine dots: no 2 cm dot is made there again (the closer look wins). Worker only.
+    private var fineCovered = Set<Int64>()
     /// Scaling and JPEG encoding happen here, at low priority, so they never compete with ARKit's tracking.
     /// Utility, not background: when the phone gets warm iOS throttles background work first, and every photo
     /// waiting here holds a 4 MB copy of the camera image.
@@ -184,14 +189,19 @@ final class LiveCloud: @unchecked Sendable {
         keyframesTaken = 0
         lastKeyframePose = nil
         trackingNormalSince = nil
+        minConfidence = UInt8(max(0, min(2, LivePreview.depthConfidence)))
+        fineOn = LivePreview.fineNear
+        fineCovered.removeAll(keepingCapacity: true)
     }
 
     /// Copies out the points and keyframes captured so far, after photos still being encoded. Call on the worker queue.
     func snapshot() -> CaptureSnapshot {
         photoQueue.sync {}
         let n = count
-        return CaptureSnapshot(points: Data(bytes: points, count: n * MemoryLayout<LivePoint>.stride),
-                               pointCount: n, keyframes: keyframes.withLock { $0 }, voxelSize: voxel)
+        var kept = [LivePoint](); kept.reserveCapacity(n)
+        for i in 0..<n where normals[i].w != Self.replaced { kept.append(points[i]) }
+        let data = kept.withUnsafeBufferPointer { Data(buffer: $0) }
+        return CaptureSnapshot(points: data, pointCount: kept.count, keyframes: keyframes.withLock { $0 }, voxelSize: voxel)
     }
 
     // MARK: Integration
@@ -255,7 +265,7 @@ final class LiveCloud: @unchecked Sendable {
         let k = frame.camera.intrinsics
         let sx = Float(dw) / Float(iw), sy = Float(dh) / Float(ih)
         let fx = k[0][0] * sx, fy = k[1][1] * sy, cx = k[2][0] * sx, cy = k[2][1] * sy
-        let high = UInt8(ARConfidenceLevel.high.rawValue)
+        let minConf = minConfidence, fine1 = fineOn, fineFar = LivePreview.fineNearMetres, fineVoxel = LivePreview.fineVoxel
 
         var n = count
         var frameHits = 0, frameSolid = 0
@@ -264,12 +274,17 @@ final class LiveCloud: @unchecked Sendable {
         tsdf?.beginFrame()
         // The GPU fusion (LiveMesh.useGPU) gets every confident pixel this loop looks at, each filling its 2 × 2 block.
         var gpuDepth: [Float]? = tsdf != nil && mesh?.gpuReady(origin: position) == true ? [Float](repeating: 0, count: dw * dh) : nil
-        // Every second depth pixel: about one sample per 2 cm cell at room distances.
-        for v in stride(from: 1, to: dh - 1, by: 2) {
-            for u in stride(from: 1, to: dw - 1, by: 2) {
-                guard cPtr[v * cRow + u] >= high else { continue }
+        // Every second depth pixel: about one sample per 2 cm cell at room distances. With fine dots on, every pixel
+        // under 1 m (0.28-0.56 cm apart there) for the 0.8 cm cells.
+        for v in 1..<(dh - 1) {
+            for u in 1..<(dw - 1) {
+                let coarse = u & 1 == 1 && v & 1 == 1
+                if !coarse && !fine1 { continue }
+                guard cPtr[v * cRow + u] >= minConf else { continue }
                 let d = dPtr[v * dRow + u]
                 guard d > 0.2, d < 4 else { continue }
+                let fine = fine1 && d < fineFar
+                if !coarse && !fine { continue }
                 // Flying pixels sit on depth edges: drop a pixel whose neighbour jumps by more than 4% + 2 cm.
                 let tolerance = d * 0.04 + 0.02
                 let dl = dPtr[v * dRow + u - 1], dr = dPtr[v * dRow + u + 1]
@@ -284,7 +299,7 @@ final class LiveCloud: @unchecked Sendable {
                 }
                 let pc = cam(u, v, d)
                 let world = pose * SIMD4<Float>(pc, 1)
-                if gpuDepth != nil {
+                if coarse, gpuDepth != nil {
                     let point = SIMD3(world.x, world.y, world.z)
                     fusedSamples += 1
                     if covered?(point) != true {
@@ -292,7 +307,7 @@ final class LiveCloud: @unchecked Sendable {
                         gpuDepth![v * dw + u] = d; gpuDepth![v * dw + u + 1] = d
                         gpuDepth![(v + 1) * dw + u] = d; gpuDepth![(v + 1) * dw + u + 1] = d
                     }
-                } else if let tsdf, u & 3 == 1, v & 3 == 1 {
+                } else if coarse, let tsdf, u & 3 == 1, v & 3 == 1 {
                     let point = SIMD3(world.x, world.y, world.z)
                     fusedSamples += 1
                     if covered?(point) != true {
@@ -316,7 +331,10 @@ final class LiveCloud: @unchecked Sendable {
                 let g = clampByte(luma - 0.344136 * cb - 0.714136 * cr)
                 let b = clampByte(luma + 1.772 * cb)
 
-                let key = Self.key(world.x, world.y, world.z, voxel)
+                let coarseKey = Self.key(world.x, world.y, world.z, voxel)
+                // Fine dots have their own keys (sign bit flipped). A 2 cm cell that has fine dots takes no 2 cm dot.
+                let key = fine ? Self.key(world.x, world.y, world.z, fineVoxel) ^ Int64.min : coarseKey
+                if !fine, fineCovered.contains(coarseKey) { continue }
                 if let hit = index[key] {
                     let i = Int(hit)
                     var alpha = points[i].rgba >> 24
@@ -347,6 +365,7 @@ final class LiveCloud: @unchecked Sendable {
                             let new = simd_dot(old, normal) < 0 ? -normal : normal
                             normals[i] = Self.encode(old + (new - old) * max(w, 0.1))
                         }
+                        if fine { normals[i].w = Self.fineDot }
                     }
                 } else {
                     guard n < Self.maxPoints else { continue }
@@ -354,6 +373,11 @@ final class LiveCloud: @unchecked Sendable {
                     points[n] = LivePoint(x: world.x, y: world.y, z: world.z,
                                           rgba: r | (g << 8) | (b << 16) | (Self.firstSeen << 24))
                     normals[n] = normal.map(Self.encode) ?? .zero
+                    if fine {
+                        normals[n].w = Self.fineDot
+                        // The closer look wins: the 2 cm dot of this spot is hidden and left out of the saved scan.
+                        if fineCovered.insert(coarseKey).inserted, let c = index[coarseKey] { normals[Int(c)].w = Self.replaced }
+                    }
                     observations[n] = 1
                     seenStamp[n] = depthFrames
                     index[key] = Int32(n)
@@ -505,7 +529,9 @@ final class LiveCloud: @unchecked Sendable {
         index.removeAll(keepingCapacity: true)
         var weights = [Float](repeating: 0, count: n)
         var out = 0
+        fineCovered.removeAll(keepingCapacity: true)
         for i in 0..<n {
+            if normals[i].w == Self.replaced { continue }
             let p = points[i]
             let w = Float(max(1, observations[i]))
             let key = Self.key(p.x, p.y, p.z, newVoxel)
@@ -530,6 +556,7 @@ final class LiveCloud: @unchecked Sendable {
             } else {
                 points[out] = p
                 normals[out] = normals[i]
+                normals[out].w = 0
                 weights[out] = w
                 observations[out] = observations[i]
                 seenStamp[out] = seenStamp[i]
@@ -569,7 +596,10 @@ final class LiveCloud: @unchecked Sendable {
         }
         guard k != n else { return 0 }
         index.removeAll(keepingCapacity: true)
-        for i in 0..<k { index[Self.key(points[i].x, points[i].y, points[i].z, voxel)] = Int32(i) }
+        for i in 0..<k where normals[i].w != Self.replaced {
+            let p = points[i]
+            index[normals[i].w == Self.fineDot ? Self.key(p.x, p.y, p.z, LivePreview.fineVoxel) ^ Int64.min : Self.key(p.x, p.y, p.z, voxel)] = Int32(i)
+        }
         countLock.withLock { $0 = k }
         detailHere = -1
         return n - k
@@ -594,6 +624,9 @@ final class LiveCloud: @unchecked Sendable {
         photoTurn *= 2
         print("LiveCloud: photo budget full, kept \(kept), now one photo per \(photoMove) m or \(photoTurn)°")
     }
+
+    /// The normal's 4th byte marks a dot: a fine (0.8 cm) dot, or a 2 cm dot replaced by fine ones (hidden, not saved).
+    static let fineDot: Int8 = 1, replaced: Int8 = 2
 
     /// Unit vector ↔ snorm8 (zero stays zero).
     private static func encode(_ n: SIMD3<Float>) -> SIMD4<Int8> {
