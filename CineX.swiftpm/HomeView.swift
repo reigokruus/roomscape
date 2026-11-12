@@ -206,6 +206,9 @@ struct HomeView: View {
                     },
                     onCancel: { scanRequest = nil }
                 )
+                // a photo-real preview pauses while scanning (stops at its last save, carries on after)
+                .onAppear { ProcessingQueue.shared.scanningStarted() }
+                .onDisappear { ProcessingQueue.shared.scanningEnded() }
             }
         }
         // A nearby phone wants to send a scan: asked once per phone (Always allow), then they just arrive.

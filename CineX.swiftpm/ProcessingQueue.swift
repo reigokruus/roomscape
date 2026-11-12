@@ -121,8 +121,8 @@ private enum log {
         Self.logMemory("scan done")
         guard RecordingProcessor.hasRecording(scan) else { return }
         add(scan, Self.recordThenProcess ? .rebuild : .text)
-        // The photo-real preview (switch "Photo-real preview"): after the scan's own job, so the scan is complete first.
-        if SplatPreview.enabled { add(scan, .splat) }
+        // The photo-real preview is no longer started after every scan (rk 12 Nov 22:41: it got in the way of the
+        // next scan in the field): it's started from the room screen ("Make photo-real"), for any saved scan.
     }
 
     func add(_ scan: SavedScan, _ job: RecordingProcessor.Job) {
@@ -151,14 +151,32 @@ private enum log {
         start()
     }
 
+    /// While a scan is being made the photo-real preview waits (GPU, memory, heat): a running one stops at its last
+    /// checkpoint and carries on from there when the scan is done; the scan is never at risk (rk 12 Nov 22:41).
+    private var scanning = false
+    func scanningStarted() {
+        scanning = true
+        if current?.job == .splat {
+            log.info("a new scan starts: the photo-real preview stops at its last save and carries on afterwards")
+            inner?.cancel()
+        }
+    }
+    func scanningEnded() {
+        scanning = false
+        start()
+    }
+    private func runnable(_ item: Item) -> Bool { !held.contains(item.scan) && !(scanning && item.job == .splat) }
+    /// The photo-real preview waiting or running for this scan.
+    func splatQueued(_ scan: SavedScan) -> Bool { items.contains { $0.scan == scan.name && $0.job == .splat } }
+
     /// Runs what's waiting, if nothing is running (also at launch and when the app comes back).
     func start() {
-        guard runner == nil, items.contains(where: { !held.contains($0.scan) }) else { return }
+        guard runner == nil, items.contains(where: runnable) else { return }
         // Not only when .active: right after Done the app is often .inactive (the scanner closing), and then the
         // continued task was never used (processing log 9 Nov).
         // The photo-real preview (GPU) can't run in the background, so not as a continued task (rk 14:20: iOS showed
         // "Task failed" when the app was left mid-training): in the app only; it waits and resumes when the app is back.
-        let next = items.first(where: { !held.contains($0.scan) })
+        let next = items.first(where: runnable)
         if next?.job != .splat, #available(iOS 26.0, *), UIApplication.shared.applicationState != .background, submitContinued() { return }
         runInApp()
     }
@@ -250,7 +268,7 @@ private enum log {
 
     /// Runs the waiting jobs in turn. False if it was stopped (the jobs stay queued and resume later).
     private func drain() async -> Bool {
-        while let item = items.first(where: { !held.contains($0.scan) }) {
+        while let item = items.first(where: runnable) {
             if Task.isCancelled { return stopped() }
             guard let scan = ScanStore.list().first(where: { $0.name == item.scan }), RecordingProcessor.hasRecording(scan) else {
                 items.removeAll { $0 == item }; save(); continue // deleted meanwhile
@@ -420,9 +438,7 @@ struct ProcessingSection: View {
                 Toggle("Points-only live view (test)", isOn: $livePoints)
                     .onChange(of: livePoints) { _, on in LivePreview.livePoints = on }
             }
-            // rk 12 Nov: the photo-real preview made on the phone after Done (off until the real trainer is linked in)
-            Toggle("Photo-real preview after a scan (test)", isOn: $splat)
-                .onChange(of: splat) { _, on in SplatPreview.enabled = on; if on { SplatPreview.askForNotifications() } }
+            // (no "Photo-real preview after a scan" switch: it's started per room with "Make photo-real", rk 12 Nov 22:41)
             NavigationLink("Licences (photo-real preview)") { SplatLicencesView() }
             RoomLinkSettings()
             Toggle("Flat tiles (test)", isOn: $flatTiles)

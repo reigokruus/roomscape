@@ -112,6 +112,8 @@ struct ResultView: View {
     /// Mesh / Photo / Model switch seemed to do nothing.
     @State private var loadStarted = false
     @ObservedObject private var processing = ProcessingQueue.shared
+    /// "Make photo-real": asked once before it starts (it takes minutes, warms the phone, needs the app open)
+    @State private var confirmingSplat = false
     /// The scan as renamed on this screen (the Name row), else nil; `current` is the scan with its latest name.
     @State private var renamed: SavedScan?
     @State private var renaming = false
@@ -257,8 +259,8 @@ struct ResultView: View {
                     // The photo-real preview (SplatPreview): open it, or make it (queued after the scan's own jobs)
                     if SplatPreview.hasResult(current) {
                         Button { showingSplat = true } label: { Label("Photo-real preview", systemImage: "cube.transparent") }
-                    } else if SplatPreview.enabled, recordingBytes != nil {
-                        Button { ProcessingQueue.shared.add(current, .splat) } label: { Label("Make photo-real preview", systemImage: "cube.transparent") }
+                    } else if recordingBytes != nil, !processing.splatQueued(current) {
+                        Button { confirmingSplat = true } label: { Label("Make photo-real preview", systemImage: "cube.transparent") }
                     }
                     roomLinkItems
                     Button { sendingNearby = true } label: { Label("Send to nearby phone", systemImage: "iphone.radiowaves.left.and.right") }
@@ -346,6 +348,7 @@ struct ResultView: View {
         // The photo-real preview needs the memory the 3D room holds (12 Nov 22:08): let it go while that runs, load it
         // again when it's done
         .modifier(ReleaseDuringPreview(busy: processing.gpuJob, release: releaseRoom, reload: { await loadRoom() }))
+        .modifier(ConfirmPhotoReal(isPresented: $confirmingSplat, scan: current))
     }
 
     #if DEBUG
@@ -756,6 +759,21 @@ struct ResultView: View {
         scene = nil; modelGroup = nil; splatGroup = nil; photoRoom = nil
         loadStarted = false
         ProcessingQueue.logMemory("room view released")
+    }
+
+    /// Beside "Enter the room": open the photo-real room, or make it (asked first), or say it's being made.
+    @ViewBuilder private var photoRealButton: some View {
+        if SplatPreview.hasResult(current) {
+            Button { showingSplat = true } label: { Label("Photo-real", systemImage: "cube.transparent") }
+                .buttonStyle(.borderedProminent)
+        } else if processing.splatQueued(current) {
+            Label("Making photo-real…", systemImage: "hourglass")
+                .font(.callout).padding(.horizontal, 12).padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+        } else if recordingBytes != nil {
+            Button { confirmingSplat = true } label: { Label("Make photo-real", systemImage: "cube.transparent") }
+                .buttonStyle(.bordered)
+        }
     }
 
     private func loadRoom() async {
@@ -1189,10 +1207,7 @@ struct ResultView: View {
                 // The photo-real preview, once made: an obvious button on the room view, not only in Share (rk 12 Nov:
                 // "i cant see the brush marks anywhere"). Here, not in the switch row above: there it made that row wider
                 // than the screen (rk 16:09).
-                if SplatPreview.hasResult(current) {
-                    Button { showingSplat = true } label: { Label("Photo-real", systemImage: "cube.transparent") }
-                        .buttonStyle(.borderedProminent)
-                }
+                photoRealButton
             }
         case .choosing:
             HStack(spacing: 8) {
@@ -2753,5 +2768,27 @@ private struct ReleaseDuringPreview: ViewModifier {
         content.onChange(of: busy) { _, now in
             if now { release() } else { Task { await reload() } }
         }
+    }
+}
+
+/// One question before the photo-real preview starts (rk 12 Nov 22:41): it takes minutes, warms the phone, and the app
+/// has to stay open. Time from the scan's plan (SplatPacing.plan) at the phone's measured pace (about 12-25 steps/s).
+private struct ConfirmPhotoReal: ViewModifier {
+    @Binding var isPresented: Bool
+    let scan: SavedScan
+    func body(content: Content) -> some View {
+        content.alert("Make the photo-real room?", isPresented: $isPresented) {
+            Button("Start") { ProcessingQueue.shared.add(scan, .splat) }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text(Self.message(scan))
+        }
+    }
+    static func message(_ scan: SavedScan) -> String {
+        let steps = Double(SplatPreview.plan(for: scan).steps)
+        let low = max(2, Int((steps / 25 / 60).rounded(.up))), high = max(low + 1, Int((steps / 12 / 60).rounded(.up)))
+        let resume = FileManager.default.fileExists(atPath: SplatPreview.folder(scan).appendingPathComponent("checkpoint.json").path)
+        return "It takes about \(low)-\(high) minutes on this phone\(resume ? " (it carries on from where it stopped)" : ""). "
+            + "The phone gets warm, and RoomScape needs to stay open on screen until it's done. Starting a new scan pauses it."
     }
 }
