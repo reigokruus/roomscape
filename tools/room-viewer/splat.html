@@ -160,12 +160,13 @@ requestAnimationFrame(flyTick);
 $('b-fly').onclick = () => { if (mode === 'fly') return; mode = 'fly'; $('b-fly').classList.add('on'); $('b-orbit').classList.remove('on'); if (current) show(current); };
 $('b-orbit').onclick = () => { if (mode === 'orbit') return; mode = 'orbit'; $('b-orbit').classList.add('on'); $('b-fly').classList.remove('on'); flyCam = null; if (current) show(current); };
 
-const files = await findSplats();
+const files = (await findSplats()).sort((a, b) => a.split('/')[0].localeCompare(b.split('/')[0]) || b.localeCompare(a, undefined, { numeric: true }));
 $('list').innerHTML = '';
 if (!files.length) $('list').textContent = 'No splats yet. Copy a trained .ply into recordings/rebuild/<room>-splat/ and reload.';
 for (const f of files) {
   const b = document.createElement('button'); b.dataset.f = f; b.onclick = () => show(f); $('list').appendChild(b);
   b.textContent = /\.ply$/i.test(f) ? f + '  (full size: too heavy for this Mac)' : f;
+  if (/_10000-light/.test(f)) b.textContent += '  (older, a third trained)';
 }
 const want = new URLSearchParams(location.search).get('file');
 const light = files.find(f => /light\.splat$/.test(f));

@@ -22,7 +22,8 @@ with open(src, 'rb') as f:
         if l.startswith('element vertex'): n = int(l.split()[2])
         elif l.startswith('property'): t, name = l.split()[1:3]; props.append((name, {'float': '<f4', 'double': '<f8', 'uchar': 'u1', 'int': '<i4', 'uint': '<u4'}[t]))
         elif l == 'end_header': break
-    A = np.fromfile(f, dtype=np.dtype(props), count=n)
+    off = f.tell()
+A = np.memmap(src, dtype=np.dtype(props), mode='r', offset=off, shape=(n,))   # read from disk as needed, not loaded whole
 C0 = 0.28209479177387814
 op = 1 / (1 + np.exp(-A['opacity'].astype(np.float32)))
 keep = op >= minop
