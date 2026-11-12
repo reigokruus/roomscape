@@ -66,6 +66,7 @@ struct ResultView: View {
     @State private var exportingGLB = false
     @State private var glbFile: SharedFile?
     @State private var glbError: String?
+    @State private var linkMade: URL?
     @State private var sendingNearby = false
     @State private var showingSplat = false
     @State private var buildingSplats = false
@@ -256,6 +257,7 @@ struct ResultView: View {
                     } else if SplatPreview.enabled, recordingBytes != nil {
                         Button { ProcessingQueue.shared.add(current, .splat) } label: { Label("Make photo-real preview", systemImage: "cube.transparent") }
                     }
+                    roomLinkItems
                     Button { sendingNearby = true } label: { Label("Send to nearby phone", systemImage: "iphone.radiowaves.left.and.right") }
                     Button { exportRmsc(save: true) } label: { Label("Save to Files…", systemImage: "folder") }
                     Button { exportRmsc(save: false) } label: { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }
@@ -300,6 +302,7 @@ struct ResultView: View {
         } message: {
             Text(glbError ?? "")
         }
+        .modifier(LinkMadeAlert(link: $linkMade))
         .modifier(RenameRoomAlert(isPresented: $renaming, title: $newTitle, onSave: saveName))
         .onDisappear { training?.pause() }
         .onChange(of: scenePhase) { _, phase in
@@ -1051,6 +1054,27 @@ struct ResultView: View {
             case .success(let url): if save { savingFile = SharedFile(url: url) } else { glbFile = SharedFile(url: url) }
             case .failure(let error): glbError = error.localizedDescription
             }
+        }
+    }
+
+    /// Share link items of the Share menu (RoomLink, switch "Share links (test)"): the room online for others' browsers.
+    @ViewBuilder private var roomLinkItems: some View {
+        if RoomLink.enabled {
+            if let link = RoomLink.link(current) {
+                ShareLink(item: link) { Label("Share link to this room", systemImage: "link") }
+                Button { UIPasteboard.general.url = link } label: { Label("Copy share link", systemImage: "doc.on.doc") }
+            } else if SplatPreview.hasResult(current) {
+                Button { makeRoomLink() } label: { Label("Make share link", systemImage: "link.badge.plus") }
+            }
+        }
+    }
+
+    private func makeRoomLink() {
+        exportingGLB = true
+        let scan = current
+        Task {
+            do { let link = try await RoomLink.uploadPreview(scan); exportingGLB = false; UIPasteboard.general.url = link; linkMade = link }
+            catch { exportingGLB = false; glbError = error.localizedDescription }
         }
     }
 
@@ -2666,5 +2690,17 @@ struct ZebraBackground: View {
             ctx.fill(path, with: .color(Self.light))
         }
         .ignoresSafeArea()
+    }
+}
+
+/// "Share link copied" after a link is made.
+private struct LinkMadeAlert: ViewModifier {
+    @Binding var link: URL?
+    func body(content: Content) -> some View {
+        content.alert("Share link copied", isPresented: Binding(get: { link != nil }, set: { if !$0 { link = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("\(link?.absoluteString ?? "")\n\nAnyone with the link can look around the room for 30 days. When the PC makes the full version, the same link shows it.")
+        }
     }
 }

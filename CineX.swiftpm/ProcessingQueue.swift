@@ -397,6 +397,7 @@ struct ProcessingSection: View {
             Toggle("Photo-real preview after a scan (test)", isOn: $splat)
                 .onChange(of: splat) { _, on in SplatPreview.enabled = on; if on { SplatPreview.askForNotifications() } }
             NavigationLink("Licences (photo-real preview)") { SplatLicencesView() }
+            RoomLinkSettings()
             Toggle("Flat tiles (test)", isOn: $flatTiles)
                 .onChange(of: flatTiles) { _, on in FlatTiles.enabled = on }
             Toggle("Screen video (test)", isOn: $screenVideo)

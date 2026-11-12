@@ -46,6 +46,8 @@ enum PCRebuildShare {
                 files.append((folder + name, cap.appendingPathComponent(name)))
             }
         }
+        // the scan's share link id, so the PC uploads its full version to the same link (upload_room.py --id)
+        if let info = RoomLink.info(scan) { files.append(("share.json", RoomLink.file(scan))); _ = info }
         progress("Packing \(files.count) files…")
         let writer = try Zip.Writer(url: out)
         try writer.add("README.txt", data: Data(readme(scan, kind).utf8))

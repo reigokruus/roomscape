@@ -107,6 +107,14 @@ enum SplatPreview {
         try fm.moveItem(at: partial, to: result(scan))
         try? fm.removeItem(at: dataset.appendingPathComponent("images"))   // made again from the recording if needed
         SplatPacing.Checkpoint.clear(in: dir)
+        // Share link (switch "Share links (test)"): put the preview online at the scan's link. A failed upload
+        // doesn't fail the preview; the room's Share menu can try again.
+        if RoomLink.enabled, RoomLink.Keychain.uploadKey != nil {
+            progress(.init(stage: "Putting the preview online", fraction: 0.995, note: nil))
+            do { try await RoomLink.uploadPreview(scan) } catch is CancellationError { throw CancellationError() } catch {
+                log.error("share link upload failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
         log.info("preview ready for \(scan.name, privacy: .public) (\(trainer.name, privacy: .public), \(Int(Date().timeIntervalSince(started))) s)")
     }
 
