@@ -1,0 +1,5 @@
+module BrushC {
+    header "brush_c.h"
+    link "brush_c"
+    export *
+}

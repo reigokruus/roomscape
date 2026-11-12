@@ -1,3 +1,49 @@
+diff --git a/apps/brush-c/src/lib.rs b/apps/brush-c/src/lib.rs
+index c5a8a0e..98c1743 100644
+--- a/apps/brush-c/src/lib.rs
++++ b/apps/brush-c/src/lib.rs
+@@ -47,6 +47,13 @@ pub struct TrainOptions {
+     pub max_resolution: u32,
+     pub export_every: u32,
+     pub output_path: *const c_char,
++    // RoomScape change (12 Nov 2026): phone limits and a cancel switch, appended so the layout above stays the same.
++    /// Most splats the model may grow to (0 = Brush's default, 10 million: far too many for a phone).
++    pub max_splats: u32,
++    /// Spherical-harmonics degree (0-3; 255 = Brush's default). Lower = less memory and faster on a phone.
++    pub sh_degree: u32,
++    /// If not null: training stops (with an error code) as soon as the byte it points to becomes non-zero.
++    pub cancel: *const u8,
+ }
+ 
+ impl TrainOptions {
+@@ -69,6 +76,13 @@ impl TrainOptions {
+         process_args.load_config.max_resolution = self.max_resolution;
+         process_args.process_config.export_every = self.export_every;
+         process_args.process_config.eval_save_to_disk = true;
++        // RoomScape change: phone limits
++        if self.max_splats > 0 {
++            process_args.train_config.max_splats = self.max_splats;
++        }
++        if self.sh_degree <= 3 {
++            process_args.model_config.sh_degree = self.sh_degree;
++        }
+         process_args
+     }
+ }
+@@ -138,7 +152,13 @@ pub unsafe extern "C" fn train_and_save(
+                 let mut process =
+                     create_process_with_device(source, device, async move |_| Some(process_args));
+ 
++                let cancel = train_options.cancel;
+                 while let Some(message_result) = process.stream.next().await {
++                    // RoomScape change: stop when the app asks (the byte is set from another thread).
++                    // SAFETY: the caller keeps `cancel` valid for the whole call (documented in TrainOptions).
++                    if !cancel.is_null() && unsafe { std::ptr::read_volatile(cancel) } != 0 {
++                        return TrainExitCode::Error;
++                    }
+                     match message_result {
+                         Ok(message) => {
+                             if let Ok(progress_message) = message.try_into() {
 diff --git a/crates/brush-rerun/Cargo.toml b/crates/brush-rerun/Cargo.toml
 index 8a48e37..b4b32bb 100644
 --- a/crates/brush-rerun/Cargo.toml

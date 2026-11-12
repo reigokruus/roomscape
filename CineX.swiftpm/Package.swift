@@ -5,6 +5,12 @@
 
 import PackageDescription
 import AppleProductTypes
+import Foundation
+
+// Brush (the photo-real preview's trainer) is linked in only when its library has been made on this Mac
+// (tools/brush-ios/make-xcframework.sh -> Vendor/BrushC.xcframework, git-ignored); otherwise the app builds as before.
+let brushLinked = FileManager.default.fileExists(atPath: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    .appendingPathComponent("Vendor/BrushC.xcframework").path)
 
 let package = Package(
     name: "RoomScape",
@@ -37,9 +43,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "AppModule",
+            dependencies: brushLinked ? ["BrushC"] : [],
             path: ".",
+            exclude: ["Vendor"],
             // the in-app photo-real preview viewer (SplatViewerView): page, scripts, licences
-            resources: [.copy("SplatViewer")]
+            resources: [.copy("SplatViewer")],
+            linkerSettings: brushLinked ? [.linkedFramework("Metal"), .linkedFramework("QuartzCore"),
+                                           .linkedFramework("CoreGraphics"), .linkedFramework("Foundation"),
+                                           .linkedLibrary("c++")] : []
         )
-    ]
+    ] + (brushLinked ? [.binaryTarget(name: "BrushC", path: "Vendor/BrushC.xcframework")] : [])
 )

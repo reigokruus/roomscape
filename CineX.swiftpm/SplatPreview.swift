@@ -45,7 +45,13 @@ enum SplatPreview {
     }
 
     /// The trainer in use: Brush when its library is linked in, else the stand-in.
-    static var trainer: Trainer { DotsTrainer() }
+    static var trainer: Trainer {
+        #if canImport(BrushC)
+        BrushTrainer()
+        #else
+        DotsTrainer()
+        #endif
+    }
 
     // MARK: The job
 

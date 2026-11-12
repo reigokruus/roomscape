@@ -16,4 +16,10 @@ Build (Rust 1.88+, `rustup target add aarch64-apple-ios`):
     cargo build -p brush-c --release --target aarch64-apple-ios
     # -> target/aarch64-apple-ios/release/libbrush_c.a
 
+Into the iPhone app: `tools/brush-ios/make-xcframework.sh <brush checkout>` makes CineX.swiftpm/Vendor/BrushC.xcframework
+(git-ignored); Package.swift links it when it's there, and SplatPreview uses BrushTrainer.swift instead of the stand-in.
+Build Brush for the app with `RUSTFLAGS="-C embed-bitcode=no" CARGO_PROFILE_RELEASE_LTO=false` (Apple's tools can't
+read Rust's newer LLVM bitcode). brush-c also gets a splat cap, a spherical-harmonics degree and a cancel byte
+(BrushTrainOptions in include/brush_c.h). Built and linked 12 Nov 2026 (app executable 3.7 -> 92.5 MB).
+
 Not yet: run on a phone, the memory limit (increased-memory-limit entitlement), a cancel switch in brush-c.
