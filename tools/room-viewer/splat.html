@@ -23,14 +23,19 @@
   <h1>Room splats</h1>
   <div id="list">looking for splats…</div>
   <div id="status"></div>
-  <div class="help">Drag to turn, right-drag to move, scroll to zoom. Splats are in recordings/rebuild/&lt;room&gt;-splat/. <a href="./" style="color:var(--accent)">Mesh viewer</a></div>
+  <div class="row" style="display:flex;gap:6px;margin-top:8px"><button id="b-fly" class="on" style="width:auto">Fly</button><button id="b-orbit" style="width:auto">Orbit</button></div>
+  <div class="help" id="keys"></div>
+  <div class="help">Splats are in recordings/rebuild/&lt;room&gt;-splat/. <a href="./" style="color:var(--accent)">Mesh viewer</a></div>
 </div>
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
 <script type="module">
+import * as THREE from 'three';
 import * as GaussianSplats3D from './vendor/gaussian-splats-3d.module.js';
 const base = '../../recordings/rebuild/';
 const $ = id => document.getElementById(id);
-let viewer = null;
+let viewer = null, mode = 'fly', current = null;
+const FLY_HELP = 'Fly: W A S D move · Space up · Ctrl or C down (also E up, Q down) · Shift faster · drag to look';
+const ORBIT_HELP = 'Orbit: drag to turn, right-drag to move, scroll to zoom';
 // ?file=<room>-splat/x.splat&cam=x,y,z&look=x,y,z
 const sp = new URLSearchParams(location.search), q = {};
 for (const k of ['cam', 'look']) if (sp.get(k)) q[k] = sp.get(k).split(',').map(Number);
@@ -55,7 +60,9 @@ async function findSplats() {
   return out;
 }
 async function show(file) {
+  current = file;
   [...$('list').children].forEach(b => b.classList.toggle('on', b.dataset.f === file));
+  $('keys').textContent = mode === 'fly' ? FLY_HELP : ORBIT_HELP;
   $('status').textContent = 'loading ' + file + '…';
   if (viewer) { await viewer.dispose(); viewer = null; $('view').innerHTML = ''; }
   viewer = new GaussianSplats3D.Viewer({
@@ -64,13 +71,59 @@ async function show(file) {
     cameraUp: [0, 1, 0], initialCameraPosition: q.cam || [3, 2.5, 3], initialCameraLookAt: q.look || [0, 0, 0],
     sharedMemoryForWorkers: false,   // python's http.server sends no cross-origin isolation headers
     dynamicScene: false, sphericalHarmonicsDegree: 1,
+    useBuiltInControls: mode === 'orbit',   // fly mode: our own WASD + look (below) moves the camera
   });
   try {
     await viewer.addSplatScene(base + file, { splatAlphaRemovalThreshold: 5, showLoadingUI: true, progressiveLoad: false });
     viewer.start();
+    if (mode === 'fly') startFly(viewer.camera);
     $('status').textContent = file;
   } catch (e) { $('status').textContent = 'could not load: ' + e; }
 }
+// ---- Fly controls (rk 12 Nov: "basic WASD ctrl+space movement for moving and lowering and raising in the room") ----
+// W/S forward/back and A/D sideways, level with the floor (looking down doesn't make you sink); Space / E up,
+// Ctrl / C / Q down; Shift = faster (1.5 m/s walking, 4 m/s with Shift); drag to look around. Ctrl+W still closes the
+// tab (the browser keeps that one), hence C and Q as the down keys too.
+const keys = new Set(); let yaw = 0, pitch = 0, flyCam = null, last = 0, drag = null;
+const FLY_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ControlLeft', 'ControlRight', 'KeyC', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight']);
+addEventListener('keydown', e => {
+  if (mode !== 'fly' || !FLY_KEYS.has(e.code) || e.metaKey) return;
+  keys.add(e.code); e.preventDefault();        // no page scroll on Space, no Ctrl+S / Ctrl+D save or bookmark dialogs
+}, { capture: true });
+addEventListener('keyup', e => { keys.delete(e.code); if (e.key === 'Control') { keys.delete('ControlLeft'); keys.delete('ControlRight'); } });
+addEventListener('blur', () => keys.clear());
+function startFly(cam) {
+  flyCam = cam; window.__flyCam = cam;   // (for testing)
+  const d = new THREE.Vector3(); cam.getWorldDirection(d);
+  yaw = Math.atan2(-d.x, -d.z); pitch = Math.asin(Math.max(-1, Math.min(1, d.y)));
+  last = performance.now();
+}
+$('view').addEventListener('pointerdown', e => { if (mode === 'fly') { drag = [e.clientX, e.clientY]; $('view').setPointerCapture(e.pointerId); } });
+$('view').addEventListener('pointerup', () => { drag = null; });
+$('view').addEventListener('pointermove', e => {
+  if (mode !== 'fly' || !drag) return;
+  yaw -= (e.clientX - drag[0]) * 0.0035; pitch = Math.max(-1.5, Math.min(1.5, pitch - (e.clientY - drag[1]) * 0.0035));
+  drag = [e.clientX, e.clientY];
+});
+function flyTick(now) {
+  requestAnimationFrame(flyTick);
+  if (mode !== 'fly' || !flyCam) return;
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 4 : 1.5) * dt;
+  const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)), right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+  const move = new THREE.Vector3();
+  if (keys.has('KeyW')) move.add(fwd); if (keys.has('KeyS')) move.sub(fwd);
+  if (keys.has('KeyD')) move.add(right); if (keys.has('KeyA')) move.sub(right);
+  if (keys.has('Space') || keys.has('KeyE')) move.y += 1;
+  if (keys.has('ControlLeft') || keys.has('ControlRight') || keys.has('KeyC') || keys.has('KeyQ')) move.y -= 1;
+  if (move.lengthSq() > 0) flyCam.position.addScaledVector(move.normalize(), speed);
+  flyCam.up.set(0, 1, 0);
+  flyCam.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+}
+requestAnimationFrame(flyTick);
+$('b-fly').onclick = () => { if (mode === 'fly') return; mode = 'fly'; $('b-fly').classList.add('on'); $('b-orbit').classList.remove('on'); if (current) show(current); };
+$('b-orbit').onclick = () => { if (mode === 'orbit') return; mode = 'orbit'; $('b-orbit').classList.add('on'); $('b-fly').classList.remove('on'); flyCam = null; if (current) show(current); };
+
 const files = await findSplats();
 $('list').innerHTML = '';
 if (!files.length) $('list').textContent = 'No splats yet. Copy a trained .ply into recordings/rebuild/<room>-splat/ and reload.';
