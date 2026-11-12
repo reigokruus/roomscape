@@ -34,7 +34,7 @@ index 9904cb9f..142107bb 100644
 +cubecl-wgpu = { path = "vendor/cubecl/crates/cubecl-wgpu" }
 +cubecl-zspace = { path = "vendor/cubecl/crates/cubecl-zspace" }
 diff --git a/apps/brush-c/src/lib.rs b/apps/brush-c/src/lib.rs
-index c5a8a0eb..d5e517cc 100644
+index c5a8a0eb..b0a83321 100644
 --- a/apps/brush-c/src/lib.rs
 +++ b/apps/brush-c/src/lib.rs
 @@ -47,6 +47,13 @@ pub struct TrainOptions {
@@ -51,8 +51,17 @@ index c5a8a0eb..d5e517cc 100644
  }
  
  impl TrainOptions {
-@@ -69,6 +76,13 @@ impl TrainOptions {
+@@ -67,8 +74,22 @@ impl TrainOptions {
+         process_args.train_config.total_train_iters = self.total_train_steps;
+         process_args.train_config.refine_every = self.refine_every;
          process_args.load_config.max_resolution = self.max_resolution;
++        // RoomScape change (12 Nov 2026): the GPU-ready picture cache defaults to 6 GiB on native targets; on a phone
++        // with about 3.4 GB for the whole app its filling and the parallel loaders swung the footprint by about 2 GB
++        // while loading. 384 MiB holds a phone dataset (about 200 pictures at 720x540).
++        #[cfg(target_os = "ios")]
++        {
++            process_args.load_config.max_scene_batch_cache_size = 384 << 20;
++        }
          process_args.process_config.export_every = self.export_every;
          process_args.process_config.eval_save_to_disk = true;
 +        // RoomScape change: phone limits
@@ -65,7 +74,7 @@ index c5a8a0eb..d5e517cc 100644
          process_args
      }
  }
-@@ -124,6 +138,13 @@ pub unsafe extern "C" fn train_and_save(
+@@ -124,6 +145,13 @@ pub unsafe extern "C" fn train_and_save(
              unsafe { CStr::from_ptr(dataset_path).to_string_lossy().into_owned() };
  
          let source = DataSource::Path(dataset_path_str);
@@ -79,7 +88,7 @@ index c5a8a0eb..d5e517cc 100644
  
          // SAFETY: Option is checked to not be null before the future.
          let train_options = unsafe { *options };
-@@ -135,17 +156,31 @@ pub unsafe extern "C" fn train_and_save(
+@@ -135,17 +163,31 @@ pub unsafe extern "C" fn train_and_save(
              .expect("Failed to create tokio runtime")
              .block_on(async move {
                  let device = DEVICE.get_or_init(burn_init_setup).await.clone();
@@ -112,7 +121,7 @@ index c5a8a0eb..d5e517cc 100644
                              return TrainExitCode::Error;
                          }
                      }
-@@ -155,5 +190,18 @@ pub unsafe extern "C" fn train_and_save(
+@@ -155,5 +197,18 @@ pub unsafe extern "C" fn train_and_save(
              })
      }));
  
@@ -131,6 +140,21 @@ index c5a8a0eb..d5e517cc 100644
 +    }
      result.unwrap_or(TrainExitCode::Error)
  }
+diff --git a/crates/brush-dataset/src/scene_loader.rs b/crates/brush-dataset/src/scene_loader.rs
+index 7d23af07..70c3b40f 100644
+--- a/crates/brush-dataset/src/scene_loader.rs
++++ b/crates/brush-dataset/src/scene_loader.rs
+@@ -75,6 +75,10 @@ impl SceneLoader {
+         // contention without overlapping I/O.
+         let n_actors = if cfg!(target_family = "wasm") {
+             1
++        } else if cfg!(target_os = "ios") {
++            // RoomScape change (12 Nov 2026): two loaders on iOS, not one per core: each decodes and uploads at
++            // the same time, and together they briefly needed about 2 GB of the phone's 3.4 GB app limit
++            2
+         } else {
+             std::thread::available_parallelism().map_or(8, |p| p.get())
+         };
 diff --git a/crates/brush-process/src/lib.rs b/crates/brush-process/src/lib.rs
 index 2cac2366..1dc668eb 100644
 --- a/crates/brush-process/src/lib.rs

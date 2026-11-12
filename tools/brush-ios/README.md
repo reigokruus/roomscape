@@ -37,3 +37,6 @@ step pushed the footprint from about 1 GB to about 3.0 GB, and iOS stopped the a
 brush-process use a `Direct` pool on iOS (exact-size allocations, free memory returned once over 512 MB reserved), and brush-c frees the unused memory once the pictures are loaded;
 `cubecl-ios-metal.patch` re-exports `MemoryPoolOptions` / `PoolType` from cubecl-core for that. On other platforms
 `BRUSH_DIRECT_POOL=1` turns it on, to compare on a Mac.
+
+The picture loading is also smaller on iOS: the GPU-ready picture cache is capped at 384 MiB (Brush's default is 6 GiB)
+and two loaders run instead of one per core (brush-dataset scene_loader), against the about 2 GB swings while loading.
