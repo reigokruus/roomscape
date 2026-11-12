@@ -111,6 +111,7 @@ struct ResultView: View {
     /// shoot planner was pushed on top); loading again built a second scene the 3D view never showed, so the
     /// Mesh / Photo / Model switch seemed to do nothing.
     @State private var loadStarted = false
+    @ObservedObject private var processing = ProcessingQueue.shared
     /// The scan as renamed on this screen (the Name row), else nil; `current` is the scan with its latest name.
     @State private var renamed: SavedScan?
     @State private var renaming = false
@@ -141,6 +142,8 @@ struct ResultView: View {
                     .clipped()
                 } else if let loadError {
                     Text(loadError).padding()
+                } else if processing.gpuJob {
+                    RoomPausedForPreview()
                 } else {
                     ProgressView()
                 }
@@ -340,6 +343,9 @@ struct ResultView: View {
             showStyle(newStyle)
         }
         .task { await loadRoom() }
+        // The photo-real preview needs the memory the 3D room holds (12 Nov 22:08): let it go while that runs, load it
+        // again when it's done
+        .modifier(ReleaseDuringPreview(busy: processing.gpuJob, release: releaseRoom, reload: { await loadRoom() }))
     }
 
     #if DEBUG
@@ -741,8 +747,20 @@ struct ResultView: View {
     /// Writes the whole scan as a .rmsc package (see `Rmsc`) and opens the share sheet for it.
     /// Loads the room, its photo room, mesh, splats, objects and the rest (was the body of `.task`; a method so the
     /// compiler checks it statement by statement instead of as one huge closure).
+    /// Drops the 3D scene and what hangs on it (points, photo room, splats), so the photo-real preview has the memory.
+    private func releaseRoom() {
+        guard scene != nil || loadStarted else { return }
+        walk = .off
+        if lightingOn { toggleLighting() }
+        if objectsOn { toggleObjects() }
+        scene = nil; modelGroup = nil; splatGroup = nil; photoRoom = nil
+        loadStarted = false
+        ProcessingQueue.logMemory("room view released")
+    }
+
     private func loadRoom() async {
-        guard !loadStarted else { return }
+        // not while the photo-real preview runs: it needs the memory (the view loads when it's done)
+        guard !loadStarted, !ProcessingQueue.shared.gpuJob else { return }
         loadStarted = true
         // Decoding the room and loading the USDZ can take a few seconds, so keep it off the main thread.
         let scan = scan
@@ -2710,6 +2728,30 @@ private struct LinkMadeAlert: ViewModifier {
             Button("OK", role: .cancel) {}
         } message: {
             Text("\(link?.absoluteString ?? "")\n\nAnyone with the link can look around the room for 30 days. When the PC makes the full version, the same link shows it.")
+        }
+    }
+}
+
+/// Shown instead of the 3D room while the photo-real preview runs (the room is let go: Brush needs the memory).
+private struct RoomPausedForPreview: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "cube.transparent").font(.largeTitle).foregroundStyle(.secondary)
+            Text("Making the photo-real room. The 3D view comes back when it's done.")
+                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(.top, 120).padding(.horizontal, 24)
+    }
+}
+
+/// Lets the room go when the photo-real preview starts and loads it again when it's done.
+private struct ReleaseDuringPreview: ViewModifier {
+    let busy: Bool
+    let release: () -> Void
+    let reload: () async -> Void
+    func body(content: Content) -> some View {
+        content.onChange(of: busy) { _, now in
+            if now { release() } else { Task { await reload() } }
         }
     }
 }

@@ -76,6 +76,7 @@ enum SplatPreview {
         try fm.createDirectory(at: dataset, withIntermediateDirectories: true)
         let note: @Sendable (String?) -> Void = { n in progress(.init(stage: "", fraction: -1, note: n)) }
         let exported = dataset.appendingPathComponent("export.done")
+        ProcessingQueue.logMemory("preview start")
         let plan = plan(for: scan)
         let steps = plan.steps
         log.info("preview plan for \(scan.name, privacy: .public): \(plan.description, privacy: .public)")
@@ -90,6 +91,16 @@ enum SplatPreview {
         try Task.checkCancellation()
         // GPU work only while the app is open
         await waitForForeground(note: note)
+        // Room for Brush: the room view lets go of its 3D scene when this job starts (ProcessingQueue.gpuJob); give
+        // that a moment, up to 20 s, then start anyway. Brush's loading briefly needs about 2 GB on top of its own.
+        ProcessingQueue.logMemory("after release")
+        let wanted: UInt64 = 2_900 << 20
+        var waited = 0.0
+        while os_proc_available_memory() < wanted, waited < 20 {
+            progress(.init(stage: "Getting ready", fraction: 0.25, note: nil))
+            try await Task.sleep(nanoseconds: 500_000_000); waited += 0.5
+        }
+        ProcessingQueue.logMemory("Brush start\(waited > 0 ? " (waited \(Int(waited)) s)" : "")")
         let trainer = self.trainer
         let started = Date()
         let partial = dir.appendingPathComponent("preview-training.ply")

@@ -47,6 +47,15 @@ private enum log {
 /// - Resumable: the queue is saved (Documents/processing-queue.json) and every job keeps its finished stages
 ///   (RecordingProcessor), so a job stopped by the system, by the user or by a restart resumes where it was.
 @MainActor final class ProcessingQueue: ObservableObject {
+    /// True while a GPU job (the photo-real preview) runs: big 3D views let go of their scenes meanwhile.
+    @Published private(set) var gpuJob = false
+
+    /// The app's memory now (footprint, and what iOS still allows), into the processing log.
+    nonisolated static func logMemory(_ label: String) {
+        let avail = Double(os_proc_available_memory()) / 1_048_576
+        log.info("memory \(label): footprint \(Int(PerfLog.footprintMB())) MB, available \(Int(avail)) MB")
+    }
+
     static let shared = ProcessingQueue()
 
     struct Item: Codable, Hashable { var scan: String; var job: RecordingProcessor.Job }
@@ -109,6 +118,7 @@ private enum log {
 
     /// After Done: the job the settings ask for, once the recording is in the scan's folder.
     func scanSaved(_ scan: SavedScan) {
+        Self.logMemory("scan done")
         guard RecordingProcessor.hasRecording(scan) else { return }
         add(scan, Self.recordThenProcess ? .rebuild : .text)
         // The photo-real preview (switch "Photo-real preview"): after the scan's own job, so the scan is complete first.
@@ -269,6 +279,11 @@ private enum log {
                 }
             }
             inner = job
+            // The photo-real preview needs most of the app's memory on the phone: screens holding big 3D scenes let
+            // go of them while it runs (ResultView), and load them again after (12 Nov 22:08: a preview right
+            // after a scan started with 1.2 GB still held by the room view and died while loading)
+            gpuJob = item.job == .splat
+            defer { gpuJob = false }
             do {
                 try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
                 items.removeAll { $0 == item }
@@ -292,6 +307,7 @@ private enum log {
     }
 
     private func stopped() -> Bool {
+        gpuJob = false
         log.info("stopped part-way: \(current?.scan ?? "?") resumes from its last finished stage")
         inner = nil
         current = nil
