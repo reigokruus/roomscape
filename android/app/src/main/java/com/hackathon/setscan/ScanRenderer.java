@@ -156,6 +156,58 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return String.format(java.util.Locale.US, "cpu %.1f cores, depth %d ms old, heat %d", cpuCores, age, thermal); }
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
     static volatile boolean AUTO_ERASE = true;
+    // ---- Rebuild frames: picture + pose + intrinsics + raw depth with confidence, twice a second (rk 12 Nov) ----
+    static volatile boolean SAVE_REBUILD = true;
+    private long rebuildAt; private int rebuildN; private File rebuildTmp;
+    private final java.util.concurrent.atomic.AtomicInteger rebuildPending = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.ExecutorService rebuildExec = java.util.concurrent.Executors.newSingleThreadExecutor(r -> new Thread(() -> {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run(); }, "rebuild-frames"));
+    /** The frames go to a folder of their own while scanning and move into the scan folder at Done (rebuild-frames/):
+     *  NNNNN.jpg (camera picture), NNNNN.depth (int w, h; then w*h big-endian shorts, mm; then w*h confidence bytes,
+     *  0-255; raw, all levels), and frames.csv: index, scan ms, the camera pose (camera -> world, corrected, 16 floats
+     *  column-major), the picture's fx fy cx cy w h and the depth's fx fy cx cy w h. */
+    private void saveRebuildFrame(float[] pose, short[] d, byte[] c, int dw, int dh, float fx, float fy, float cx, float cy,
+                                  byte[][] yuv, int[] yi, float ifx, float ify, float icx, float icy, long ms) {
+        if (rebuildTmp == null) { rebuildTmp = new File(activity.getFilesDir(), "rebuild-tmp-" + System.currentTimeMillis()); rebuildTmp.mkdirs(); rebuildN = 0; }
+        final File dir = rebuildTmp; final int idx = rebuildN++;
+        rebuildPending.incrementAndGet();
+        rebuildExec.execute(() -> {
+            try {
+                int w = yi[0], h = yi[1], yRow = yi[2], yPix = yi[3], cRow = yi[4], cPix = yi[5];
+                int[] px = new int[w * h];
+                for (int v = 0; v < h; v++) for (int u = 0; u < w; u++) {
+                    int Y = yuv[0][v * yRow + u * yPix] & 255; int ci = (v / 2) * cRow + (u / 2) * cPix;
+                    int U = (ci < yuv[1].length ? yuv[1][ci] & 255 : 128) - 128, V = (ci < yuv[2].length ? yuv[2][ci] & 255 : 128) - 128;
+                    int r = Math.max(0, Math.min(255, Math.round(Y + 1.402f * V))), g = Math.max(0, Math.min(255, Math.round(Y - 0.344f * U - 0.714f * V))), b = Math.max(0, Math.min(255, Math.round(Y + 1.772f * U)));
+                    px[v * w + u] = 0xFF000000 | r << 16 | g << 8 | b;
+                }
+                android.graphics.Bitmap bm = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+                String nm = String.format(java.util.Locale.US, "%05d", idx);
+                try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, nm + ".jpg"))) { bm.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, o); }
+                bm.recycle();
+                try (java.io.DataOutputStream o = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(new File(dir, nm + ".depth"))))) {
+                    o.writeInt(dw); o.writeInt(dh); for (short v : d) o.writeShort(v);
+                    if (c != null) o.write(c); else o.write(new byte[dw * dh]);
+                }
+                StringBuilder line = new StringBuilder().append(idx).append(',').append(ms);
+                for (float v : pose) line.append(',').append(v);
+                line.append(',').append(ifx).append(',').append(ify).append(',').append(icx).append(',').append(icy).append(',').append(w).append(',').append(h);
+                line.append(',').append(fx).append(',').append(fy).append(',').append(cx).append(',').append(cy).append(',').append(dw).append(',').append(dh).append('\n');
+                try (java.io.FileWriter fw = new java.io.FileWriter(new File(dir, "frames.csv"), true)) { fw.write(line.toString()); }
+            } catch (Throwable e) { android.util.Log.w("RoomScape", "rebuild frame: " + e); }
+            finally { rebuildPending.decrementAndGet(); }
+        });
+    }
+    /** At Done (or a kept Cancel): the frames move into the scan folder as rebuild-frames/. */
+    private void keepRebuildFrames(File scanDir) {
+        File t = rebuildTmp; rebuildTmp = null;
+        if (t == null || scanDir == null) return;
+        rebuildExec.execute(() -> {   // after the frames still being written
+            File to = new File(scanDir, "rebuild-frames");
+            if (t.renameTo(to)) log("rebuild frames kept with the scan: rebuild-frames/ (" + (to.list() == null ? 0 : to.list().length) + " files)");
+            else log("rebuild frames: couldn't move " + t.getName() + " into the scan folder");
+        });
+    }
     /** Debug tools "Merge flat areas" (rk 11 Nov 23:20: "smooth over some areas where the dots make a coherent shape"):
      *  settled fine (0.8 cm) dots in a 2 cm cell that lie flat (thinner than 4 mm) and evenly coloured (channel spread
      *  under 12) become one dot there: the average position and colour, the best confidence, the closest distance.
@@ -1679,7 +1731,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             try { ScanStore.rename(dir, nm); } catch (Exception e) { logError("keep cancelled scan", e); }
             log("scan cancelled: kept as '" + nm + "' (" + count + " points) in " + dir.getName());
             // its diagnostics too, as after Done (11 Nov 20:12: a cancelled scan kept no log, pose track or screen video)
-            try { saveEvents(dir); saveLogInto(dir); screenTargetDir = dir; finishScreenVideo(); } catch (Exception e) { logError("keep cancelled scan's diagnostics", e); }
+            try { saveEvents(dir); saveLogInto(dir); screenTargetDir = dir; finishScreenVideo(); keepRebuildFrames(dir); } catch (Exception e) { logError("keep cancelled scan's diagnostics", e); }
             dir = null;
         }
         log(dir != null ? "scan cancelled: deleting its autosave " + dir.getName() : improveDir != null ? "continue scan cancelled: saved scan kept as it was" : "scan cancelled");
@@ -2762,6 +2814,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 perf.stop();
                 if (dir != null && tilesSaved != null) saveTiles(dir, tilesSaved);
                 if (dir != null && removedAtDone[0] != null) saveRemoved(dir, removedAtDone[0]);
+                if (dir != null) keepRebuildFrames(dir);
                 if (dir != null) saveFilledWall(dir);
                 // (dot-confidence.bin is written with every save now, by ScanStore)
                 if (dir != null) { saveEvents(dir); saveLiveMesh(dir); keepScreenVideo(dir); perf.moveInto(dir, "perf-scan"); log("perf log kept with the scan " + dir.getName() + ": perf-scan.jsonl"); saveLogInto(dir); saveFeatureHeights(dir); saveDepthPairs(dir); saveHeight(dir); }
@@ -5592,6 +5645,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 Image.Plane cp = conf.getPlanes()[0];
                 cbuf = cp.getBuffer(); cRow = cp.getRowStride(); cPix = cp.getPixelStride();
             }
+            // Rebuild frames (rk 12 Nov 09:15: rebuild the room offline from the depth and the pictures): twice a second
+            // the raw depth with its confidence (all levels, for offline use only) and the camera picture are copied
+            // here, before the 95% rule; written with the pose (below) on a low-priority thread.
+            short[] rbD = null; byte[] rbC = null; byte[][] rbYuv = null; int[] rbYuvInfo = null;
+            if (SAVE_REBUILD && cpuImage != null && nowMsFrame - rebuildAt >= 500 && rebuildPending.get() < 3) {
+                try {
+                    rbD = new short[dw * dh]; for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) rbD[v * dw + u] = dbuf.get(v * dRow + u * dPix);
+                    if (cbuf != null) { rbC = new byte[dw * dh]; for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) rbC[v * dw + u] = cbuf.get(v * cRow + u * cPix); }
+                    Image.Plane[] pl = cpuImage.getPlanes(); rbYuv = new byte[3][];
+                    for (int q = 0; q < 3; q++) { ByteBuffer bb = pl[q].getBuffer().duplicate(); bb.position(0); rbYuv[q] = new byte[bb.remaining()]; bb.get(rbYuv[q]); }
+                    rbYuvInfo = new int[]{cpuImage.getWidth(), cpuImage.getHeight(), pl[0].getRowStride(), pl[0].getPixelStride(), pl[1].getRowStride(), pl[1].getPixelStride()};
+                    rebuildAt = nowMsFrame;
+                } catch (Throwable e) { rbD = null; }
+            }
             // Unsure depth is discarded at the door (rk 11 Nov 22:12: "I don't want them put on the scan at all ...
             // unconfident spots are built on other unconfident spots, which is garbage"): every reading under PAINT_MIN
             // becomes "no depth" here, before the dots, the surface, the line-up after a loss, see-through clearing,
@@ -5624,6 +5691,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             applyFix(m);
             shadowCheck(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, rawM, nowMsFrame);
             System.arraycopy(m, 0, lastGoodCam, 0, 16); haveGoodCam = true;   // where the phone was, for a re-alignment guess
+            if (rbD != null) saveRebuildFrame(m.clone(), rbD, rbC, dw, dh, fx, fy, cx, cy, rbYuv, rbYuvInfo, ifx, ify, icx, icy, nowMsFrame - t0);
             if (GOOD_SPOTS && nowMsFrame - anchorOfferAt >= 1000 && featuresNow >= Anchors.MIN_FEATURES) { anchorOfferAt = nowMsFrame; offerAnchor(dbuf, dRow, dPix, dw, dh, fx, fy, cx, cy, m); }
             int[] rgb = new int[3];
             frameHits = 0; frameSolid = 0; farPixelsFrame = 0;
