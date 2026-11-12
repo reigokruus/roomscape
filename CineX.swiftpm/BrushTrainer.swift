@@ -1,6 +1,7 @@
 #if canImport(BrushC)
 import BrushC
 import Foundation
+import UIKit
 
 /// The real trainer for the photo-real preview: Brush (Apache-2.0, https://github.com/ArthurBrussee/brush), linked in
 /// as a static library when CineX.swiftpm/Vendor/BrushC.xcframework exists on the Mac that builds the app (see
@@ -26,6 +27,14 @@ struct BrushTrainer: SplatPreview.Trainer {
         try? fm.removeItem(at: outDir)
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         let box = Box(progress)
+        // iOS stops GPU work in the background: when the app is left, Brush is stopped cleanly (cancel byte) and the
+        // job waits in the queue, starting again when the app is back (rk 14:20).
+        let left = UnsafeMutablePointer<Bool>.allocate(capacity: 1); left.pointee = false
+        defer { left.deallocate() }
+        let leaving = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { _ in
+            left.pointee = true; box.cancel.pointee = 1
+        }
+        defer { NotificationCenter.default.removeObserver(leaving) }
         let code: BrushTrainExitCode = await withTaskCancellationHandler {
             await withCheckedContinuation { (done: CheckedContinuation<BrushTrainExitCode, Never>) in
                 let thread = Thread {
@@ -53,6 +62,10 @@ struct BrushTrainer: SplatPreview.Trainer {
             box.cancel.pointee = 1
         }
         try Task.checkCancellation()
+        if left.pointee {
+            SplatPreview.log.info("Brush stopped: the app was left; the preview starts again when RoomScape is open")
+            throw CancellationError()   // the queue keeps the job and runs it when the app is back
+        }
         guard code == BrushTrainSuccess else {
             // brush-c writes why into brush-error.txt (RoomScape's patch): into the processing log with it
             let why = (try? String(contentsOf: outDir.appendingPathComponent("brush-error.txt"), encoding: .utf8)) ?? "no reason given"

@@ -146,7 +146,10 @@ private enum log {
         guard runner == nil, items.contains(where: { !held.contains($0.scan) }) else { return }
         // Not only when .active: right after Done the app is often .inactive (the scanner closing), and then the
         // continued task was never used (processing log 9 Nov).
-        if #available(iOS 26.0, *), UIApplication.shared.applicationState != .background, submitContinued() { return }
+        // The photo-real preview (GPU) can't run in the background, so not as a continued task (rk 14:20: iOS showed
+        // "Task failed" when the app was left mid-training): in the app only; it waits and resumes when the app is back.
+        let next = items.first(where: { !held.contains($0.scan) })
+        if next?.job != .splat, #available(iOS 26.0, *), UIApplication.shared.applicationState != .background, submitContinued() { return }
         runInApp()
     }
 
