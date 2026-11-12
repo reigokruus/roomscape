@@ -32,6 +32,10 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
     @Published var powerSaving = false
     /// The scan card: hint and the This spot / Room bars (see `updateHud`), the same as the Android app's.
     @Published var hud = ScanHud()
+    /// The S24 look's status line (LivePreview.s24Look): phone load, 0 fine (green), 1 busy (amber), 2 overloaded
+    /// (red), from the heat, the app's processor use (cores busy, ARKit and RoomPlan included) and moving too fast.
+    @Published var load = 0
+    @Published var loadText = ""
     /// When a tap last cleared part of the scan (the card says so for a moment).
     private var clearedAt = Date.distantPast
     /// Scan area again: how far the marked areas are scanned, and which way to turn when they're off screen.
@@ -286,12 +290,26 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
             var tooFast = false
             var shown: (hint: String, level: Int, at: Date)?
             var scanSeconds: Double = 0, lastTick = Date()
+            var lostSince: Date?
+            var lastCPU = Self.processCPU(), lastCPUAt = Date(), cores: Double = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 guard let self, self.phase == .scanning else { return }
                 guard let frame = session.currentFrame else { continue }
-                if case .normal = frame.camera.trackingState { scanSeconds += min(1, Date().timeIntervalSince(lastTick)) }
+                if case .normal = frame.camera.trackingState { scanSeconds += min(1, Date().timeIntervalSince(lastTick)); lostSince = nil }
+                else if LivePreview.s24Look, scanSeconds > 2 {
+                    // As on Android (rk 11 Nov: "when it loses track it should just stop the scan"): no prompts; tracking
+                    // lost for over 1 s ends the scan and saves it like Done.
+                    if lostSince == nil { lostSince = Date() }
+                    if let l = lostSince, Date().timeIntervalSince(l) > 1.0 {
+                        self.endEarly("Tracking was lost, so the scan stopped and was saved.")
+                        return
+                    }
+                }
                 lastTick = Date()
+                let cpu = Self.processCPU(), now = Date()
+                if now.timeIntervalSince(lastCPUAt) > 0.2 { cores = cores * 0.5 + (cpu - lastCPU) / now.timeIntervalSince(lastCPUAt) * 0.5 }
+                lastCPU = cpu; lastCPUAt = now
                 let t = frame.camera.transform.columns.3
                 let position = SIMD3<Float>(t.x, t.y, t.z)
                 if let lastPosition, frame.timestamp > lastTime {
@@ -323,9 +341,20 @@ final class ScanController: NSObject, ObservableObject, RoomCaptureViewDelegate 
                 self.areaNote = Self.areaNote(frame: frame, cloud: cloud)
                 let justCleared = Date().timeIntervalSince(self.clearedAt) < 3
                 self.hud = ScanHud(hint: hint, level: level, spot: justCleared ? min(max(0, spot), self.hud.spot) : max(0, spot),
-                                   room: justCleared ? room : max(self.hud.room, room), seconds: Int(scanSeconds))
+                                   room: justCleared ? room : max(self.hud.room, room), seconds: Int(scanSeconds), points: points)
+                let heat = ProcessInfo.processInfo.thermalState
+                self.load = heat.rawValue >= ProcessInfo.ThermalState.serious.rawValue || cores > 4.5 || tooFast ? 2
+                          : heat == .fair || cores > 3.5 ? 1 : 0
+                self.loadText = String(format: "%.1f cores, heat %d", cores, heat.rawValue)
             }
         }
+    }
+
+    /// The app's processor time so far (user + system, seconds), for the load dot.
+    nonisolated static func processCPU() -> Double {
+        var u = rusage()
+        getrusage(RUSAGE_SELF, &u)
+        return Double(u.ru_utime.tv_sec) + Double(u.ru_utime.tv_usec) / 1e6 + Double(u.ru_stime.tv_sec) + Double(u.ru_stime.tv_usec) / 1e6
     }
 
     /// Tap to clear (rk 9 Nov): wipes our own points and live mesh in the tapped circle so the spot can be scanned
@@ -737,7 +766,12 @@ struct ScannerScreen: View {
             .padding(.bottom, 32)
 
             // The scan card at the top: one hint and two progress bars, as on the Android app.
-            if controller.phase == .scanning {
+            if controller.phase == .scanning, LivePreview.s24Look {
+                // The S24 look: no hints or warnings, one small status line (time · dots · phone load), as on Android.
+                ScanStatusLine(seconds: controller.hud.seconds, points: controller.hud.points, load: controller.load)
+                    .padding(.top, 8)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            } else if controller.phase == .scanning {
                 TimelineView(.periodic(from: controller.phaseStarted, by: 1)) { context in
                     ScanHudCard(hud: controller.hud, notes: scanNotes(elapsed: context.date.timeIntervalSince(controller.phaseStarted)))
                 }
@@ -794,6 +828,8 @@ struct ScanHud: Equatable {
     var room: Float = 0
     /// Scan length (rk 10 Nov): seconds of tracking so far (not while lost).
     var seconds = 0
+    /// Dots so far (the S24 look's status line).
+    var points = 0
 
     static let spotDone: Float = 0.85
 
@@ -821,6 +857,30 @@ struct ScanHud: Equatable {
         if spot < 0.35 { return (pointsOnly ? "Sway the phone slowly over this spot" : "Sway the phone slowly over this spot until the mesh covers it in white", pointsOnly ? 1 : 2) }
         if spot < spotDone { return ("Good. Keep swaying gently here a little longer", 1) }
         return (pointsOnly ? "This spot is done. Move on" : "This spot is done. Move on to the next orange area", 0)
+    }
+}
+
+/// The S24 look's status line (Android's HUD timer line): scan time · dots of the budget · a phone-load dot (green
+/// fine, amber busy, red overloaded: slow down).
+struct ScanStatusLine: View {
+    let seconds: Int
+    let points: Int
+    let load: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(format: "%d:%02d", seconds / 60, seconds % 60))
+            Text("·")
+            Text("Dots \(points >= 1000 ? "\(points / 1000)k" : "\(points)") / \(LiveCloud.maxPoints / 1_000_000).\(LiveCloud.maxPoints / 100_000 % 10)M")
+            Text("·")
+            Circle().fill(load == 2 ? Color.red : load == 1 ? Color.orange : Color.green).frame(width: 9, height: 9)
+            Text("Phone load")
+        }
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(Color.black.opacity(0.55), in: Capsule())
+        .allowsHitTesting(false)
     }
 }
 
