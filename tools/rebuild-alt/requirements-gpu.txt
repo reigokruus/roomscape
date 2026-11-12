@@ -5,6 +5,9 @@
 gsplat==1.5.3
 imageio
 imageio-ffmpeg
+open3d>=0.18     # mesh from the trained splats
+plyfile
+scipy
 # Option 3 only (Difix3D's pinned versions):
 diffusers==0.25.1
 transformers==4.38.0

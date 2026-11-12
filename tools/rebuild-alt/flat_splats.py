@@ -302,10 +302,7 @@ def main():
             scores.append(psnr(rc, gt))
             if k < 6 or k % 5 == 0:
                 save_png(side_by_side([gt, rc]), os.path.join(a.out, "eval", f"{k:02d}_{os.path.splitext(v['name'])[0]}.png"))
-    tris = None
-    if not a.no_mesh:
-        tris = fuse_mesh(params, tv, a.sh_degree, a.voxel, 6.0, os.path.join(a.out, "mesh.ply"))
-    write_report(os.path.join(a.out, "report.json"), {
+    report = {
         "method": "depth-guided flat splats (2DGS)",
         "depth_guide": tv.depth_kind if a.depth_weight > 0 else "off",
         "steps": a.steps,
@@ -313,11 +310,16 @@ def main():
         "train_resolution": [tv.items[0]["w"], tv.items[0]["h"]],
         "heldout_pictures": len(scores),
         "heldout_psnr_db": round(float(np.mean(scores)), 2) if scores else None,
-        "mesh_triangles": tris,
+        "mesh_triangles": None,
         "seconds_training": round(t_train, 1),
         "seconds_total": round(time.time() - t0, 1),
         "files": ["splats.ply", "mesh.ply", "eval/"],
-    })
+    }
+    write_report(os.path.join(a.out, "report.json"), report)  # written before the mesh step, so a mesh failure loses nothing
+    if not a.no_mesh:
+        report["mesh_triangles"] = fuse_mesh(params, tv, a.sh_degree, a.voxel, 6.0, os.path.join(a.out, "mesh.ply"))
+        report["seconds_total"] = round(time.time() - t0, 1)
+        write_report(os.path.join(a.out, "report.json"), report)
 
 
 if __name__ == "__main__":
