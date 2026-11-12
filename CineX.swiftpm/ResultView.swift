@@ -259,6 +259,13 @@ struct ResultView: View {
                     Button { sendingNearby = true } label: { Label("Send to nearby phone", systemImage: "iphone.radiowaves.left.and.right") }
                     Button { exportRmsc(save: true) } label: { Label("Save to Files…", systemImage: "folder") }
                     Button { exportRmsc(save: false) } label: { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }
+                    if recordingBytes != nil {
+                        // rk 12 Nov: send a scan to the PC that makes the photo-real room (Google Drive, Files, AirDrop)
+                        Menu {
+                            Button { exportForPC(.quick) } label: { Label("Quick (about 30-40 MB)", systemImage: "hare") }
+                            Button { exportForPC(.full) } label: { Label("Full quality (the whole recording)", systemImage: "film") }
+                        } label: { Label("For a PC rebuild (.zip)", systemImage: "desktopcomputer.and.arrow.down") }
+                    }
                     if photoRoom != nil {
                         Button(action: exportGLB) { Label("Photo room for a computer (.glb)", systemImage: "desktopcomputer") }
                     }
@@ -1042,6 +1049,21 @@ struct ResultView: View {
             exportingGLB = false
             switch result {
             case .success(let url): if save { savingFile = SharedFile(url: url) } else { glbFile = SharedFile(url: url) }
+            case .failure(let error): glbError = error.localizedDescription
+            }
+        }
+    }
+
+    private func exportForPC(_ kind: PCRebuildShare.Kind) {
+        exportingGLB = true
+        let scan = current
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<URL, Error> in
+                do { return .success(try await PCRebuildShare.zip(scan, kind)) } catch { return .failure(error) }
+            }.value
+            exportingGLB = false
+            switch result {
+            case .success(let url): glbFile = SharedFile(url: url)
             case .failure(let error): glbError = error.localizedDescription
             }
         }
