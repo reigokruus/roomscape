@@ -1,3 +1,38 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 9904cb9..142107b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -25,6 +25,8 @@ members = [
+     "crates/rrfd",
+ ]
+ default-members = ["apps/brush-app"]
++# RoomScape change: the vendored cubecl copy is its own workspace
++exclude = ["vendor"]
+ 
+ [workspace.package]
+ edition = "2024"
+@@ -333,3 +335,21 @@ wgpu-core            = { git = "https://github.com/ArthurBrussee/wgpu", branch =
+ wgpu-hal             = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
+ wgpu-types           = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
+ naga                 = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
++
++# RoomScape change (12 Nov 2026): a local copy of cubecl (the commit burn uses) whose wgpu backend picks Metal on iOS
++# too (vendor/cubecl/crates/cubecl-wgpu/src/graphics.rs); every cubecl crate comes from the copy so there is one cubecl.
++[patch."https://github.com/tracel-ai/cubecl"]
++cubecl = { path = "vendor/cubecl/crates/cubecl" }
++cubecl-common = { path = "vendor/cubecl/crates/cubecl-common" }
++cubecl-core = { path = "vendor/cubecl/crates/cubecl-core" }
++cubecl-cpp = { path = "vendor/cubecl/crates/cubecl-cpp" }
++cubecl-environment = { path = "vendor/cubecl/crates/cubecl-environment" }
++cubecl-ir = { path = "vendor/cubecl/crates/cubecl-ir" }
++cubecl-macros = { path = "vendor/cubecl/crates/cubecl-macros" }
++cubecl-macros-internal = { path = "vendor/cubecl/crates/cubecl-macros-internal" }
++cubecl-opt = { path = "vendor/cubecl/crates/cubecl-opt" }
++cubecl-runtime = { path = "vendor/cubecl/crates/cubecl-runtime" }
++cubecl-server = { path = "vendor/cubecl/crates/cubecl-server" }
++cubecl-std = { path = "vendor/cubecl/crates/cubecl-std" }
++cubecl-wgpu = { path = "vendor/cubecl/crates/cubecl-wgpu" }
++cubecl-zspace = { path = "vendor/cubecl/crates/cubecl-zspace" }
 diff --git a/apps/brush-c/src/lib.rs b/apps/brush-c/src/lib.rs
 index c5a8a0e..3903ed1 100644
 --- a/apps/brush-c/src/lib.rs

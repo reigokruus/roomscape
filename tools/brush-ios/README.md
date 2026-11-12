@@ -10,10 +10,16 @@ Brush commit 1388f74) makes the `brush-c` library (C interface: `train_and_save`
 Every change is marked "RoomScape change" in the source, as the Apache-2.0 licence asks. The iPhone dependency tree of
 brush-c goes from 582 crates to 351 with no desktop-only crates left (checked with `cargo tree`, 12 Nov 2026).
 
+- cubecl (the GPU layer under Brush, the commit burn pins: 467522442c7b) picks Vulkan on every OS but macOS; iOS has
+  Metal only (the first on-phone test failed with "No possible adapter … requested VULKAN, supported METAL").
+  `cubecl-ios-metal.patch` makes iOS pick Metal; Brush uses a local copy of cubecl at `vendor/cubecl` with the patch
+  (Brush's Cargo.toml: `[patch."https://github.com/tracel-ai/cubecl"]` for every cubecl crate, `exclude = ["vendor"]`).
+
 Build (Rust 1.88+, `rustup target add aarch64-apple-ios`):
 
     git clone https://github.com/ArthurBrussee/brush && cd brush && git checkout 1388f74 && git apply ../brush-ios.patch
-    cargo build -p brush-c --release --target aarch64-apple-ios
+    git clone https://github.com/tracel-ai/cubecl vendor/cubecl && (cd vendor/cubecl && git checkout 467522442c7b && git apply ../../../cubecl-ios-metal.patch)
+    RUSTFLAGS="-C embed-bitcode=no" CARGO_PROFILE_RELEASE_LTO=false cargo build -p brush-c --release --target aarch64-apple-ios
     # -> target/aarch64-apple-ios/release/libbrush_c.a
 
 Into the iPhone app: `tools/brush-ios/make-xcframework.sh <brush checkout>` makes CineX.swiftpm/Vendor/BrushC.xcframework
