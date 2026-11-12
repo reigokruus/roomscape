@@ -54,7 +54,10 @@ struct BrushTrainer: SplatPreview.Trainer {
         }
         try Task.checkCancellation()
         guard code == BrushTrainSuccess else {
-            throw NSError(domain: "SplatPreview", code: 10, userInfo: [NSLocalizedDescriptionKey: "Brush couldn't train the preview"])
+            // brush-c writes why into brush-error.txt (RoomScape's patch): into the processing log with it
+            let why = (try? String(contentsOf: outDir.appendingPathComponent("brush-error.txt"), encoding: .utf8)) ?? "no reason given"
+            SplatPreview.log.error("Brush failed: \(why, privacy: .public)")
+            throw NSError(domain: "SplatPreview", code: 10, userInfo: [NSLocalizedDescriptionKey: "Brush couldn't train the preview: " + why])
         }
         // Brush names its export export_<step>.ply: take the newest
         let plys = (try fm.contentsOfDirectory(at: outDir, includingPropertiesForKeys: [.contentModificationDateKey]))

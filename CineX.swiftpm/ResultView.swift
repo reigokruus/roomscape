@@ -279,7 +279,7 @@ struct ResultView: View {
         .overlay(alignment: .center) {
             ProcessingOverlay(scan: current.name, done: $rebuildDone)
         }
-        .alert("Rebuilt from the recording", isPresented: Binding(get: { rebuildDone != nil }, set: { if !$0 { rebuildDone = nil } })) {
+        .alert((rebuildDone ?? "").contains("photo-real") ? "Photo-real preview" : "Rebuilt from the recording", isPresented: Binding(get: { rebuildDone != nil }, set: { if !$0 { rebuildDone = nil } })) {
             Button("OK", role: .cancel) {}
         } message: { Text(rebuildDone ?? "") }
         .sheet(item: $glbFile) { file in

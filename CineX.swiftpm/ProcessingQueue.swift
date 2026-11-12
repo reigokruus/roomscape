@@ -411,8 +411,13 @@ struct ProcessingOverlay: View {
             .opacity(queue.current?.scan == scan ? 1 : 0)
             .allowsHitTesting(false)
             .onChange(of: queue.finished) { _, f in
-                guard let f, f.scan == scan, f.job == .rebuild else { return }
+                guard let f, f.scan == scan, f.job == .rebuild || f.job == .splat else { return }
                 queue.finished = nil
+                if f.job == .splat {   // the photo-real preview: say where it is, or why there is none
+                    done = f.error.map { "Couldn't make the photo-real preview. \($0)" }
+                        ?? "The photo-real preview is ready: Share menu (top right) > Photo-real preview."
+                    return
+                }
                 done = f.error.map { "Couldn't rebuild: \($0)" }
                     ?? "Go back and open the room again to see it. The previous version is kept in the scan's before-rebuild folder."
             }
