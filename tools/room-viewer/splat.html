@@ -65,13 +65,22 @@ async function findSplats() {
   }
   return out;
 }
+let loadSeq = 0;
 async function show(file) {
-  current = file;
+  // rk 11:57: switching rooms or Fly/Orbit hung at "loading…": shutting down the previous splat threw, which stopped
+  // the new load. Now the old one is let go whatever happens, a newer click wins over an older one, the status shows
+  // progress, and a failure or a 90 s stall says so instead of hanging.
+  const seq = ++loadSeq; current = file;
   [...$('list').children].forEach(b => b.classList.toggle('on', b.dataset.f === file));
   $('keys').textContent = mode === 'fly' ? FLY_HELP : ORBIT_HELP;
   $('status').textContent = 'loading ' + file + '…';
-  if (viewer) { await viewer.dispose(); viewer = null; $('view').innerHTML = ''; }
-  viewer = new GaussianSplats3D.Viewer({
+  const old = viewer; viewer = null; flyCam = null;
+  if (old) { try { await old.dispose(); } catch (e) { console.warn('previous splat did not close cleanly', e); } }
+  // the splat library's dispose() takes our #view element out of the page with it: make a fresh one each time
+  if ($('view')) $('view').remove();
+  const view = document.createElement('div'); view.id = 'view'; document.body.prepend(view);
+  if (seq !== loadSeq) return;
+  const v = new GaussianSplats3D.Viewer({
     rootElement: $('view'),
     // ARKit / ARCore world: y up
     cameraUp: [0, 1, 0], initialCameraPosition: startFor(file).cam, initialCameraLookAt: startFor(file).look,
@@ -79,12 +88,18 @@ async function show(file) {
     dynamicScene: false, sphericalHarmonicsDegree: 1,
     useBuiltInControls: mode === 'orbit',   // fly mode: our own WASD + look (below) moves the camera
   });
+  viewer = v;
   try {
-    await viewer.addSplatScene(base + file, { splatAlphaRemovalThreshold: 5, showLoadingUI: true, progressiveLoad: false });
-    viewer.start();
-    if (mode === 'fly') startFly(viewer.camera);
+    const load = v.addSplatScene(base + file, { splatAlphaRemovalThreshold: 5, showLoadingUI: true, progressiveLoad: false,
+      onProgress: pct => { if (seq === loadSeq && pct < 100) $('status').textContent = `loading ${file}… ${Math.round(pct)}%`; } });
+    await Promise.race([load, new Promise((_, no) => setTimeout(() => no(new Error('no progress for 90 s')), 90000))]);
+    if (seq !== loadSeq) return;
+    v.start();
+    if (mode === 'fly') startFly(v.camera);
     $('status').textContent = file;
-  } catch (e) { $('status').textContent = 'could not load: ' + e; }
+  } catch (e) {
+    if (seq === loadSeq) $('status').textContent = `Could not load ${file}: ${e && e.message ? e.message : e}. Reload the page (Cmd+Shift+R) and pick it again.`;
+  }
 }
 // ---- Fly controls (rk 12 Nov: "basic WASD ctrl+space movement for moving and lowering and raising in the room") ----
 // W/S forward/back and A/D sideways, level with the floor (looking down doesn't make you sink); Space / E up,
@@ -149,7 +164,8 @@ const files = await findSplats();
 $('list').innerHTML = '';
 if (!files.length) $('list').textContent = 'No splats yet. Copy a trained .ply into recordings/rebuild/<room>-splat/ and reload.';
 for (const f of files) {
-  const b = document.createElement('button'); b.textContent = f; b.dataset.f = f; b.onclick = () => show(f); $('list').appendChild(b);
+  const b = document.createElement('button'); b.dataset.f = f; b.onclick = () => show(f); $('list').appendChild(b);
+  b.textContent = /\.ply$/i.test(f) ? f + '  (full size: too heavy for this Mac)' : f;
 }
 const want = new URLSearchParams(location.search).get('file');
 const light = files.find(f => /light\.splat$/.test(f));
