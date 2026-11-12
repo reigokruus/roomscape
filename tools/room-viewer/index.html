@@ -29,7 +29,7 @@
 <body>
 <div id="panel">
   <h1>Room rebuild · 12 Nov 09:17</h1>
-  <div class="row"><button id="b-replay" class="on">Replay (depth)</button><button id="b-wall">Replay + sharp wall</button><button id="b-dots">Dots only</button></div>
+  <div class="row"><button id="b-replay" class="on">Replay (depth)</button><button id="b-wall">Replay + sharp wall</button><button id="b-dots">Dots only</button><button id="b-ios">iPhone 10 Nov 20:09</button></div>
   <div class="row"><button id="b-orbit" class="on">Orbit</button><button id="b-walk">Walk</button><button id="b-top">Top</button></div>
   <div class="row"><button id="b-labels" class="on">Labels</button></div>
   <label>Cut ceiling <input id="cut" type="range" min="0.8" max="3" step="0.05" value="2.0"></label>
@@ -43,7 +43,7 @@ import * as THREE from 'three';
 import { OrbitControls } from './vendor/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from './vendor/jsm/loaders/GLTFLoader.js';
 
-const ROOMS = { replay: '../../recordings/rebuild/0917-replay/', wall: '../../recordings/rebuild/0917-replay/', dots: '../../recordings/rebuild/0917-dots/' };
+const ROOMS = { replay: '../../recordings/rebuild/0917-replay/', wall: '../../recordings/rebuild/0917-replay/', dots: '../../recordings/rebuild/0917-dots/', ios: '../../recordings/rebuild/ios-2009/' };
 // sharp wall textures (tools/room-rebuild/wall_texture.py): single video frames projected onto a fitted wall plane
 const WALLS = { wall: ['wall-01'] };
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -61,7 +61,7 @@ const $ = id => document.getElementById(id);
 
 function setCut() { clip.constant = floorY + parseFloat($('cut').value); }
 async function load(key) {
-  which = key; ['replay', 'wall', 'dots'].forEach(k => $('b-' + k).classList.toggle('on', k === key));
+  which = key; ['replay', 'wall', 'dots', 'ios'].forEach(k => $('b-' + k).classList.toggle('on', k === key));
   $('status').textContent = 'loading ' + key + '…';
   const gltf = await loader.loadAsync(ROOMS[key] + 'room.glb');
   if (room) { scene.remove(room); room.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
@@ -75,7 +75,9 @@ async function load(key) {
     tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
   } });
   scene.add(room);
-  for (const w of (WALLS[key] || [])) {
+  let walls = WALLS[key] || [];
+  try { const r = await fetch(ROOMS[key] + 'textures.json'); if (r.ok) walls = walls.concat(await r.json()); } catch (e) {}
+  for (const w of walls) {
     const info = await (await fetch(ROOMS[key] + w + '.json')).json();
     const tex = await new THREE.TextureLoader().loadAsync(ROOMS[key] + w + '.png');
     tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
@@ -108,7 +110,7 @@ async function load(key) {
   if (!camera.userData.placed) { const c = box.getCenter(new THREE.Vector3()); orbit.target.set(c.x, floorY + 0.5, c.z); camera.position.set(c.x + 5, floorY + 6, c.z + 6); camera.userData.placed = true; }
   try { labels = await (await fetch(ROOMS[key] + 'labels.json')).json(); } catch (e) { labels = []; }
   buildLabels();
-  $('status').textContent = `${{ replay: 'Replay: real depth + camera pictures', wall: 'Replay + one wall: its own triangles painted with a single sharp video still', dots: 'Dots only + video pictures' }[key]} · ${Math.round(tris / 1000)}k triangles`;
+  $('status').textContent = `${{ replay: 'Replay: real depth + camera pictures', wall: 'Replay + one wall: its own triangles painted with a single sharp video still', dots: 'Dots only + video pictures', ios: 'iPhone LiDAR + flat surfaces painted from single sharp frames' }[key]} · ${Math.round(tris / 1000)}k triangles`;
 }
 function buildLabels() {
   tags.forEach(t => t.el.remove()); tags = []; pins.clear(); $('list').innerHTML = '';
@@ -141,7 +143,7 @@ function setMode(m) {
   $('help').textContent = m === 'walk' ? 'Walk: W A S D or arrows to move (Shift = faster), drag to look around. Eye height 1.6 m.'
     : 'Orbit: drag to turn, right-drag to move, scroll to zoom. Click a name in the list to fly there.';
 }
-$('b-replay').onclick = () => load('replay'); $('b-wall').onclick = () => load('wall'); $('b-dots').onclick = () => load('dots');
+$('b-replay').onclick = () => load('replay'); $('b-wall').onclick = () => load('wall'); $('b-dots').onclick = () => load('dots'); $('b-ios').onclick = () => { camera.userData.placed = false; load('ios'); };
 $('b-orbit').onclick = () => setMode('orbit'); $('b-walk').onclick = () => setMode('walk'); $('b-top').onclick = () => setMode('top');
 $('b-labels').onclick = () => { showLabels = !showLabels; $('b-labels').classList.toggle('on', showLabels); pins.visible = showLabels; };
 $('cut').oninput = setCut;
