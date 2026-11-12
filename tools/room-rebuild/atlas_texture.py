@@ -1,341 +1,266 @@
 #!/usr/bin/env python3
-"""Paint the whole rebuilt room from single video stills ("the mesh is the drawing board", rk 12 Nov): flat areas
-take the plane textures of planes_texture.py, everything else (sofa, chairs, steamer, objects) a texture atlas where
-each patch of triangles is a crop of the one best still that sees it. One textured GLB out.
+"""Paint the whole rebuilt room (furniture included) from the best single video stills, into one texture atlas.
 
-  python3 atlas_texture.py <rebuild dir> <video> <all-frames.csv> <out.glb> --planes <dir with textures.json>
-                           [--extra wall-01.json,...] [--step 3] [--K 8] [--lam 0.9] [--atlas 2048] [--reuse]
+  python atlas_texture.py <room.ply> <video> <all-frames.csv> <out dir> [--mm 2.5] [--max-tex 8192] [--step 1]
+                          [--patch 0.3] [--pix 2]
 
-1. Plane triangles: a triangle near a plane texture (centroid within 6 cm of the plane, facing the same way, on a
-   painted texel) is drawn with that texture (planar UVs; the viewer's own rule). --extra textures go first.
-2. Every other triangle: every --step-th video frame is scored for it: sharpness at its pixel (and the frame's
-   sharpness against the frames around it, so motion blur loses), closeness, head-on, away from the picture border,
-   and seen unblocked (a ray from the camera hits it first). The K best frames are kept per triangle.
-3. One frame per triangle, smoothed so neighbours share a frame: a few rounds where each triangle takes, among its own
-   K frames, the one with the best score + --lam x the share of its neighbours that use it.
-4. Patches = connected triangles on the same frame. Each patch's UVs = where its vertices fall in that frame; the crop
-   (2 px margin) is copied into an atlas page (--atlas per side). No resampling, no blending: the still's own pixels.
-5. Seams: each patch gets one colour gain (per channel) so its colour on its boundary edges matches its neighbours
-   (other patches and the plane textures), least squares, outliers dropped (misaligned or occluded edges).
-6. Triangles no frame sees keep their vertex colour. Holes stay holes: nothing is added.
-The video is read front to back twice (scoring, then the chosen crops), one frame at a time. Yields to Xcode builds.
+The mesh is only the drawing board (rk): every triangle takes its colour from one video frame, never an average.
+1. UV atlas of the mesh (xatlas, the mesh in 24 blocks so all cores work), texel size --mm.
+2. Pass 1 over the video (every --step-th posed frame): cast a ray per --pix pixels against the mesh; each triangle a
+   ray hits gets a score from that frame: local sharpness of the picture there x head-on (cos) x picture detail
+   (mm per pixel vs --mm) x away from the picture edge x how close its colour there is to the mesh's fused colour
+   (--sigma; misaligned or blocked views lose). All scores are kept (frames x triangles, in RAM).
+3. Choice: the surface in patches (--patch m cubes, split by facing); each patch takes the one frame that paints it
+   best overall; triangles that frame sees poorly (< 40% of their own best) take their own best frame.
+4. Seam levelling (Waechter et al. 2014 style): per (vertex, frame) a colour offset, solved so the two sides of a seam
+   meet and offsets vary smoothly within a frame's patch.
+5. Pass 2 keeps the chosen frames; every texel is projected into its triangle's frame and sampled (+ offset).
+   Triangles no frame saw keep the mesh's vertex colours. Holes stay holes: only the given mesh is painted.
+Writes <out>/room.glb (mesh + atlas, for the viewer), atlas.jpg, atlas-info.json.
 """
-import sys, os, json, struct, time, subprocess, math, numpy as np, cv2, open3d as o3d
-from scipy.sparse import coo_matrix, csr_matrix
-from scipy.sparse.csgraph import connected_components
-from scipy.sparse.linalg import lsqr
+import sys, os, json, time, numpy as np, cv2, open3d as o3d, torch, xatlas, scipy.sparse as sp, scipy.sparse.linalg as spl
 
 args = sys.argv[1:]
 def opt(name, default):
     if name in args: i = args.index(name); v = args[i + 1]; del args[i:i + 2]; return v
     return default
-def flag(name):
-    if name in args: args.remove(name); return True
-    return False
-PLANES = opt('--planes', None); EXTRA = opt('--extra', ''); STEP = int(opt('--step', 3)); K = int(opt('--K', 8))
-LAM = float(opt('--lam', 0.9)); AS = int(opt('--atlas', 2048)); REUSE = flag('--reuse')
-rdir, video, allcsv, outglb = args
-work = os.path.splitext(outglb)[0] + '-work'; os.makedirs(work, exist_ok=True)
+MM = float(opt('--mm', 2.5)); MAXT = int(opt('--max-tex', 8192)); STEP = int(opt('--step', 1))
+PATCH = float(opt('--patch', 0.3)); PIX = int(opt('--pix', 2))
+ply, video, allcsv, odir = args
+os.makedirs(odir, exist_ok=True)
+dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 T0 = time.time()
+def log(s): print(f"[{time.time() - T0:6.0f} s] {s}", flush=True)
 
-_last = [0.0]
-def yield_to_xcode(every=60):
-    if time.time() - _last[0] < every: return
-    while subprocess.run(['pgrep', '-f', 'xcodebuild|swift-build|swift-frontend|XCBBuildService|xctest'], capture_output=True).returncode == 0:
-        time.sleep(20)
-    _last[0] = time.time()
-
-mesh = o3d.io.read_triangle_mesh(os.path.join(rdir, 'room.ply'))
-V = np.asarray(mesh.vertices); T = np.asarray(mesh.triangles).astype(np.int64); VC = np.asarray(mesh.vertex_colors)
-nT = len(T); P0, P1, P2 = V[T[:, 0]], V[T[:, 1]], V[T[:, 2]]
-cen = (P0 + P1 + P2) / 3; cr = np.cross(P1 - P0, P2 - P0); area = np.linalg.norm(cr, axis=1) / 2
-Fn = cr / np.maximum(2 * area, 1e-12)[:, None]
+mesh = o3d.io.read_triangle_mesh(ply)
+V = np.asarray(mesh.vertices).astype(np.float64); F = np.asarray(mesh.triangles).astype(np.int64)
+VC = np.asarray(mesh.vertex_colors) if mesh.has_vertex_colors() else np.full((len(V), 3), 0.5)
+nF = len(F)
+FN = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]); area = np.linalg.norm(FN, axis=1) / 2
+FN /= np.maximum(np.linalg.norm(FN, axis=1, keepdims=True), 1e-12)
+log(f"mesh: {len(V)} vertices, {nF} triangles, {area.sum():.1f} m2")
 RC = o3d.t.geometry.RaycastingScene(); RC.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
-print(f"{nT} triangles, {area.sum():.1f} m2")
 
-# triangle adjacency (shared edges)
-E = np.concatenate([T[:, [0, 1]], T[:, [1, 2]], T[:, [2, 0]]]); E.sort(1); et = np.tile(np.arange(nT), 3)
-key = E[:, 0] * len(V) + E[:, 1]; o = np.argsort(key, kind='stable'); ks = key[o]
-same = np.nonzero(ks[1:] == ks[:-1])[0]
-pairs = np.stack([et[o][same], et[o][same + 1]], 1); pe = E[o][same]          # adjacent triangle pairs + their edge
-print(f"{len(pairs)} shared edges")
+# ---- 1. atlas
+# the mesh in ~24 spatial blocks: xatlas works on separate meshes in parallel (one big mesh runs on ~2 cores)
+NCH = 24
+cen = V[F].mean(1); nx = 6; nz = max(1, NCH // nx)
+qx = np.searchsorted(np.quantile(cen[:, 0], np.linspace(0, 1, nx + 1)[1:-1]), cen[:, 0])
+blk = np.zeros(nF, np.int64)
+for i in range(nx):
+    m = qx == i
+    if m.any(): blk[m] = i * nz + np.searchsorted(np.quantile(cen[m, 2], np.linspace(0, 1, nz + 1)[1:-1]), cen[m, 2])
+chunks = [np.nonzero(blk == c)[0] for c in range(nx * nz) if (blk == c).any()]
+while True:
+    at = xatlas.Atlas(); cmaps = []
+    for fi in chunks:
+        vu, inv = np.unique(F[fi].reshape(-1), return_inverse=True); cmaps.append(vu)
+        at.add_mesh(V[vu].astype(np.float32), inv.reshape(-1, 3).astype(np.uint32))
+    co = xatlas.ChartOptions(); po = xatlas.PackOptions()
+    po.texels_per_unit = 1000.0 / MM; po.padding = 2; po.bilinear = True; po.resolution = 0
+    at.generate(co, po)
+    if max(at.width, at.height) <= MAXT and at.atlas_count == 1: break
+    MM *= 1.25; log(f"atlas {at.width}x{at.height} x{at.atlas_count} too big, texel -> {MM:.2f} mm")
+AW, AH = at.width, at.height
+vm_l, af_l, uv_l, F2 = [], [], [], np.zeros_like(F); base = 0
+for ci, (fi, vu) in enumerate(zip(chunks, cmaps)):
+    vm, af, uv = at[ci]; vm_l.append(vu[vm]); af_l.append(af.astype(np.int64) + base); uv_l.append(uv); base += len(vm)
+vmap = np.concatenate(vm_l); UV = np.concatenate(uv_l)
+AF = np.zeros((nF, 3), np.int64)
+for fi, af in zip(chunks, af_l): AF[fi] = af
+log(f"atlas {AW}x{AH} at {MM:.2f} mm/texel, {len(vmap)} atlas vertices")
 
-# 1. plane triangles
-plane_files = [f for f in EXTRA.split(',') if f]
-if PLANES: plane_files += [os.path.join(PLANES, n + '.json') for n in json.load(open(os.path.join(PLANES, 'textures.json')))]
-owner = np.full(nT, -1)          # >= 0: plane index
-planes = []
-for f in plane_files:
-    info = json.load(open(f)); img = cv2.imread(f[:-5] + '.png', cv2.IMREAD_UNCHANGED)
-    o_ = np.array(info['corners'][0]); ex = np.array(info['corners'][1]) - o_; ey = np.array(info['corners'][3]) - o_
-    lx, ly = np.linalg.norm(ex), np.linalg.norm(ey); ex /= lx; ey /= ly; nn = np.array(info['normal'])
-    r = cen - o_; dn = r @ nn; u = r @ ex / lx; v = r @ ey / ly; H, W = img.shape[:2]
-    m = (owner < 0) & (np.abs(dn) < 0.06) & (u > 0) & (u < 1) & (v > 0) & (v < 1) & (np.abs(Fn @ nn) > 0.6)
-    k = np.nonzero(m)[0]
-    a = img[np.clip(((1 - v[k]) * H).astype(int), 0, H - 1), np.clip((u[k] * W).astype(int), 0, W - 1), 3] > 128
-    owner[k[a]] = len(planes)
-    planes.append(dict(file=f, o=o_, ex=ex, ey=ey, lx=lx, ly=ly, img=img, kind=info.get('kind', 'wall')))
-print(f"plane textures: {len(planes)}; their triangles {(owner >= 0).sum()} ({area[owner >= 0].sum():.1f} m2)")
+# ---- frames
+rows = [l.strip().split(',') for l in open(allcsv)]
+byvi = {int(r[0]): r for r in rows if r[3] == '2'}
+def frame_pose(r):
+    return np.array([float(x) for x in r[4:20]]).reshape(4, 4).T, [float(x) for x in r[20:26]]
+r0 = rows[0]; _, ii0 = frame_pose(r0); W, H = int(ii0[4]), int(ii0[5])
+gu, gv = np.meshgrid(np.arange(PIX / 2, W, PIX), np.arange(PIX / 2, H, PIX))
+gu = gu.reshape(-1).astype(np.float32); gv = gv.reshape(-1).astype(np.float32)
 
-R = np.nonzero(owner < 0)[0]; nR = len(R); ridx = np.full(nT, -1); ridx[R] = np.arange(nR)
-rows = {}
-for l in open(allcsv):
-    r = l.strip().split(',')
-    if r[3] == '2': rows[int(r[0])] = r
-def pose(r):
-    M = np.array([float(x) for x in r[4:20]]).reshape(4, 4).T; return M, [float(x) for x in r[20:26]]
-def project(M, ii, P):
-    c = (P - M[:3, 3]) @ M[:3, :3]; z = -c[:, 2]; zz = np.maximum(z, 1e-3)
-    return ii[0] * c[:, 0] / zz + ii[2], ii[3] - ii[1] * c[:, 1] / zz, z
-
-# 2. scoring pass
-sfile = os.path.join(work, 'scores.npz')
-if REUSE and os.path.exists(sfile):
-    d = np.load(sfile); bs, bf = d['bs'], d['bf']; print("scores reused")
-else:
-    bs = np.zeros((nR, K), np.float32); bf = np.full((nR, K), -1, np.int32)
-    Cr = cen[R]; Fr = Fn[R]; Gs = []
-    cap = cv2.VideoCapture(video); vi = -1; nsc = 0
-    while cap.grab():
-        vi += 1; yield_to_xcode()
-        r = rows.get(vi)
-        if r is None or vi % STEP: continue
-        M, ii = pose(r); W, H = ii[4], ii[5]; cam = M[:3, 3]
-        u, v, z = project(M, ii, Cr)
-        k = np.nonzero((u >= 3) & (u < W - 4) & (v >= 3) & (v < H - 4) & (z > 0.25) & (z < 4.5))[0]
-        _, img = cap.retrieve()
-        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        lap = cv2.GaussianBlur(np.abs(cv2.Laplacian(g, cv2.CV_32F)), (0, 0), 2.0)
-        G = float(lap.mean()); Gs.append(G); b = min(1.3, G / max(np.median(Gs[-45:]), 1e-6))
-        if not len(k): continue
-        d = Cr[k] - cam; L = np.linalg.norm(d, axis=1); cosv = np.abs((d * Fr[k]).sum(1)) / L
-        q = cosv > 0.25; k, d, L, cosv = k[q], d[q], L[q], cosv[q]
-        if not len(k): continue
-        ray = np.concatenate([np.tile(cam, (len(k), 1)), d / L[:, None]], 1).astype(np.float32)
-        hit = RC.cast_rays(o3d.core.Tensor(ray))
-        th = hit['t_hit'].numpy(); pid = hit['primitive_ids'].numpy().astype(np.int64)
-        vis = (pid == R[k]) | (th > L - 0.02)
-        k, cosv = k[vis], cosv[vis]; uu, vv, zz = u[k], v[k], z[k]
-        local = lap[vv.astype(int), uu.astype(int)]
-        edge = np.minimum.reduce([uu, W - uu, vv, H - vv])
-        sc = (b ** 3) * np.sqrt(local + 2) * np.minimum(1.0, 1.0 / zz) ** 1.5 * cosv * np.where(edge < 30, 0.6, 1.0)
-        sc = sc.astype(np.float32)
-        j = bs[k].argmin(1); mn = bs[k, j]; up = sc > mn
-        bs[k[up], j[up]] = sc[up]; bf[k[up], j[up]] = vi; nsc += 1
-        if nsc % 500 == 0: print(f"  scored {nsc} frames (video frame {vi}), {time.time() - T0:.0f} s", flush=True)
-    cap.release()
-    np.savez(sfile, bs=bs, bf=bf); print(f"scoring: {nsc} frames, {time.time() - T0:.0f} s")
-
-# 3. one frame per triangle, smoothed
-seen = bf.max(1) >= 0
-srel = bs / np.maximum(bs.max(1, keepdims=True), 1e-9); srel[bf < 0] = -1
-srel[srel < 0.3] = -1                                     # never take a frame much worse than the triangle's best
-lab = bf[np.arange(nR), srel.argmax(1)]
-rp = pairs[(ridx[pairs[:, 0]] >= 0) & (ridx[pairs[:, 1]] >= 0)]
-a_, b_ = ridx[rp[:, 0]], ridx[rp[:, 1]]
-NB = np.full((nR, 6), -1)
-# neighbour table (up to 6 per triangle; a skin mesh has <= 3 mostly)
-order = np.argsort(np.concatenate([a_, b_]), kind='stable'); src = np.concatenate([a_, b_])[order]; dst = np.concatenate([b_, a_])[order]
-first = np.searchsorted(src, np.arange(nR)); pos = np.arange(len(src)) - first[src]; ok = pos < 6
-NB[src[ok], pos[ok]] = dst[ok]
-rng = np.random.default_rng(0)
-for it in range(10):
-    nl = np.where(NB >= 0, lab[np.maximum(NB, 0)], -2)                         # neighbour labels
-    nn_ = np.maximum((NB >= 0).sum(1), 1)
-    vote = (bf[:, :, None] == nl[:, None, :]).sum(2) / nn_[:, None]
-    E_ = np.where(srel > 0, srel + LAM * vote, -9)
-    new = bf[np.arange(nR), E_.argmax(1)]
-    upd = (rng.random(nR) < 0.5) & seen
-    ch = (new != lab) & upd; lab[ch] = new[ch]
-    print(f"  smoothing round {it + 1}: {ch.sum()} triangles changed frame")
-lab[~seen] = -1
-print(f"frames chosen: {len(np.unique(lab[seen]))} distinct for {seen.sum()} seen triangles; {(~seen).sum()} unseen")
-
-# 4. patches
-same_lab = (lab[a_] == lab[b_]) & (lab[a_] >= 0)
-G_ = coo_matrix((np.ones(same_lab.sum()), (a_[same_lab], b_[same_lab])), shape=(nR, nR))
-ncomp, comp = connected_components(G_, directed=False)
-comp[~seen] = -1
-pids = np.unique(comp[seen]); pmap = np.full(ncomp, -1); pmap[pids] = np.arange(len(pids)); patch = np.where(seen, pmap[np.maximum(comp, 0)], -1)
-nP = len(pids); plab = np.zeros(nP, int); plab[patch[seen]] = lab[seen]
-print(f"{nP} patches (median {np.median(np.bincount(patch[seen])):.0f} triangles)")
-
-# per-patch UVs (pixel coords in its frame) and crop rectangles
-TR_ = T[R]; uvpx = np.zeros((nR, 3, 2), np.float32)
-byframe = {}
-for p in range(nP): byframe.setdefault(int(plab[p]), []).append(p)
-ptris = [[] for _ in range(nP)]
-for i in np.nonzero(seen)[0]: ptris[patch[i]].append(i)
-ptris = [np.array(x) for x in ptris]
-PAD = 64; MARG = 2
-rect = np.zeros((nP, 4), int)                 # x0, y0, w, h in (padded) frame pixels
-for f, ps in byframe.items():
-    M, ii = pose(rows[f])
-    for p in ps:
-        tt = ptris[p]; Pv = V[TR_[tt].reshape(-1)]
-        u, v, z = project(M, ii, Pv); u = np.clip(u, -PAD + 1, ii[4] + PAD - 2); v = np.clip(v, -PAD + 1, ii[5] + PAD - 2)
-        uvpx[tt] = np.stack([u, v], 1).reshape(-1, 3, 2)
-        x0, y0 = int(np.floor(u.min())) - MARG, int(np.floor(v.min())) - MARG
-        x1, y1 = int(np.ceil(u.max())) + MARG + 1, int(np.ceil(v.max())) + MARG + 1
-        rect[p] = (x0, y0, x1 - x0, y1 - y0)
-# shelf packing onto pages
-order = np.argsort(-rect[:, 3], kind='stable'); place = np.zeros((nP, 3), int)   # page, x, y
-page, x, y, sh = 0, 0, 0, 0
-for p in order:
-    w, h = rect[p, 2], rect[p, 3]
-    if x + w > AS: x = 0; y += sh; sh = 0
-    if y + h > AS: page += 1; x, y, sh = 0, 0, 0
-    place[p] = (page, x, y); x += w; sh = max(sh, h)
-npages = page + 1
-print(f"atlas: {npages} page(s) of {AS}x{AS}, crops cover {(rect[:, 2] * rect[:, 3]).sum() / (npages * AS * AS) * 100:.0f}%")
-
-# boundary edges for seam levelling: atlas patch | atlas patch, atlas patch | plane
-bnd = []      # (edge midpoint, side A patch, side B patch or -1-planeidx)
-for (t1, t2), e in zip(pairs, pe):
-    r1, r2 = ridx[t1], ridx[t2]
-    pa = patch[r1] if r1 >= 0 else None; pb = patch[r2] if r2 >= 0 else None
-    if pa is not None and pa >= 0 and pb is not None and pb >= 0 and pa != pb: bnd.append((e, pa, pb))
-    elif pa is not None and pa >= 0 and r2 < 0: bnd.append((e, pa, -1 - owner[t2]))
-    elif pb is not None and pb >= 0 and r1 < 0: bnd.append((e, pb, -1 - owner[t1]))
-bm = np.array([(V[e[0]] + V[e[1]]) / 2 for e, _, _ in bnd]) if bnd else np.zeros((0, 3))
-bA = np.array([a for _, a, _ in bnd], int); bB = np.array([b for _, _, b in bnd], int)
-colA = np.full((len(bnd), 3), np.nan); colB = np.full((len(bnd), 3), np.nan)
-# plane side: the plane texture's colour there
-for pi, pl in enumerate(planes):
-    k = np.nonzero(bB == -1 - pi)[0]
-    if not len(k): continue
-    r = bm[k] - pl['o']; u = r @ pl['ex'] / pl['lx']; v = r @ pl['ey'] / pl['ly']; H, W = pl['img'].shape[:2]
-    blur = cv2.GaussianBlur(pl['img'], (0, 0), 3)
-    px, py = np.clip((u * W).astype(int), 0, W - 1), np.clip(((1 - v) * H).astype(int), 0, H - 1)
-    okp = blur[py, px, 3] > 200; colB[k[okp]] = blur[py[okp], px[okp], :3]
-
-# 5. pass 2: the crops
-pages = [np.zeros((AS, AS, 3), np.uint8) for _ in range(npages)]
-edges_of_frame = {}
-for i, (a, b) in enumerate(zip(bA, bB)):
-    edges_of_frame.setdefault(int(plab[a]), []).append((i, 0))
-    if b >= 0: edges_of_frame.setdefault(int(plab[b]), []).append((i, 1))
-cap = cv2.VideoCapture(video); vi = -1; done = 0
+# ---- 2. pass 1: score every frame for every triangle (kept whole in RAM: frames x triangles, float16)
+FN_t = torch.tensor(FN, dtype=torch.float32, device=dev)
+# reference colour per triangle: the mesh's fused vertex colours (an average over many depth frames). A frame whose
+# picture there is far off that colour is misaligned or blocked: sharp texture from the wrong object must not win.
+REF = torch.tensor(VC[F].mean(1) * 255, dtype=torch.float32, device=dev); SIG = float(opt('--sigma', 35))
+fids = [v for v in sorted(byvi) if v % STEP == 0]; fcol = {v: j for j, v in enumerate(fids)}
+S = np.zeros((len(fids), nF), np.float16)
+log(f"score table: {len(fids)} frames x {nF} triangles = {S.nbytes / 1e9:.1f} GB in RAM")
+cap = cv2.VideoCapture(video); vi = -1; nscored = 0
 while cap.grab():
-    vi += 1; yield_to_xcode()
-    if vi not in byframe: continue
-    _, img = cap.retrieve(); pad = cv2.copyMakeBorder(img, PAD, PAD, PAD, PAD, cv2.BORDER_REPLICATE)
-    for p in byframe[vi]:
-        x0, y0, w, h = rect[p]; pg, ax, ay = place[p]
-        pages[pg][ay:ay + h, ax:ax + w] = pad[y0 + PAD:y0 + PAD + h, x0 + PAD:x0 + PAD + w]
-    if vi in edges_of_frame:
-        M, ii = pose(rows[vi]); blur = cv2.GaussianBlur(img, (0, 0), 2)
-        ie = np.array(edges_of_frame[vi]); u, v, z = project(M, ii, bm[ie[:, 0]])
-        okk = (u >= 0) & (u < ii[4] - 1) & (v >= 0) & (v < ii[5] - 1)
-        c = blur[np.clip(v.astype(int), 0, int(ii[5]) - 1), np.clip(u.astype(int), 0, int(ii[4]) - 1)].astype(float)
-        for (ei, side), cc, o_k in zip(ie, c, okk):
-            if o_k: (colA if side == 0 else colB)[ei] = cc
-    done += 1
-cap.release()
-print(f"crops copied from {done} frames, {time.time() - T0:.0f} s")
+    vi += 1
+    if vi not in fcol: continue
+    r = byvi[vi]; _, img = cap.retrieve()
+    M, ii = frame_pose(r); fx, fy, cx, cy = ii[:4]
+    d = np.stack([(gu - cx) / fx, -(gv - cy) / fy, -np.ones_like(gu)], 1)
+    dn = d / np.linalg.norm(d, axis=1, keepdims=True); dw = dn @ M[:3, :3].T
+    ray = np.concatenate([np.tile(M[:3, 3], (len(dw), 1)), dw], 1).astype(np.float32)
+    hit = RC.cast_rays(o3d.core.Tensor(ray))
+    th = hit['t_hit'].numpy(); pid = hit['primitive_ids'].numpy().astype(np.int64)
+    ok = np.isfinite(th) & (th < 5)
+    if ok.sum() < 50: continue
+    z = th * -dn[:, 2]
+    ok &= z > 0.25
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    lap = cv2.GaussianBlur(np.abs(cv2.Laplacian(g, cv2.CV_32F)), (0, 0), 3)
+    sh = lap[gv.astype(int), gu.astype(int)]
+    k = np.nonzero(ok)[0]
+    pk_ = torch.tensor(pid[k], device=dev)
+    cosv = (torch.tensor(dw[k], dtype=torch.float32, device=dev) * FN_t[pk_]).sum(1).abs()
+    res = torch.clamp(torch.tensor(MM / 1000 / (z[k] / fx), dtype=torch.float32, device=dev), max=1.0)
+    # away from the picture's edge (lens distortion, motion blur at the edges): soft weight
+    ex = torch.tensor(np.minimum(np.minimum(gu[k], W - gu[k]) / (0.1 * W), np.minimum(gv[k], H - gv[k]) / (0.1 * H)).clip(0, 1), dtype=torch.float32, device=dev)
+    q = torch.tensor(sh[k], dtype=torch.float32, device=dev) * cosv ** 1.5 * res * (0.5 + 0.5 * ex)
+    qs = torch.zeros(nF, device=dev).index_add_(0, pk_, q); qc = torch.zeros(nF, device=dev).index_add_(0, pk_, torch.ones_like(q))
+    rgb = cv2.cvtColor(cv2.blur(img, (5, 5)), cv2.COLOR_BGR2RGB)[gv.astype(int)[k], gu.astype(int)[k]]
+    csum = torch.zeros((nF, 3), device=dev).index_add_(0, pk_, torch.tensor(rgb, dtype=torch.float32, device=dev))
+    cm = csum / qc.clamp(min=1)[:, None]
+    cdiff = (cm - REF).norm(dim=1) / 1.732
+    cons = torch.exp(-(cdiff / SIG) ** 2)
+    S[fcol[vi]] = (qs / qc.clamp(min=1) * cons).half().cpu().numpy()
+    nscored += 1
+    if nscored % 1000 == 0: log(f"pass 1: {nscored} frames (video frame {vi})")
+fmax = S.max(0).astype(np.float32); seen = fmax > 0
+log(f"pass 1 done: {nscored} frames, {int(seen.sum())} of {nF} triangles seen ({float(area[seen].sum() / area.sum()) * 100:.0f}% of area)")
 
-# 6. seam levelling: per patch log gain per channel
-gain = np.ones((nP, 3))
-good = ~np.isnan(colA).any(1) & ~np.isnan(colB).any(1)
-if good.sum() > 10:
-    la = np.log(colA[good] + 8); lb = np.log(colB[good] + 8); A_ = bA[good]; B_ = bB[good]
-    for ch in range(3):
-        keep = np.ones(len(A_), bool)
-        for rnd in range(3):
-            ia = A_[keep]; ib = B_[keep]; d = lb[keep, ch] - la[keep, ch]; ne = len(ia); isp = ib >= 0
-            rr = np.concatenate([np.arange(ne), np.arange(ne)[isp], ne + np.arange(nP)])
-            cc = np.concatenate([ia, ib[isp], np.arange(nP)])
-            vv = np.concatenate([np.ones(ne), -np.ones(isp.sum()), np.full(nP, 0.5)])
-            Am = csr_matrix((vv, (rr, cc)), shape=(ne + nP, nP)); bvec = np.concatenate([d, np.zeros(nP)])
-            g = lsqr(Am, bvec, atol=1e-6, btol=1e-6, iter_lim=2000)[0]
-            res = d - (g[ia] - np.where(isp, g[np.maximum(ib, 0)], 0))
-            keep2 = np.ones(len(A_), bool); keep2[np.nonzero(keep)[0]] = np.abs(res) < 0.25
-            keep = keep2
-        gain[:, ch] = np.exp(np.clip(g, np.log(0.65), np.log(1.5)))
-    for p in range(nP):
-        x0, y0, w, h = rect[p]; pg, ax, ay = place[p]
-        reg = pages[pg][ay:ay + h, ax:ax + w].astype(np.float32)
-        # gain on the colour (log(c + 8) space -> multiply (c + 8))
-        pages[pg][ay:ay + h, ax:ax + w] = np.clip((reg + 8) * gain[p] - 8, 0, 255).astype(np.uint8)    # all colours here are BGR
-    print(f"seam levelling: {good.sum()} boundary samples, gains median {np.round(np.median(gain, 0), 3)}, "
-          f"5-95% {np.round(np.percentile(gain, 5), 2).tolist()}..{np.round(np.percentile(gain, 95), 2).tolist()}")
+# ---- 3. choice: one frame per surface patch (~--patch m, same facing), the frame that paints the patch best overall;
+# triangles that frame doesn't see well take their own best. Few frames, big pieces, few seams.
+cen = V[F].mean(1); ax = np.argmax(np.abs(FN), 1) * 2 + (FN[np.arange(nF), np.argmax(np.abs(FN), 1)] > 0)
+vox = np.floor(cen / PATCH).astype(np.int64); vox -= vox.min(0)
+pkey = ((vox[:, 0] * 4096 + vox[:, 1]) * 4096 + vox[:, 2]) * 6 + ax
+_, patch = np.unique(pkey, return_inverse=True); nPa = patch.max() + 1
+patch_t = torch.tensor(patch, device=dev); w_t = torch.tensor(area / fmax.clip(1e-6), dtype=torch.float32, device=dev)  # each triangle's scores relative to its best
+# greedy, in rounds: each patch's best frame takes the triangles it sees well; the triangles left over choose again
+# together (the next best frame for what is left of the patch), so leftovers come in pieces, not triangle by triangle
+Lc = np.full(nF, -1, np.int64); todo = seen.copy(); cols = np.arange(nF)
+for rnd in range(4):
+    if not todo.any(): break
+    wr = w_t * torch.tensor(todo, dtype=torch.float32, device=dev)
+    best_val = torch.full((nPa,), -1.0, device=dev); best_fr = torch.zeros(nPa, dtype=torch.int64, device=dev)
+    for a in range(0, len(fids), 128):
+        T = torch.tensor(S[a:a + 128], device=dev).float() * wr          # (b, nF)
+        PSm = torch.zeros((T.shape[0], nPa), device=dev).index_add_(1, patch_t, T)
+        v, j = PSm.max(0); upd = v > best_val; best_val[upd] = v[upd]; best_fr[upd] = j[upd] + a
+    pf = best_fr[patch_t].cpu().numpy()
+    own = S[pf, cols].astype(np.float32)
+    take = todo & (own >= (0.25 if rnd < 3 else 0.0) * fmax) & (own > 0)
+    Lc[take] = pf[take]; todo &= ~take
+    log(f"choice round {rnd + 1}: {int(take.sum())} triangles placed, {int(todo.sum())} left")
+fallback = todo
+if fallback.any(): Lc[fallback] = np.argmax(S[:, fallback], 0)
+L = np.where(Lc >= 0, np.array(fids)[Lc.clip(0)], -1).astype(np.int64)
+labels = np.unique(L[L >= 0])
+log(f"choice: {nPa} patches, {len(labels)} frames used; {int(fallback.sum())} triangles took their own best frame")
+del S
 
-# 7. GLB
-def jpg(img_bgr): return cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tobytes()
-def fill_holes(rgba):
-    """plane textures: transparent texels take the nearest painted colour (triangles at the edge sample there)"""
-    rgb = rgba[..., :3].copy(); a = rgba[..., 3] > 128
-    if a.all() or not a.any(): return rgb
-    small = cv2.resize(rgb, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA); sa = cv2.resize(a.astype(np.uint8), None, fx=0.25, fy=0.25, interpolation=cv2.INTER_NEAREST) > 0
-    filled = small.copy(); m = sa.copy()
-    for _ in range(64):
-        if m.all(): break
-        num = cv2.blur((filled * m[..., None]).astype(np.float32), (3, 3)); den = cv2.blur(m.astype(np.float32), (3, 3))
-        nm = (den > 0) & ~m; filled[nm] = (num[nm] / den[nm][:, None]).astype(np.uint8); m |= nm
-    big = cv2.resize(filled, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
-    rgb[~a] = big[~a]; return rgb
+# ---- pass 2: keep chosen frames
+keep = {}; need = set(labels.tolist()); cap = cv2.VideoCapture(video); vi = -1
+while cap.grab():
+    vi += 1
+    if vi in need: keep[vi] = cv2.imencode('.jpg', cap.retrieve()[1], [cv2.IMWRITE_JPEG_QUALITY, 96])[1]   # in memory, compressed (a 1920x1440 video has big frames)
+    if vi > labels.max(): break
+log(f"pass 2: {len(keep)} frames kept")
+lidx = {v: i for i, v in enumerate(labels)}
+_cache = [None, None]
+def frame_img(li):
+    if _cache[0] != li: _cache[0], _cache[1] = li, torch.tensor(cv2.cvtColor(cv2.imdecode(keep[int(labels[li])], cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB))
+    return _cache[1]
+POSE = np.stack([frame_pose(byvi[v])[0] for v in labels]); INT = np.stack([frame_pose(byvi[v])[1][:4] for v in labels])
 
-bin_ = bytearray(); views = []; accessors = []; meshes_prims = []; images = []; textures = []; materials = []
-def add_view(b, target=None):
-    while len(bin_) % 4: bin_.append(0)
-    off = len(bin_); bin_.extend(b); v = dict(buffer=0, byteOffset=off, byteLength=len(b))
-    if target: v['target'] = target
-    views.append(v); return len(views) - 1
-def add_acc(arr, ctype, typ, target, minmax=False, normalized=False):
-    vw = add_view(arr.tobytes(), target); a = dict(bufferView=vw, componentType=ctype, count=len(arr), type=typ)
-    if normalized: a['normalized'] = True
-    if minmax: a['min'] = arr.min(0).tolist(); a['max'] = arr.max(0).tolist()
-    accessors.append(a); return len(accessors) - 1
-def add_tex(img_bgr):
-    images.append(dict(bufferView=add_view(jpg(img_bgr)), mimeType='image/jpeg'))
-    textures.append(dict(source=len(images) - 1, sampler=0))
-    materials.append(dict(pbrMetallicRoughness=dict(baseColorTexture=dict(index=len(textures) - 1), metallicFactor=0, roughnessFactor=1),
-                          doubleSided=True, extensions=dict(KHR_materials_unlit={})))
-    return len(materials) - 1
-def add_prim(tris, uv, mat, color=None):
-    pos = V[T[tris].reshape(-1)].astype(np.float32)
-    attrs = dict(POSITION=add_acc(pos, 5126, 'VEC3', 34962, minmax=True))
-    if uv is not None: attrs['TEXCOORD_0'] = add_acc(uv.reshape(-1, 2).astype(np.float32), 5126, 'VEC2', 34962)
-    if color is not None: attrs['COLOR_0'] = add_acc(color.astype(np.float32), 5126, 'VEC3', 34962)
-    idx = np.arange(len(pos), dtype=np.uint32)
-    pr = dict(attributes=attrs, indices=add_acc(idx, 5125, 'SCALAR', 34963))
-    if mat is not None: pr['material'] = mat
-    meshes_prims.append(pr)
+def sample(li, P, blur=False):
+    """colour (0..255 float) of 3D points P in kept frame index li (one frame), bilinear; NaN outside"""
+    M = POSE[li]; fx, fy, cx, cy = INT[li]
+    c = (P - M[:3, 3]) @ M[:3, :3]; z = np.maximum(-c[:, 2], 1e-3)
+    u = fx * c[:, 0] / z + cx; v = cy - fy * c[:, 1] / z
+    img = frame_img(li).to(dev).permute(2, 0, 1)[None].float()
+    if blur: img = torch.nn.functional.avg_pool2d(img, 5, 1, 2, count_include_pad=False)
+    gx = torch.tensor(u / (W - 1) * 2 - 1, dtype=torch.float32, device=dev); gy = torch.tensor(v / (H - 1) * 2 - 1, dtype=torch.float32, device=dev)
+    out = torch.nn.functional.grid_sample(img, torch.stack([gx, gy], 1)[None, None], align_corners=True, padding_mode='border')[0, :, 0].T
+    return out.cpu().numpy()
 
-areas = dict(plane=0.0, atlas=0.0, vertex=0.0)
-for pi, pl in enumerate(planes):
-    tris = np.nonzero(owner == pi)[0]
-    if not len(tris): continue
-    r = V[T[tris].reshape(-1)] - pl['o']; u = r @ pl['ex'] / pl['lx']; v = r @ pl['ey'] / pl['ly']
-    img = fill_holes(pl['img'])
-    if max(img.shape[:2]) > 2048: s = 2048 / max(img.shape[:2]); img = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-    add_prim(tris, np.stack([u, 1 - v], 1), add_tex(img)); areas['plane'] += area[tris].sum()
-for pg in range(npages):
-    ps = np.nonzero(place[:, 0] == pg)[0]
-    if not len(ps): continue
-    tl = np.concatenate([ptris[p] for p in ps]); pp = patch[tl]
-    off = np.stack([place[pp, 1] - rect[pp, 0], place[pp, 2] - rect[pp, 1]], 1)[:, None, :]
-    uv = (uvpx[tl] + off + 0.5) / AS
-    add_prim(R[tl], uv, add_tex(pages[pg])); areas['atlas'] += area[R[tl]].sum()
-un = R[~seen]
-if len(un):
-    add_prim(un, None, None, color=VC[T[un].reshape(-1)]); areas['vertex'] += area[un].sum()
-gl = dict(asset=dict(version='2.0', generator='shootlocal atlas_texture.py'), scene=0, scenes=[dict(nodes=[0])],
-          nodes=[dict(mesh=0)], meshes=[dict(primitives=meshes_prims)], accessors=accessors, bufferViews=views,
-          buffers=[dict(byteLength=len(bin_))], images=images, textures=textures, materials=materials,
-          samplers=[dict(magFilter=9729, minFilter=9729, wrapS=33071, wrapT=33071)], extensionsUsed=['KHR_materials_unlit'])
-js = json.dumps(gl).encode()
-while len(js) % 4: js += b' '
-while len(bin_) % 4: bin_.append(0)
-with open(outglb, 'wb') as f:
-    f.write(struct.pack('<III', 0x46546C67, 2, 12 + 8 + len(js) + 8 + len(bin_)))
-    f.write(struct.pack('<II', len(js), 0x4E4F534A)); f.write(js)
-    f.write(struct.pack('<II', len(bin_), 0x004E4942)); f.write(bin_)
-tot = area.sum()
-summary = dict(triangles=int(nT), area_m2=round(float(tot), 2),
-               plane_share=round(areas['plane'] / tot, 3), atlas_share=round(areas['atlas'] / tot, 3), vertex_share=round(areas['vertex'] / tot, 3),
-               plane_triangles=int((owner >= 0).sum()), atlas_triangles=int(seen.sum()), vertex_triangles=int((~seen).sum()),
-               patches=int(nP), frames_used=int(len(byframe)), atlas_pages=int(npages), seconds=round(time.time() - T0))
-json.dump(summary, open(os.path.join(work, 'summary.json'), 'w'), indent=1)
-np.savez(os.path.join(work, 'labels.npz'), R=R, lab=lab, patch=patch, owner=owner)
-print(f"{outglb}: {os.path.getsize(outglb) / 1e6:.1f} MB; " + json.dumps(summary))
+# ---- 4. seam levelling: offsets g per (vertex, label)
+fl = L[:, None].repeat(3, 1)                        # label per face corner
+cv_ = F.reshape(-1); cl = fl.reshape(-1); good = cl >= 0
+pk = np.unique(cv_[good] * (len(labels) + 1) + np.vectorize(lidx.get)(cl[good]))
+pv, pl = pk // (len(labels) + 1), pk % (len(labels) + 1)
+nP = len(pk); log(f"seam levelling: {nP} (vertex, frame) pairs")
+col = np.zeros((nP, 3))
+order = np.argsort(pl); bounds = np.searchsorted(pl[order], np.arange(len(labels) + 1))
+for li in range(len(labels)):
+    sel = order[bounds[li]:bounds[li + 1]]
+    if len(sel): col[sel] = sample(li, V[pv[sel]], blur=True)
+# seam constraints: consecutive pairs of the same vertex
+sv = pv[1:] == pv[:-1]; ia, ib = np.nonzero(sv)[0], np.nonzero(sv)[0] + 1
+dc = np.abs(col[ia] - col[ib]).max(1); keepc = dc < 30            # bigger jumps: misaligned or something in front, not exposure
+log(f"seam points: {len(ia)}, {int((~keepc).sum())} dropped as not the same surface colour")
+ia, ib = ia[keepc], ib[keepc]
+# smoothness: edges of faces with the same label
+def pidx(v, l): return np.searchsorted(pk, v * (len(labels) + 1) + l)
+fe = np.nonzero(L >= 0)[0]; flab = np.vectorize(lidx.get)(L[fe]) if len(fe) else np.zeros(0, np.int64)
+ea, eb = [], []
+for (x, y) in ((0, 1), (1, 2), (2, 0)):
+    ea.append(pidx(F[fe, x], flab)); eb.append(pidx(F[fe, y], flab))
+ea = np.concatenate(ea); eb = np.concatenate(eb)
+WS = 1.0; REG = 0.1
+nS, nE = len(ia), len(ea)
+rr = np.concatenate([np.arange(nS), np.arange(nS), nS + np.arange(nE), nS + np.arange(nE), nS + nE + np.arange(nP)])
+cc = np.concatenate([ia, ib, ea, eb, np.arange(nP)])
+vv = np.concatenate([np.ones(nS), -np.ones(nS), np.full(nE, WS), np.full(nE, -WS), np.full(nP, REG)])
+A = sp.csr_matrix((vv, (rr, cc)), shape=(nS + nE + nP, nP))
+G = np.zeros((nP, 3))
+for ch in range(3):
+    b = np.concatenate([-(col[ia, ch] - col[ib, ch]), np.zeros(nE + nP)])
+    G[:, ch] = spl.lsqr(A, b, atol=1e-6, btol=1e-6, iter_lim=3000)[0]
+G = np.clip(G, -15, 15)
+log(f"seam levelling: {nS} seam points, offsets median {np.median(np.abs(G)):.1f}, 95% {np.percentile(np.abs(G), 95):.1f} (of 255)")
+
+# ---- 5. bake
+Fid = np.zeros((AH, AW, 3), np.uint8)
+UVp = np.stack([UV[:, 0] * AW - 0.5, (1 - UV[:, 1]) * AH - 0.5], 1)
+for f in range(nF):
+    c = f + 1; cv2.fillConvexPoly(Fid, np.round(UVp[AF[f]] * 16).astype(np.int32), (c & 255, (c >> 8) & 255, (c >> 16) & 255), cv2.LINE_8, 4)
+fid = Fid[..., 0].astype(np.int64) | (Fid[..., 1].astype(np.int64) << 8) | (Fid[..., 2].astype(np.int64) << 16); del Fid
+ty, tx = np.nonzero(fid); tf = fid[ty, tx] - 1; del fid
+log(f"bake: {len(tf)} texels ({len(tf) / (AW * AH) * 100:.0f}% of the atlas)")
+A2 = UVp[AF[tf]]                                     # (n, 3, 2)
+p = np.stack([tx, ty], 1).astype(np.float64)
+v0, v1 = A2[:, 1] - A2[:, 0], A2[:, 2] - A2[:, 0]; v2 = p - A2[:, 0]
+den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]; den[np.abs(den) < 1e-12] = 1e-12
+b1 = (v2[:, 0] * v1[:, 1] - v1[:, 0] * v2[:, 1]) / den; b2 = (v0[:, 0] * v2[:, 1] - v2[:, 0] * v0[:, 1]) / den
+B = np.clip(np.stack([1 - b1 - b2, b1, b2], 1), 0, 1); B /= B.sum(1, keepdims=True); del A2, p, v0, v1, v2
+TEX = np.zeros((AH, AW, 3), np.uint8); MASK = np.zeros((AH, AW), np.uint8)
+tl = L[tf]
+un = tl < 0
+if un.any():
+    c = (VC[F[tf[un]]] * B[un][..., None]).sum(1) * 255
+    TEX[ty[un], tx[un]] = np.clip(c, 0, 255).astype(np.uint8); MASK[ty[un], tx[un]] = 255
+o = np.argsort(tl, kind='stable'); tls = tl[o]
+for li, lv in enumerate(labels):
+    a, b = np.searchsorted(tls, lv), np.searchsorted(tls, lv, 'right')
+    if a == b: continue
+    s = o[a:b]; ff = tf[s]
+    P = (V[F[ff]] * B[s][..., None]).sum(1)
+    c = sample(li, P)
+    gi = pidx(F[ff].reshape(-1), np.full(len(ff) * 3, li)).reshape(-1, 3)
+    c += (G[gi] * B[s][..., None]).sum(1)
+    TEX[ty[s], tx[s]] = np.clip(c, 0, 255).astype(np.uint8); MASK[ty[s], tx[s]] = 255
+log("bake done; filling gutters")
+for _ in range(4):
+    e = MASK == 0
+    if not e.any(): break
+    w = cv2.blur((MASK > 0).astype(np.float32), (3, 3))
+    s = cv2.blur(TEX.astype(np.float32) * (MASK > 0)[..., None], (3, 3))
+    f2 = e & (w > 0)
+    TEX[f2] = (s[f2] / w[f2][:, None]).astype(np.uint8); MASK[f2] = 255
+
+cv2.imwrite(os.path.join(odir, 'atlas.jpg'), cv2.cvtColor(TEX, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90])
+import trimesh, PIL.Image
+im = PIL.Image.open(os.path.join(odir, 'atlas.jpg'))
+tm = trimesh.Trimesh(V[vmap], AF, process=False,
+                     visual=trimesh.visual.TextureVisuals(uv=UV, material=trimesh.visual.material.PBRMaterial(baseColorTexture=im, metallicFactor=0.0, roughnessFactor=1.0)))
+tm.export(os.path.join(odir, 'room.glb'))
+json.dump(dict(atlas=[AW, AH], mm_per_texel=round(MM, 2), triangles=nF, frames_scored=nscored, frames_used=len(labels), patch_m=PATCH,
+               seen_area=round(float(area[L >= 0].sum() / area.sum()), 3), step=STEP),
+          open(os.path.join(odir, 'atlas-info.json'), 'w'), indent=1)
+log(f"written {odir}/room.glb ({os.path.getsize(os.path.join(odir, 'room.glb')) / 1e6:.0f} MB)")
