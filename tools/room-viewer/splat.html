@@ -163,7 +163,10 @@ $('b-orbit').onclick = () => { if (mode === 'orbit') return; mode = 'orbit'; $('
 
 // per room: light copies first (newest training step first), the heavy full-size .ply files last
 const rank = f => (/\.ply$/i.test(f) ? 1 : 0);
-const files = (await findSplats()).sort((a, b) => a.split('/')[0].localeCompare(b.split('/')[0]) || rank(a) - rank(b) || b.localeCompare(a, undefined, { numeric: true }));
+// the newest full versions on top (coordinator 12 Nov), then per room as before
+const PIN = ['ios-1112-1255-splat/ios-1112-1255-legion-full-light.splat', 'ios-1112-1255-splat/ios-1112-1255-5060-full-light.splat'];
+const pin = f => (PIN.includes(f) ? PIN.indexOf(f) : PIN.length);
+const files = (await findSplats()).sort((a, b) => pin(a) - pin(b) || a.split('/')[0].localeCompare(b.split('/')[0]) || rank(a) - rank(b) || b.localeCompare(a, undefined, { numeric: true }));
 $('list').innerHTML = '';
 if (!files.length) $('list').textContent = 'No splats yet. Copy a trained .ply into recordings/rebuild/<room>-splat/ and reload.';
 for (const f of files) {
@@ -174,6 +177,8 @@ for (const f of files) {
   if (f === 'ios-splat/splat-light.splat') b.textContent += '  (full version, Legion, gsplat)';
   if (/brush-30000-light/.test(f)) b.textContent += '  (full version, Legion, Brush)';
   if (f === 'ios-1112-1255-splat/preview_7000-light.splat') b.textContent = 'New scan 12:55 (preview, 5060 PC)';
+  if (f === PIN[0]) b.textContent = 'New scan 12:55 (full version, Legion)';
+  if (f === PIN[1]) b.textContent = 'New scan 12:55 (full version, 5060 PC)';
 }
 const want = new URLSearchParams(location.search).get('file');
 const light = files.find(f => /light\.splat$/.test(f));
