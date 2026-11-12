@@ -60,7 +60,7 @@ if skin == 'depth':
     for stem, pose, ii, di in frames:
         d, c = read_depth(stem); h, w = d.shape
         keep = (c >= 200) | ((c >= 100) & (d < 1500)) | ((c >= 40) & (d < 800))
-        d = np.where(keep & (d >= 200) & (d <= 4000), d, 0).astype(np.float32)
+        d = np.where(keep & (d >= 200) & (d <= 4000), d, 0).astype(np.uint16)   # millimetres as uint16: Open3D takes a float image as metres already
         img = cv2.imread(stem + '.jpg'); img = cv2.cvtColor(cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
         intr = o3d.camera.PinholeCameraIntrinsic(w, h, di[0], di[1], di[2], di[3])
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(o3d.geometry.Image(np.ascontiguousarray(img)), o3d.geometry.Image(d),
