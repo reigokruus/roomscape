@@ -15,13 +15,13 @@ From the package's `code/tools-room-rebuild-and-viewer.tar` (`tools/room-rebuild
 Optional check (should print about 0.6): `python check_nerfstudio.py` needs times.json; or trust the app's rules
 (the same as SplatDataset.swift, checked on the 10 Nov 20:09 scan: 0.61-0.63).
 
-## 2. Train with Brush (brush-cli or the Brush app, 1.0)
+## 2. Train with Brush (brush-cli or the Brush app, v0.3.0 as on the PCs; newer main calls the flag --total-train-iters)
 
     # (a) preview, about 3 minutes on the 5060 / 4070: phone quality
-    brush ds-preview --total-train-iters 7000 --max-splats 400000 --max-resolution 960 \
+    brush ds-preview --total-steps 7000 --max-splats 400000 --max-resolution 960 \
           --export-every 7000 --export-path out --export-name preview.ply
     # (b) full version, about 45-60 minutes
-    brush ds-full --total-train-iters 30000 --max-resolution 1920 \
+    brush ds-full --total-steps 30000 --max-resolution 1920 \
           --export-every 10000 --export-path out --export-name full_{iter}.ply
 
 The camera poses are ARKit's, which Brush reads as they are (Nerfstudio/OpenGL convention); the splat comes out in the
