@@ -79,18 +79,12 @@ async function load(key) {
     const info = await (await fetch(ROOMS[key] + w + '.json')).json();
     const tex = await new THREE.TextureLoader().loadAsync(ROOMS[key] + w + '.png');
     tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
-    const n = new THREE.Vector3(...info.normal).multiplyScalar(0.004);   // 4 mm in front of the model's wall
-    const c = info.corners.map(p => new THREE.Vector3(...p).add(n));
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute([...c[0].toArray(), ...c[1].toArray(), ...c[2].toArray(), ...c[3].toArray()], 3));
-    g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2)); g.setIndex([0, 1, 2, 0, 2, 3]);
-    room.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide, clippingPlanes: [clip] })));
-    // the model's own wall is a few cm thick and bumpy: hide its triangles behind the painted part (within 6 cm of the
-    // plane, where the texture has paint), so they don't poke through
+    // rk 09:53: the model's own (bumpy) wall triangles are the drawing board: each triangle near the wall plane, where the
+    // still has paint, takes its piece of the still (planar projection: its position on the plane = where in the still)
     const cv = document.createElement('canvas'); cv.width = tex.image.width; cv.height = tex.image.height;
     const cx = cv.getContext('2d'); cx.drawImage(tex.image, 0, 0); const A = cx.getImageData(0, 0, cv.width, cv.height).data;
     const o = new THREE.Vector3(...info.corners[0]), ex = new THREE.Vector3(...info.corners[1]).sub(o), ey = new THREE.Vector3(...info.corners[3]).sub(o);
-    const lx = ex.length(), ly = ey.length(); ex.normalize(); ey.normalize(); const nn = new THREE.Vector3(...info.normal);
+    const wpos = [], wuv = []; const lx = ex.length(), ly = ey.length(); ex.normalize(); ey.normalize(); const nn = new THREE.Vector3(...info.normal);
     room.traverse(m => { if (!m.isMesh || !m.geometry.index || m.material.map) return;
       const P = m.geometry.attributes.position, I = m.geometry.index.array, keep = [], q = new THREE.Vector3();
       for (let t = 0; t < I.length; t += 3) {
@@ -99,8 +93,13 @@ async function load(key) {
         let hide = false;
         if (Math.abs(dn) < 0.06 && u > 0 && u < 1 && v > 0 && v < 1) { const px = Math.floor(u * cv.width), py = Math.floor((1 - v) * cv.height); hide = A[(py * cv.width + px) * 4 + 3] > 128; }
         if (!hide) keep.push(I[t], I[t + 1], I[t + 2]);
+        else for (let k = 0; k < 3; k++) { const vi = I[t + k]; q.set(P.getX(vi), P.getY(vi), P.getZ(vi)); const r2 = q.clone().sub(o);
+          wpos.push(q.x, q.y, q.z); wuv.push(r2.dot(ex) / lx, r2.dot(ey) / ly); }
       }
       m.geometry.setIndex(keep); });
+    const wg = new THREE.BufferGeometry();
+    wg.setAttribute('position', new THREE.Float32BufferAttribute(wpos, 3)); wg.setAttribute('uv', new THREE.Float32BufferAttribute(wuv, 2));
+    room.add(new THREE.Mesh(wg, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, clippingPlanes: [clip] })));
   }
   const box = new THREE.Box3().setFromObject(room);
   // floor: the lowest 2% of vertices
@@ -109,7 +108,7 @@ async function load(key) {
   if (!camera.userData.placed) { const c = box.getCenter(new THREE.Vector3()); orbit.target.set(c.x, floorY + 0.5, c.z); camera.position.set(c.x + 5, floorY + 6, c.z + 6); camera.userData.placed = true; }
   try { labels = await (await fetch(ROOMS[key] + 'labels.json')).json(); } catch (e) { labels = []; }
   buildLabels();
-  $('status').textContent = `${{ replay: 'Replay: real depth + camera pictures', wall: 'Replay + one wall painted from a single sharp video frame', dots: 'Dots only + video pictures' }[key]} · ${Math.round(tris / 1000)}k triangles`;
+  $('status').textContent = `${{ replay: 'Replay: real depth + camera pictures', wall: 'Replay + one wall: its own triangles painted with a single sharp video still', dots: 'Dots only + video pictures' }[key]} · ${Math.round(tris / 1000)}k triangles`;
 }
 function buildLabels() {
   tags.forEach(t => t.el.remove()); tags = []; pins.clear(); $('list').innerHTML = '';
