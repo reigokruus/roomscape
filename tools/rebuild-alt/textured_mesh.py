@@ -135,7 +135,7 @@ def score_views(mesh, frames, vis_side: int, min_cos: float):
         img = f.image(vis_side)
         h, w = img.shape[:2]
         fs = f.scaled(w, h)
-        small.append(img)
+        small.append(((img * 255).astype(np.uint8), fs))
         sharp.append(sharpness(img))
         jj, ii = np.meshgrid(np.arange(h) + 0.5, np.arange(w) + 0.5, indexing="ij")
         d = np.stack([(ii - fs.K[0, 2]) / fs.K[0, 0], (jj - fs.K[1, 2]) / fs.K[1, 1], np.ones_like(ii)], -1).reshape(-1, 3)
@@ -167,7 +167,7 @@ def score_views(mesh, frames, vis_side: int, min_cos: float):
     vals = vals * sharp_w[cols]
     S = sparse.csr_matrix((vals, (rows, cols)), shape=(len(tris), len(frames)))
     C = np.concatenate(samp)
-    return S, (rows, cols, C), sharp
+    return S, (rows, cols, C), sharp, small
 
 
 def choose_labels(S, pairs, iters: int, smooth: float):
@@ -224,7 +224,68 @@ def view_gains(samples, label, n_views):
 
 # ---------------------------------------------------------------- atlas
 
-def build_atlas(mesh, frames, label, gains, ds: Dataset, pairs, max_atlas: int, pad: int = 2):
+def seam_gains(tris, label, comp, pairs, small, gains, reg: float = 0.05):
+    """Brightness/colour gain per patch so neighbouring patches from different pictures meet without a step.
+    Least squares in log space over the colours both pictures give at the shared vertices."""
+    a, b = pairs[:, 0], pairs[:, 1]
+    keep = (label[a] >= 0) & (label[b] >= 0) & (comp[a] != comp[b])
+    a, b = a[keep], b[keep]
+    if len(a) == 0:
+        return {}
+    eq = tris[a][:, :, None] == tris[b][:, None, :]
+    shared = eq.any(2)  # which of a's corners are on the seam
+    ai, ci = np.nonzero(shared)
+    vid = tris[a][ai, ci]
+    ta, tb = a[ai], b[ai]
+
+    def sample(view_ids, points):
+        out = np.zeros((len(points), 3))
+        for v in np.unique(view_ids):
+            m = view_ids == v
+            img, fs = small[v]
+            # local average (9 x 9 px box) so texture detail and small misalignments don't count as a brightness step
+            ii = np.cumsum(np.cumsum(np.pad(img.astype(np.float64), ((1, 0), (1, 0), (0, 0))), 0), 1)
+            u, vv, _ = project(points[m], fs)
+            h, w = img.shape[:2]
+            x0 = np.clip(u.astype(int) - 4, 0, w - 1); x1 = np.clip(u.astype(int) + 5, 1, w)
+            y0 = np.clip(vv.astype(int) - 4, 0, h - 1); y1 = np.clip(vv.astype(int) + 5, 1, h)
+            area = ((x1 - x0) * (y1 - y0))[:, None]
+            box = ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]
+            out[m] = box / np.maximum(area, 1) / 255.0 * gains[v]
+        return out
+    return ta, tb, vid, sample
+
+
+def solve_chart_gains(mesh, label, comp, pairs, small, gains, reg: float = 0.05):
+    tris = np.asarray(mesh.triangles)
+    verts = np.asarray(mesh.vertices)
+    r = seam_gains(tris, label, comp, pairs, small, gains, reg)
+    if not r:
+        return {}
+    ta, tb, vid, sample = r
+    ca = sample(label[ta], verts[vid])
+    cb = sample(label[tb], verts[vid])
+    ok = (ca.min(1) > 0.03) & (cb.min(1) > 0.03) & (ca.max(1) < 0.98) & (cb.max(1) < 0.98)
+    ta, tb, ca, cb = ta[ok], tb[ok], ca[ok], cb[ok]
+    ids, inv = np.unique(np.concatenate([comp[ta], comp[tb]]), return_inverse=True)
+    n = len(ids)
+    ia, ib = inv[: len(ta)], inv[len(ta):]
+    m = len(ta)
+    from scipy.sparse.linalg import lsqr
+    A = sparse.vstack([
+        sparse.coo_matrix((np.r_[np.ones(m), -np.ones(m)], (np.r_[np.arange(m), np.arange(m)], np.r_[ia, ib])), shape=(m, n)),
+        sparse.identity(n) * reg * np.sqrt(max(m / n, 1.0)),
+    ]).tocsr()
+    out = np.zeros((n, 3))
+    for ch in range(3):
+        rhs = np.r_[np.log(cb[:, ch]) - np.log(ca[:, ch]), np.zeros(n)]
+        out[:, ch] = lsqr(A, rhs, atol=1e-6, btol=1e-6, iter_lim=2000)[0]
+    g = np.exp(np.clip(out, np.log(0.5), np.log(2.0)))
+    return dict(zip(ids.tolist(), g))
+
+
+def build_atlas(mesh, frames, label, gains, ds: Dataset, pairs, max_atlas: int, small=None,
+                texel: float = 0.0, level: bool = True, pad: int = 2):
     tris = np.asarray(mesh.triangles)
     verts = np.asarray(mesh.vertices)
     T = len(tris)
@@ -232,6 +293,10 @@ def build_atlas(mesh, frames, label, gains, ds: Dataset, pairs, max_atlas: int, 
     p = pairs[same]
     g = sparse.coo_matrix((np.ones(len(p)), (p[:, 0], p[:, 1])), shape=(T, T))
     _, comp = connected_components(g, directed=False)
+    cgain = solve_chart_gains(mesh, label, comp, pairs, small, gains) if (level and small) else {}
+    if cgain:
+        gv = np.array(list(cgain.values()))
+        log(f"levelling: {len(cgain)} patches, gains {np.percentile(gv, 5):.2f}..{np.percentile(gv, 95):.2f}")
     charts = {}
     for t, c in enumerate(comp):
         if label[t] >= 0:
@@ -240,24 +305,27 @@ def build_atlas(mesh, frames, label, gains, ds: Dataset, pairs, max_atlas: int, 
     for c, ts in charts.items():
         ts = np.array(ts)
         f = frames[label[ts[0]]]
-        u, v, _ = project(verts[tris[ts]].reshape(-1, 3), f)
+        u, v, z = project(verts[tris[ts]].reshape(-1, 3), f)
         uv = np.stack([u, v], 1).reshape(-1, 3, 2)
+        # don't store more detail than --texel (metres per texture pixel): close-up pictures are shrunk
+        own = min(1.0, (float(np.median(z)) / f.K[0, 0]) / texel) if texel > 0 else 1.0
         x0, y0 = np.floor(uv.reshape(-1, 2).min(0)).astype(int) - pad
         x1, y1 = np.ceil(uv.reshape(-1, 2).max(0)).astype(int) + pad
         x0, y0 = max(x0, 0), max(y0, 0)
         x1, y1 = min(x1, f.width), min(y1, f.height)
-        crops.append([label[ts[0]], x0, y0, x1, y1, ts, uv])
+        crops.append([label[ts[0]], x0, y0, x1, y1, ts, uv, own, cgain.get(c, np.ones(3))])
     unseen = np.flatnonzero(label < 0)
     # shelf packing; shrink everything if it would not fit
-    area = sum((c[3] - c[1]) * (c[4] - c[2]) for c in crops) + len(unseen) * 9
+    area = sum((c[3] - c[1]) * (c[4] - c[2]) * c[7] ** 2 for c in crops) + len(unseen) * 9
+    size = lambda c, sc: (max(1, int(round((c[3] - c[1]) * c[7] * sc))), max(1, int(round((c[4] - c[2]) * c[7] * sc))))
     scale = min(1.0, 0.85 * max_atlas / np.sqrt(max(area, 1)))
     while True:
         order = sorted(range(len(crops)), key=lambda i: -(crops[i][4] - crops[i][2]))
         x = y = shelf = 0
         place = {}
         for i in order:
-            w = int(np.ceil((crops[i][3] - crops[i][1]) * scale)) + 1
-            h = int(np.ceil((crops[i][4] - crops[i][2]) * scale)) + 1
+            w, h = size(crops[i], scale)
+            w, h = w + 1, h + 1
             if x + w > max_atlas:
                 x, y, shelf = 0, y + shelf, 0
             place[i] = (x, y, w, h)
@@ -275,18 +343,18 @@ def build_atlas(mesh, frames, label, gains, ds: Dataset, pairs, max_atlas: int, 
     corner_uv = np.zeros((T, 3, 2))
     cache = {}
     for i in sorted(range(len(crops)), key=lambda i: crops[i][0]):  # by picture: each is read once
-        vi, x0, y0, x1, y1, ts, uv = crops[i]
+        vi, x0, y0, x1, y1, ts, uv, own, cg = crops[i]
         if vi not in cache:
             cache = {vi: frames[vi].image() * gains[vi]}
         img = cache[vi]
         px, py, w, h = place[i]
-        crop = img[y0:y1, x0:x1]
-        if scale < 1.0:
+        crop = img[y0:y1, x0:x1] * cg
+        cw, chh = size(crops[i], scale)
+        if (cw, chh) != (x1 - x0, y1 - y0):
             crop = np.asarray(Image.fromarray((np.clip(crop, 0, 1) * 255).astype(np.uint8)).resize(
-                (max(1, int(round((x1 - x0) * scale))), max(1, int(round((y1 - y0) * scale)))), Image.LANCZOS),
-                np.float32) / 255
+                (cw, chh), Image.LANCZOS), np.float32) / 255
         atlas[py:py + crop.shape[0], px:px + crop.shape[1]] = crop[: H - py, : W - px]
-        corner_uv[ts] = (uv - [x0, y0]) * scale + [px, py]
+        corner_uv[ts] = (uv - [x0, y0]) * [cw / max(x1 - x0, 1), chh / max(y1 - y0, 1)] + [px, py]
     # unseen triangles: colour of the nearest start point
     if len(unseen):
         cent = verts[tris[unseen]].mean(1)
@@ -366,7 +434,9 @@ def main():
     ap.add_argument("--min-cos", type=float, default=0.2, help="skip views more grazing than this")
     ap.add_argument("--smooth", type=float, default=1.2, help="how strongly neighbours share a picture")
     ap.add_argument("--atlas", type=int, default=8192, help="texture size in pixels (square)")
-    ap.add_argument("--no-gains", action="store_true", help="skip brightness levelling")
+    ap.add_argument("--no-gains", action="store_true", help="skip per-picture brightness levelling")
+    ap.add_argument("--no-level", action="store_true", help="skip per-patch seam levelling")
+    ap.add_argument("--texel", type=float, default=0.002, help="finest texture detail kept, metres per pixel (0 = full picture)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     t0 = time.time()
@@ -389,12 +459,13 @@ def main():
     t_surface = time.time() - t0
 
     pairs = triangle_neighbours(tris)
-    S, samples, sharp = score_views(mesh, train, a.vis_side, a.min_cos)
+    S, samples, sharp, small = score_views(mesh, train, a.vis_side, a.min_cos)
     label = choose_labels(S, pairs, iters=20, smooth=a.smooth)
     gains = np.ones((len(train), 3)) if a.no_gains else view_gains(samples, label, len(train))
     seen = float((label >= 0).mean())
     log(f"views: {seen*100:.1f}% of triangles have a picture, {len(np.unique(label[label >= 0]))} pictures used")
-    atlas, corner_uv, scale, n_charts = build_atlas(mesh, train, label, gains, ds, pairs, a.atlas)
+    atlas, corner_uv, scale, n_charts = build_atlas(mesh, train, label, gains, ds, pairs, a.atlas, small,
+                                                    a.texel, not a.no_level)
     write_outputs(mesh, atlas, corner_uv, a.out)
     t_tex = time.time() - t0 - t_surface
     log(f"texture: {n_charts} patches, atlas {atlas.shape[1]}x{atlas.shape[0]} at {scale:.2f} of picture resolution")
