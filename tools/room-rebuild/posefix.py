@@ -14,7 +14,10 @@ def find_jump(frames_bin):
         if prev is not None and t - prev[0] < 1.5:
             R = prev[1][:3, :3].T @ P[:3, :3]
             ang = np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
-            if np.linalg.norm(P[:3, 3] - prev[1][:3, 3]) > 1.0 or ang > 30:
+            # the app's rule (PoseJump.isJump): more than a walking camera can do in the time between the frames
+            # (23:17 scan: a 0.9 s gap with a normal 35 degree turn must not count)
+            dt = t - prev[0]
+            if np.linalg.norm(P[:3, 3] - prev[1][:3, 3]) > 0.5 + 1.0 * dt or ang > 25 + 120 * dt:
                 return i, t
         prev = (t, P)
     return None

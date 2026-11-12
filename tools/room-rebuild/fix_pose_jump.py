@@ -33,8 +33,10 @@ T = np.array(T); t0 = T[0]
 def rot_angle(a, b):
     R = a[:3, :3].T @ b[:3, :3]
     return np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
+# the app's rule (PoseJump.isJump): more than a walking camera can do in the time between the two frames
 jumps = [i for i in range(1, n) if T[i] - T[i - 1] < 1.5 and
-         (np.linalg.norm(P[i][:3, 3] - P[i - 1][:3, 3]) > 1.0 or rot_angle(P[i - 1], P[i]) > 30)]
+         (np.linalg.norm(P[i][:3, 3] - P[i - 1][:3, 3]) > 0.5 + 1.0 * (T[i] - T[i - 1])
+          or rot_angle(P[i - 1], P[i]) > 25 + 120 * (T[i] - T[i - 1]))]
 if not jumps: sys.exit('no pose jump found')
 j = jumps[0]
 if len(jumps) > 1: print(f'note: {len(jumps)} jumps, repairing the first (t={T[j] - t0:.1f} s); others: {[round(T[k] - t0, 1) for k in jumps[1:]]}')

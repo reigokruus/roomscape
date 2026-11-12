@@ -60,7 +60,7 @@ echo "Recording: $(( $(stat -f %z $REC/frames.bin) / 120 )) frames, $(du -sh $RE
 
 # 3. rebuild frames (if the Python tools are set up on this Mac)
 STAMP=$(echo $SCAN | sed -E 's/Scan_2026-([0-9]+)-([0-9]+)_([0-9]+)-([0-9]+).*/\1\2-\3\4/')
-PY=$(ls -d /private/tmp/claude-501/*/*/scratchpad/uwvenv/bin/python 2>/dev/null | head -1)
+PY=$(ls -d $HOME/DEV/py-roomscape/bin/python 2>/dev/null | head -1)
 FR=$REPO/recordings/rebuild/ios-$STAMP/frames
 if [ -n "$PY" ]; then nice -n 10 $PY -u $REPO/tools/room-rebuild/ios_frames.py $REC $FR --every 0.4 | tail -1
 else echo "(No Python tools here: the PC makes the rebuild frames with tools/room-rebuild/ios_frames.py.)"; fi
