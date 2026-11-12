@@ -14,6 +14,7 @@
 # Private: the dataset shows a real home. Delete the pod (and its volume) when the results are downloaded.
 set -euo pipefail
 SRC=${1:?bench zip path or URL}; SUM=${2:?SHA-256 of the zip}
+case "$SRC" in http*) ;; *) SRC=$(realpath "$SRC") ;; esac   # before the cd below
 BRUSH_URL=https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-x86_64-unknown-linux-gnu.tar.xz
 BRUSH_SHA=4f0f9a8785d1951c62df26aae247c02c5bba32b00f40b06df4e1c9b867399e20
 W=~/room-run; mkdir -p $W; cd $W
