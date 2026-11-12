@@ -29,7 +29,7 @@ if [ ! -e /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ ! -e /etc/vulkan/icd.d/
   mkdir -p /etc/vulkan/icd.d
   echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3"}}' > /etc/vulkan/icd.d/nvidia_icd.json
 fi
-if ! vulkaninfo --summary 2>/dev/null | grep -qi nvidia; then
+if ! xvfb-run -a vulkaninfo --summary 2>/dev/null | grep -qi nvidia; then
   echo "!!! Vulkan doesn't see the NVIDIA GPU. The pod needs graphics driver capabilities:"
   echo "    redeploy with the environment variable NVIDIA_DRIVER_CAPABILITIES=all (pod template → Environment)."
   exit 1
