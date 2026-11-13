@@ -1,4 +1,3 @@
-import UserNotifications
 import BackgroundTasks
 import Foundation
 import SwiftUI
@@ -50,14 +49,24 @@ private enum log {
 @MainActor final class ProcessingQueue: ObservableObject {
     /// True while a GPU job (the photo-real preview) runs: big 3D views let go of their scenes meanwhile.
     @Published private(set) var gpuJob = false
-    /// The photo-real preview needs a fresh start of the app (SplatPreview.NeedsFreshStart): asked once (FreshStartSheet);
-    /// until then preview jobs wait. Not saved: after the relaunch the queued preview just runs.
-    @Published var freshStartNeeded = false
+    /// The photo-real mode (rk 13 Nov 08:54): while set, the whole app is just the "Making photo-real" screen for this
+    /// scan (PhotoRealScreen); the room list, rooms and scanner are gone, so they hold no memory. Set when the preview
+    /// is started or begins; cleared when the user leaves that screen after it's done or stopped.
+    @Published var photoRealScan: String?
+
+    /// Stops the photo-real preview for this scan at its last save and takes it out of the queue (Make photo-real
+    /// later carries on from that save).
+    func stopPhotoReal(_ scan: String) {
+        items.removeAll { $0.scan == scan && $0.job == .splat }
+        save()
+        if current?.scan == scan, current?.job == .splat { inner?.cancel() }
+        log.info("photo-real preview stopped by the user: \(scan)")
+    }
 
     /// The app's memory now (footprint, and what iOS still allows), into the processing log.
     nonisolated static func logMemory(_ label: String) {
         let avail = Double(os_proc_available_memory()) / 1_048_576
-        log.info("memory \(label): footprint \(Int(PerfLog.footprintMB())) MB, available \(Int(avail)) MB")
+        log.info("memory \(label): footprint \(Int(PerfLog.footprintMB())) MB, available \(Int(avail)) MB; \(PerfLog.memoryBreakdown())")
     }
 
     static let shared = ProcessingQueue()
@@ -169,9 +178,7 @@ private enum log {
         scanning = false
         start()
     }
-    private func runnable(_ item: Item) -> Bool {
-        !held.contains(item.scan) && !((scanning || freshStartNeeded) && item.job == .splat)
-    }
+    private func runnable(_ item: Item) -> Bool { !held.contains(item.scan) && !(scanning && item.job == .splat) }
     /// The photo-real preview waiting or running for this scan.
     func splatQueued(_ scan: SavedScan) -> Bool { items.contains { $0.scan == scan.name && $0.job == .splat } }
 
@@ -307,6 +314,7 @@ private enum log {
             // go of them while it runs (ResultView), and load them again after (12 Nov 22:08: a preview right
             // after a scan started with 1.2 GB still held by the room view and died while loading)
             gpuJob = item.job == .splat
+            if item.job == .splat { photoRealScan = item.scan }
             defer { gpuJob = false }
             do {
                 try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
@@ -316,14 +324,6 @@ private enum log {
                 log.info("processed \(item.scan)")
             } catch is CancellationError {
                 return stopped()
-            } catch is SplatPreview.NeedsFreshStart {
-                // kept in the queue (and its saves): it runs after the app is opened again
-                log.info("photo-real preview waits for a fresh start of the app")
-                freshStartNeeded = true
-                inner = nil
-                current = nil
-                progress = nil
-                continue
             } catch {
                 // Kept in the scan's processing folder; "Rebuild from recording" tries again.
                 log.error("processing failed: \(String(describing: error))")
@@ -492,35 +492,5 @@ struct ProcessingOverlay: View {
                 done = f.error.map { "Couldn't rebuild: \($0)" }
                     ?? "Go back and open the room again to see it. The previous version is kept in the scan's before-rebuild folder."
             }
-    }
-}
-
-/// One calm question when the photo-real preview needs a fresh start (ProcessingQueue.freshStartNeeded): RoomScape
-/// closes itself, and a notification a moment later opens it again; the queued preview then runs by itself.
-/// rk's own-use build: closing the app from code is acceptable here (13 Nov).
-struct FreshStartSheet: ViewModifier {
-    @ObservedObject private var queue = ProcessingQueue.shared
-    func body(content: Content) -> some View {
-        content.alert("RoomScape needs a fresh start to make the photo-real room", isPresented: $queue.freshStartNeeded) {
-            Button("Close RoomScape") { Self.closeAndComeBack() }
-        } message: {
-            Text("It closes now. Tap the notification (or the app) to open it again, and the photo-real room starts by itself.")
-        }
-    }
-
-    static func closeAndComeBack() {
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { _, _ in
-            let content = UNMutableNotificationContent()
-            content.title = "Tap to make the photo-real room"
-            content.body = "RoomScape carries on where it was."
-            content.sound = .default
-            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 2, repeats: false)
-            center.add(UNNotificationRequest(identifier: "fresh-start", content: content, trigger: trigger)) { _ in
-                ProcessingQueue.logMemory("closing for a fresh start")
-                // the scan files are written when they're made; the queue is saved; let the log line land, then go
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
-            }
-        }
     }
 }

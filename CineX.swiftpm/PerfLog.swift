@@ -1,3 +1,4 @@
+import Metal
 import Darwin
 import Foundation
 import os
@@ -228,6 +229,26 @@ final class PerfLog: @unchecked Sendable {
         getrusage(RUSAGE_SELF, &u)
         return Double(u.ru_utime.tv_sec) + Double(u.ru_utime.tv_usec) / 1e6 + Double(u.ru_stime.tv_sec) + Double(u.ru_stime.tv_usec) / 1e6
     }
+
+    /// What the footprint is made of (13 Nov: about 1.1 GB stayed after every scan with all our objects freed):
+    /// heap and other anonymous memory ("internal"), compressed, graphics (Metal / IOAccelerator / IOSurface ledger),
+    /// media, neural engine, purgeable, and what Metal says this process has allocated on the GPU.
+    static func memoryBreakdown() -> String {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let r = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        guard r == KERN_SUCCESS else { return "no task info" }
+        func mb(_ v: UInt64) -> Int { Int(v / 1_048_576) }
+        func mb(_ v: Int64) -> Int { Int(max(0, v) / 1_048_576) }
+        let metal = metalDevice.map { mb(UInt64($0.currentAllocatedSize)) } ?? -1
+        return "internal \(mb(info.internal)), compressed \(mb(info.compressed)), "
+            + "graphics \(mb(info.ledger_tag_graphics_footprint)) (+\(mb(info.ledger_tag_graphics_footprint_compressed)) compressed), "
+            + "media \(mb(info.ledger_tag_media_footprint)), neural \(mb(info.ledger_tag_neural_footprint)), "
+            + "purgeable \(mb(info.ledger_purgeable_nonvolatile)), Metal allocated \(metal) MB"
+    }
+    private static let metalDevice = MTLCreateSystemDefaultDevice()
 
     static func footprintMB() -> Double {
         var info = task_vm_info_data_t()

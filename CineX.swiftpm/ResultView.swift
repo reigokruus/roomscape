@@ -2778,7 +2778,11 @@ private struct ConfirmPhotoReal: ViewModifier {
     let scan: SavedScan
     func body(content: Content) -> some View {
         content.alert("Make the photo-real room?", isPresented: $isPresented) {
-            Button("Start") { ProcessingQueue.shared.add(scan, .splat) }
+            Button("Start") {
+                // the app becomes just the photo-real screen right away (it needs the memory; rk 13 Nov)
+                ProcessingQueue.shared.photoRealScan = scan.name
+                ProcessingQueue.shared.add(scan, .splat)
+            }
             Button("Not now", role: .cancel) {}
         } message: {
             Text(Self.message(scan))

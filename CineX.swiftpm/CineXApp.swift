@@ -18,11 +18,24 @@ struct CineXApp: App {
                 let at = args.firstIndex(of: "-virtualScanAt").flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil } ?? 0
                 VirtualScanScreen(folder: URL(fileURLWithPath: args[i + 1]), startAt: at)
             } else {
-                HomeView().modifier(FreshStartSheet())
+                AppRoot()
             }
             #else
-            HomeView().modifier(FreshStartSheet())
+            AppRoot()
             #endif
+        }
+    }
+}
+
+/// The room list, or only the photo-real screen while the photo-real room is being made (rk 13 Nov 08:54: nothing
+/// else reachable, so the rooms, scanner and their 3D views are gone and hold no memory).
+struct AppRoot: View {
+    @ObservedObject private var queue = ProcessingQueue.shared
+    var body: some View {
+        if let name = queue.photoRealScan {
+            PhotoRealScreen(scanName: name)
+        } else {
+            HomeView()
         }
     }
 }
