@@ -2711,6 +2711,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         boolean[] early = dropEarlyDrift();
         purgeCleared(early);
         dropNoise();
+        dropSeenThroughAtDone();
         log("refined " + refinedTotal + " re-observations, dropped " + droppedNoise + " one-off specks / see-through points, kept " + count
                 + "; " + removedN + " points taken out in all, kept aside in removed-points.bin");
         removedAtDone[0] = removed.toByteArray(); removed = null;
@@ -6245,7 +6246,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Points the clean-up at Done takes out are kept aside (removed-points.bin), never just deleted (data is gold):
      *  x, y, z float + r, g, b + reason (1 early drift seen through, 2 cleared by see-through while scanning, 3 seen
-     *  only once, 4 seen through at Done). */
+     *  only once, 4 seen through at Done, 5 seen past by the scan's own later frames at Done, DoneSeeThrough). */
     private java.io.ByteArrayOutputStream removed; private int removedN;
     private void keepRemoved(int i, int reason) {
         if (removed == null) return;
@@ -6314,6 +6315,41 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         droppedNoise = count - k;
         count = k; uploaded = 0;
         rebuildVoxelIndex();
+    }
+
+    /** Done: the saved points against the scan's own rebuild frames (DoneSeeThrough; rk 13 Nov 14:44, the drifted desk
+     *  copy under the table was still in the points view after Done). Points that later views clearly see past (centre
+     *  ray, net 10) are taken out and kept aside in removed-points.bin (reason 5). At most 2 s; on the 14:41 scan the
+     *  same code on a Mac took 0.4 s for 239 frames and took out 695 of 200,383 points (288 of the 496 in the desk copy).
+     *  Skipped if it would take out more than 10% (something off, keep everything). */
+    private void dropSeenThroughAtDone() {
+        File dir = rebuildTmp;
+        if (dir == null || count < 2000) return;
+        for (int w = 0; w < 50 && rebuildPending.get() > 0; w++) {   // the last frames still being written (up to 1 s)
+            try { Thread.sleep(20); } catch (InterruptedException e) { break; }
+        }
+        float[] xyz = new float[count * 3];
+        for (int i = 0; i < count * 3; i++) xyz[i] = pos.get(i);
+        DoneSeeThrough.Stats st = new DoneSeeThrough.Stats();
+        boolean[] drop = DoneSeeThrough.drop(xyz, count, dir, 2000, st);
+        String what = String.format(java.util.Locale.US, "Done see-through: tested %d, dropped %d in %d ms (%d of %d frames)",
+                st.tested, st.dropped, st.ms, st.framesUsed, st.frames);
+        if (drop == null || st.dropped == 0) { log(what); return; }
+        if (st.dropped > count / 10) { log(what + ": more than 10%, nothing taken out"); return; }
+        int k = 0;
+        for (int i = 0; i < count; i++) {
+            if (drop[i]) { keepRemoved(i, 5); continue; }
+            if (k != i) {
+                pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
+                for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; dotFine[k] = dotFine[i]; mergedDot[k] = mergedDot[i];
+            }
+            k++;
+        }
+        droppedNoise += count - k;
+        count = k; uploaded = 0;
+        rebuildVoxelIndex();
+        log(what);
     }
 
     private void recordPath(Pose p) {
