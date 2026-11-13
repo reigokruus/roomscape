@@ -1,0 +1,96 @@
+diff --git a/crates/brush-process/src/lib.rs b/crates/brush-process/src/lib.rs
+index 1dc668eb..0d9de8e8 100644
+--- a/crates/brush-process/src/lib.rs
++++ b/crates/brush-process/src/lib.rs
+@@ -28,6 +28,7 @@ use brush_vfs::SendNotWasm;
+ use tokio_stream::{Stream, StreamExt};
+ 
+ fn burn_options() -> RuntimeOptions {
++    cubecl_config();
+     RuntimeOptions {
+         tasks_max: 64,
+         memory_config: memory_config(),
+@@ -55,6 +56,34 @@ fn memory_config() -> burn_wgpu::MemoryConfiguration {
+     }
+ }
+ 
++/// RoomScape change (13 Nov 2026): CubeCL reads its settings (cubecl.toml, CUBECL_* env vars) only where its `std_io`
++/// cfg is on, which in this vendored version is Windows, Linux, macOS and Android, not iOS (cubecl-runtime build.rs,
++/// `RuntimeConfig::get`). So on the phone CUBECL_AUTOTUNE_LEVEL, which the app sets, never applied. Here, before the
++/// device exists, the same settings are installed from code on iOS: the autotune level from CUBECL_AUTOTUNE_LEVEL, and
++/// with BRUSH_AUTOTUNE_LOG=1 CubeCL's autotune log on stderr (the app's memory test sends stderr to a file), to see
++/// whether the ~2 GB bursts at the first steps and the first refines are autotune benchmarks.
++fn cubecl_config() {
++    #[cfg(target_os = "ios")]
++    {
++        use burn::cubecl::config::autotune::{AutotuneLevel, AutotuneLogLevel};
++        use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
++        let mut cfg = CubeClRuntimeConfig::default();
++        match std::env::var("CUBECL_AUTOTUNE_LEVEL").as_deref() {
++            Ok("minimal" | "0") => cfg.autotune.level = AutotuneLevel::Minimal,
++            Ok("balanced" | "1") => cfg.autotune.level = AutotuneLevel::Balanced,
++            Ok("extensive" | "2") => cfg.autotune.level = AutotuneLevel::Extensive,
++            Ok("full" | "3") => cfg.autotune.level = AutotuneLevel::Full,
++            _ => {}
++        }
++        if std::env::var("BRUSH_AUTOTUNE_LOG").is_ok_and(|v| v == "1") {
++            cfg.autotune.logger.stderr = true;
++            cfg.autotune.logger.level = AutotuneLogLevel::Minimal;
++        }
++        // false when CubeCL's settings were already read (a second training in the same app run): they stay
++        let _ = CubeClRuntimeConfig::try_set(cfg);
++    }
++}
++
+ pub async fn burn_init_setup() -> ProcessDevice {
+     burn_wgpu::init_setup_async::<AutoGraphicsApi>(&WgpuDevice::default(), burn_options()).await;
+     default_device()
+diff --git a/crates/brush-process/src/train_stream.rs b/crates/brush-process/src/train_stream.rs
+index 7ffac9b2..97a8e03c 100644
+--- a/crates/brush-process/src/train_stream.rs
++++ b/crates/brush-process/src/train_stream.rs
+@@ -215,6 +215,7 @@ pub(crate) async fn train_stream(
+     let export_path: PathBuf = export_path.components().collect();
+     // RoomScape change (13 Nov 2026): where the iOS memory marks go (loading-marks / refine-marks .jsonl)
+     brush_train::memmarks::set_dir(&export_path);
++    REFINES_RUN.store(0, std::sync::atomic::Ordering::Relaxed);
+     let sh_degree = init_splats.sh_degree();
+ 
+     let training_steps = train_stream_config.train_config.total_train_iters;
+@@ -350,6 +351,7 @@ pub(crate) async fn train_stream(
+         {
+             let (new_splats, refine_stats) = trainer.refine(iter, splats).await;
+             splats = new_splats;
++            REFINES_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+             refine_stats
+         } else {
+             RefineStats {
+@@ -672,11 +674,15 @@ async fn export_checkpoint(
+ /// refine unused memory is given back, and the refine runs only with at least 2.25 GB available (the 2.0 GB spike plus
+ /// 0.25 GB to spare); otherwise it is skipped (training goes on with the splats it has) and noted in refine-skips.txt
+ /// next to the export ("step availableMB footprintMB"), which the app reports. Always true elsewhere.
+-/// The threshold is BRUSH_REFINE_MIN_AVAIL_MB when the app sets it (default 2250; the app's memory test sets less so
+-/// refines run and their marks get written).
++/// Two stages (13 Nov, measured with marks on the phone: only the first two refines of a run burst, by about 1.6 GB
++/// for 0.8-3 s, when GPU work first meets the new splat counts; later ones need about 60 MB): until two refines have
++/// run, BRUSH_REFINE_MIN_AVAIL_MB (default 1700) must be available, after that BRUSH_REFINE_MIN_AVAIL_LATER_MB
++/// (default 800).
+ #[cfg(target_os = "ios")]
+ fn refine_headroom_ok(device: &crate::ProcessDevice, iter: u32, export_path: &Path) -> bool {
+-    let needed: u64 = std::env::var("BRUSH_REFINE_MIN_AVAIL_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2250) << 20;
++    let env_mb = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default);
++    let early = REFINES_RUN.load(std::sync::atomic::Ordering::Relaxed) < 2;
++    let needed: u64 = if early { env_mb("BRUSH_REFINE_MIN_AVAIL_MB", 1700) } else { env_mb("BRUSH_REFINE_MIN_AVAIL_LATER_MB", 800) } << 20;
+     device.memory_cleanup();
+     let avail = brush_train::memmarks::available();
+     if avail >= needed {
+@@ -690,6 +696,9 @@ fn refine_headroom_ok(device: &crate::ProcessDevice, iter: u32, export_path: &Pa
+     false
+ }
+ 
++/// Refines that ran in this process's current training (reset when a training starts).
++static REFINES_RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++
+ #[cfg(not(target_os = "ios"))]
+ fn refine_headroom_ok(_device: &crate::ProcessDevice, _iter: u32, _export_path: &Path) -> bool {
+     true

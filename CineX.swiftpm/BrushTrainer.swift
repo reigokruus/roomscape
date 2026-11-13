@@ -36,7 +36,7 @@ struct BrushTrainer: SplatPreview.Trainer {
     /// in the processing log. Read off the phone afterwards (13 Nov: finding Brush's 2 GB spikes).
     static func keepMarks(from outDir: URL, in folder: URL) {
         let fm = FileManager.default
-        let names = ["loading-marks.jsonl", "refine-marks.jsonl", "step-marks.jsonl", "refine-skips.txt"]
+        let names = ["loading-marks.jsonl", "refine-marks.jsonl", "step-marks.jsonl", "refine-skips.txt", "cubecl-autotune.log"]
         let found = names.filter { fm.fileExists(atPath: outDir.appendingPathComponent($0).path) }
         guard !found.isEmpty else { return }
         let keep = folder.appendingPathComponent("memory-marks")
@@ -52,10 +52,11 @@ struct BrushTrainer: SplatPreview.Trainer {
     }
 
     /// The refine guard in Brush (iOS): a refine runs only with this much memory available, else it's skipped
-    /// (refine-skips.txt). 2250 MB for real runs (13 Nov: the refine's ~2 GB spike); the memory test sets 1200 so
-    /// refines run and refine-marks.jsonl names the part that spikes (a crash there is acceptable: the marks survive).
+    /// (refine-skips.txt). Measured 13 Nov (refine-marks): only the first two refines of a run burst (~1.6 GB for
+    /// 0.8-3 s), later ones need ~60 MB: 1700 MB until two refines have run, then 800. The memory test uses the same.
     static func setRefineGuard(test: Bool) {
-        setenv("BRUSH_REFINE_MIN_AVAIL_MB", test ? "1200" : "2250", 1)
+        setenv("BRUSH_REFINE_MIN_AVAIL_MB", "1700", 1)
+        setenv("BRUSH_REFINE_MIN_AVAIL_LATER_MB", "800", 1)
     }
 
     /// Everything the Brush thread's callback needs (it runs on that thread, for every step).
@@ -131,7 +132,14 @@ struct BrushTrainer: SplatPreview.Trainer {
     /// shape is new: at the start and after each refine. On the phone the footprint flipped between about 0.1 and
     /// 2.2-2.4 GB in exactly those moments (13 Nov 08:39 run), on top of the about 1.1 GB the app keeps after a scan.
     /// The least tuning is asked for here (read once, at Brush's first use).
-    private static let tuneLess: Void = { setenv("CUBECL_AUTOTUNE_LEVEL", "minimal", 1) }()
+    /// CubeCL's settings: the autotune level (13 Nov: read from Brush's source, CubeCL never applied this on iOS until
+    /// Brush started installing it itself; now it does) and its autotune log on stderr, which goes to
+    /// brush-out/cubecl-autotune.log during training (kept with the memory marks): whether the first steps' and first
+    /// refines' ~2 GB bursts are autotune benchmarks.
+    private static let tuneLess: Void = {
+        setenv("CUBECL_AUTOTUNE_LEVEL", "minimal", 1)
+        setenv("BRUSH_AUTOTUNE_LOG", "1", 1)
+    }()
 
     func train(dataset: URL, output: URL, steps: Int, maxSplats: Int, setup: String, resume: SplatPacing.Checkpoint?,
                progress: @escaping @Sendable (Int, String?) -> Void) async throws {
@@ -143,6 +151,8 @@ struct BrushTrainer: SplatPreview.Trainer {
         Self.keepMarks(from: outDir, in: folder)
         try? fm.removeItem(at: outDir)
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+        // CubeCL's autotune log (on stderr) into this run's folder
+        _ = freopen(outDir.appendingPathComponent("cubecl-autotune.log").path, "a", stderr)
         // Starting splat: the checkpoint (resume) or the scan's dots (points.ply, Brush's default)
         let initPly = dataset.appendingPathComponent("init.ply")
         try? fm.removeItem(at: initPly)
