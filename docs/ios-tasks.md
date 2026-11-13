@@ -1,35 +1,47 @@
-# iOS tasks: CineX iPhone app
+# iPhone app (CineX.swiftpm): state and handoff
 
-Task list for whoever works on the iPhone version (`CineX.swiftpm`) on a Mac with Xcode and a LiDAR iPhone. To use it with Claude Code, open this repo and say: "Read docs/ios-tasks.md and work through it."
+State as of **Build 13 Nov 2026 13:22:13** (tested on an iPhone 15 Pro). Older background: `docs/android-to-ios-handoff.md`.
 
-The spec is `docs/android-to-ios-handoff.md`. Read it in full first. Section 1 lists the owner's product decisions.
+## Rules
+- Scans, recordings, screen videos, photos and renders show a real home. They never leave the owner's machines and
+  are never committed (`recordings/` and `harness-out/` are git-ignored). Saved data is never deleted.
+- No bundle ID, team ID, signing settings, API keys or tokens in commits. The Claude API key and the share-link
+  upload key are typed into the app by the user and kept in the Keychain.
+- Say what was and wasn't tested on a phone.
 
-## Ground rules
-- The Claude API key is typed into the app by the user only. It is never put in chat, in code, or in git.
-- Don't draw guessed objects such as cartoon furniture or labelled boxes. The owner removed these on purpose.
-- Walls, floor and ceiling come from RoomPlan, not from user taps.
-- Portrait only. The app targets iOS 17+ on LiDAR iPhones.
-- `android/` belongs to the Android work. Leave it unchanged.
-- Each task goes on its own branch with a PR into `main`, and the PR says what was tested on the phone. Zeynep merges.
+## Build and install
+1. Brush (the on-phone photo-real trainer): follow `tools/brush-ios/README.md` (clone Brush 1388f74, apply the patch,
+   pinned Cargo.lock, cargo for `aarch64-apple-ios`, `make-xcframework.sh`). Without `Vendor/BrushC.xcframework`
+   the app still builds, with a stand-in trainer.
+2. In `CineX.swiftpm/Package.swift`, set your own `bundleIdentifier` and pick your team in Xcode (Signing &
+   Capabilities). Keep these local: don't commit them.
+3. `cd CineX.swiftpm && xcodebuild -scheme RoomScape -destination 'generic/platform=iOS' -configuration Release
+   -allowProvisioningUpdates -derivedDataPath <build folder> build`, then
+   `xcrun devicectl device install app --device <your device id> <build folder>/Build/Products/Release-iphoneos/RoomScape.app`.
+4. Metal shaders are compiled at runtime from strings: check a changed shader on the Mac (CLAUDE.md).
 
-## Tasks, in order
-1. **Build it.** Build `CineX.swiftpm` for the attached iPhone and fix the compile errors. The merged Swift code (gear inventory, shoot planner, mesh overlay, frame check) has never been compiled together. Then run a RoomPlan scan and check that the saved scan opens.
-2. **Live discs while scanning.**
-   - From RoomPlan's `RoomCaptureSession.arSession` frames (`sceneDepth` + `confidenceMap`), build a 2 cm voxel point cloud with colour and a per-spot seen counter. Count once per depth frame, and call a spot solid after about 1 s of sightings.
-   - Draw each spot as a disc over the camera. The rim goes red → yellow → green, and solid spots shrink to faint dots.
-   - Show a status line: "Detail here: N% solid".
-   - Details are in handoff section 2, under "Live capture", "Seen counter" and "Live discs".
-3. **Save points and photos with the scan.**
-   - Store the point cloud and keyframes (photo + pose + intrinsics, about 1 per 20 cm moved or 15° turned, at most 80) next to the RoomPlan usdz and json, in `ScanStore.swift`.
-   - Show thumbnails on the home screen.
-4. **Splat view.** In the result view, show the points as surfels: PCA normals, a radius from point density, and snapping to planes. Each one is drawn as a disc lying on its surface, together with RoomPlan's walls and floor. Port `Surfels.java`.
-5. **Lighting preview.** Port `Lighting.java` and its shader, using the numbers in handoff section 3.
-   - Gear lights, people, a table and chairs.
-   - The room's own light stays in the image.
-   - Exposure is set for the face, with an f-stop readout.
-   - The panel can be closed.
-6. **If time allows:**
-   - Splat training with a live preview and a Pause button. Port `Trainer.java` to Metal compute.
-   - Improve scan using ARWorldMap relocalisation.
+## What works (phone-tested)
+- Live scan (`LiveCloud`, `LiveDiscs`, `DotCleanup`):
+  - only a centred capture zone, 0.72 × 0.7 of the screen, makes dots; it is drawn as a thin outline;
+  - a clearly closer, sure look replaces a dot;
+  - a dot that sure depth later sees clearly through is erased (`harness strays` replays a recording);
+  - dots are sized by their cell, so scanned surfaces read filled;
+  - not-yet-scanned gaps show amber stripes;
+  - one rotating hint (Move slowly / Go closer / Look around);
+  - the dot cores are drawn in a single pass (two passes caused the black flicker).
+- After Done, the scan is rebuilt from the recording, and the open room screen reloads in place.
+- Make photo-real (manual): on `PhotoRealScreen`, Brush trains on the phone in about 5 minutes. Memory safeguards:
+  - a refine needs 1700 MB available until two refines have run, then 800 MB;
+  - memory marks are kept in `<room>/splat/memory-marks/`;
+  - the "Photo-real memory test" switch on the home screen runs it without a new scan.
 
-After each task, summarise in two or three plain sentences what changed and what to try on the phone.
+## Open
+- Brush's first-run GPU bursts (about +2 GB at training steps 0 and 1 and at the first refine, under a second to
+  4 s): not autotune (logged); likely first-time kernel or pipeline compiles, unproven.
+- Rebuild see-through cleanup (`RebuildCleanup`, `harness rebuildstrays`) is written but not wired in. Inspect the
+  points it drops near real surfaces first.
+- Point colour from a photo where the point is actually visible (an occlusion check) is not done.
+- The pose guard near RoomPlan's size limit is untested in a big space.
+- The room screen doesn't keep the camera angle when it reloads.
+- Android to-do: capture zone, gap stripes, rotating hints, Brush photo-real. The "This spot / Room" bars are
+  hidden in code, but no APK has been built with that yet.

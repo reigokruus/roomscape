@@ -15,12 +15,20 @@ brush-c goes from 582 crates to 351 with no desktop-only crates left (checked wi
   `cubecl-ios-metal.patch` makes iOS pick Metal; Brush uses a local copy of cubecl at `vendor/cubecl` with the patch
   (Brush's Cargo.toml: `[patch."https://github.com/tracel-ai/cubecl"]` for every cubecl crate, `exclude = ["vendor"]`).
 
-Build (Rust 1.88+, `rustup target add aarch64-apple-ios`):
+Build (stable Rust; built with rustc 1.99.1, `rustup target add aarch64-apple-ios`; Xcode 26). From a folder outside
+this repo, with `P` = this folder (`.../tools/brush-ios`):
 
-    git clone https://github.com/ArthurBrussee/brush && cd brush && git checkout 1388f74 && git apply ../brush-ios.patch
-    git clone https://github.com/tracel-ai/cubecl vendor/cubecl && (cd vendor/cubecl && git checkout 467522442c7b && git apply ../../../cubecl-ios-metal.patch)
+    git clone https://github.com/ArthurBrussee/brush && cd brush && git checkout 1388f74
+    git apply $P/brush-ios.patch          # everything, cumulative (the other brush-ios-*.patch files are single rounds, for reading)
+    cp $P/Cargo.lock .                    # burn is taken from its main branch: this lock pins the commit that was built (faec398)
+    git clone https://github.com/tracel-ai/cubecl vendor/cubecl
+    (cd vendor/cubecl && git checkout 467522442c7b && git apply $P/cubecl-ios-metal.patch)
     RUSTFLAGS="-C embed-bitcode=no" CARGO_PROFILE_RELEASE_LTO=false cargo build -p brush-c --release --target aarch64-apple-ios
-    # -> target/aarch64-apple-ios/release/libbrush_c.a
+    # -> target/aarch64-apple-ios/release/libbrush_c.a (about 375 MB)
+    $P/make-xcframework.sh "$PWD"         # -> CineX.swiftpm/Vendor/BrushC.xcframework (git-ignored)
+
+Checked 13 Nov 2026: applying both patches to clean checkouts of 1388f74 and 467522442c7b gives exactly the tree the
+phone builds of that day were made from.
 
 Into the iPhone app: `tools/brush-ios/make-xcframework.sh <brush checkout>` makes CineX.swiftpm/Vendor/BrushC.xcframework
 (git-ignored); Package.swift links it when it's there, and SplatPreview uses BrushTrainer.swift instead of the stand-in.

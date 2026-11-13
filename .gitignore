@@ -9,3 +9,8 @@ tools/heavy-queue.log
 builds-wip/
 CineX.swiftpm/Vendor/
 tools/brush-mac/
+
+# Mac-side renders and tool output (may show a real home)
+harness-out/
+# Rust build output
+/target/
