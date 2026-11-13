@@ -55,3 +55,8 @@ State as of **Build 13 Nov 2026 13:22:13** (tested on an iPhone 15 Pro). Older b
   hidden in code, but no APK has been built with that yet.
 - Photo-real tab: the small-screen width was checked only on rk's phone (no iPhone SE / 375-pt check yet), and
   standing and top view hand over a look point 2 m ahead.
+
+## Android too
+
+From 13 Nov you also own the Android UI, in the emulator: see [android-dev.md](android-dev.md) for the branch, how
+to run it, and what doesn't work there.
