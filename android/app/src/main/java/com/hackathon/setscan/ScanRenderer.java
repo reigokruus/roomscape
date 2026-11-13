@@ -175,7 +175,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return String.format(java.util.Locale.US, "cpu %.1f cores, depth %d ms old, heat %d", cpuCores, age, thermal); }
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
     static final boolean AUTO_ERASE = false;   // the 2-frame eraser stays off (12 Nov); see-through erase runs with the Android-tuned rule in carve()
-    private int erasedSec, revivedSec, speckSec; private long eraseLogAt;
+    private int erasedSec, revivedSec, speckSec, strongSec; private long eraseLogAt;
     static final int SPECK_FRAMES = 10;   // a one-reading dot not seen again in this many depth frames (carve)   // see-through erases and revivals, logged once a second
     // ---- Rebuild frames: picture + pose + intrinsics + raw depth with confidence, twice a second (rk 12 Nov) ----
     static volatile boolean SAVE_REBUILD = true;
@@ -5991,6 +5991,13 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private final int[] seenStamp = new int[MAX_POINTS];
     private final byte[] thru = new byte[MAX_POINTS]; // depth frames that saw clearly past this point
     private int carveCursor, carvedTotal;
+    /** Dots with a see-through strike are checked again on every depth frame (rk 13 Nov 16:57: strays cleared "quite
+     *  slowly and intensely doing orbiting": round robin reached each dot only every ~6 depth frames, so 10 strikes took
+     *  ~60 frames). A dot checked this frame carries the frame in carveStamp, so round robin skips it. */
+    private static final int HOT_MAX = 40000;
+    private int[] hot = new int[HOT_MAX], hotCur = new int[HOT_MAX];
+    private int hotN;
+    private final int[] carveStamp = new int[MAX_POINTS];
 
     /**
      * See-through clearing: a point the camera later sees past (the measured surface is clearly farther away at that pixel,
@@ -6036,9 +6043,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         // (rk 10 Nov 10:31 scan: 19 fps), 60k ~10 ms (23:29 scan); 40k while the depth thread keeps up, else 20k.
         if (depthLate()) return;   // ARCore first: no extra pass while its frames come late
         int budget = Math.min(n, budgetMax), removed = 0;
-        for (int it = 0; it < budget; it++) {
-            int i = carveCursor++;
-            if (carveCursor >= n) carveCursor = 0;
+        int[] hs = hot; hot = hotCur; hotCur = hs; int hotTake = hotN; hotN = 0;   // last frame's struck dots first
+        for (int it = 0; it < hotTake + budget; it++) {
+            int i;
+            if (it < hotTake) { i = hotCur[it]; if (i >= n) continue; }
+            else { i = carveCursor++; if (carveCursor >= n) carveCursor = 0; if (carveStamp[i] == stampFrame) continue; }
+            carveStamp[i] = stampFrame;
             if (obs[i] == 0 || seenStamp[i] == stampFrame) continue; // dead, or seen in this very frame
             float x = pos.get(i * 3), y = pos.get(i * 3 + 1), z = pos.get(i * 3 + 2);
             float zc = v[2] * x + v[6] * y + v[10] * z + v[14];
@@ -6071,8 +6081,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             int c0 = dbuf.get(vv * dRow + u * dPix) & 0xFFFF, tol = c0 / 25 + 20;
             if (Math.abs((dbuf.get(vv * dRow + (u - 1) * dPix) & 0xFFFF) - c0) > tol || Math.abs((dbuf.get(vv * dRow + (u + 1) * dPix) & 0xFFFF) - c0) > tol
                     || Math.abs((dbuf.get((vv - 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol || Math.abs((dbuf.get((vv + 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol) continue;
-            if (verdict == 0) { if (thru[i] != 0) thru[i]--; continue; }   // seen where it is: one count back
-            int t = Math.min(255, (thru[i] & 0xFF) + 1);
+            if (verdict == 0) { if (thru[i] != 0 && --thru[i] != 0 && hotN < HOT_MAX) hot[hotN++] = i; continue; }   // seen where it is: one count back
+            // Strong evidence counts twice: a dot within 1.5 m, and a sure reading (80%+) at least max(30 cm, 25%) past it.
+            int add = 1;
+            if (dp < 1.5f && c0 * 0.001f > (dp + Math.max(0.30f, 0.25f * dp)) * depthK + depthC
+                    && (cbuf == null || (cbuf.get(vv * cRow + u * cPix) & 0xFF) >= PAINT_MIN)) { add = 2; strongSec++; }
+            int t = Math.min(255, (thru[i] & 0xFF) + add);
             thru[i] = (byte) t;
             // See-through erase (rk 13 Nov: a dot the sensor later sees through is removed), Android-tuned: 10 frames
             // (net) seeing clearly past it (the iPhone's 2 / 3 flickered on the S24).
@@ -6081,12 +6095,12 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 obs[i] = 0; thru[i] = 0;
                 col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done; a new reading in its cell brings it back
                 removed++;
-            }
+            } else if (hotN < HOT_MAX) hot[hotN++] = i;
         }
         if (removed > 0) { refined = true; carvedTotal += removed; erasedSec += removed; }
         if (System.currentTimeMillis() - eraseLogAt >= 1000) {
-            if (erasedSec > 0 || revivedSec > 0) log("see-through: erased " + erasedSec + " (one-off specks " + speckSec + "), revived " + revivedSec);
-            erasedSec = 0; revivedSec = 0; speckSec = 0; eraseLogAt = System.currentTimeMillis();
+            if (erasedSec > 0 || revivedSec > 0) log("see-through: erased " + erasedSec + " (one-off specks " + speckSec + "), revived " + revivedSec + ", strong looks " + strongSec + ", struck dots rechecked " + hotN);
+            erasedSec = 0; revivedSec = 0; speckSec = 0; strongSec = 0; eraseLogAt = System.currentTimeMillis();
         }
     }
 
