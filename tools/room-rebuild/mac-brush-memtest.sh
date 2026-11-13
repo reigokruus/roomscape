@@ -29,7 +29,7 @@ run() {  # name, env assignments…, then -- binary steps-flag
   local pid=$! t0=$(perl -MTime::HiRes=time -e 'printf "%.2f", time') peak=0
   while kill -0 $pid 2>/dev/null; do
     local now=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
-    local fp=$(/usr/bin/footprint -p $pid 2>/dev/null | awk '/Footprint:/ {v=$(NF-4); u=$(NF-3); if (u=="KB") v/=1024; else if (u=="GB") v*=1024; printf "%d", v; exit}')
+    local fp=$(/usr/bin/footprint -p $pid 2>/dev/null | awk '/Footprint:/ {for (i = 1; i < NF; i++) if ($i == "Footprint:") {v = $(i+1); u = $(i+2)}; if (u == "KB") v /= 1024; else if (u == "GB") v *= 1024; printf "%d", v; exit}')
     [[ -z $fp ]] && continue
     echo "$(printf '%.1f' $((now - t0))) $fp" >> $d/samples.txt
     if (( fp > peak )); then peak=$fp; /usr/bin/footprint -p $pid > $d/peak.txt 2>/dev/null; fi
