@@ -1,0 +1,962 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 9904cb9f..142107bb 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -25,6 +25,8 @@ members = [
+     "crates/rrfd",
+ ]
+ default-members = ["apps/brush-app"]
++# RoomScape change: the vendored cubecl copy is its own workspace
++exclude = ["vendor"]
+ 
+ [workspace.package]
+ edition = "2024"
+@@ -333,3 +335,21 @@ wgpu-core            = { git = "https://github.com/ArthurBrussee/wgpu", branch =
+ wgpu-hal             = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
+ wgpu-types           = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
+ naga                 = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
++
++# RoomScape change (12 Nov 2026): a local copy of cubecl (the commit burn uses) whose wgpu backend picks Metal on iOS
++# too (vendor/cubecl/crates/cubecl-wgpu/src/graphics.rs); every cubecl crate comes from the copy so there is one cubecl.
++[patch."https://github.com/tracel-ai/cubecl"]
++cubecl = { path = "vendor/cubecl/crates/cubecl" }
++cubecl-common = { path = "vendor/cubecl/crates/cubecl-common" }
++cubecl-core = { path = "vendor/cubecl/crates/cubecl-core" }
++cubecl-cpp = { path = "vendor/cubecl/crates/cubecl-cpp" }
++cubecl-environment = { path = "vendor/cubecl/crates/cubecl-environment" }
++cubecl-ir = { path = "vendor/cubecl/crates/cubecl-ir" }
++cubecl-macros = { path = "vendor/cubecl/crates/cubecl-macros" }
++cubecl-macros-internal = { path = "vendor/cubecl/crates/cubecl-macros-internal" }
++cubecl-opt = { path = "vendor/cubecl/crates/cubecl-opt" }
++cubecl-runtime = { path = "vendor/cubecl/crates/cubecl-runtime" }
++cubecl-server = { path = "vendor/cubecl/crates/cubecl-server" }
++cubecl-std = { path = "vendor/cubecl/crates/cubecl-std" }
++cubecl-wgpu = { path = "vendor/cubecl/crates/cubecl-wgpu" }
++cubecl-zspace = { path = "vendor/cubecl/crates/cubecl-zspace" }
+diff --git a/apps/brush-c/src/lib.rs b/apps/brush-c/src/lib.rs
+index c5a8a0eb..10bf0aaf 100644
+--- a/apps/brush-c/src/lib.rs
++++ b/apps/brush-c/src/lib.rs
+@@ -47,6 +47,13 @@ pub struct TrainOptions {
+     pub max_resolution: u32,
+     pub export_every: u32,
+     pub output_path: *const c_char,
++    // RoomScape change (12 Nov 2026): phone limits and a cancel switch, appended so the layout above stays the same.
++    /// Most splats the model may grow to (0 = Brush's default, 10 million: far too many for a phone).
++    pub max_splats: u32,
++    /// Spherical-harmonics degree (0-3; 255 = Brush's default). Lower = less memory and faster on a phone.
++    pub sh_degree: u32,
++    /// If not null: training stops (with an error code) as soon as the byte it points to becomes non-zero.
++    pub cancel: *const u8,
+ }
+ 
+ impl TrainOptions {
+@@ -67,8 +74,22 @@ impl TrainOptions {
+         process_args.train_config.total_train_iters = self.total_train_steps;
+         process_args.train_config.refine_every = self.refine_every;
+         process_args.load_config.max_resolution = self.max_resolution;
++        // RoomScape change (12 Nov 2026): the GPU-ready picture cache defaults to 6 GiB on native targets; on a phone
++        // with about 3.4 GB for the whole app its filling and the parallel loaders swung the footprint by about 2 GB
++        // while loading. 384 MiB holds a phone dataset (about 200 pictures at 720x540).
++        #[cfg(any(target_os = "ios", target_os = "android"))]   // RoomScape change: Android too
++        {
++            process_args.load_config.max_scene_batch_cache_size = 384 << 20;
++        }
+         process_args.process_config.export_every = self.export_every;
+         process_args.process_config.eval_save_to_disk = true;
++        // RoomScape change: phone limits
++        if self.max_splats > 0 {
++            process_args.train_config.max_splats = self.max_splats;
++        }
++        if self.sh_degree <= 3 {
++            process_args.model_config.sh_degree = self.sh_degree;
++        }
+         process_args
+     }
+ }
+@@ -124,6 +145,13 @@ pub unsafe extern "C" fn train_and_save(
+             unsafe { CStr::from_ptr(dataset_path).to_string_lossy().into_owned() };
+ 
+         let source = DataSource::Path(dataset_path_str);
++        // RoomScape change: where to write why training failed (brush-error.txt next to the export), for the app's log
++        // SAFETY: Option is checked to not be null above; caller guarantees output_path is a valid C-string if not null.
++        let error_file = unsafe {
++            let o = &*options;
++            if o.output_path.is_null() { None } else { Some(std::path::PathBuf::from(CStr::from_ptr(o.output_path).to_string_lossy().into_owned()).join("brush-error.txt")) }
++        };
++        let report = |msg: String| { if let Some(f) = &error_file { let _ = std::fs::write(f, msg); } };
+ 
+         // SAFETY: Option is checked to not be null before the future.
+         let train_options = unsafe { *options };
+@@ -135,17 +163,31 @@ pub unsafe extern "C" fn train_and_save(
+             .expect("Failed to create tokio runtime")
+             .block_on(async move {
+                 let device = DEVICE.get_or_init(burn_init_setup).await.clone();
++                // RoomScape change (12 Nov 2026): kept to free the loading buffers once the dataset is in (below)
++                let cleanup_device = device.clone();
+                 let mut process =
+                     create_process_with_device(source, device, async move |_| Some(process_args));
+ 
++                let cancel = train_options.cancel;
+                 while let Some(message_result) = process.stream.next().await {
++                    // RoomScape change: stop when the app asks (the byte is set from another thread).
++                    // SAFETY: the caller keeps `cancel` valid for the whole call (documented in TrainOptions).
++                    if !cancel.is_null() && unsafe { std::ptr::read_volatile(cancel) } != 0 {
++                        return TrainExitCode::Error;
++                    }
+                     match message_result {
+                         Ok(message) => {
++                            // RoomScape change (12 Nov 2026): loading the pictures leaves about 2.2 GB reserved on the
++                            // phone; give the unused part back before training's first refines add to it
++                            if matches!(message, ProcessMessage::DoneLoading) {
++                                cleanup_device.memory_cleanup();
++                            }
+                             if let Ok(progress_message) = message.try_into() {
+                                 progress_callback(progress_message, user_data);
+                             }
+                         }
+-                        Err(_) => {
++                        Err(e) => {
++                            report(format!("{e:?}"));   // RoomScape change: say why
+                             return TrainExitCode::Error;
+                         }
+                     }
+@@ -155,5 +197,18 @@ pub unsafe extern "C" fn train_and_save(
+             })
+     }));
+ 
++    // RoomScape change: a panic's message goes to brush-error.txt too (the app reads it into its log)
++    if let Err(payload) = &result {
++        let msg = payload.downcast_ref::<String>().cloned()
++            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
++            .unwrap_or_else(|| "panic (no message)".to_owned());
++        // SAFETY: options was checked to not be null at the top; output_path is a valid C-string if not null.
++        let out = unsafe { (*options).output_path };
++        if !out.is_null() {
++            // SAFETY: as above.
++            let dir = unsafe { CStr::from_ptr(out) }.to_string_lossy().into_owned();
++            let _ = std::fs::write(std::path::Path::new(&dir).join("brush-error.txt"), format!("panic: {msg}"));
++        }
++    }
+     result.unwrap_or(TrainExitCode::Error)
+ }
+diff --git a/crates/brush-dataset/src/scene_loader.rs b/crates/brush-dataset/src/scene_loader.rs
+index 7d23af07..3e2d26e4 100644
+--- a/crates/brush-dataset/src/scene_loader.rs
++++ b/crates/brush-dataset/src/scene_loader.rs
+@@ -75,6 +75,10 @@ impl SceneLoader {
+         // contention without overlapping I/O.
+         let n_actors = if cfg!(target_family = "wasm") {
+             1
++        } else if cfg!(any(target_os = "ios", target_os = "android")) {   // RoomScape change: Android too
++            // RoomScape change (12 Nov 2026): two loaders on iOS, not one per core: each decodes and uploads at
++            // the same time, and together they briefly needed about 2 GB of the phone's 3.4 GB app limit
++            2
+         } else {
+             std::thread::available_parallelism().map_or(8, |p| p.get())
+         };
+diff --git a/crates/brush-process/src/lib.rs b/crates/brush-process/src/lib.rs
+index 2cac2366..1a359310 100644
+--- a/crates/brush-process/src/lib.rs
++++ b/crates/brush-process/src/lib.rs
+@@ -28,9 +28,60 @@ use brush_vfs::SendNotWasm;
+ use tokio_stream::{Stream, StreamExt};
+ 
+ fn burn_options() -> RuntimeOptions {
++    cubecl_config();
+     RuntimeOptions {
+         tasks_max: 64,
+-        memory_config: burn_wgpu::MemoryConfiguration::ExclusivePages,
++        memory_config: memory_config(),
++    }
++}
++
++/// RoomScape change (12 Nov 2026): on iOS an app gets about 3.4 GB in all, and with `ExclusivePages` (one page per
++/// allocation in exponentially spaced size buckets, kept for reuse) the refine steps' big temporaries pushed the
++/// footprint about 2 GB over its 1 GB baseline, to 3.0 GB, and iOS stopped the app. A `Direct` pool allocates exact
++/// sizes and gives free memory back to the driver once more than `RECLAIM_AT` is reserved. Elsewhere unchanged unless
++/// `BRUSH_DIRECT_POOL=1` (to measure the difference on a Mac).
++fn memory_config() -> burn_wgpu::MemoryConfiguration {
++    // 512 MiB (was 1 GiB, 12 Nov 21:59): the first refines after loading still reached 2.4 GB of the phone's 3.4 GB
++    const RECLAIM_AT: u64 = 512 << 20;
++    let direct = cfg!(any(target_os = "ios", target_os = "android")) ||   // RoomScape change: Android too
++        std::env::var("BRUSH_DIRECT_POOL").is_ok_and(|v| v == "1");
++    if direct {
++        burn_wgpu::MemoryConfiguration::Custom {
++            pool_options: vec![burn::cubecl::MemoryPoolOptions {
++                pool_type: burn::cubecl::PoolType::Direct { reclaim_at: Some(RECLAIM_AT) },
++                dealloc_period: None,
++            }],
++        }
++    } else {
++        burn_wgpu::MemoryConfiguration::ExclusivePages
++    }
++}
++
++/// RoomScape change (13 Nov 2026): CubeCL reads its settings (cubecl.toml, CUBECL_* env vars) only where its `std_io`
++/// cfg is on, which in this vendored version is Windows, Linux, macOS and Android, not iOS (cubecl-runtime build.rs,
++/// `RuntimeConfig::get`). So on the phone CUBECL_AUTOTUNE_LEVEL, which the app sets, never applied. Here, before the
++/// device exists, the same settings are installed from code on iOS: the autotune level from CUBECL_AUTOTUNE_LEVEL, and
++/// with BRUSH_AUTOTUNE_LOG=1 CubeCL's autotune log on stderr (the app's memory test sends stderr to a file), to see
++/// whether the ~2 GB bursts at the first steps and the first refines are autotune benchmarks.
++fn cubecl_config() {
++    #[cfg(target_os = "ios")]
++    {
++        use burn::cubecl::config::autotune::{AutotuneLevel, AutotuneLogLevel};
++        use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
++        let mut cfg = CubeClRuntimeConfig::default();
++        match std::env::var("CUBECL_AUTOTUNE_LEVEL").as_deref() {
++            Ok("minimal" | "0") => cfg.autotune.level = AutotuneLevel::Minimal,
++            Ok("balanced" | "1") => cfg.autotune.level = AutotuneLevel::Balanced,
++            Ok("extensive" | "2") => cfg.autotune.level = AutotuneLevel::Extensive,
++            Ok("full" | "3") => cfg.autotune.level = AutotuneLevel::Full,
++            _ => {}
++        }
++        if std::env::var("BRUSH_AUTOTUNE_LOG").is_ok_and(|v| v == "1") {
++            cfg.autotune.logger.stderr = true;
++            cfg.autotune.logger.level = AutotuneLogLevel::Minimal;
++        }
++        // false when CubeCL's settings were already read (a second training in the same app run): they stay
++        let _ = CubeClRuntimeConfig::try_set(cfg);
+     }
+ }
+ 
+diff --git a/crates/brush-process/src/train_stream.rs b/crates/brush-process/src/train_stream.rs
+index abf9c0a4..fa710f9c 100644
+--- a/crates/brush-process/src/train_stream.rs
++++ b/crates/brush-process/src/train_stream.rs
+@@ -52,6 +52,7 @@ pub(crate) async fn train_stream(
+     let mut rng = rand::rngs::StdRng::seed_from_u64(process_config.seed);
+ 
+     log::info!("Loading dataset");
++    let m = brush_train::memmarks::mark("loading-marks", 0, "load_dataset (read, decode index)");
+     let load_result = load_dataset(vfs.clone(), &train_stream_config.load_config)
+         .instrument(trace_span!("Load dataset"))
+         .await?;
+@@ -65,6 +66,8 @@ pub(crate) async fn train_stream(
+             .await;
+     }
+ 
++    m.end();
++    let m = brush_train::memmarks::mark("loading-marks", 0, "init splats and bounds");
+     let dataset = load_result.dataset;
+ 
+     log::info!("Log scene to rerun");
+@@ -156,7 +159,9 @@ pub(crate) async fn train_stream(
+         })
+         .await;
+ 
++    m.end();
+     emitter.emit(ProcessMessage::DoneLoading).await;
++    let m = brush_train::memmarks::mark("loading-marks", 0, "SceneLoader + trainer setup");
+ 
+     // Start with memory cleared out.
+     device.memory_cleanup();
+@@ -187,6 +192,7 @@ pub(crate) async fn train_stream(
+     trainer.set_view_cams(view_cams.clone());
+ 
+     // Get the dataset name from the base path (if available) for interpolation.
++    m.end();
+     let dataset_name = vfs
+         .base_path()
+         .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+@@ -207,6 +213,9 @@ pub(crate) async fn train_stream(
+     let export_path = base_path.join(&export_path_str);
+     // Normalize path components
+     let export_path: PathBuf = export_path.components().collect();
++    // RoomScape change (13 Nov 2026): where the iOS memory marks go (loading-marks / refine-marks .jsonl)
++    brush_train::memmarks::set_dir(&export_path);
++    REFINES_RUN.store(0, std::sync::atomic::Ordering::Relaxed);
+     let sh_degree = init_splats.sh_degree();
+ 
+     let training_steps = train_stream_config.train_config.total_train_iters;
+@@ -301,6 +310,7 @@ pub(crate) async fn train_stream(
+ 
+         let step_time = Instant::now();
+ 
++        let mb = (iter < 30).then(|| brush_train::memmarks::mark("loading-marks", iter, "next_batch"));
+         let batch = dataloader
+             .next_batch()
+             .instrument(trace_span!("Wait for next data batch"))
+@@ -311,7 +321,13 @@ pub(crate) async fn train_stream(
+         // `step` immediately replaces `splats` with the returned value, so we
+         // can move it here instead of cloning every iteration.
+         let diff_splats = splats.train();
++        if let Some(m) = mb { m.end(); }
++        let ms = (iter < 30).then(|| brush_train::memmarks::mark("loading-marks", iter, "train step"));
++        // every later step too, written only when its footprint jumps 256 MB or more (where else bursts happen)
++        let burst = (iter >= 30).then(|| brush_train::memmarks::quiet("step-marks", iter, "train step (burst)"));
+         let (new_diff_splats, stats) = trainer.step(batch, diff_splats).await;
++        if let Some(m) = ms { m.end(); }
++        if let Some(m) = burst { m.end_if_jump(256, &[("intersections", trainer.last_intersections as u64)]); }
+         splats = new_diff_splats.valid();
+ 
+         // Phase-local iteration for refine gating
+@@ -331,9 +347,11 @@ pub(crate) async fn train_stream(
+         let refine = if phase_iter > 0
+             && phase_iter.is_multiple_of(train_stream_config.train_config.refine_every)
+             && phase_progress <= 0.95
++            && refine_headroom_ok(device, iter, &export_path)
+         {
+             let (new_splats, refine_stats) = trainer.refine(iter, splats).await;
+             splats = new_splats;
++            REFINES_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+             refine_stats
+         } else {
+             RefineStats {
+@@ -649,3 +667,40 @@ async fn export_checkpoint(
+         .context(format!("Failed to export ply {export_path:?}"))?;
+     Ok(())
+ }
++
++/// RoomScape change (13 Nov 2026): on iOS a refine only runs if the app has room for it. iOS stops an app that crosses
++/// its memory limit (about 3.4 GB on an iPhone 15 Pro, everything included), and a refine briefly needs about 2 GB on
++/// top of training (measured on the phone: 818 -> 2,847 MB at step 200, 1,411 -> 3,056 MB at step 600). So before each
++/// refine unused memory is given back, and the refine runs only with at least 2.25 GB available (the 2.0 GB spike plus
++/// 0.25 GB to spare); otherwise it is skipped (training goes on with the splats it has) and noted in refine-skips.txt
++/// next to the export ("step availableMB footprintMB"), which the app reports. Always true elsewhere.
++/// Two stages (13 Nov, measured with marks on the phone: only the first two refines of a run burst, by about 1.6 GB
++/// for 0.8-3 s, when GPU work first meets the new splat counts; later ones need about 60 MB): until two refines have
++/// run, BRUSH_REFINE_MIN_AVAIL_MB (default 1700) must be available, after that BRUSH_REFINE_MIN_AVAIL_LATER_MB
++/// (default 800).
++// RoomScape change (13 Nov 2026): also on Android (the S24), with MemAvailable as the measure.
++#[cfg(any(target_os = "ios", target_os = "android"))]
++fn refine_headroom_ok(device: &crate::ProcessDevice, iter: u32, export_path: &Path) -> bool {
++    let env_mb = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default);
++    let early = REFINES_RUN.load(std::sync::atomic::Ordering::Relaxed) < 2;
++    let needed: u64 = if early { env_mb("BRUSH_REFINE_MIN_AVAIL_MB", 1700) } else { env_mb("BRUSH_REFINE_MIN_AVAIL_LATER_MB", 800) } << 20;
++    device.memory_cleanup();
++    let avail = brush_train::memmarks::available();
++    if avail >= needed {
++        return true;
++    }
++    use std::io::Write;
++    let _ = std::fs::create_dir_all(export_path);
++    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(export_path.join("refine-skips.txt")) {
++        let _ = writeln!(f, "{iter} {} {}", avail >> 20, brush_train::memmarks::footprint() >> 20);
++    }
++    false
++}
++
++/// Refines that ran in this process's current training (reset when a training starts).
++static REFINES_RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++
++#[cfg(not(any(target_os = "ios", target_os = "android")))]
++fn refine_headroom_ok(_device: &crate::ProcessDevice, _iter: u32, _export_path: &Path) -> bool {
++    true
++}
+diff --git a/crates/brush-render/src/bwd/burn_glue.rs b/crates/brush-render/src/bwd/burn_glue.rs
+index c544157a..64638780 100644
+--- a/crates/brush-render/src/bwd/burn_glue.rs
++++ b/crates/brush-render/src/bwd/burn_glue.rs
+@@ -233,6 +233,9 @@ pub struct SplatOutputDiff {
+     /// Rendered image, on the autodiff graph (this is what the loss backprops through).
+     pub img: Tensor<3>,
+     pub num_visible: u32,
++    /// RoomScape change (13 Nov 2026): splat-tile intersections of this render (what sizes the sort and raster
++    /// buffers), for the iOS memory marks.
++    pub num_intersections: u32,
+     /// Per-splat visibility aux — on the **inner** backend (no gradients).
+     pub visible: Tensor<1>,
+     /// Per-splat max screen radius aux — on the **inner** backend (no gradients).
+@@ -325,6 +328,7 @@ pub async fn render_splats_with_pass(
+     SplatOutputDiff {
+         img: Tensor::from_dispatch(output.out_img),
+         num_visible: output.aux.num_visible,
++        num_intersections: output.aux.num_intersections,
+         visible: Tensor::from_dispatch(output.aux.visible).without_autodiff(),
+         max_radius: Tensor::from_dispatch(output.aux.max_radius).without_autodiff(),
+         opacities: Tensor::from_dispatch(output.aux.opacities).without_autodiff(),
+diff --git a/crates/brush-rerun/Cargo.toml b/crates/brush-rerun/Cargo.toml
+index 8a48e373..273934af 100644
+--- a/crates/brush-rerun/Cargo.toml
++++ b/crates/brush-rerun/Cargo.toml
+@@ -18,7 +18,8 @@ brush-dataset.path = "../brush-dataset"
+ 
+ tokio.workspace = true
+ 
+-[target.'cfg(not(target_family = "wasm"))'.dependencies]
++# RoomScape change (12 Nov 2026): no rerun SDK on iOS either (the no-op tools, as on the web).
++[target.'cfg(not(any(target_family = "wasm", target_os = "ios", target_os = "android")))'.dependencies]
+ rerun.workspace = true
+ glam.workspace = true
+ image.workspace = true
+diff --git a/crates/brush-rerun/src/lib.rs b/crates/brush-rerun/src/lib.rs
+index fdfc0271..468bde15 100644
+--- a/crates/brush-rerun/src/lib.rs
++++ b/crates/brush-rerun/src/lib.rs
+@@ -1,7 +1,8 @@
++// RoomScape change (12 Nov 2026): iOS uses the no-op visualize tools, like WASM (no rerun SDK in the app).
+ use clap::Args;
+ use serde::{Deserialize, Serialize};
+ 
+-#[cfg(not(target_family = "wasm"))]
++#[cfg(not(any(target_family = "wasm", target_os = "ios", target_os = "android")))]
+ pub mod burn_to_rerun;
+ 
+ // visualize_tools has a noop implementation for WASM.
+diff --git a/crates/brush-rerun/src/visualize_tools.rs b/crates/brush-rerun/src/visualize_tools.rs
+index 032c8337..783e3743 100644
+--- a/crates/brush-rerun/src/visualize_tools.rs
++++ b/crates/brush-rerun/src/visualize_tools.rs
+@@ -1,16 +1,16 @@
+ #![allow(unused_imports)]
+ 
+ pub struct VisualizeTools {
+-    #[cfg(not(target_family = "wasm"))]
++    #[cfg(not(any(target_family = "wasm", target_os = "ios", target_os = "android")))]
+     rec: rerun::RecordingStream,
+     /// Tracks which eval view indices have had their GT image logged. GT
+     /// images never change, so we log them once as static instead of paying
+     /// the full readback + send cost every eval iter.
+-    #[cfg(not(target_family = "wasm"))]
++    #[cfg(not(any(target_family = "wasm", target_os = "ios", target_os = "android")))]
+     gt_logged: std::sync::Mutex<std::collections::HashSet<u32>>,
+ }
+ 
+-#[cfg(not(target_family = "wasm"))]
++#[cfg(not(any(target_family = "wasm", target_os = "ios", target_os = "android")))]
+ mod visualize_tools_impl {
+     use std::sync::Arc;
+ 
+@@ -695,7 +695,7 @@ mod visualize_tools_impl {
+     }
+ }
+ 
+-#[cfg(target_family = "wasm")]
++#[cfg(any(target_family = "wasm", target_os = "ios", target_os = "android"))]
+ mod visualize_tools_impl {
+     use std::sync::Arc;
+ 
+diff --git a/crates/brush-train/src/lib.rs b/crates/brush-train/src/lib.rs
+index b388faae..eddffa19 100644
+--- a/crates/brush-train/src/lib.rs
++++ b/crates/brush-train/src/lib.rs
+@@ -5,6 +5,7 @@ pub mod eval;
+ pub mod lod;
+ pub mod msg;
+ pub mod train;
++pub mod memmarks;
+ 
+ mod adam_scaled;
+ mod multinomial;
+diff --git a/crates/brush-train/src/memmarks.rs b/crates/brush-train/src/memmarks.rs
+new file mode 100644
+index 00000000..99fff3ed
+--- /dev/null
++++ b/crates/brush-train/src/memmarks.rs
+@@ -0,0 +1,196 @@
++//! RoomScape change (13 Nov 2026): memory marks on iOS, to find what takes the phone's memory about 2 GB up at the
++//! start of training and at every refine (measured from the app, but not which part of Brush).
++//!
++//! `mark(file, step, name)` ... `.end()` writes one JSON line {step, name, before_mb, after_mb, peak_mb, avail_mb, ms}
++//! to `<dir>/<file>.jsonl`. A background thread samples the process footprint every 20 ms, so a peak that lasts well
++//! under a second between `mark` and `end` is caught. Lines are kept in memory until `set_dir` says where to write.
++//! Everywhere but iOS every call is a no-op.
++
++#[cfg(any(target_os = "ios", target_os = "android"))]   // RoomScape change: Android too (13 Nov 2026)
++mod imp {
++    use std::io::Write;
++    use std::path::PathBuf;
++    use std::sync::Mutex;
++    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++    use std::time::Instant;
++
++    static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
++    static PENDING: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
++    static PEAK: AtomicU64 = AtomicU64::new(0);
++    static SAMPLING: AtomicBool = AtomicBool::new(false);
++
++    #[cfg(target_os = "ios")]
++    unsafe extern "C" {
++        static mach_task_self_: u32;
++        fn task_info(target: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
++        fn os_proc_available_memory() -> usize;
++    }
++
++    /// The process footprint in bytes (task_vm_info.phys_footprint: what iOS's memory limit counts).
++    #[cfg(target_os = "ios")]
++    pub fn footprint() -> u64 {
++        let mut buf = [0i32; 128];
++        let mut count: u32 = 128;
++        // SAFETY: TASK_VM_INFO (22) fills at most `count` 32-bit words into `buf`; phys_footprint sits at byte 144
++        // (checked against the SDK's task_vm_info_data_t).
++        unsafe {
++            if task_info(mach_task_self_, 22, buf.as_mut_ptr(), &mut count) != 0 {
++                return 0;
++            }
++            std::ptr::read_unaligned((buf.as_ptr() as *const u8).add(144) as *const u64)
++        }
++    }
++
++    #[cfg(target_os = "ios")]
++    pub fn available() -> u64 {
++        // SAFETY: a plain libSystem query (iOS 13+).
++        unsafe { os_proc_available_memory() as u64 }
++    }
++
++    /// Android: the process's resident memory (/proc/self/statm, pages); GPU memory is shared with the system there.
++    #[cfg(target_os = "android")]
++    pub fn footprint() -> u64 {
++        std::fs::read_to_string("/proc/self/statm")
++            .ok()
++            .and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
++            .map_or(0, |pages| pages * 4096)
++    }
++
++    /// Android: the system's MemAvailable (/proc/meminfo): what the low-memory killer watches.
++    #[cfg(target_os = "android")]
++    pub fn available() -> u64 {
++        std::fs::read_to_string("/proc/meminfo")
++            .ok()
++            .and_then(|s| {
++                s.lines()
++                    .find(|l| l.starts_with("MemAvailable:"))
++                    .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
++            })
++            .map_or(u64::MAX, |kb| kb * 1024)
++    }
++
++    fn start_sampler() {
++        if SAMPLING.swap(true, Ordering::SeqCst) {
++            return;
++        }
++        std::thread::Builder::new()
++            .name("memmarks".into())
++            .spawn(|| {
++                loop {
++                    PEAK.fetch_max(footprint(), Ordering::Relaxed);
++                    std::thread::sleep(std::time::Duration::from_millis(20));
++                }
++            })
++            .ok();
++    }
++
++    pub fn set_dir(dir: &std::path::Path) {
++        let _ = std::fs::create_dir_all(dir);
++        *DIR.lock().unwrap() = Some(dir.to_path_buf());
++        let pending: Vec<_> = std::mem::take(&mut *PENDING.lock().unwrap());
++        for (file, line) in pending {
++            write(file, &line);
++        }
++    }
++
++    fn write(file: &'static str, line: &str) {
++        let dir = DIR.lock().unwrap().clone();
++        let Some(dir) = dir else {
++            PENDING.lock().unwrap().push((file, line.to_owned()));
++            return;
++        };
++        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{file}.jsonl"))) {
++            let _ = writeln!(f, "{line}");
++        }
++    }
++
++    pub struct Mark {
++        file: &'static str,
++        step: u32,
++        name: &'static str,
++        before: u64,
++        start: Instant,
++    }
++
++    /// Starts a mark and writes a "begin" line straight away (each line goes to the file as it is written, so if
++    /// iOS stops the app in the middle, the last begin line names the part that was running).
++    pub fn mark(file: &'static str, step: u32, name: &'static str) -> Mark {
++        let m = quiet(file, step, name);
++        write(
++            file,
++            &format!("{{\"step\":{step},\"name\":\"{name}\",\"begin\":true,\"before_mb\":{},\"avail_mb\":{}}}", m.before >> 20, available() >> 20),
++        );
++        m
++    }
++
++    /// A mark without the begin line (for one around every training step, written only when it jumped).
++    pub fn quiet(file: &'static str, step: u32, name: &'static str) -> Mark {
++        start_sampler();
++        let before = footprint();
++        PEAK.store(before, Ordering::Relaxed);
++        Mark { file, step, name, before, start: Instant::now() }
++    }
++
++    impl Mark {
++        pub fn end(self) {
++            self.end_with(&[]);
++        }
++
++        /// Ends the mark only if the footprint's peak went at least `jump_mb` above where it started.
++        pub fn end_if_jump(self, jump_mb: u64, extra: &[(&str, u64)]) {
++            let peak = PEAK.load(Ordering::Relaxed).max(footprint());
++            if peak >= self.before + (jump_mb << 20) {
++                self.end_with(extra);
++            }
++        }
++
++        /// Ends the mark with extra numbers in the line (e.g. the forward render's intersection count).
++        pub fn end_with(self, extra: &[(&str, u64)]) {
++            let after = footprint();
++            let peak = PEAK.load(Ordering::Relaxed).max(after);
++            let mb = |b: u64| b >> 20;
++            let mut more = String::new();
++            for (k, v) in extra {
++                more.push_str(&format!(",\"{k}\":{v}"));
++            }
++            write(
++                self.file,
++                &format!(
++                    "{{\"step\":{},\"name\":\"{}\",\"before_mb\":{},\"after_mb\":{},\"peak_mb\":{},\"avail_mb\":{},\"ms\":{}{more}}}",
++                    self.step,
++                    self.name,
++                    mb(self.before),
++                    mb(after),
++                    mb(peak),
++                    mb(available()),
++                    self.start.elapsed().as_millis()
++                ),
++            );
++        }
++    }
++}
++
++#[cfg(not(any(target_os = "ios", target_os = "android")))]
++mod imp {
++    pub struct Mark;
++    pub fn mark(_file: &'static str, _step: u32, _name: &'static str) -> Mark {
++        Mark
++    }
++    pub fn quiet(_file: &'static str, _step: u32, _name: &'static str) -> Mark {
++        Mark
++    }
++    impl Mark {
++        pub fn end(self) {}
++        pub fn end_if_jump(self, _jump_mb: u64, _extra: &[(&str, u64)]) {}
++        pub fn end_with(self, _extra: &[(&str, u64)]) {}
++    }
++    pub fn set_dir(_dir: &std::path::Path) {}
++    pub fn footprint() -> u64 {
++        0
++    }
++    pub fn available() -> u64 {
++        u64::MAX
++    }
++}
++
++pub use imp::{Mark, available, footprint, mark, quiet, set_dir};
+diff --git a/crates/brush-train/src/train.rs b/crates/brush-train/src/train.rs
+index b46d0807..f7be22af 100644
+--- a/crates/brush-train/src/train.rs
++++ b/crates/brush-train/src/train.rs
+@@ -81,6 +81,8 @@ pub struct SplatTrainer {
+     ssim_enabled: bool,
+     bounds: BoundingBox,
+     step_count: u32,
++    /// RoomScape change (13 Nov 2026): the last forward render's splat-tile intersections (memory marks).
++    pub last_intersections: u32,
+     max_sh_degree: u32,
+     rng: rand::rngs::StdRng,
+     /// Per-train-view (world center, focal in px at native res) for the
+@@ -99,7 +101,11 @@ fn inv_sigmoid(x: Tensor<1>) -> Tensor<1> {
+ /// `f_i = sqrt(factor) · min_v(||mean_i - cam_v|| / focal_px_v)`. `means` and
+ /// the result are on the inner (non-autodiff) backend; `f` is a frozen
+ /// constant. Returns `None` if disabled or there are no cameras.
+-fn compute_min_scale(
++///
++/// RoomScape change (13 Nov 2026): worked out on the CPU from the splat positions (read back once, n x 3 floats)
++/// instead of a GPU tensor chain per view. With ~200 views and ~200k splats the GPU version's temporaries took the
++/// phone's memory about 2 GB up at every refine (measured), past iOS's limit for the app. Same formula.
++async fn compute_min_scale(
+     means: &Tensor<2>,
+     view_cams: &[(glam::Vec3, f32)],
+     factor: f32,
+@@ -108,20 +114,24 @@ fn compute_min_scale(
+         return None;
+     }
+     let device = means.device();
+-    let n = means.dims()[0] as i32;
+-
+-    let mut min_ratio: Option<Tensor<1>> = None;
++    let m: Vec<f32> = means.clone().into_data_async().await.ok()?.try_to_vec().ok()?;
++    let n = m.len() / 3;
++    let mut min_ratio = vec![f32::INFINITY; n];
+     for (center, focal) in view_cams {
+-        let c = Tensor::<1>::from_floats([center.x, center.y, center.z], &device).reshape([1, 3]);
+-        let diff = means.clone() - c;
+-        let dist = diff.clone().mul(diff).sum_dim(1).sqrt().reshape([n]);
+-        let ratio = dist.div_scalar(focal.max(1e-6));
+-        min_ratio = Some(match min_ratio {
+-            Some(m) => m.min_pair(ratio),
+-            None => ratio,
+-        });
++        let inv = 1.0 / focal.max(1e-6);
++        for (i, r) in min_ratio.iter_mut().enumerate() {
++            let (dx, dy, dz) = (m[3 * i] - center.x, m[3 * i + 1] - center.y, m[3 * i + 2] - center.z);
++            let ratio = (dx * dx + dy * dy + dz * dz).sqrt() * inv;
++            if ratio < *r {
++                *r = ratio;
++            }
++        }
++    }
++    let s = factor.sqrt();
++    for r in &mut min_ratio {
++        *r *= s;
+     }
+-    min_ratio.map(|r| r.mul_scalar(factor.sqrt()))
++    Some(Tensor::<1>::from_data(TensorData::new(min_ratio, [n]), &device))
+ }
+ 
+ pub async fn get_splat_bounds(splats: Splats, percentile: f32) -> BoundingBox {
+@@ -192,6 +202,7 @@ impl SplatTrainer {
+             ssim_enabled,
+             bounds,
+             step_count: 0,
++            last_intersections: 0,
+             max_sh_degree: 0,
+             rng: rand::rngs::StdRng::seed_from_u64(seed),
+             view_cams: Vec::new(),
+@@ -268,9 +279,24 @@ impl SplatTrainer {
+             // The splats already carry their 3D-filter floor (set at refine);
+             // the render path folds it in. Optimizer/refine work on raw params.
+             let render_input = splats.clone();
++            // RoomScape change (13 Nov 2026): memory marks inside the first 30 steps (iOS only, see memmarks), to
++            // find the ~2 GB bursts measured at steps 0 and 16 on the phone.
++            let iter = self.step_count - 1;
++            let fine = iter < 30;
++            let m = fine.then(|| crate::memmarks::mark("step-marks", iter, "forward render (project, sort, raster)"));
+             let diff_out = render_splats(render_input, &camera, img_size, background)
+                 .instrument(trace_span!("Forward"))
+                 .await;
++            self.last_intersections = diff_out.num_intersections;
++            if let Some(m) = m {
++                m.end_with(&[
++                    ("intersections", diff_out.num_intersections as u64),
++                    ("visible", diff_out.num_visible as u64),
++                    ("width", img_w as u64),
++                    ("height", img_h as u64),
++                ]);
++            }
++            let m = fine.then(|| crate::memmarks::mark("step-marks", iter, "loss + backward"));
+ 
+             let pred_image = diff_out.img;
+             let refine_weight_holder = diff_out.refine_weight_holder;
+@@ -329,6 +355,9 @@ impl SplatTrainer {
+             // scalar later without keeping the backward pass alive.
+             let loss_inner = loss.clone().inner();
+             let mut grads = splats.bwd_validate(loss).await;
++            if let Some(m) = m {
++                m.end();
++            }
+ 
+             let refine_weight = refine_weight_holder
+                 .grad_remove(&mut grads)
+@@ -379,6 +408,8 @@ impl SplatTrainer {
+             });
+ 
+         optimizer.transforms.scaling = Some(lr_scaling);
++        let fine = self.step_count <= 30;
++        let m = fine.then(|| crate::memmarks::mark("step-marks", self.step_count - 1, "optimizer + housekeeping + noise (synced)"));
+ 
+         splats = trace_span!("Optimizer step").in_scope(|| {
+             splats.transforms = trace_span!("Transforms step").in_scope(|| {
+@@ -449,6 +480,12 @@ impl SplatTrainer {
+             Tensor::from_inner(out).require_grad()
+         });
+ 
++        if let Some(m) = m.filter(|_| splats.num_splats() > 0) {
++            // wait for the queued work (optimizer, refine stats, noise) so the mark covers it
++            let _ = splats.raw_opacities.val().inner().slice(s![0..1]).into_data_async().await;
++            m.end();
++        }
++
+         let stats = TrainStepStats {
+             num_visible,
+             lr_mean,
+@@ -463,6 +500,8 @@ impl SplatTrainer {
+     }
+ 
+     pub async fn refine(&mut self, iter: u32, splats: Splats) -> (Splats, RefineStats) {
++        // RoomScape change (13 Nov 2026): memory marks per part of the refine (iOS only, see memmarks)
++        let mut m = crate::memmarks::mark("refine-marks", iter, "prune checks (bake floor, masks, non-finite count)");
+         let progress = iter as f32 / self.config.total_train_iters.max(1) as f32;
+         // Refine manipulates the canonical (un-floored) params, so bake the
+         // current 3D-filter floor into them first — split/clone/prune then see
+@@ -528,8 +567,12 @@ impl SplatTrainer {
+             .bool_or(bound_mask)
+             .bool_or(non_finite_mask);
+ 
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "prune_points");
+         let (mut splats, refiner, pruned_count) =
+             prune_points(splats, &mut optim, refiner, prune_mask).await;
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "resample dead (weights to CPU)");
+         let mut split_inds = HashSet::new();
+ 
+         // Always replace dead gaussians, so that the pruned budget is reused.
+@@ -548,6 +591,8 @@ impl SplatTrainer {
+             split_inds.extend(resampled_inds);
+         }
+ 
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "oversized split selection");
+         // Force-split splats that are too big on screen (every refine). Rather
+         // than killing them (the old `kill_at_screen_size`), we split them and
+         // shrink the children down to `split_at_screen_size` on screen — see
+@@ -580,6 +625,8 @@ impl SplatTrainer {
+         }
+         let num_split_oversized = (split_inds.len() - pre_oversized) as u32;
+ 
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "growth selection (weights to CPU)");
+         let pre_high_grad = split_inds.len();
+         if iter >= self.config.growth_start_iter && iter < self.config.growth_stop_iter {
+             let above_threshold = refiner.above_threshold(self.config.growth_grad_threshold);
+@@ -622,12 +669,20 @@ impl SplatTrainer {
+         let refine_count = split_inds.len();
+         // Per-splat max on-screen extent, used by `refine_splats` to cap the
+         // split shrink so oversized splats' children land at `split_at_screen_size`.
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "refine_splats (split/clone, optimizer state)");
+         let screen_sizes = refiner.max_screen_size.clone();
+         splats = self.refine_splats(&device, optim, splats, split_inds, screen_sizes, iter);
+ 
+         // Update current bounds based on the splats.
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "get_splat_bounds");
+         self.bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "memory_cleanup");
+         device.memory_cleanup();
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "3D-filter floor (CPU)");
+ 
+         // Recompute the per-splat 3D-filter floor against the new positions/
+         // count and attach it — the floor is part of the splat from here until
+@@ -638,13 +693,14 @@ impl SplatTrainer {
+             // No-op when there are no view cameras (e.g. unit tests).
+             let means = splats.means();
+             if let Some(f) =
+-                compute_min_scale(&means, &self.view_cams, self.config.min_scale_factor)
++                compute_min_scale(&means, &self.view_cams, self.config.min_scale_factor).await
+             {
+                 splats = splats.with_min_scale(f);
+             }
+         }
+ 
+         let splat_count = splats.num_splats();
++        m.end();
+ 
+         (
+             splats,
+diff --git a/crates/rrfd/Cargo.toml b/crates/rrfd/Cargo.toml
+index b84ff546..674430fa 100644
+--- a/crates/rrfd/Cargo.toml
++++ b/crates/rrfd/Cargo.toml
+@@ -9,13 +9,21 @@ license.workspace = true
+ thiserror.workspace = true
+ tokio = { workspace = true, features = ["sync", "io-util"] }
+ 
+-[target.'cfg(all(not(target_family = "wasm"), not(target_os = "android")))'.dependencies]
++# RoomScape change (12 Nov 2026): no file dialogs on iOS (rfd has no iOS backend); Brush is driven through brush-c there.
++[target.'cfg(all(not(target_family = "wasm"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
+ tokio = { workspace = true, features = ["fs", "sync", "io-util"] }
+ rfd = "0.17"
+ 
++# RoomScape change (13 Nov 2026): Android like iOS (its file picker needs an older jni and the app drives brush-c)
++[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
++tokio = { workspace = true, features = ["fs", "sync", "io-util"] }
++
++[features]
++android-picker = ["dep:jni", "dep:lazy_static"]
++
+ [target.'cfg(target_os = "android")'.dependencies]
+-jni = "0.22"
+-lazy_static = "1.5.0"
++jni = { version = "0.22", optional = true }
++lazy_static = { version = "1.5.0", optional = true }
+ 
+ [target.'cfg(target_family = "wasm")'.dependencies]
+ wasm-bindgen = "0.2"
+diff --git a/crates/rrfd/src/lib.rs b/crates/rrfd/src/lib.rs
+index 861168e8..b8691971 100644
+--- a/crates/rrfd/src/lib.rs
++++ b/crates/rrfd/src/lib.rs
+@@ -1,4 +1,4 @@
+-#[cfg(target_os = "android")]
++#[cfg(all(target_os = "android", feature = "android-picker"))]   // RoomScape change: off, the app drives brush-c
+ pub mod android;
+ 
+ #[cfg(target_family = "wasm")]
+@@ -28,7 +28,16 @@ pub struct PickedFile<R: AsyncRead + Unpin> {
+ 
+ /// Pick a file and return the name & reader of the file.
+ pub async fn pick_file() -> Result<PickedFile<impl AsyncRead + Unpin>, PickFileError> {
+-    #[cfg(all(not(target_os = "android"), not(target_family = "wasm")))]
++    // RoomScape change (12 Nov 2026): iOS has no file dialog here (the app passes paths through brush-c).
++    #[cfg(any(target_os = "ios", target_os = "android"))]
++    {
++        if false {
++            return Ok(PickedFile { name: String::new(), reader: tokio::io::empty() });
++        }
++        Err(PickFileError::NoFileSelected)
++    }
++
++    #[cfg(all(not(target_os = "android"), not(target_os = "ios"), not(target_family = "wasm")))]
+     {
+         let file = rfd::AsyncFileDialog::new()
+             .pick_file()
+@@ -45,7 +54,7 @@ pub async fn pick_file() -> Result<PickedFile<impl AsyncRead + Unpin>, PickFileE
+         wasm::pick_file().await
+     }
+ 
+-    #[cfg(target_os = "android")]
++    #[cfg(all(target_os = "android", feature = "android-picker"))]   // RoomScape change: off, the app drives brush-c
+     {
+         let file = android::pick_file().await?;
+         Ok(PickedFile {
+@@ -57,7 +66,12 @@ pub async fn pick_file() -> Result<PickedFile<impl AsyncRead + Unpin>, PickFileE
+ 
+ #[cfg(not(target_family = "wasm"))]
+ pub async fn pick_directory() -> Result<PathBuf, PickFileError> {
+-    #[cfg(not(target_os = "android"))]
++    #[cfg(any(target_os = "ios", target_os = "android"))]
++    {
++        Err(PickFileError::NoDirectorySelected)   // RoomScape change: no folder dialog on iOS
++    }
++
++    #[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
+     {
+         let dir = rfd::AsyncFileDialog::new()
+             .pick_folder()
+@@ -67,7 +81,7 @@ pub async fn pick_directory() -> Result<PathBuf, PickFileError> {
+         Ok(dir.path().to_path_buf())
+     }
+ 
+-    #[cfg(target_os = "android")]
++    #[cfg(all(target_os = "android", feature = "android-picker"))]   // RoomScape change: off, the app drives brush-c
+     {
+         panic!("No picking directories on Android yet.")
+     }
+@@ -77,7 +91,13 @@ pub async fn pick_directory() -> Result<PathBuf, PickFileError> {
+ ///
+ /// Nb: Does not work on Android currently.
+ pub async fn save_file(default_name: &str, data: Vec<u8>) -> Result<(), PickFileError> {
+-    #[cfg(all(not(target_os = "android"), not(target_family = "wasm")))]
++    #[cfg(any(target_os = "ios", target_os = "android"))]
++    {
++        let _ = (default_name, data);   // RoomScape change: no save dialog on iOS
++        Err(PickFileError::NoFileSelected)
++    }
++
++    #[cfg(all(not(target_os = "android"), not(target_os = "ios"), not(target_family = "wasm")))]
+     {
+         let file = rfd::AsyncFileDialog::new()
+             .set_file_name(default_name)
+@@ -95,7 +115,7 @@ pub async fn save_file(default_name: &str, data: Vec<u8>) -> Result<(), PickFile
+         wasm::save_file(default_name, &data).await
+     }
+ 
+-    #[cfg(target_os = "android")]
++    #[cfg(all(target_os = "android", feature = "android-picker"))]   // RoomScape change: off, the app drives brush-c
+     {
+         let _ = default_name;
+         let _ = data;
