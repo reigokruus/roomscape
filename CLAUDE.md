@@ -3,6 +3,43 @@
 Read [README.md](README.md) first: what the apps do, Android vs iPhone, maturity per feature and the TODO column.
 This file is how to work in the code.
 
+## Start here: working with Zeynep (from 13 Nov 2026)
+
+Zeynep develops both apps on her Mac. rk (the owner) tests on the phones: a Galaxy S24 and an iPhone 15 Pro.
+Before changing anything, read the guide for the app you'll touch:
+- iPhone: [docs/ios-tasks.md](docs/ios-tasks.md) covers state, build and install, what's phone-tested and what's open.
+- Android: [docs/android-dev.md](docs/android-dev.md) covers the branch, emulator setup, what can't work in the
+  emulator, and where the UI lives.
+
+Rules for the agent, in order of importance:
+1. **Branches.**
+   - iPhone work goes on a branch off `main`.
+   - Android work goes on a branch off `claude/project-thread-k4b688`, never off `main`: `main`'s Android code is
+     older.
+   - Never push to `main` or to `claude/project-thread-k4b688` yourself. Push your own branch and say it's ready.
+     A push to `main` that touches `android/` publishes a public APK through CI.
+2. **Never commit** any of these:
+   - `CineX.swiftpm/Package.swift` bundle ID or team changes (keep them local: `git update-index --skip-worktree
+     CineX.swiftpm/Package.swift` helps);
+   - API keys, tokens or device IDs;
+   - anything under `android/app/src/main/jniLibs/` (the Brush libraries are git-ignored on purpose);
+   - scans, recordings, screenshots of rooms or logs (they show a real home).
+3. **Emulator and simulator can't test scanning.** ARCore depth, LiDAR/RoomPlan, Brush training and phone heat need
+   the real phones. For a change that touches them, say "untested on a phone" and leave the test to rk.
+4. **Build stamp.** Every build shows a readable stamp, like `Build 13 Nov 17:15:11` (Tallinn time), on the home
+   screen. When you report a build, put that stamp on its own line. Never quote Android's numeric versionCode.
+5. **Shared pieces.**
+   - `CineX.swiftpm/SplatViewer/index.html` is the photo-real viewer for both apps: Android copies it in at build
+     time. Changes must stay optional for the other app.
+   - The `.rmsc` format: see [docs/rmsc-format.md](docs/rmsc-format.md). Add only optional fields.
+6. **Check before you report.**
+   - Android: `cd android && ./gradlew assembleDebug` must pass. Run `./gradlew testDebugUnitTest` if you touched
+     FloorArea or other logic with tests.
+   - iPhone: the `xcodebuild` line in docs/ios-tasks.md must pass. A changed Metal shader string needs the Mac check
+     below.
+   - UI: look at it at the smallest width (iPhone SE 375 pt; a 360 dp Android phone). A segmented control or row
+     with `.fixedSize()` that grows past the screen widened the whole iPhone room screen on 13 Nov.
+
 ## Layout
 
 - `android/`: the Android app (Java, OpenGL ES; ARCore). One Gradle module, `android/app`.
