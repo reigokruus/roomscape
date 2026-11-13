@@ -6354,8 +6354,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
 
     /** Done: the saved points against the scan's own rebuild frames (DoneSeeThrough; rk 13 Nov 14:44, the drifted desk
      *  copy under the table was still in the points view after Done). Points that later views clearly see past (centre
-     *  ray, net 10) are taken out and kept aside in removed-points.bin (reason 5). At most 2 s; on the 14:41 scan the
-     *  same code on a Mac took 0.4 s for 239 frames and took out 695 of 200,383 points (288 of the 496 in the desk copy).
+     *  ray, net 10) are taken out and kept aside in removed-points.bin (reason 5). At most 2 s (the 16:29 scan's first
+     *  version needed ~4 s on the S24 for all frames; now every core and an early stop per point); on the 14:41 scan the
+     *  same code on a Mac took 0.3 s for 239 frames and took out 695 of 200,383 points (288 of the 496 in the desk copy).
      *  Skipped if it would take out more than 10% (something off, keep everything). */
     private void dropSeenThroughAtDone() {
         File dir = rebuildTmp;
@@ -6367,8 +6368,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         for (int i = 0; i < count * 3; i++) xyz[i] = pos.get(i);
         DoneSeeThrough.Stats st = new DoneSeeThrough.Stats();
         boolean[] drop = DoneSeeThrough.drop(xyz, count, dir, 2000, st);
-        String what = String.format(java.util.Locale.US, "Done see-through: tested %d, dropped %d in %d ms (%d of %d frames)",
-                st.tested, st.dropped, st.ms, st.framesUsed, st.frames);
+        String what = String.format(java.util.Locale.US, "Done see-through: tested %d, dropped %d in %d ms (read %d ms, test %d ms on %d threads%s; %d of %d frames)",
+                st.tested, st.dropped, st.ms, st.readMs, st.testMs, st.threads, st.budgetHit ? ", BUDGET HIT: points left untested were kept" : "", st.framesUsed, st.frames);
         if (drop == null || st.dropped == 0) { log(what); return; }
         if (st.dropped > count / 10) { log(what + ": more than 10%, nothing taken out"); return; }
         int k = 0;
