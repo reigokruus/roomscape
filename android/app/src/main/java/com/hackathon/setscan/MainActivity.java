@@ -1954,15 +1954,14 @@ public class MainActivity extends Activity {
             float w = getWidth(), h = getHeight(), cx = w / 2, cy = h / 2, d = getResources().getDisplayMetrics().density;
             float rx = w * 0.40f, ry = h * 0.30f;
             r.set(cx - rx, cy - ry, cx + rx, cy + ry);
-            cv.drawOval(r, line);
-            double a = 2 * Math.PI * ((android.os.SystemClock.uptimeMillis() % LAP_MS) / (double) LAP_MS);
+            cv.drawArc(r, 0, 180, false, line);   // the near half of the orbit: a half orbit, left and back right (rk 13 Nov 14:25)
+            double t = 2 * Math.PI * ((android.os.SystemClock.uptimeMillis() % LAP_MS) / (double) LAP_MS);
+            double a = Math.PI / 2 + Math.PI / 2 * Math.sin(t);
             float px = cx + rx * (float) Math.cos(a), py = cy + ry * (float) Math.sin(a);
-            boolean behind = Math.sin(a) < 0;   // the far side of the orbit
             float o = 4f * d;
-            phone.setAlpha(behind ? 120 : 255);
-            if (behind) drawPhone(cv, px, py, cx, cy, d);
+            phone.setAlpha(255);
             cv.drawRoundRect(new android.graphics.RectF(cx - o, cy - o * 1.15f, cx + o, cy + o * 1.15f), 1.2f * d, 1.2f * d, fill);   // the object
-            if (!behind) drawPhone(cv, px, py, cx, cy, d);
+            drawPhone(cv, px, py, cx, cy, d);
             if (isShown()) postInvalidateOnAnimation();
         }
         /** The phone at (px, py), its back turned to the orbit's outside: its long side across the line to the object. */
