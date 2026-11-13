@@ -1793,6 +1793,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams rp2 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         rp2.topMargin = dp(6);
         hud.addView(r2, rp2);
+        r1.setVisibility(View.GONE); r2.setVisibility(View.GONE);   // hidden (rk 13 Nov), see `bars` below
         // Scan length (rk 10 Nov): counts only while depth is being fused (not while the position is lost).
         hudTimer = new TextView(this);
         hudTimer.setTextColor(0x99FFFFFF); hudTimer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
@@ -1938,8 +1939,9 @@ public class MainActivity extends Activity {
             hudHint.setTextColor(HINT_COLORS[Math.max(0, Math.min(3, level))]);
             hudSub.setText(sub == null ? "" : sub);
             hudSub.setVisibility(sub == null ? View.GONE : View.VISIBLE);
-            // the bars only while scanning normally: hidden while the position is lost (detail < 0)
-            int bars = detail < 0 ? View.GONE : View.VISIBLE;
+            // The "This spot" / "Room" bars are hidden for good (rk 13 Nov: "safe to remove all that "this area" and
+            // "whole room" counters on top"); they're still filled below. Before: shown unless the position was lost.
+            int bars = View.GONE;
             ((View) hudDetail.getParent()).setVisibility(bars); ((View) hudRoom.getParent()).setVisibility(bars);
                         hudDetail.setProgress(Math.round(detail * 1000));
             hudDetail.setProgressTintList(android.content.res.ColorStateList.valueOf(detail >= ScanRenderer.SPOT_DONE ? 0xFF33D17A : Ios.ACCENT));
