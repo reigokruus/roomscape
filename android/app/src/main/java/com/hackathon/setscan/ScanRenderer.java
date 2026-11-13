@@ -175,7 +175,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         return String.format(java.util.Locale.US, "cpu %.1f cores, depth %d ms old, heat %d", cpuCores, age, thermal); }
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
     static final boolean AUTO_ERASE = false;   // the 2-frame eraser stays off (12 Nov); see-through erase runs with the Android-tuned rule in carve()
-    private int erasedSec, revivedSec; private long eraseLogAt;   // see-through erases and revivals, logged once a second
+    private int erasedSec, revivedSec, speckSec; private long eraseLogAt;
+    static final int SPECK_FRAMES = 10;   // a one-reading dot not seen again in this many depth frames (carve)   // see-through erases and revivals, logged once a second
     // ---- Rebuild frames: picture + pose + intrinsics + raw depth with confidence, twice a second (rk 12 Nov) ----
     static volatile boolean SAVE_REBUILD = true;
     private long rebuildAt; private int rebuildN; private File rebuildTmp;
@@ -5879,7 +5880,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (!inZone(zx, zy, zz) && zones.size() < 24) {
                     zones.add(new float[]{zx, zy, zz, 0.3f});
                     log(String.format(java.util.Locale.US, "auto detail zone %d at (%.2f, %.2f, %.2f)", zones.size(), zx, zy, zz));
-                    activity.toast("Close-up spotted: sway slowly here for extra detail");
+                    // (no "Close-up spotted" message: rk 13 Nov 14:39 "fully remove the closeup detected message")
                 }
             }
             // Keep this depth image for the next sharp photo (photos are taken on any camera frame, see maybePhoto).
@@ -6029,6 +6030,14 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // and a bar's point just beside its pixel saw the wall and was erased (rk 10 Nov: bars vanished up close).
             int rp = Math.max(1, Math.min(6, Math.round(0.6f * VOXEL * fx / dp)));
             if (u < rp + 1 || vv < rp + 1 || u >= dw - rp - 1 || vv >= dh - rp - 1) continue;
+            // One-off specks (rk 13 Nov 14:39: "the stray dots are never removed"; the 14:34 scan erased 346 live but
+            // dropped 21,002 one-reading dots only at Done): a dot seen in one frame only, SPECK_FRAMES or more frames ago,
+            // whose pixel now has sure depth in view without confirming it, goes now instead of at Done.
+            if ((obs[i] & 0xFF) == 1 && stampFrame - seenStamp[i] >= SPECK_FRAMES) {
+                int mm0 = dbuf.get(vv * dRow + u * dPix) & 0xFFFF;
+                boolean sure = mm0 >= 200 && mm0 <= 4000 && (cbuf == null || (cbuf.get(vv * cRow + u * cPix) & 0xFF) >= PAINT_MIN);
+                if (sure) { obs[i] = 0; thru[i] = 0; col.put(i * 4 + 3, (byte) 0); speckSec++; removed++; continue; }
+            }
             // clearly farther than the dot: max(10 cm, 8%), the Android-tuned margin (the S24's depth is rougher than the
             // iPhone's LiDAR: the iPhone's 8 cm / 5% erased good patches and they came back, 13 Nov 13:58), raw depth units
             float lim = (dp + Math.max(0.10f, 0.08f * dp)) * depthK + depthC;
@@ -6058,8 +6067,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         }
         if (removed > 0) { refined = true; carvedTotal += removed; erasedSec += removed; }
         if (System.currentTimeMillis() - eraseLogAt >= 1000) {
-            if (erasedSec > 0 || revivedSec > 0) log("see-through: erased " + erasedSec + ", revived " + revivedSec);
-            erasedSec = 0; revivedSec = 0; eraseLogAt = System.currentTimeMillis();
+            if (erasedSec > 0 || revivedSec > 0) log("see-through: erased " + erasedSec + " (one-off specks " + speckSec + "), revived " + revivedSec);
+            erasedSec = 0; revivedSec = 0; speckSec = 0; eraseLogAt = System.currentTimeMillis();
         }
     }
 
