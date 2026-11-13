@@ -6041,24 +6041,20 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // clearly farther than the dot: max(10 cm, 8%), the Android-tuned margin (the S24's depth is rougher than the
             // iPhone's LiDAR: the iPhone's 8 cm / 5% erased good patches and they came back, 13 Nov 13:58), raw depth units
             float lim = (dp + Math.max(0.10f, 0.08f * dp)) * depthK + depthC;
-            int verdict = 1;   // 1 seen through, 0 the dot is seen (or something in front of it), -1 can't tell
-            for (int ny = -1; ny <= 1 && verdict == 1; ny++) for (int nx = -1; nx <= 1; nx++) {
-                int r = beyondOrNot(dbuf, dRow, dPix, cbuf, cRow, cPix, u + nx * rp, vv + ny * rp, lim);
-                if (r != 1) { verdict = r; break; }
-            }
-            if (verdict == 0) { thru[i] = 0; continue; }   // seen solid where it is: the count starts again
+            // The centre ray only (rk 13 Nov 14:50, the stray desk-top copy under the table: the 3x3 footprint all beyond
+            // removed 22% of it, legs, cables and unsure pixels spoiled it; the centre ray 58%, other dots 0.20%).
+            int verdict = beyondOrNot(dbuf, dRow, dPix, cbuf, cRow, cPix, u, vv, lim);   // 1 through, 0 seen at or in front, -1 can't tell
             if (verdict < 0) continue;
             // no depth edge at the spot's own pixel (flying pixels at silhouettes aren't evidence)
             int c0 = dbuf.get(vv * dRow + u * dPix) & 0xFFFF, tol = c0 / 25 + 20;
             if (Math.abs((dbuf.get(vv * dRow + (u - 1) * dPix) & 0xFFFF) - c0) > tol || Math.abs((dbuf.get(vv * dRow + (u + 1) * dPix) & 0xFFFF) - c0) > tol
                     || Math.abs((dbuf.get((vv - 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol || Math.abs((dbuf.get((vv + 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol) continue;
+            if (verdict == 0) { if (thru[i] != 0) thru[i]--; continue; }   // seen where it is: one count back
             int t = Math.min(255, (thru[i] & 0xFF) + 1);
             thru[i] = (byte) t;
-            // See-through erase (rk 13 Nov: a dot the sensor later sees through is removed), Android-tuned: 4 frames
-            // seeing clearly past the whole spot, 10 for a solid dot (the iPhone's 2 / 3 flickered on the S24); the 3x3
-            // footprint check above keeps thin bars and chair legs seen against the wall.
-            boolean solid = (col.get(i * 4 + 3) & 0xFF) == 255;
-            boolean gone = t >= (solid ? 10 : 4);
+            // See-through erase (rk 13 Nov: a dot the sensor later sees through is removed), Android-tuned: 10 frames
+            // (net) seeing clearly past it (the iPhone's 2 / 3 flickered on the S24).
+            boolean gone = t >= 10;
             if (gone) {
                 obs[i] = 0; thru[i] = 0;
                 col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done; a new reading in its cell brings it back
