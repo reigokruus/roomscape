@@ -10,7 +10,7 @@ enum DotCleanup {
     /// can erase them, drawn as a thin outline on the scan screen. Replayed on rk's 13 Nov 10:24 recording (floaters =
     /// dots later seen clearly through): the whole frame 8 515 floaters, 66% of the surface covered; the screen only
     /// (1.0) 3 732, 59%; 0.85 2 918, 55%; 0.7 1 650, 47%. Height 0.7 keeps Cancel / Done below it on a 15 Pro.
-    static let zoneWidth: Float = 0.85, zoneHeight: Float = 0.7
+    static let zoneWidth: Float = 0.72, zoneHeight: Float = 0.7   // width 0.72 (was 0.85): rk 13 Nov "make the effective scan area narrower somewhat. height is good"
 
     /// The zone in the depth map's normalised coordinates (x along the sensor's long side, y along its short side,
     /// 0…1), for a portrait screen of `viewAspect` (width / height) showing the camera aspect-filled, as RoomPlan's
