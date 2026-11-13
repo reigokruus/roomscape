@@ -645,6 +645,9 @@ struct ScannerScreen: View {
             // Press and hold to clear (0.9 s, a ring fills under the finger; a tap did it until 10 Nov, and a first-time
             // user taps by instinct): wipes the scan in a circle around it (11% of the screen's short side) so it can
             // be scanned again. The card and buttons above take their own taps. The same gesture as the Android app.
+            if controller.phase == .scanning {
+                CaptureZone(started: controller.phaseStarted).ignoresSafeArea()
+            }
             if controller.phase == .scanning, Self.clearWhileScanning {
                 GeometryReader { g in
                     Color.clear
@@ -720,7 +723,6 @@ struct ScannerScreen: View {
                         .buttonStyle(.bordered)
                         .background(.regularMaterial, in: Capsule())
                 case .scanning:
-                    ScanTips(started: controller.phaseStarted)
                     // Cancel and Done, the same as on the Android app.
                     HStack(spacing: 16) {
                         // Cancel throws the scan away (a Continue scan pass only; the saved room is kept). After a
@@ -961,7 +963,34 @@ struct ClearFlash {
     var visible = true
 }
 
-/// Two small scanning tips just above Cancel / Done (rk 13 Nov: "a simple icon representing those things with a small
+/// The capture zone (rk 13 Nov: "a rectangle in the center instead that only shows the good scannable area and only
+/// captures in that zone"): a thin light outline of the middle `DotCleanup.zoneWidth` × `zoneHeight` of the screen, the outside very
+/// slightly darker; only depth inside it makes dots (LiveCloud). The two tips sit just inside its bottom edge.
+private struct CaptureZone: View {
+    let started: Date
+
+    var body: some View {
+        GeometryReader { g in
+            let zw = CGFloat(DotCleanup.zoneWidth), zh = CGFloat(DotCleanup.zoneHeight)
+            let rect = CGRect(x: g.size.width * (1 - zw) / 2, y: g.size.height * (1 - zh) / 2,
+                              width: g.size.width * zw, height: g.size.height * zh)
+            let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+            ZStack {
+                Path { p in
+                    p.addRect(CGRect(origin: .zero, size: g.size))
+                    p.addPath(shape.path(in: rect))
+                }
+                .fill(Color.black.opacity(0.18), style: FillStyle(eoFill: true))
+                shape.path(in: rect).stroke(Color.white.opacity(0.45), lineWidth: 1)
+                ScanTips(started: started)
+                    .position(x: rect.midX, y: rect.maxY - 22)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Two small scanning tips just inside the capture zone's bottom edge (rk 13 Nov: "a simple icon representing those things with a small
 /// label each"): move slowly, look around objects. Semi-transparent, not tappable, gone after 12 s.
 private struct ScanTips: View {
     let started: Date

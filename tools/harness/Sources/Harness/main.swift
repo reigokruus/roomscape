@@ -106,6 +106,8 @@ case "plyview":
         Images.renderFromCamera(pos, tris, pose: pose, k: k, imageWidth: w, imageHeight: h, to: url)
         print("  render: \(url.path)")
     } }
+case "strays":
+    try Strays.run(URL(fileURLWithPath: args[1]), around: args.count > 2 ? Float(args[2]) : nil)
 case "replay":
     try Replay.run(URL(fileURLWithPath: args[1]), out: out)
 case "holefill":

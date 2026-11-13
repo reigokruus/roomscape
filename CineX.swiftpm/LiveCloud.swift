@@ -101,6 +101,16 @@ final class LiveCloud: @unchecked Sendable {
     private var index: [Int64: Int32] = [:]
     private var observations: [UInt8]
     private var seenStamp: [Int32]
+    /// Per dot: the distance of its closest look so far (cm, 0 = unknown) and how many depth frames in a row saw
+    /// clearly past it (DotCleanup).
+    private var nearCm: [UInt16]
+    private var through: [UInt8]
+    private var eraseCursor = 0
+    /// Dots replaced by a clearly closer look, and erased because the camera saw through them (this scan).
+    private(set) var closerTotal = 0, erasedTotal = 0
+    /// The scan screen's width / height, for the capture zone (set by the renderer; 0 = not known yet: the whole
+    /// depth frame's middle share).
+    static let viewAspect = OSAllocatedUnfairLock<Float>(initialState: 0)
     private var depthFrames: Int32 = 0
     private var lastPosition: SIMD3<Float>?
     private var lastTime: TimeInterval = 0
@@ -169,6 +179,8 @@ final class LiveCloud: @unchecked Sendable {
         normals = normalBuffer.contents().bindMemory(to: SIMD4<Int8>.self, capacity: Self.maxPoints)
         observations = [UInt8](repeating: 0, count: Self.maxPoints)
         seenStamp = [Int32](repeating: -1, count: Self.maxPoints)
+        nearCm = [UInt16](repeating: 0, count: Self.maxPoints)
+        through = [UInt8](repeating: 0, count: Self.maxPoints)
         index.reserveCapacity(Self.maxPoints)
     }
 
@@ -192,6 +204,9 @@ final class LiveCloud: @unchecked Sendable {
         minConfidence = UInt8(max(0, min(2, LivePreview.depthConfidence)))
         fineOn = LivePreview.fineNear
         fineCovered.removeAll(keepingCapacity: true)
+        eraseCursor = 0
+        closerTotal = 0
+        erasedTotal = 0
     }
 
     /// Copies out the points and keyframes captured so far, after photos still being encoded. Call on the worker queue.
@@ -199,7 +214,7 @@ final class LiveCloud: @unchecked Sendable {
         photoQueue.sync {}
         let n = count
         var kept = [LivePoint](); kept.reserveCapacity(n)
-        for i in 0..<n where normals[i].w != Self.replaced { kept.append(points[i]) }
+        for i in 0..<n where normals[i].w != Self.replaced && normals[i].w != Self.erased { kept.append(points[i]) }
         let data = kept.withUnsafeBufferPointer { Data(buffer: $0) }
         return CaptureSnapshot(points: data, pointCount: kept.count, keyframes: keyframes.withLock { $0 }, voxelSize: voxel)
     }
@@ -266,6 +281,12 @@ final class LiveCloud: @unchecked Sendable {
         let sx = Float(dw) / Float(iw), sy = Float(dh) / Float(ih)
         let fx = k[0][0] * sx, fy = k[1][1] * sy, cx = k[2][0] * sx, cy = k[2][1] * sy
         let minConf = minConfidence, fine1 = fineOn, fineFar = LivePreview.fineNearMetres, fineVoxel = LivePreview.fineVoxel
+        // Only the capture zone (the outlined middle of the screen) makes, updates and erases dots. The surface fusion
+        // below and the recording still use the whole depth frame.
+        let zr = DotCleanup.zoneRect(imageWidth: iw, imageHeight: ih, viewAspect: Self.viewAspect.withLock { $0 })
+        let zx0 = Int(zr.x0 * Float(dw)), zx1 = Int((zr.x1 * Float(dw)).rounded(.up))
+        let zy0 = Int(zr.y0 * Float(dh)), zy1 = Int((zr.y1 * Float(dh)).rounded(.up))
+        let high = UInt8(ARConfidenceLevel.high.rawValue)
 
         var n = count
         var frameHits = 0, frameSolid = 0
@@ -280,7 +301,8 @@ final class LiveCloud: @unchecked Sendable {
             for u in 1..<(dw - 1) {
                 let coarse = u & 1 == 1 && v & 1 == 1
                 if !coarse && !fine1 { continue }
-                guard cPtr[v * cRow + u] >= minConf else { continue }
+                let conf = cPtr[v * cRow + u]
+                guard conf >= minConf else { continue }
                 let d = dPtr[v * dRow + u]
                 guard d > 0.2, d < 4 else { continue }
                 let fine = fine1 && d < fineFar
@@ -315,6 +337,10 @@ final class LiveCloud: @unchecked Sendable {
                         tsdf.integrate(origin: position, point: point)
                     }
                 }
+                // Dots: inside the capture zone only; past 2.5 m only sure depth (when the setting lets weaker in).
+                if u < zx0 || u >= zx1 || v < zy0 || v >= zy1 { continue }
+                if conf < high, d > 2.5 { continue }
+                let lookCm = UInt16(min(65_535, Int((d * 100).rounded())))
                 // Surface normal from the four neighbours, turned to face the camera, then into world space.
                 var nc = simd_cross(cam(u + 1, v, dr) - cam(u - 1, v, dl), cam(u, v - 1, du) - cam(u, v + 1, dd))
                 if simd_dot(nc, pc) > 0 { nc = -nc }
@@ -345,6 +371,20 @@ final class LiveCloud: @unchecked Sendable {
                         if alpha >= 255 - Self.seenStep + 1 { frameSolid += 1 }
                         alpha = min(255, alpha + Self.seenStep)
                     }
+                    // An erased dot's cell seen again, or a clearly closer sure look (closest good look wins): the
+                    // reading replaces the dot's position, colour and normal.
+                    let dead = normals[i].w == Self.erased
+                    if dead || (conf >= high && DotCleanup.closerWins(stored: nearCm[i], now: lookCm)) {
+                        if dead { alpha = Self.firstSeen } else { closerTotal += 1 }
+                        points[i] = LivePoint(x: world.x, y: world.y, z: world.z, rgba: r | (g << 8) | (b << 16) | (alpha << 24))
+                        normals[i] = normal.map(Self.encode) ?? .zero
+                        if fine { normals[i].w = Self.fineDot }
+                        observations[i] = 1
+                        nearCm[i] = lookCm
+                        through[i] = 0
+                        continue
+                    }
+                    if nearCm[i] == 0 || lookCm < nearCm[i] { nearCm[i] = lookCm }
                     // A spot seen again: blend the new reading in, so repeated looks clean up a bad first one.
                     let seen = observations[i]
                     if seen < 255 { observations[i] = seen + 1 }
@@ -379,12 +419,20 @@ final class LiveCloud: @unchecked Sendable {
                         if fineCovered.insert(coarseKey).inserted, let c = index[coarseKey] { normals[Int(c)].w = Self.replaced }
                     }
                     observations[n] = 1
+                    nearCm[n] = lookCm
+                    through[n] = 0
                     seenStamp[n] = depthFrames
                     index[key] = Int32(n)
                     n += 1
                 }
             }
         }
+
+        // See-through erase: dots the camera's sure depth now sees clearly past go (DotCleanup.seenThrough).
+        let frameView = DotCleanup.DepthFrame(depth: UnsafePointer(dPtr), depthRow: dRow, confidence: UnsafePointer(cPtr), confidenceRow: cRow,
+                                              width: dw, height: dh, fx: fx, fy: fy, cx: cx, cy: cy, worldToCamera: pose.inverse,
+                                              x0: zx0, x1: zx1, y0: zy0, y1: zy1, voxel: voxel)
+        erasePass(frameView, count: n)
 
         if let gpuDepth, let mesh { mesh.fuseGPU(depth: gpuDepth, width: dw, height: dh, pose: pose, fx: fx, fy: fy, cx: cx, cy: cy) }
 
@@ -399,6 +447,32 @@ final class LiveCloud: @unchecked Sendable {
         // Continue scan: a photo only when at least a quarter of the view is new (not the saved scan's blue areas).
         if covered != nil, fusedSamples > 0, newSamples * 4 < fusedSamples { return }
         captureKeyframeIfMoved(frame, pose: pose)
+    }
+
+    /// Tests up to `DotCleanup.budget` dots (round robin) against this depth frame; a dot seen through in
+    /// `throughFrames` frames (one more when solid) is hidden and left out of the saved scan.
+    private func erasePass(_ f: DotCleanup.DepthFrame, count n: Int) {
+        guard n > 0 else { return }
+        var left = min(n, DotCleanup.budget)
+        var i = eraseCursor % n
+        while left > 0 {
+            left -= 1
+            defer { i += 1; if i >= n { i = 0 } }
+            let w = normals[i].w
+            if w == Self.replaced || w == Self.erased || seenStamp[i] == depthFrames { continue }
+            let p = points[i]
+            guard let seen = DotCleanup.seenThrough(SIMD3(p.x, p.y, p.z), f) else { continue }
+            if !seen { through[i] = 0; continue }
+            let t = through[i] &+ 1
+            through[i] = t
+            let solid = p.rgba >> 24 == 255
+            if t >= (solid ? DotCleanup.throughFramesSolid : DotCleanup.throughFrames) {
+                normals[i].w = Self.erased
+                through[i] = 0
+                erasedTotal += 1
+            }
+        }
+        eraseCursor = i
     }
 
     /// Keeps a photo each time the phone has moved 20 cm or turned 15° since the last one, up to `maxKeyframes`.
@@ -531,7 +605,7 @@ final class LiveCloud: @unchecked Sendable {
         var out = 0
         fineCovered.removeAll(keepingCapacity: true)
         for i in 0..<n {
-            if normals[i].w == Self.replaced { continue }
+            if normals[i].w == Self.replaced || normals[i].w == Self.erased { continue }
             let p = points[i]
             let w = Float(max(1, observations[i]))
             let key = Self.key(p.x, p.y, p.z, newVoxel)
@@ -553,6 +627,9 @@ final class LiveCloud: @unchecked Sendable {
                 weights[k] = total
                 observations[k] = UInt8(min(255, Int(observations[k]) + Int(observations[i])))
                 seenStamp[k] = max(seenStamp[k], seenStamp[i])
+                // the closest look of the two (0 = unknown)
+                if nearCm[k] == 0 || (nearCm[i] > 0 && nearCm[i] < nearCm[k]) { nearCm[k] = nearCm[i] }
+                through[k] = 0
             } else {
                 points[out] = p
                 normals[out] = normals[i]
@@ -560,6 +637,8 @@ final class LiveCloud: @unchecked Sendable {
                 weights[out] = w
                 observations[out] = observations[i]
                 seenStamp[out] = seenStamp[i]
+                nearCm[out] = nearCm[i]
+                through[out] = 0
                 index[key] = Int32(out)
                 out += 1
             }
@@ -591,12 +670,13 @@ final class LiveCloud: @unchecked Sendable {
             if k != i {
                 points[k] = points[i]; normals[k] = normals[i]
                 observations[k] = observations[i]; seenStamp[k] = seenStamp[i]
+                nearCm[k] = nearCm[i]; through[k] = through[i]
             }
             k += 1
         }
         guard k != n else { return 0 }
         index.removeAll(keepingCapacity: true)
-        for i in 0..<k where normals[i].w != Self.replaced {
+        for i in 0..<k where normals[i].w != Self.replaced && normals[i].w != Self.erased {
             let p = points[i]
             index[normals[i].w == Self.fineDot ? Self.key(p.x, p.y, p.z, LivePreview.fineVoxel) ^ Int64.min : Self.key(p.x, p.y, p.z, voxel)] = Int32(i)
         }
@@ -627,6 +707,8 @@ final class LiveCloud: @unchecked Sendable {
 
     /// The normal's 4th byte marks a dot: a fine (0.8 cm) dot, or a 2 cm dot replaced by fine ones (hidden, not saved).
     static let fineDot: Int8 = 1, replaced: Int8 = 2
+    /// A dot the camera saw through (DotCleanup): hidden, not saved; a later reading in its cell brings it back.
+    static let erased: Int8 = 3
 
     /// Unit vector ↔ snorm8 (zero stays zero).
     private static func encode(_ n: SIMD3<Float>) -> SIMD4<Int8> {

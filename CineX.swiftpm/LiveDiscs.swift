@@ -539,6 +539,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let commands = queue.makeCommandBuffer(),
               let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
         drawableHeight = Float(view.drawableSize.height)
+        if view.bounds.height > 0 { let aspect = Float(view.bounds.width / view.bounds.height); LiveCloud.viewAspect.withLock { $0 = aspect } }
         let count = cloud.count
         if let camera = session?.currentFrame?.camera, view.bounds.width > 0 {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
@@ -681,7 +682,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             }
         }
         // The normal's 4th byte: 1 = a fine (0.8 cm) dot, 2 = a 2 cm dot replaced by fine ones (not drawn).
-        if (normals[iid].w == 2) hidden = true;
+        if (normals[iid].w == 2 || normals[iid].w == 3) hidden = true;   // 3: erased (seen through)
         float hs = (normals[iid].w == 1) ? u.fineHalf : u.halfSize;
         if (u.points > 0.5) {
             // As Android's live dots: the halo 3.2 / 2.0 of the core, smaller when nearer than 1.5 m (down to 30%),
