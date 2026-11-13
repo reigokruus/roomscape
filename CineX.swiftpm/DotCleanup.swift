@@ -1,3 +1,4 @@
+import Foundation
 import simd
 
 /// The live dots' cleanup rules (rk 13 Nov, stray black dots that never went away: "would it be possible to update
@@ -83,5 +84,57 @@ enum DotCleanup {
         if abs(f.depth[v * f.depthRow + u - 1] - z) > tol || abs(f.depth[v * f.depthRow + u + 1] - z) > tol
             || abs(f.depth[(v - 1) * f.depthRow + u] - z) > tol || abs(f.depth[(v + 1) * f.depthRow + u] - z) > tol { return nil }
         return true
+    }
+}
+
+extension DotCleanup {
+    /// Whether this frame's sure depth sees the point at about its own depth (within the margin) at its pixel.
+    static func seenAt(_ p: SIMD3<Float>, _ f: DepthFrame) -> Bool {
+        let c = f.worldToCamera * SIMD4(p, 1)
+        let d = -c.z
+        guard d > 0.25, d < 3.5 else { return false }
+        let u = Int(f.fx * c.x / d + f.cx), v = Int(f.cy - f.fy * c.y / d)
+        guard u >= 1, v >= 1, u < f.width - 1, v < f.height - 1, f.confidence[v * f.confidenceRow + u] >= 2 else { return false }
+        return abs(f.depth[v * f.depthRow + u] - d) < margin(d)
+    }
+}
+
+/// The room built from the recording after Done (13 Nov, coordinator for rk: the same see-through idea as the live
+/// dots): a point that sure depth from other frames sees clearly through (over its whole spot, as `seenThrough`, the
+/// whole frame, no capture zone) in at least `minThrough` frames, and in at least as many frames as see it at its
+/// own depth, is dropped. Every `frameStep`-th depth frame is used.
+enum RebuildCleanup {
+    static let minThrough = 3, frameStep = 3
+
+    /// One depth frame: depth in metres, confidence 0-2 (empty = unknown), row-major `width` × `height`, intrinsics
+    /// for this size, world to camera.
+    struct Frame { var depth: [Float32]; var confidence: [UInt8]; var width: Int; var height: Int
+                   var fx: Float; var fy: Float; var cx: Float; var cy: Float; var worldToCamera: simd_float4x4 }
+
+    /// Which points to keep. `frame(i)` gives depth frame i (nil to skip it); called once per used frame, in order.
+    static func keep(_ points: [SIMD3<Float>], frameCount: Int, voxel: Float = 0.02, frame: (Int) -> Frame?) -> [Bool] {
+        let n = points.count
+        guard n > 0 else { return [] }
+        var through = [UInt16](repeating: 0, count: n), at = [UInt16](repeating: 0, count: n)
+        let parts = 6
+        for i in stride(from: 0, to: frameCount, by: frameStep) {
+            guard let f = frame(i), !f.confidence.isEmpty else { continue }
+            f.depth.withUnsafeBufferPointer { dp in f.confidence.withUnsafeBufferPointer { cp in
+                through.withUnsafeMutableBufferPointer { tp in at.withUnsafeMutableBufferPointer { ap in
+                    let view = DotCleanup.DepthFrame(depth: dp.baseAddress!, depthRow: f.width, confidence: cp.baseAddress!, confidenceRow: f.width,
+                                                     width: f.width, height: f.height, fx: f.fx, fy: f.fy, cx: f.cx, cy: f.cy,
+                                                     worldToCamera: f.worldToCamera, x0: 0, x1: f.width, y0: 0, y1: f.height, voxel: voxel)
+                    let tpp = tp.baseAddress!, app = ap.baseAddress!
+                    DispatchQueue.concurrentPerform(iterations: parts) { part in
+                        for j in stride(from: part, to: n, by: parts) {
+                            if let s = DotCleanup.seenThrough(points[j], view) {
+                                if s { tpp[j] &+= 1 } else if DotCleanup.seenAt(points[j], view) { app[j] &+= 1 }
+                            }
+                        }
+                    }
+                } }
+            } }
+        }
+        return (0..<n).map { !(Int(through[$0]) >= minThrough && through[$0] >= at[$0]) }
     }
 }

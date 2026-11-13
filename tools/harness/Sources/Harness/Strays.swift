@@ -196,3 +196,115 @@ enum Strays {
         }
     }
 }
+
+/// The rebuild's points (RecordingProcessor.surface: medium+ confidence, every 2nd pixel, 2 cm cells seen twice) from a
+/// recording, before and after RebuildCleanup, with the same floater ground truth and the time it takes.
+///   harness rebuildstrays recordings/ios/<scan>/<scan>.capture
+enum RebuildStrays {
+    static func run(_ capture: URL) throws {
+        let rec = capture.appendingPathComponent("recording")
+        let fd = try Data(contentsOf: rec.appendingPathComponent("frames.bin"))
+        var frames: [(t: Double, pose: simd_float4x4, k: simd_float3x3, w: Int, h: Int, ok: Bool)] = []
+        fd.withUnsafeBytes { b in
+            for i in 0..<(fd.count / 120) {
+                let o = i * 120
+                var c: [SIMD4<Float>] = []
+                for j in 0..<4 { c.append(b.loadUnaligned(fromByteOffset: o + 8 + j * 16, as: SIMD4<Float>.self)) }
+                var k: [SIMD3<Float>] = []
+                for j in 0..<3 { let q = o + 72 + j * 12; k.append(SIMD3(b.loadUnaligned(fromByteOffset: q, as: Float.self), b.loadUnaligned(fromByteOffset: q + 4, as: Float.self), b.loadUnaligned(fromByteOffset: q + 8, as: Float.self))) }
+                frames.append((b.loadUnaligned(fromByteOffset: o, as: Double.self), simd_float4x4(c[0], c[1], c[2], c[3]), simd_float3x3(k[0], k[1], k[2]),
+                               Int(b.loadUnaligned(fromByteOffset: o + 108, as: Int32.self)), Int(b.loadUnaligned(fromByteOffset: o + 112, as: Int32.self)),
+                               b.loadUnaligned(fromByteOffset: o + 116, as: Int32.self) == 2))
+            }
+        }
+        let dd = try Data(contentsOf: rec.appendingPathComponent("depth.bin"))
+        var all: [RebuildCleanup.Frame] = []
+        var cells: [SIMD3<Int32>: (sum: SIMD3<Float>, n: Int32)] = [:]
+        var at = 0, fi = 0
+        while at + 12 <= dd.count {
+            let t = dd.subdata(in: at..<(at + 8)).withUnsafeBytes { $0.loadUnaligned(as: Double.self) }
+            let len = Int(dd.subdata(in: (at + 8)..<(at + 12)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })
+            at += 12
+            guard at + len <= dd.count, let raw = try? (dd.subdata(in: at..<(at + len)) as NSData).decompressed(using: .lzfse) as Data else { break }
+            at += len
+            while fi + 1 < frames.count, abs(frames[fi + 1].t - t) <= abs(frames[fi].t - t) { fi += 1 }
+            let f = frames[fi]
+            guard f.ok else { continue }
+            let w = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt16.self) }), h = Int(raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 2, as: UInt16.self) })
+            var depth = [Float32](repeating: 0, count: w * h), conf = [UInt8](repeating: 0, count: w * h)
+            raw.withUnsafeBytes { b in
+                for i in 0..<(w * h) {
+                    depth[i] = Float(b.loadUnaligned(fromByteOffset: 4 + i * 2, as: UInt16.self)) / 1000
+                    conf[i] = b.loadUnaligned(fromByteOffset: 4 + w * h * 2 + i, as: UInt8.self)
+                }
+            }
+            let sx = Float(w) / Float(f.w), sy = Float(h) / Float(f.h)
+            let fx = f.k[0][0] * sx, fy = f.k[1][1] * sy, cx = f.k[2][0] * sx, cy = f.k[2][1] * sy
+            all.append(RebuildCleanup.Frame(depth: depth, confidence: conf, width: w, height: h, fx: fx, fy: fy, cx: cx, cy: cy, worldToCamera: f.pose.inverse))
+            // as RecordingProcessor.surface (its pixel centre convention included)
+            func z(_ x: Int, _ y: Int) -> Float { depth[y * w + x] }
+            for y in stride(from: 1, to: h - 1, by: 2) { for x in stride(from: 1, to: w - 1, by: 2) {
+                let d = z(x, y)
+                guard d > 0.2, d < 4, conf[y * w + x] >= 1 else { continue }
+                let tol = d * 0.04 + 0.02
+                if abs(z(x - 1, y) - d) > tol || abs(z(x + 1, y) - d) > tol || abs(z(x, y - 1) - d) > tol || abs(z(x, y + 1) - d) > tol { continue }
+                let p4 = f.pose * SIMD4((Float(x) - cx) * d / fx, -(Float(y) - cy) * d / fy, -d, 1)
+                let pw = SIMD3(p4.x, p4.y, p4.z)
+                guard cells.count < 1_200_000 else { continue }
+                let k = SIMD3(Int32((pw.x / 0.02).rounded(.down)), Int32((pw.y / 0.02).rounded(.down)), Int32((pw.z / 0.02).rounded(.down)))
+                let c = cells[k] ?? (.zero, 0)
+                cells[k] = (c.sum + pw, c.n + 1)
+            } }
+        }
+        let points = cells.values.filter { $0.n >= 2 }.map { $0.sum / Float($0.n) }
+        print("rebuild points: \(points.count) from \(all.count) depth frames")
+        let t0 = Date()
+        let keep = RebuildCleanup.keep(points, frameCount: all.count) { all[$0] }
+        let secs = Date().timeIntervalSince(t0)
+        let kept = points.indices.filter { keep[$0] }.map { points[$0] }
+        let dropped = points.indices.filter { !keep[$0] }.map { points[$0] }
+        print("cleanup: dropped \(dropped.count) (\(String(format: "%.2f", 100 * Double(dropped.count) / Double(points.count)))%) in \(String(format: "%.1f", secs)) s on this Mac")
+        // ground truth as in `strays` (every 6th frame here), before and after
+        func floaters(_ pts: [SIMD3<Float>]) -> Int {
+            let lock = OSAllocatedUnfairLock(initialState: 0)
+            let sample = Swift.stride(from: 0, to: all.count, by: 6).map { all[$0] }
+            DispatchQueue.concurrentPerform(iterations: 8) { part in
+                var local = 0
+                for j in Swift.stride(from: part, to: pts.count, by: 8) {
+                    var thr = 0, atc = 0
+                    for f in sample {
+                        let c = f.worldToCamera * SIMD4(pts[j], 1)
+                        let d = -c.z
+                        guard d > 0.25, d < 3.5 else { continue }
+                        let u = Int(f.fx * c.x / d + f.cx), v = Int(f.cy - f.fy * c.y / d)
+                        guard u >= 1, v >= 1, u < f.width - 1, v < f.height - 1, f.confidence[v * f.width + u] >= 2 else { continue }
+                        let zz = f.depth[v * f.width + u]
+                        if zz > d + DotCleanup.margin(d) { thr += 1 } else if abs(zz - d) < DotCleanup.margin(d) { atc += 1 }
+                    }
+                    if thr >= 3, thr > atc { local += 1 }
+                }
+                lock.withLock { $0 += local }
+            }
+            return lock.withLock { $0 }
+        }
+        print("floaters before \(floaters(points)), after \(floaters(kept))")
+        // dropped points right on the scan's surface (possible real things lost): mesh within 3 cm
+        let mesh = Replay.readMesh(capture.appendingPathComponent("mesh.bin")) ?? []
+        var surface = Set<SIMD3<Int32>>()
+        for p in mesh { surface.insert(SIMD3(Int32((p.x / 0.03).rounded(.down)), Int32((p.y / 0.03).rounded(.down)), Int32((p.z / 0.03).rounded(.down)))) }
+        let onSurface = dropped.filter { p in
+            let k = SIMD3(Int32((p.x / 0.03).rounded(.down)), Int32((p.y / 0.03).rounded(.down)), Int32((p.z / 0.03).rounded(.down)))
+            for dx in -1...1 { for dy in -1...1 { for dz in -1...1 where surface.contains(k &+ SIMD3(Int32(dx), Int32(dy), Int32(dz))) { return true } } }
+            return false
+        }
+        print("dropped points within 3 cm of the scan's surface: \(onSurface.count)")
+        // a PLY of the dropped points (red) and the kept ones (grey), to look at
+        let out = URL(fileURLWithPath: "harness-out/rebuild-strays-\(capture.deletingPathExtension().lastPathComponent).ply")
+        var ply = "ply\nformat ascii 1.0\nelement vertex \(kept.count / 4 + dropped.count)\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+        for (i, p) in kept.enumerated() where i % 4 == 0 { ply += "\(p.x) \(p.y) \(p.z) 170 170 170\n" }
+        for p in dropped { ply += "\(p.x) \(p.y) \(p.z) 255 30 30\n" }
+        try? FileManager.default.createDirectory(at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try ply.write(to: out, atomically: true, encoding: .utf8)
+        print("view: \(out.path)")
+    }
+}
