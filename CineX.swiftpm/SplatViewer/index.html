@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Room preview</title>
 <!-- The in-app photo-real room preview (SplatViewerView.swift): served by the app itself under roomscape-splat://,
-     offline. scene.ply is the scan's splat; ?cam=x,y,z&look=x,y,z where the camera starts (splat/view.json). -->
+     offline. scene.ply is the scan's splat; ?cam=x,y,z&look=x,y,z where the camera starts (splat/view.json); optional
+     ?fov=degrees (vertical; Android passes its room view's 60 so the switch doesn't jump); window.roomCam() gives the
+     camera back as {cam:[x,y,z], look:[x,y,z]} (Android's Photo-real tab hands it back to the room view). -->
 <style>
   html, body { margin: 0; height: 100%; background: #111214; color: #eceae6; font: 14px -apple-system, sans-serif; overflow: hidden; }
   #view { position: fixed; inset: 0; }
@@ -28,12 +30,19 @@ const viewer = new GaussianSplats3D.Viewer({
   useBuiltInControls: true,                 // touch: one finger turns, two fingers move and zoom
 });
 const status = document.getElementById('status');
+if (q.get('fov') && viewer.camera) { viewer.camera.fov = Number(q.get('fov')); viewer.camera.updateProjectionMatrix(); }
+window.roomCam = () => {
+  const c = viewer.camera, t = viewer.controls && viewer.controls.target;
+  if (!c || !t) return null;
+  return JSON.stringify({ cam: [c.position.x, c.position.y, c.position.z], look: [t.x, t.y, t.z] });
+};
 try {
   await viewer.addSplatScene('scene.ply', { splatAlphaRemovalThreshold: 5, showLoadingUI: false, progressiveLoad: false,
     format: GaussianSplats3D.SceneFormat.Ply,
     onProgress: p => { status.textContent = `Loading the room… ${Math.round(p)}%`; } });
   viewer.start();
-  status.textContent = 'One finger to turn, two to move and zoom';
+  if (q.get('fov') && viewer.camera) { viewer.camera.fov = Number(q.get('fov')); viewer.camera.updateProjectionMatrix(); }
+  status.textContent = q.get('quiet') ? '' : 'One finger to turn, two to move and zoom';
   setTimeout(() => { status.textContent = ''; }, 4000);
 } catch (e) { status.textContent = 'Could not show the preview: ' + (e && e.message ? e.message : e); }
 </script>

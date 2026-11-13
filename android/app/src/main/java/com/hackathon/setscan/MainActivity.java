@@ -1215,6 +1215,7 @@ public class MainActivity extends Activity {
         if (viewerTop != null) {
             viewerTop.setVisibility(viewer ? View.VISIBLE : View.GONE);
             styleSwitch.setVisibility(viewer ? View.VISIBLE : View.GONE);
+            updateSplatTab(viewer);
             viewerPanel.setVisibility(viewer && walkState == 0 ? View.VISIBLE : View.GONE);
             pillRow.setVisibility(viewer ? View.VISIBLE : View.GONE);
             setViewerTitle();
@@ -1246,7 +1247,7 @@ public class MainActivity extends Activity {
                 b.setVisibility(View.GONE);
             }
             java.io.File dir = renderer.currentDir;
-            if (dir != null && PhotoRealActivity.result(dir).exists()) { photoRealButton.setText("Photo-real preview"); menuActions.add(0, photoRealButton); }
+            if (dir != null && PhotoRealActivity.result(dir).exists()) { photoRealButton.setText("Show photo-real"); menuActions.add(0, photoRealButton); }
             else if (PhotoRealActivity.possible(this, dir)) { photoRealButton.setText("Make photo-real"); menuActions.add(0, photoRealButton); }
         }
     }
@@ -1347,10 +1348,20 @@ public class MainActivity extends Activity {
             t.setGravity(Gravity.CENTER);
             t.setPadding(dp(16), dp(6), dp(16), dp(6));
             final String tabName = names[i];
-            t.setOnClickListener(v -> { act("view tab \"" + tabName + "\""); renderer.setStyle(s); updateStyleSwitch(); splatButton.setText(renderer.styleLabel()); });
+            t.setOnClickListener(v -> { act("view tab \"" + tabName + "\""); hideSplatView(); renderer.setStyle(s); updateStyleSwitch(); splatButton.setText(renderer.styleLabel()); });
             styleTabs[i] = t;
             styleSwitch.addView(t);
         }
+        // Photo-real: the scan's splat in this same view, a fourth tab once it has been made (rk 13 Nov 17:12)
+        splatTab = new TextView(this);
+        splatTab.setText("Photo-real");
+        splatTab.setTextColor(Color.WHITE);
+        splatTab.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        splatTab.setGravity(Gravity.CENTER);
+        splatTab.setPadding(dp(16), dp(6), dp(16), dp(6));
+        splatTab.setVisibility(View.GONE);
+        splatTab.setOnClickListener(v -> { act("view tab \"Photo-real\""); showSplatView(); });
+        styleSwitch.addView(splatTab);
         applyPhotoTab();
         // Lighting and Objects as pills under the top bar, then the view switch, like the iPhone.
         pillRow = new LinearLayout(this);
@@ -1728,13 +1739,80 @@ public class MainActivity extends Activity {
     }
 
     private void updateStyleSwitch() {
-        int s = renderer.style();
+        int s = splatWeb != null ? -1 : renderer.style();
         for (int i = 0; i < styleTabs.length; i++) {
             android.graphics.drawable.GradientDrawable on = new android.graphics.drawable.GradientDrawable();
             on.setColor(0xFF636366); on.setCornerRadius(dp(7));
             styleTabs[i].setBackground(TAB_STYLE[i] == s ? on : null);
             styleTabs[i].setTypeface(TAB_STYLE[i] == s ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
         }
+        if (splatTab != null) {
+            android.graphics.drawable.GradientDrawable on = new android.graphics.drawable.GradientDrawable();
+            on.setColor(0xFF636366); on.setCornerRadius(dp(7));
+            splatTab.setBackground(splatWeb != null ? on : null);
+            splatTab.setTypeface(splatWeb != null ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
+        }
+    }
+
+    // ---------------- the Photo-real tab: the splat in the room view itself (rk 13 Nov 17:12) ----------------
+
+    private TextView splatTab;
+    private File photoRealReturn;   // the scan being made photo-real on its own screen
+    private android.webkit.WebView splatWeb;
+    private File splatDir;
+
+    /** Shows or hides the Photo-real tab for the open scan, and closes the splat when the view no longer fits it. */
+    private void updateSplatTab(boolean viewer) {
+        if (splatTab == null) return;
+        File d = renderer.currentDir;
+        boolean has = viewer && walkState == 0 && d != null && PhotoRealActivity.result(d).exists();
+        splatTab.setVisibility(has ? View.VISIBLE : View.GONE);
+        if (splatWeb != null && (!has || !d.equals(splatDir))) hideSplatView();
+    }
+
+    /** The splat over the 3D view, from the same camera; the GL view rests underneath until the tab is left. */
+    private void showSplatView() {
+        File d = renderer.currentDir;
+        if (d == null || !PhotoRealActivity.result(d).exists()) return;
+        if (splatWeb != null) return;
+        float[] c = renderer.orbitCamera();
+        android.webkit.WebView web = new android.webkit.WebView(this);
+        web.setBackgroundColor(0xFF111214);
+        web.getSettings().setJavaScriptEnabled(true);
+        web.getSettings().setAllowFileAccess(false);
+        web.setWebViewClient(PhotoRealActivity.viewerClient(this, PhotoRealActivity.result(d)));
+        ViewGroup root = (ViewGroup) glView.getParent();
+        FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) glView.getLayoutParams();
+        FrameLayout.LayoutParams wp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+        wp.bottomMargin = gp.bottomMargin;
+        root.addView(web, root.indexOfChild(glView) + 1, wp);
+        splatWeb = web; splatDir = d;
+        web.loadUrl(String.format(java.util.Locale.US, "%ssplat/index.html?cam=%.3f,%.3f,%.3f&look=%.3f,%.3f,%.3f&fov=60",
+                PhotoRealActivity.HOST, c[0], c[1], c[2], c[3], c[4], c[5]));
+        glView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);   // no point drawing the room under it
+        updateStyleSwitch();
+    }
+
+    /** Back to the room view, at the splat view's camera. */
+    private void hideSplatView() {
+        final android.webkit.WebView web = splatWeb;
+        if (web == null) return;
+        splatWeb = null; splatDir = null;
+        glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+        updateStyleSwitch();
+        web.evaluateJavascript("window.roomCam ? window.roomCam() : null", v -> {
+            try {
+                if (v != null && !v.equals("null")) {
+                    String json = v.startsWith("\"") ? new org.json.JSONTokener(v).nextValue().toString() : v;
+                    org.json.JSONObject o = new org.json.JSONObject(json);
+                    org.json.JSONArray e = o.getJSONArray("cam"), l = o.getJSONArray("look");
+                    renderer.setOrbitCamera((float) e.getDouble(0), (float) e.getDouble(1), (float) e.getDouble(2),
+                            (float) l.getDouble(0), (float) l.getDouble(1), (float) l.getDouble(2));
+                }
+            } catch (Exception ignored) { }
+            if (web.getParent() != null) ((ViewGroup) web.getParent()).removeView(web);
+            web.destroy();
+        });
     }
 
     /** Opens the photo-real screen for the open scan; a new one only after the warning (rk 12 Nov 22:41). */
@@ -1751,8 +1829,8 @@ public class MainActivity extends Activity {
             } else android.widget.Toast.makeText(this, "This scan has no pictures to make it photo-real.", android.widget.Toast.LENGTH_LONG).show();
             return;
         }
-        Runnable go = () -> { act("Make photo-real"); startActivity(new android.content.Intent(this, PhotoRealActivity.class).putExtra(PhotoRealActivity.EXTRA_SCAN, dir.getAbsolutePath())); };
-        if (PhotoRealActivity.result(dir).exists()) { go.run(); return; }
+        if (PhotoRealActivity.result(dir).exists()) { showSplatView(); return; }   // made already: the Photo-real tab
+        Runnable go = () -> { act("Make photo-real"); photoRealReturn = dir; startActivity(new android.content.Intent(this, PhotoRealActivity.class).putExtra(PhotoRealActivity.EXTRA_SCAN, dir.getAbsolutePath())); };
         new android.app.AlertDialog.Builder(this).setTitle("Make photo-real?")
                 .setMessage("This takes a while (about 5 to 15 minutes) and the phone gets hot. Keep the app open on the next screen until it's done.")
                 .setPositiveButton("Continue", (d, w) -> go.run()).setNegativeButton("Not now", null).show();
@@ -1765,7 +1843,7 @@ public class MainActivity extends Activity {
         // and its rebuild-frames/ only move in at the end, so the entry was missing (rk 13 Nov 16:55 "cant find photoreal").
         items.remove(photoRealButton);
         java.io.File dir = renderer.currentDir;
-        if (dir != null && PhotoRealActivity.result(dir).exists()) { photoRealButton.setText("Photo-real preview"); items.add(0, photoRealButton); }
+        if (dir != null && PhotoRealActivity.result(dir).exists()) { photoRealButton.setText("Show photo-real"); items.add(0, photoRealButton); }
         else if (PhotoRealActivity.possible(this, dir)) { photoRealButton.setText("Make photo-real"); items.add(0, photoRealButton); }
         else if (dir != null && renderer.framesNotKeptYet() && BrushNative.present(this)) {
             photoRealButton.setText("Make photo-real"); items.add(0, photoRealButton); }
@@ -3066,6 +3144,12 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         act("app resumed (onResume)");
+        // back from making it photo-real: the new Photo-real tab, opened on it
+        if (viewerTop != null && !scanning) {
+            updateSplatTab(true);
+            File pr = photoRealReturn; photoRealReturn = null;
+            if (pr != null && pr.equals(renderer.currentDir) && PhotoRealActivity.result(pr).exists()) glView.post(this::showSplatView);
+        }
         // the phone's rotation and shaking while scanning: the held view and the "stand still" hint when tracking is lost
         try {
             android.hardware.SensorManager sm = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE);

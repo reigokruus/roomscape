@@ -9068,6 +9068,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisableVertexAttribArray(aPos);
     }
 
+    /** The orbit camera as {eye x, y, z, look-at x, y, z} (the photo-real tab starts from it, rk 13 Nov 17:12). */
+    float[] orbitCamera() {
+        float p = topView ? 1.5697f : pitch, y = topView ? 0f : yaw;
+        return new float[]{target[0] + dist * (float) (Math.cos(p) * Math.sin(y)), target[1] + dist * (float) Math.sin(p),
+                target[2] + dist * (float) (Math.cos(p) * Math.cos(y)), target[0], target[1], target[2]};
+    }
+    /** Puts the orbit camera at an eye looking at a point (back from the photo-real tab). */
+    void setOrbitCamera(float ex, float ey, float ez, float tx, float ty, float tz) {
+        float dx = ex - tx, dy = ey - ty, dz = ez - tz, d = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (!(d > 0.05f) || d > 200f || walking) return;
+        target[0] = tx; target[1] = ty; target[2] = tz; dist = d; topView = false;
+        pitch = (float) Math.asin(Math.max(-1, Math.min(1, dy / d)));
+        yaw = (float) Math.atan2(dx, dz);
+    }
+
     private void drawViewer() {
         for (Runnable r; (r = glTasks.poll()) != null; ) r.run();
         // "Nothing here" behind the room (not in the clean thumbnail frame), so holes can't pass for black things.

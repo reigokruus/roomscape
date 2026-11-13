@@ -195,7 +195,9 @@ public class PhotoRealActivity extends Activity {
         running = false;
         ui.post(() -> {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            if (ok) { showViewer(); return; }
+            // done: back to the room view, which opens its Photo-real tab (rk 13 Nov 17:12); this screen's process
+            // (the training's memory) ends with it
+            if (ok) { finish(); ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 1500); return; }
             line.setText(msg); action.setText("Start again"); bar.setVisibility(View.GONE); note.setText("");
         });
     }
@@ -257,27 +259,31 @@ public class PhotoRealActivity extends Activity {
 
     static final String HOST = "https://appassets.androidplatform.net/";
 
-    private void showViewer() {
-        root.removeAllViews();
-        WebView web = new WebView(this);
-        web.setBackgroundColor(0xFF111214);
-        web.getSettings().setJavaScriptEnabled(true);
-        web.getSettings().setAllowFileAccess(false);
-        final File ply = result(scan);
-        web.setWebViewClient(new WebViewClient() {
+    /** Serves the bundled viewer (assets/SplatViewer) and the scan's splat as scene.ply under HOST/splat/, offline. */
+    static WebViewClient viewerClient(final android.content.Context ctx, final File ply) {
+        return new WebViewClient() {
             @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest req) {
                 String path = req.getUrl().getPath();
                 if (path == null || !req.getUrl().toString().startsWith(HOST)) return null;
                 String name = path.substring(path.lastIndexOf('/') + 1);
                 try {
-                    InputStream in = name.equals("scene.ply") ? new FileInputStream(ply) : getAssets().open("SplatViewer/" + name);
+                    InputStream in = name.equals("scene.ply") ? new FileInputStream(ply) : ctx.getAssets().open("SplatViewer/" + name);
                     String type = name.endsWith(".html") ? "text/html" : name.endsWith(".js") ? "text/javascript" : "application/octet-stream";
                     WebResourceResponse r = new WebResourceResponse(type, "utf-8", in);
                     r.setResponseHeaders(java.util.Collections.singletonMap("Access-Control-Allow-Origin", "*"));
                     return r;
                 } catch (Exception e) { return new WebResourceResponse("text/plain", "utf-8", 404, "Not found", null, null); }
             }
-        });
+        };
+    }
+
+    private void showViewer() {
+        root.removeAllViews();
+        WebView web = new WebView(this);
+        web.setBackgroundColor(0xFF111214);
+        web.getSettings().setJavaScriptEnabled(true);
+        web.getSettings().setAllowFileAccess(false);
+        web.setWebViewClient(viewerClient(this, result(scan)));
         root.addView(web, new FrameLayout.LayoutParams(-1, -1));
         Button back = new Button(this);
         back.setAllCaps(false); back.setText("‹ Back");
