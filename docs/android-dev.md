@@ -1,59 +1,112 @@
-# Android: working on the UI in the emulator (for Zeynep)
+# Android app: guide for Vera (and her Claude agent)
 
-From 13 Nov 2026 Zeynep owns Android development as well. She works on the UI in the Android Studio emulator, with no
-phone and no scanning. rk tests on the Galaxy S24. Read [CLAUDE.md](../CLAUDE.md) first for the code layout and rules.
+From 13 Nov 2026 Vera develops the Android app and tests it on her own **Galaxy S23 Ultra**. rk (the owner) also
+tests on a Galaxy S24. Read [CLAUDE.md](../CLAUDE.md) first (layout, rules), then this file.
 
-## Which branch
+## Branch
 
-Work on **`claude/project-thread-k4b688`**, not `main`. It holds all the Android work up to now: the capture zone,
-the hints and the "Circle around" animation, stray-dot removal, Make photo-real with Brush, the Photo-real tab and the
-readable build stamp. It already includes everything on `main`.
+- Base all Android work on **`claude/project-thread-k4b688`**, not on `main`. It has all the Android work up to
+  13 Nov: the capture zone, rotating hints and "Circle around", stray-dot removal (live and at Done), 80% depth
+  confidence, Make photo-real with Brush, the Photo-real tab and the readable build stamp. It already includes `main`.
+- Work on your own branch: `git fetch origin && git checkout -b vera/<topic> origin/claude/project-thread-k4b688`.
+  Push that branch and tell rk it is ready; rk merges.
+- Never push to `main`. A push to `main` that touches `android/` makes CI publish a public APK, and CI's APK has no
+  photo-real (the Brush libraries aren't in git).
 
-`main` stays behind on purpose. A push to `main` that touches `android/` makes CI build the APK and publish it as a
-public GitHub release, and CI's APK has no photo-real (see below). Merge to `main` only when rk says so.
+## Build and install on the S23 Ultra
+
+Setup:
+- JDK 17 or 21 (Gradle 8.14 doesn't run on Java 25).
+- The Android SDK with platform 35; Android Studio is fine. Put `sdk.dir=<path>` in `android/local.properties`,
+  which is git-ignored.
+- On the phone, turn on USB debugging and check that `adb devices` lists it. Note its serial.
 
 ```
-git fetch origin
-git checkout -b android-zeynep origin/claude/project-thread-k4b688   # her own branch off it
+cd android && ./gradlew assembleDebug
+adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Push her own branch, and rk merges it. Two people pushing the same branch at once lose work.
+- **Always `install -r`.** Never `adb uninstall` and never `-d`: uninstalling deletes every scan on the phone.
+- The debug signing key is in the repo (`android/app/debug.keystore`), so your builds update rk's builds in place,
+  and his update yours.
+- The version code is the build time, so a newer build always installs over an older one.
+- Unit tests: `./gradlew testDebugUnitTest`, for example `--tests com.hackathon.setscan.FloorAreaEditTest`.
+- Don't reinstall while a scan or photo-real training is running: it closes the app.
 
-## Open and run
+## Build stamp (rule)
 
-1. In Android Studio, **File > Open** the `android/` folder (not the repo root). Use JDK 17 or 21 (Settings > Build >
-   Gradle > Gradle JDK). Gradle 8.14 doesn't run on Java 25.
-2. Create the emulator. On an Apple Silicon Mac, use a **Pixel** device with an **arm64-v8a "Google Play"** system
-   image (API 34 or 35). The APK ships arm64 only (`abiFilters 'arm64-v8a'`), so an x86_64 image refuses it, or runs
-   it only through slow translation.
-3. Run the `app` configuration, or use the command line: `cd android && ./gradlew installDebug`.
+Every build shows a readable stamp on the home screen, like **`Build 13 Nov 17:15:11`** (Tallinn time). It comes
+from `android/app/build.gradle` (`resValue build_stamp`, `MainActivity.buildStamp()`). When you report a build, put
+that stamp on its own line. Never quote the numeric versionCode (`yyDDDHHmm`) to rk: it's internal.
 
-The debug signing key is in the repo (`android/app/debug.keystore`), so her builds sign the same way as rk's.
+## Photo-real (Brush) libraries: not in git
 
-## What doesn't work in the emulator
+"Make photo-real" needs two native libraries in `android/app/src/main/jniLibs/arm64-v8a/` (git-ignored):
+`libbrush_c.so` (about 98 MB) and `libbrushjni.so`. Without them the app builds and runs, but hides Make photo-real.
+`BrushNative.present()` checks for them. Get them one of three ways:
 
-- **Scanning.** ARCore depth needs the real camera. The manifest asks for ARCore (`com.google.ar.core` required), so
-  on first start the app asks to install Google Play Services for AR. On a Play image that may work, but the emulator
-  has no depth camera, so a scan won't give dots. Nobody has tried the app in an emulator yet, so note what happens.
-- **To see the room screen**, open a saved room file instead of scanning. Drag a `.rmsc` file onto the emulator
-  (it goes to Downloads), then open it from the Files app with RoomScape. Ask rk for a test file that doesn't show his
-  home. Scans are private data: never commit them or put them anywhere public.
-- **Make photo-real (Brush).** The Brush libraries (`libbrush_c.so`, `libbrushjni.so`) are not in git: they go in the
-  git-ignored `android/app/src/main/jniLibs/arm64-v8a/`, built by `tools/brush-android/build.sh` (Rust and NDK 27,
-  not needed for UI work). Without them the app simply hides "Make photo-real". The **Photo-real tab** in the room
-  view shows only for a scan that already has `splat/preview.ply`. For UI work on it, rk can send a scan that has one.
-- **Heat, memory and speed** behave differently from the S24, so check anything timing-related on the phone.
+1. **From rk:** `brush-android-libs-16k.zip`, built 13 Nov and linked for 16 KB pages. Unzip it into `android/app/src/main/`.
+   SHA-256 checksums:
+   - `libbrush_c.so` 8be16056a3e726e50f62a7875118758abbe08ca57e23df2a8ef4d2632303f73c
+   - `libbrushjni.so` e9d4a6a71cfcb1b5e4799e04dbbb991f338b406bfea1b6e3de512822ccea2ad5
+2. **From any RoomScape APK that has photo-real:**
+   `unzip -j <apk> 'lib/arm64-v8a/libbrush*' -d android/app/src/main/jniLibs/arm64-v8a/`. Older APKs carry
+   libraries without 16 KB alignment, and Android 15 shows a warning for those.
+3. **Build them:** follow `tools/brush-android/README.md` (Rust, NDK 27, about 7 min). Do this only if you change
+   Brush.
 
-## Build stamp rule
+Never commit them. Check that `git status` shows nothing under `jniLibs/`.
 
-Every build shows a readable stamp, **"Build 13 Nov 17:15:11"** (Tallinn time), on the home screen and in every
-"build ready" message, on its own line. It comes from `build.gradle` (`resValue build_stamp`). The numeric
-versionCode (`yyDDDHHmm`) stays internal, so never quote it to rk. A new build always installs over an older one.
+## Scans on the phone: private data
 
-## Where things are
+- A scan is saved in the app's private storage: `files/scans/scan_<time>/`. The files are described in CLAUDE.md
+  under "Reading a scan": `points.bin`, `meta.json`, `scan-log.txt`, `rebuild-frames/`, `splat/` and so on.
+- Copy one to your computer (debug builds only):
+  `adb -s <serial> exec-out run-as com.hackathon.setscan tar cf - -C files/scans <scan> | tar xf -`
+- Photo-real results go in `<scan>/splat/`: `preview.ply` is the result, `train-log.txt` has the time, rests and
+  skipped refines.
+- Scans show real homes. Never commit them, upload them or put them anywhere public. Work on copies, and never delete
+  or rewrite a scan.
+- Don't print the app's prefs file `shared_prefs/cinex.xml` whole: it holds the Claude API key. Grep for the key
+  names instead.
 
-- Screens, buttons and menus: `MainActivity.java`. The room view's Photo / Points / Mesh / Photo-real tabs are around
-  `styleSwitch`, the ✦ menu is `showViewerMenu()`, and the scan hints are `SCAN_TIPS`, `OrbitIcon`, `ZoneFrame`.
-- Make photo-real screen: `PhotoRealActivity.java` (it runs in its own process). The Photo-real tab's viewer is the
-  iPhone's `CineX.swiftpm/SplatViewer/index.html`, copied in at build time, so a change there affects both apps.
-- Drawing: `ScanRenderer.java` (GL). Most UI work doesn't need it.
+## Where things are (`android/app/src/main/java/com/hackathon/setscan/`)
+
+- **Screens, buttons, menus: `MainActivity.java`.**
+  - The room view's Photo / Points / Mesh / Photo-real tabs are around `styleSwitch` (`showSplatView`,
+    `hideSplatView`).
+  - The ✦ menu is `showViewerMenu()`.
+  - The scan hints are `SCAN_TIPS`, `OrbitIcon` ("Circle around") and `ZoneFrame` (the capture zone outline, an
+    Android View: a GL outline flickered on the S24).
+  - Debug tools open with a long press on the main button.
+- **Live scan and room view: `ScanRenderer.java`** (GL thread, large; search by feature).
+  - `carve()` is the see-through erase plus one-off specks; struck dots are rechecked every frame.
+  - `supersede()` is "closest look wins".
+  - `PAINT_MIN` is the depth confidence for dots (204 = 80%, confirmed by rk).
+  - `ZONE_W` / `ZONE_H` set the capture zone (0.72 × 0.70).
+  - `dropSeenThroughAtDone()` / `DoneSeeThrough.java` clean up at Done, with a 2 s budget.
+  - A per-second log goes to `scan-log.txt`.
+- **Make photo-real: `PhotoRealActivity.java`.** It runs in its own process, `:photoreal`. `SplatPlan.java` sets
+  the steps, pictures and heat rests; `SplatDataset.java` and `BrushNative.java` are also used. The viewer is the
+  iPhone's `CineX.swiftpm/SplatViewer/index.html`, copied in at build time: a change there affects both apps.
+- Off-device checks:
+  - `java FloorArea.java <scan folder>`;
+  - `java DoneSeeThrough.java <scan> <budget ms>`;
+  - `tools/android-splat/SplatDatasetCli.java`.
+
+## Known state and open work (13 Nov)
+
+- **Phone-tested by rk on the S24:**
+  - the capture zone and outline (flicker fixed);
+  - 80% confidence;
+  - live stray removal;
+  - Make photo-real: 3,500 steps in about 3 min, 4,500 steps in about 4 min, the phone stays fairly cool;
+  - the Photo-real tab.
+- **Not yet confirmed on a phone:** faster stray clearing up close, and the Done pass covering all frames.
+- **Open:**
+  - photo-real can't resume after the app is closed;
+  - drift duplicates (a second copy of a surface after slow ARCore drift) are only partly removed;
+  - tracking loss on plain walls;
+  - floor area for non-rectangular rooms (see CLAUDE.md "Open work").
+- The S23 Ultra hasn't run photo-real yet. Watch `train-log.txt`, especially `refines skipped for memory`, and
+  the heat.

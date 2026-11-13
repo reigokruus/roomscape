@@ -54,7 +54,7 @@ State as of **Build 13 Nov 2026 13:22:13** (tested on an iPhone 15 Pro). Older b
 - Photo-real tab: the small-screen width was checked only on rk's phone (no iPhone SE / 375-pt check yet), and
   standing and top view hand over a look point 2 m ahead.
 
-## Android too
+## Android
 
-From 13 Nov you also own the Android UI, in the emulator: see [android-dev.md](android-dev.md) for the branch, how
-to run it, and what doesn't work there.
+Vera develops the Android app on her S23 Ultra: see [android-dev.md](android-dev.md). Changes to shared pieces
+(`SplatViewer/index.html`, the .rmsc format) need to work for both apps.
