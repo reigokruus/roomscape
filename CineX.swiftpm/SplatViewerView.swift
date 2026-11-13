@@ -9,6 +9,10 @@ struct SplatViewerView: UIViewRepresentable {
     let splat: URL
     /// Where the camera starts (splat/view.json), if known.
     var view: (cam: [Float], look: [Float])?
+    /// Vertical field of view in degrees (the room view's, so switching to the Photo-real tab doesn't jump); nil = the page's.
+    var fov: Float? = nil
+    /// Gives the room view the web view, to ask where its camera ended up (the Photo-real tab).
+    var link: SplatViewLink? = nil
 
     static let scheme = "roomscape-splat"
 
@@ -23,8 +27,10 @@ struct SplatViewerView: UIViewRepresentable {
         if let view {
             let f = { (v: [Float]) in v.map { String(format: "%.3f", $0) }.joined(separator: ",") }
             url += "?cam=\(f(view.cam))&look=\(f(view.look))"
+            if let fov { url += String(format: "&fov=%.1f", fov) }
         }
         web.load(URLRequest(url: URL(string: url)!))
+        link?.web = web
         return web
     }
 
@@ -50,6 +56,21 @@ struct SplatViewerView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+    }
+}
+
+/// The Photo-real tab's handle on its web view: where the splat view's camera is now (index.html's roomCam()).
+final class SplatViewLink {
+    weak var web: WKWebView?
+
+    func camera(_ done: @escaping ((cam: [Float], look: [Float])?) -> Void) {
+        guard let web else { done(nil); return }
+        web.evaluateJavaScript("window.roomCam ? window.roomCam() : null") { value, _ in
+            guard let text = value as? String, let data = text.data(using: .utf8),
+                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: [Double]],
+                  let cam = j["cam"], let look = j["look"], cam.count == 3, look.count == 3 else { done(nil); return }
+            done((cam.map(Float.init), look.map(Float.init)))
+        }
     }
 }
 
