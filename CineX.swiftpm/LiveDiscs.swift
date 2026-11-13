@@ -614,12 +614,24 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBytes(&none, length: none.count * MemoryLayout<SIMD4<Float>>.stride, index: 3)
             }
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
-            encoder.setRenderPipelineState(LivePreview.livePoints ? pointDepthPipeline : depthPipeline)
-            encoder.setDepthStencilState(depthWrite)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
-            encoder.setRenderPipelineState(LivePreview.livePoints ? pointPipeline : colorPipeline)
-            encoder.setDepthStencilState(depthEqual)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+            if LivePreview.livePoints {
+                // One pass for the opaque cores, colour and depth together (rk 13 Nov, "flickering black dots" on
+                // walls from the middle of a scan on): with a depth pass and then a colour pass that must hit exactly
+                // the same depth, the capture thread updating a dot between the two draws (its position blended, its
+                // size following how solid it is) moved it, the colour pass missed, and the depth already written
+                // showed the 30% camera through a dot-shaped hole for that frame. The cores are opaque, so the depth
+                // pre-pass isn't needed.
+                encoder.setRenderPipelineState(pointPipeline)
+                encoder.setDepthStencilState(depthWrite)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+            } else {
+                encoder.setRenderPipelineState(depthPipeline)
+                encoder.setDepthStencilState(depthWrite)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+                encoder.setRenderPipelineState(colorPipeline)
+                encoder.setDepthStencilState(depthEqual)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+            }
             if LivePreview.livePoints {
                 // Android's splat look: a soft gaussian halo 1.6 times the core, blended on top, depth tested only.
                 uniforms.halo = 1
