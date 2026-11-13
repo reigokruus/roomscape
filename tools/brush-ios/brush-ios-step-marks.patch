@@ -1,0 +1,209 @@
+diff --git a/crates/brush-process/src/train_stream.rs b/crates/brush-process/src/train_stream.rs
+index 005cab09..7ffac9b2 100644
+--- a/crates/brush-process/src/train_stream.rs
++++ b/crates/brush-process/src/train_stream.rs
+@@ -322,8 +322,11 @@ pub(crate) async fn train_stream(
+         let diff_splats = splats.train();
+         if let Some(m) = mb { m.end(); }
+         let ms = (iter < 30).then(|| brush_train::memmarks::mark("loading-marks", iter, "train step"));
++        // every later step too, written only when its footprint jumps 256 MB or more (where else bursts happen)
++        let burst = (iter >= 30).then(|| brush_train::memmarks::quiet("step-marks", iter, "train step (burst)"));
+         let (new_diff_splats, stats) = trainer.step(batch, diff_splats).await;
+         if let Some(m) = ms { m.end(); }
++        if let Some(m) = burst { m.end_if_jump(256, &[("intersections", trainer.last_intersections as u64)]); }
+         splats = new_diff_splats.valid();
+ 
+         // Phase-local iteration for refine gating
+@@ -669,12 +672,14 @@ async fn export_checkpoint(
+ /// refine unused memory is given back, and the refine runs only with at least 2.25 GB available (the 2.0 GB spike plus
+ /// 0.25 GB to spare); otherwise it is skipped (training goes on with the splats it has) and noted in refine-skips.txt
+ /// next to the export ("step availableMB footprintMB"), which the app reports. Always true elsewhere.
++/// The threshold is BRUSH_REFINE_MIN_AVAIL_MB when the app sets it (default 2250; the app's memory test sets less so
++/// refines run and their marks get written).
+ #[cfg(target_os = "ios")]
+ fn refine_headroom_ok(device: &crate::ProcessDevice, iter: u32, export_path: &Path) -> bool {
+-    const NEEDED: u64 = 2304 << 20; // 2.25 GB
++    let needed: u64 = std::env::var("BRUSH_REFINE_MIN_AVAIL_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2250) << 20;
+     device.memory_cleanup();
+     let avail = brush_train::memmarks::available();
+-    if avail >= NEEDED {
++    if avail >= needed {
+         return true;
+     }
+     use std::io::Write;
+diff --git a/crates/brush-render/src/bwd/burn_glue.rs b/crates/brush-render/src/bwd/burn_glue.rs
+index c544157a..64638780 100644
+--- a/crates/brush-render/src/bwd/burn_glue.rs
++++ b/crates/brush-render/src/bwd/burn_glue.rs
+@@ -233,6 +233,9 @@ pub struct SplatOutputDiff {
+     /// Rendered image, on the autodiff graph (this is what the loss backprops through).
+     pub img: Tensor<3>,
+     pub num_visible: u32,
++    /// RoomScape change (13 Nov 2026): splat-tile intersections of this render (what sizes the sort and raster
++    /// buffers), for the iOS memory marks.
++    pub num_intersections: u32,
+     /// Per-splat visibility aux — on the **inner** backend (no gradients).
+     pub visible: Tensor<1>,
+     /// Per-splat max screen radius aux — on the **inner** backend (no gradients).
+@@ -325,6 +328,7 @@ pub async fn render_splats_with_pass(
+     SplatOutputDiff {
+         img: Tensor::from_dispatch(output.out_img),
+         num_visible: output.aux.num_visible,
++        num_intersections: output.aux.num_intersections,
+         visible: Tensor::from_dispatch(output.aux.visible).without_autodiff(),
+         max_radius: Tensor::from_dispatch(output.aux.max_radius).without_autodiff(),
+         opacities: Tensor::from_dispatch(output.aux.opacities).without_autodiff(),
+diff --git a/crates/brush-train/src/memmarks.rs b/crates/brush-train/src/memmarks.rs
+index 25406108..e2e6245b 100644
+--- a/crates/brush-train/src/memmarks.rs
++++ b/crates/brush-train/src/memmarks.rs
+@@ -87,7 +87,19 @@ mod imp {
+         start: Instant,
+     }
+ 
++    /// Starts a mark and writes a "begin" line straight away (each line goes to the file as it is written, so if
++    /// iOS stops the app in the middle, the last begin line names the part that was running).
+     pub fn mark(file: &'static str, step: u32, name: &'static str) -> Mark {
++        let m = quiet(file, step, name);
++        write(
++            file,
++            &format!("{{\"step\":{step},\"name\":\"{name}\",\"begin\":true,\"before_mb\":{},\"avail_mb\":{}}}", m.before >> 20, available() >> 20),
++        );
++        m
++    }
++
++    /// A mark without the begin line (for one around every training step, written only when it jumped).
++    pub fn quiet(file: &'static str, step: u32, name: &'static str) -> Mark {
+         start_sampler();
+         let before = footprint();
+         PEAK.store(before, Ordering::Relaxed);
+@@ -96,13 +108,30 @@ mod imp {
+ 
+     impl Mark {
+         pub fn end(self) {
++            self.end_with(&[]);
++        }
++
++        /// Ends the mark only if the footprint's peak went at least `jump_mb` above where it started.
++        pub fn end_if_jump(self, jump_mb: u64, extra: &[(&str, u64)]) {
++            let peak = PEAK.load(Ordering::Relaxed).max(footprint());
++            if peak >= self.before + (jump_mb << 20) {
++                self.end_with(extra);
++            }
++        }
++
++        /// Ends the mark with extra numbers in the line (e.g. the forward render's intersection count).
++        pub fn end_with(self, extra: &[(&str, u64)]) {
+             let after = footprint();
+             let peak = PEAK.load(Ordering::Relaxed).max(after);
+             let mb = |b: u64| b >> 20;
++            let mut more = String::new();
++            for (k, v) in extra {
++                more.push_str(&format!(",\"{k}\":{v}"));
++            }
+             write(
+                 self.file,
+                 &format!(
+-                    "{{\"step\":{},\"name\":\"{}\",\"before_mb\":{},\"after_mb\":{},\"peak_mb\":{},\"avail_mb\":{},\"ms\":{}}}",
++                    "{{\"step\":{},\"name\":\"{}\",\"before_mb\":{},\"after_mb\":{},\"peak_mb\":{},\"avail_mb\":{},\"ms\":{}{more}}}",
+                     self.step,
+                     self.name,
+                     mb(self.before),
+@@ -122,8 +151,13 @@ mod imp {
+     pub fn mark(_file: &'static str, _step: u32, _name: &'static str) -> Mark {
+         Mark
+     }
++    pub fn quiet(_file: &'static str, _step: u32, _name: &'static str) -> Mark {
++        Mark
++    }
+     impl Mark {
+         pub fn end(self) {}
++        pub fn end_if_jump(self, _jump_mb: u64, _extra: &[(&str, u64)]) {}
++        pub fn end_with(self, _extra: &[(&str, u64)]) {}
+     }
+     pub fn set_dir(_dir: &std::path::Path) {}
+     pub fn footprint() -> u64 {
+@@ -134,4 +168,4 @@ mod imp {
+     }
+ }
+ 
+-pub use imp::{Mark, available, footprint, mark, set_dir};
++pub use imp::{Mark, available, footprint, mark, quiet, set_dir};
+diff --git a/crates/brush-train/src/train.rs b/crates/brush-train/src/train.rs
+index fb76f5a8..f7be22af 100644
+--- a/crates/brush-train/src/train.rs
++++ b/crates/brush-train/src/train.rs
+@@ -81,6 +81,8 @@ pub struct SplatTrainer {
+     ssim_enabled: bool,
+     bounds: BoundingBox,
+     step_count: u32,
++    /// RoomScape change (13 Nov 2026): the last forward render's splat-tile intersections (memory marks).
++    pub last_intersections: u32,
+     max_sh_degree: u32,
+     rng: rand::rngs::StdRng,
+     /// Per-train-view (world center, focal in px at native res) for the
+@@ -200,6 +202,7 @@ impl SplatTrainer {
+             ssim_enabled,
+             bounds,
+             step_count: 0,
++            last_intersections: 0,
+             max_sh_degree: 0,
+             rng: rand::rngs::StdRng::seed_from_u64(seed),
+             view_cams: Vec::new(),
+@@ -276,9 +279,24 @@ impl SplatTrainer {
+             // The splats already carry their 3D-filter floor (set at refine);
+             // the render path folds it in. Optimizer/refine work on raw params.
+             let render_input = splats.clone();
++            // RoomScape change (13 Nov 2026): memory marks inside the first 30 steps (iOS only, see memmarks), to
++            // find the ~2 GB bursts measured at steps 0 and 16 on the phone.
++            let iter = self.step_count - 1;
++            let fine = iter < 30;
++            let m = fine.then(|| crate::memmarks::mark("step-marks", iter, "forward render (project, sort, raster)"));
+             let diff_out = render_splats(render_input, &camera, img_size, background)
+                 .instrument(trace_span!("Forward"))
+                 .await;
++            self.last_intersections = diff_out.num_intersections;
++            if let Some(m) = m {
++                m.end_with(&[
++                    ("intersections", diff_out.num_intersections as u64),
++                    ("visible", diff_out.num_visible as u64),
++                    ("width", img_w as u64),
++                    ("height", img_h as u64),
++                ]);
++            }
++            let m = fine.then(|| crate::memmarks::mark("step-marks", iter, "loss + backward"));
+ 
+             let pred_image = diff_out.img;
+             let refine_weight_holder = diff_out.refine_weight_holder;
+@@ -337,6 +355,9 @@ impl SplatTrainer {
+             // scalar later without keeping the backward pass alive.
+             let loss_inner = loss.clone().inner();
+             let mut grads = splats.bwd_validate(loss).await;
++            if let Some(m) = m {
++                m.end();
++            }
+ 
+             let refine_weight = refine_weight_holder
+                 .grad_remove(&mut grads)
+@@ -387,6 +408,8 @@ impl SplatTrainer {
+             });
+ 
+         optimizer.transforms.scaling = Some(lr_scaling);
++        let fine = self.step_count <= 30;
++        let m = fine.then(|| crate::memmarks::mark("step-marks", self.step_count - 1, "optimizer + housekeeping + noise (synced)"));
+ 
+         splats = trace_span!("Optimizer step").in_scope(|| {
+             splats.transforms = trace_span!("Transforms step").in_scope(|| {
+@@ -457,6 +480,12 @@ impl SplatTrainer {
+             Tensor::from_inner(out).require_grad()
+         });
+ 
++        if let Some(m) = m.filter(|_| splats.num_splats() > 0) {
++            // wait for the queued work (optimizer, refine stats, noise) so the mark covers it
++            let _ = splats.raw_opacities.val().inner().slice(s![0..1]).into_data_async().await;
++            m.end();
++        }
++
+         let stats = TrainStepStats {
+             num_visible,
+             lr_mean,

@@ -36,7 +36,7 @@ struct BrushTrainer: SplatPreview.Trainer {
     /// in the processing log. Read off the phone afterwards (13 Nov: finding Brush's 2 GB spikes).
     static func keepMarks(from outDir: URL, in folder: URL) {
         let fm = FileManager.default
-        let names = ["loading-marks.jsonl", "refine-marks.jsonl", "refine-skips.txt"]
+        let names = ["loading-marks.jsonl", "refine-marks.jsonl", "step-marks.jsonl", "refine-skips.txt"]
         let found = names.filter { fm.fileExists(atPath: outDir.appendingPathComponent($0).path) }
         guard !found.isEmpty else { return }
         let keep = folder.appendingPathComponent("memory-marks")
@@ -49,6 +49,13 @@ struct BrushTrainer: SplatPreview.Trainer {
             try? fm.copyItem(at: src, to: keep.appendingPathComponent("\(stamp)-\(name)"))
         }
         ProcessingQueue.logMemory("Brush memory marks kept (\(found.joined(separator: ", ")), \(lines) lines) in \(folder.lastPathComponent)/memory-marks")
+    }
+
+    /// The refine guard in Brush (iOS): a refine runs only with this much memory available, else it's skipped
+    /// (refine-skips.txt). 2250 MB for real runs (13 Nov: the refine's ~2 GB spike); the memory test sets 1200 so
+    /// refines run and refine-marks.jsonl names the part that spikes (a crash there is acceptable: the marks survive).
+    static func setRefineGuard(test: Bool) {
+        setenv("BRUSH_REFINE_MIN_AVAIL_MB", test ? "1200" : "2250", 1)
     }
 
     /// Everything the Brush thread's callback needs (it runs on that thread, for every step).
