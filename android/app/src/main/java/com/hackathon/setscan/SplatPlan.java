@@ -23,11 +23,12 @@ final class SplatPlan {
     }
 
     /** Rest after training, as a share of the time it just took, by Android's thermal status (0 none, 1 light,
-     *  2 moderate, 3 severe, 4+ critical / emergency / shutdown). As the iPhone: none 0.1, light 0.4 (its fair), moderate
-     *  and severe 1.0 (its serious: half speed at most); null at critical: pause until the phone cools. */
+     *  2 moderate, 3 severe, 4+ critical / emergency / shutdown). None 0 (the S24's first run, 13 Nov: 3,500 steps in
+     *  190 s and it hardly got warm, so no rest while it is cool), light 0.2, moderate and severe 1.0 (half speed at
+     *  most); null at critical: pause until the phone cools. The iPhone keeps 0.1 / 0.4. */
     static Double restFactor(int thermal) {
-        if (thermal <= 0) return 0.1;
-        if (thermal == 1) return 0.4;
+        if (thermal <= 0) return 0.0;
+        if (thermal == 1) return 0.2;
         if (thermal <= 3) return 1.0;
         return null;
     }
