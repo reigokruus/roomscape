@@ -90,6 +90,9 @@ struct ResultView: View {
     @State private var selectedRoom: Int?
     @State private var dragSide: Int?
     private let floorRoomsNode = FloorRoomsNode()
+    /// The rooms' wall lines on or off (the Walls button), remembered across scans; on by default. Off, the lines are
+    /// hidden and a finger only turns the view (no wall grabbed by accident); the numbers stay in the title and card.
+    @AppStorage("showRoomLines") private var showRoomLines = true
     /// Objects (RoomPlan's furniture, plus what Claude finds in the photos): edited in the Objects panel.
     @State private var objectsOn = false
     @State private var objects: [RoomObject] = []
@@ -352,6 +355,10 @@ struct ResultView: View {
             RoomObjects.save(ObjectsFile(claudeChecked: claudeChecked, objects: objects), for: scan)
         }
         .onChange(of: measuringRooms) { _, _ in showFloorRooms() }
+        .onChange(of: showRoomLines) { _, on in
+            // Lines off: let go of the picked room, so the title goes back to the whole floor.
+            if !on { selectedRoom = nil; dragSide = nil; showFloorRooms() }
+        }
         .onChange(of: selectedObject) { _, id in
             objectsScene?.apply(objects, selected: id)
         }
@@ -414,6 +421,7 @@ struct ResultView: View {
     /// Lighting and objects toggles (only once the splats are ready), or the "building" note.
     @ViewBuilder private func modeButtons(labeled: Bool) -> some View {
         if !outlets.isEmpty { outletsButton(labeled: labeled) }
+        if floorRooms != nil, !lightingOn, !objectsOn { roomLinesButton(labeled: labeled) }
         if splatGroup != nil {
             Button {
                 toggleLighting()
@@ -451,6 +459,22 @@ struct ResultView: View {
             Button { showOutlets = true } label: { face }
                 .buttonStyle(.bordered)
                 .accessibilityLabel("Show the \(outlets.count) power outlets")
+        }
+    }
+
+    /// Walls: shows or hides the rooms' amber wall lines (and with them tapping a room and dragging a wall). Filled
+    /// amber while they show.
+    @ViewBuilder private func roomLinesButton(labeled: Bool) -> some View {
+        let face = ModeLabel(title: "Walls", icon: "square.dashed", labeled: labeled)
+        if showRoomLines {
+            Button { showRoomLines = false } label: { face.foregroundStyle(.black) }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .accessibilityLabel("Hide the wall lines")
+        } else {
+            Button { showRoomLines = true } label: { face }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Show the wall lines")
         }
     }
 
@@ -675,9 +699,10 @@ struct ResultView: View {
 
     // MARK: Rooms on the floor (area, tap a room, drag its walls)
 
-    /// The plain 3D view (no panel, not standing in the room or marking areas): rooms can be tapped, walls dragged.
+    /// The plain 3D view (no panel, not standing in the room or marking areas) with the wall lines on: rooms can be
+    /// tapped, walls dragged.
     private var measuringRooms: Bool {
-        floorRooms != nil && walk == .off && !lightingOn && !objectsOn && !pickingAreas
+        showRoomLines && floorRooms != nil && walk == .off && !lightingOn && !objectsOn && !pickingAreas
     }
 
     /// The room whose walls show and can be dragged: the picked one, else the first (as on Android).
@@ -2445,7 +2470,8 @@ struct RoomSummary: View {
             } footer: {
                 if let rooms = floorRooms {
                     Text((rooms.rooms.count >= 2 ? "Tap a room's floor in the 3D view for its own size. " : "")
-                         + "A curtain or a cupboard against a wall is measured as the wall: drag the amber line on the floor to where the wall really is.")
+                         + "A curtain or a cupboard against a wall is measured as the wall: drag the amber line on the floor to where the wall really is. "
+                         + "The Walls button above the room hides the lines.")
                 }
             }
             if !missedWindows.isEmpty {
