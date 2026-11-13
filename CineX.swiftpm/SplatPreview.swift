@@ -94,6 +94,13 @@ enum SplatPreview {
         // Room for Brush: the room view lets go of its 3D scene when this job starts (ProcessingQueue.gpuJob); give
         // that a moment, up to 20 s, then start anyway. Brush's loading briefly needs about 2 GB on top of its own.
         ProcessingQueue.logMemory("after release")
+        // After a scan Apple's frameworks keep about 1.1 GB the app can't free (13 Nov: measured, every scan), and
+        // Brush's start and first refines need about 2.2 GB more: over the phone's 3.4 GB. From a fresh start the app
+        // holds about 30 MB and it always fits. So above 600 MB the job waits for a fresh start (the queue asks once).
+        if PerfLog.footprintMB() > 600 {
+            ProcessingQueue.logMemory("fresh start needed")
+            throw NeedsFreshStart()
+        }
         let wanted: UInt64 = 2_900 << 20
         var waited = 0.0
         while os_proc_available_memory() < wanted, waited < 20 {
@@ -273,6 +280,9 @@ enum SplatPreview {
     // MARK: Notification
 
     /// Asks once (when the switch is turned on) whether the app may say when a preview is ready.
+    /// The preview can't start in this run of the app (see `run`): it stays queued and starts after a fresh launch.
+    struct NeedsFreshStart: Error {}
+
     static func askForNotifications() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }

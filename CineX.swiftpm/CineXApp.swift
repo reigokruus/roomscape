@@ -18,10 +18,10 @@ struct CineXApp: App {
                 let at = args.firstIndex(of: "-virtualScanAt").flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil } ?? 0
                 VirtualScanScreen(folder: URL(fileURLWithPath: args[i + 1]), startAt: at)
             } else {
-                HomeView()
+                HomeView().modifier(FreshStartSheet())
             }
             #else
-            HomeView()
+            HomeView().modifier(FreshStartSheet())
             #endif
         }
     }
