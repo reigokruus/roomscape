@@ -27,6 +27,9 @@ enum RecordingProcessor {
         case rebuild, text, splat
         /// The photo-real preview as a memory test (PhotoRealTest): from step 0 into splat-test/, the real one kept.
         case splatTest
+        /// The memory test's "building from the recording": the same work as `rebuild`, in its own folder, and its
+        /// results are thrown away instead of swapped into the scan (the scan is never changed).
+        case rebuildTest
         var isPhotoReal: Bool { self == .splat || self == .splatTest }
     }
 
@@ -48,12 +51,14 @@ enum RecordingProcessor {
         let fm = FileManager.default
         let rec = scan.captureURL.appendingPathComponent("recording")
         let work = scan.captureURL.appendingPathComponent("processing-\(job.rawValue)")
+        if job == .rebuildTest { try? fm.removeItem(at: work) }   // the test always does the whole work
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         func done(_ stage: String) -> Bool { fm.fileExists(atPath: work.appendingPathComponent("\(stage).done").path) }
         func mark(_ stage: String) { fm.createFile(atPath: work.appendingPathComponent("\(stage).done").path, contents: Data()) }
         let note: @Sendable (String?) -> Void = { n in progress(Progress(stage: "", fraction: -1, note: n)) }
         // Where each stage's progress bar starts and ends.
-        let span: [String: (Float, Float)] = job == .rebuild
+        let rebuilding = job == .rebuild || job == .rebuildTest
+        let span: [String: (Float, Float)] = rebuilding
             ? ["surface": (0.02, 0.6), "photos": (0.6, 0.85), "text": (0.85, 0.95), "save": (0.95, 1)]
             : ["text": (0.05, 0.95), "save": (0.95, 1)]
         func report(_ stage: String, _ title: String, _ f: Float) {
@@ -84,7 +89,7 @@ enum RecordingProcessor {
                                            progress: { if job == .text { report("text", "Finding text", $0) } })
             FileManager.default.createFile(atPath: work.appendingPathComponent("text.done").path, contents: Data())
         }()
-        if job == .rebuild {
+        if rebuilding {
             // 1. Surface and points.
             if !done("surface") {
                 let clears = Clear.load(rec.appendingPathComponent("clears.json"))
@@ -119,11 +124,11 @@ enum RecordingProcessor {
             }
         }
         // 3. (started above, alongside the surface and photos)
-        if job == .rebuild, !textDone { report("text", "Finding text", 0) }
+        if rebuilding, !textDone { report("text", "Finding text", 0) }
         try await textStage
         // 4. Points coloured from the photos, then swap the new files in.
         report("save", "Saving", 0)
-        if job == .rebuild, !done("points") {
+        if rebuilding, !done("points") {
             let raw = try Data(contentsOf: work.appendingPathComponent("points-raw.bin"))
             let positions = raw.withUnsafeBytes { Array($0.bindMemory(to: SIMD3<Float>.self)) }
             let photos = loadPhotos(work)
@@ -133,7 +138,9 @@ enum RecordingProcessor {
             mark("points")
         }
         try Task.checkCancellation()
-        if job == .rebuild {
+        if job == .rebuildTest {
+            // the memory test: the work is done (its memory use is what the test needs); nothing goes into the scan
+        } else if job == .rebuild {
             try swapIn(from: work, into: scan.captureURL, backupBase: "before-rebuild",
                        names: ["points.bin", "keyframes.json", "photos", ScanMesh.fileName, "meta.json", "decals"],
                        aside: ["surfels.bin", "trained.bin", "thumbnail-kind"])

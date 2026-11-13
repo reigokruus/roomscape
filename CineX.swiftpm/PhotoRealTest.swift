@@ -38,13 +38,18 @@ import SwiftUI
         }
     }
 
-    /// The scanner closed: if it was a test run, start the test preview of the saved scan.
+    /// The scanner closed: if it was a test run, do the scan's "building from the recording" work as after a real
+    /// scan (a dry run: nothing goes into the scan), then the test preview of the saved scan. With both, the memory
+    /// at the preview's start is close to a real after-scan state (13 Nov: about 940 MB; the scanner alone left 524).
     func scannerClosed() {
         guard let name = scannerRunFor else { return }
         scannerRunFor = nil
         closeScanner = false
         guard let scan = ScanStore.list().first(where: { $0.name == name }) else { return }
-        runNow(scan)
+        ProcessingQueue.logMemory("test: scanner closed, building from the recording (dry run) next")
+        ProcessingQueue.shared.photoRealScan = scan.name
+        ProcessingQueue.shared.add(scan, .rebuildTest)
+        ProcessingQueue.shared.add(scan, .splatTest)
     }
 
     func runNow(_ scan: SavedScan) {

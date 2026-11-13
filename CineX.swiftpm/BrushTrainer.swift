@@ -31,6 +31,26 @@ struct BrushTrainer: SplatPreview.Trainer {
     static let maxResolution: UInt32 = 720, maxSplats: UInt32 = 200_000, shDegree: UInt32 = 1
     static let setup = "brush \(maxResolution)px sh\(shDegree)"   // + the plan's splat cap (SplatPreview.run)
 
+    /// Brush's memory marks (brush-train memmarks, iOS: loading-marks.jsonl, refine-marks.jsonl) and its refine-skips
+    /// note, copied into <folder>/memory-marks/<time>-<name> so they survive (also from a run iOS stopped), and a line
+    /// in the processing log. Read off the phone afterwards (13 Nov: finding Brush's 2 GB spikes).
+    static func keepMarks(from outDir: URL, in folder: URL) {
+        let fm = FileManager.default
+        let names = ["loading-marks.jsonl", "refine-marks.jsonl", "refine-skips.txt"]
+        let found = names.filter { fm.fileExists(atPath: outDir.appendingPathComponent($0).path) }
+        guard !found.isEmpty else { return }
+        let keep = folder.appendingPathComponent("memory-marks")
+        try? fm.createDirectory(at: keep, withIntermediateDirectories: true)
+        let stamp = Int(Date().timeIntervalSince1970)
+        var lines = 0
+        for name in found {
+            let src = outDir.appendingPathComponent(name)
+            lines += ((try? String(contentsOf: src, encoding: .utf8)) ?? "").split(separator: "\n").count
+            try? fm.copyItem(at: src, to: keep.appendingPathComponent("\(stamp)-\(name)"))
+        }
+        ProcessingQueue.logMemory("Brush memory marks kept (\(found.joined(separator: ", ")), \(lines) lines) in \(folder.lastPathComponent)/memory-marks")
+    }
+
     /// Everything the Brush thread's callback needs (it runs on that thread, for every step).
     private final class Box: @unchecked Sendable {
         let progress: @Sendable (Int, String?) -> Void
@@ -112,6 +132,8 @@ struct BrushTrainer: SplatPreview.Trainer {
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
         let outDir = folder.appendingPathComponent("brush-out")
+        // a run that iOS stopped leaves its memory marks here: keep them before the folder is cleared
+        Self.keepMarks(from: outDir, in: folder)
         try? fm.removeItem(at: outDir)
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         // Starting splat: the checkpoint (resume) or the scan's dots (points.ply, Brush's default)
@@ -190,6 +212,7 @@ struct BrushTrainer: SplatPreview.Trainer {
         }
         if fm.fileExists(atPath: output.path) { try fm.removeItem(at: output) }
         try fm.moveItem(at: last, to: output)
+        Self.keepMarks(from: outDir, in: folder)
         // refines Brush skipped for memory (brush-process, iOS): kept next to the preview for SplatPreview's summary
         if let skips = try? String(contentsOf: outDir.appendingPathComponent("refine-skips.txt"), encoding: .utf8) {
             let url = folder.appendingPathComponent("refine-skips.txt")
