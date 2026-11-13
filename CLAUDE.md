@@ -3,13 +3,15 @@
 Read [README.md](README.md) first: what the apps do, Android vs iPhone, maturity per feature and the TODO column.
 This file is how to work in the code.
 
-## Start here: working with Zeynep (from 13 Nov 2026)
+## Start here (from 13 Nov 2026)
 
-Zeynep develops both apps on her Mac. rk (the owner) tests on the phones: a Galaxy S24 and an iPhone 15 Pro.
-Before changing anything, read the guide for the app you'll touch:
-- iPhone: [docs/ios-tasks.md](docs/ios-tasks.md) covers state, build and install, what's phone-tested and what's open.
-- Android: [docs/android-dev.md](docs/android-dev.md) covers the branch, emulator setup, what can't work in the
-  emulator, and where the UI lives.
+Two developers, each with a Claude agent. rk (the owner) tests on the phones.
+- **iPhone app (`CineX.swiftpm/`): Zeynep**, on her Mac with an iPhone. Read [docs/ios-tasks.md](docs/ios-tasks.md):
+  the state, how to build and install, what's phone-tested and what's open.
+- **Android app (`android/`): Vera**, on her Galaxy S23 Ultra. Read [docs/android-dev.md](docs/android-dev.md): the
+  branch, how to build and install, the Brush libraries, scans on the phone, and where things are.
+Work only in your own app's folder. If a change is needed in the other app, or in a shared piece, say so and leave
+it to that app's developer.
 
 Rules for the agent, in order of importance:
 1. **Branches.**
@@ -24,8 +26,10 @@ Rules for the agent, in order of importance:
    - API keys, tokens or device IDs;
    - anything under `android/app/src/main/jniLibs/` (the Brush libraries are git-ignored on purpose);
    - scans, recordings, screenshots of rooms or logs (they show a real home).
-3. **Emulator and simulator can't test scanning.** ARCore depth, LiDAR/RoomPlan, Brush training and phone heat need
-   the real phones. For a change that touches them, say "untested on a phone" and leave the test to rk.
+3. **Never delete scan data.**
+   - Android: never `adb uninstall` (it wipes every scan) and never install with `-d`. Always use `install -r`.
+   - iPhone: never delete the app; reinstall over it.
+   - Don't install while a scan or photo-real training is running.
 4. **Build stamp.** Every build shows a readable stamp, like `Build 13 Nov 17:15:11` (Tallinn time), on the home
    screen. When you report a build, put that stamp on its own line. Never quote Android's numeric versionCode.
 5. **Shared pieces.**
@@ -39,6 +43,7 @@ Rules for the agent, in order of importance:
      below.
    - UI: look at it at the smallest width (iPhone SE 375 pt; a 360 dp Android phone). A segmented control or row
      with `.fixedSize()` that grows past the screen widened the whole iPhone room screen on 13 Nov.
+   - Say what you tested on a phone and what you didn't.
 
 ## Layout
 
