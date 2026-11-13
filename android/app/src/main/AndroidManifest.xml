@@ -49,6 +49,9 @@
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
+        <!-- Make photo-real: Brush trains in its own process, so the scanner's memory isn't held meanwhile. -->
+        <activity android:name=".PhotoRealActivity" android:exported="false" android:process=":photoreal"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
         <service android:name=".ProcessingService" android:exported="false"
             android:foregroundServiceType="dataSync" />
     </application>

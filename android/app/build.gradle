@@ -28,6 +28,10 @@ android {
     buildTypes {
         debug { signingConfig signingConfigs.debug }
     }
+    // The photo-real viewer (GaussianSplats3D + three.js, MIT) is the iPhone's: copied from CineX.swiftpm/SplatViewer at
+    // build time into the APK's assets/SplatViewer/ (one copy in git). Brush's libraries go in src/main/jniLibs
+    // (git-ignored, built by tools/brush-android/build.sh); without them the app has no "Make photo-real".
+    sourceSets { main { assets.srcDirs += "$buildDir/generated/splatViewerAssets" } }
     androidResources { noCompress 'tflite' } // the depth model is memory-mapped straight from the APK
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
@@ -74,3 +78,9 @@ tasks.withType(Test).configureEach {
     if (project.hasProperty('tilesScan')) systemProperty 'tiles.scan', project.property('tilesScan')
     if (project.hasProperty('tilesOut')) systemProperty 'tiles.out', project.property('tilesOut')
 }
+
+def copySplatViewer = tasks.register('copySplatViewer', Copy) {
+    from "$rootDir/../CineX.swiftpm/SplatViewer"
+    into "$buildDir/generated/splatViewerAssets/SplatViewer"
+}
+preBuild.dependsOn copySplatViewer

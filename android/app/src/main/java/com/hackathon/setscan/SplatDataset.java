@@ -112,6 +112,11 @@ final class SplatDataset {
      * Returns how many pictures were picked.
      */
     static int export(File scanDir, File outDir, Sharpness sharpness) throws IOException {
+        return export(scanDir, outDir, sharpness, MAX_FRAMES, MAX_POINTS);
+    }
+
+    /** As above, with the picture and starting-point limits of a phone plan (SplatPlan). */
+    static int export(File scanDir, File outDir, Sharpness sharpness, int maxFrames, int maxPoints) throws IOException {
         File rf = new File(scanDir, "rebuild-frames");
         List<Frame> frames = readFrames(new File(rf, "frames.csv"));
         float[] scores = new float[frames.size()];
@@ -119,7 +124,7 @@ final class SplatDataset {
             File jpg = new File(rf, String.format(Locale.US, "%05d.jpg", frames.get(i).idx));
             scores[i] = jpg.exists() ? sharpness.of(jpg) : Float.NaN;
         }
-        List<Integer> pick = pickSharpest(scores, MAX_FRAMES);
+        List<Integer> pick = pickSharpest(scores, maxFrames);
         File images = new File(outDir, "images");
         if (!images.isDirectory() && !images.mkdirs()) throw new IOException("can't make " + images);
         List<Frame> picked = new ArrayList<>(); List<String> files = new ArrayList<>();
@@ -148,7 +153,7 @@ final class SplatDataset {
                 n = k;
             }
         }
-        write(new File(outDir, "points.ply"), pointsPly(xyz, rgb, n, MAX_POINTS));
+        write(new File(outDir, "points.ply"), pointsPly(xyz, rgb, n, maxPoints));
         write(new File(outDir, "transforms.json"), transformsJson(picked, files, "points.ply").getBytes(StandardCharsets.UTF_8));
         return picked.size();
     }
