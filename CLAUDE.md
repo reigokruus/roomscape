@@ -24,7 +24,9 @@ Rules for the agent, in order of importance:
    - `CineX.swiftpm/Package.swift` bundle ID or team changes (keep them local: `git update-index --skip-worktree
      CineX.swiftpm/Package.swift` helps);
    - API keys, tokens or device IDs;
-   - anything under `android/app/src/main/jniLibs/` (the Brush libraries are git-ignored on purpose);
+   - anything under `android/app/src/main/jniLibs/` (the Brush photo-real libraries: git-ignored on purpose,
+     fetched from the GitHub release `brush-android-libs-16k` by the Gradle task `fetchBrushLibs` on the first
+     build, a required set-up step you do yourself; see docs/android-dev.md);
    - scans, recordings, screenshots of rooms or logs (they show a real home).
 3. **Never delete scan data.**
    - Android: never `adb uninstall` (it wipes every scan) and never install with `-d`. Always use `install -r`.

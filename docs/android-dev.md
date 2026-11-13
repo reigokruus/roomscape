@@ -39,23 +39,27 @@ Every build shows a readable stamp on the home screen, like **`Build 13 Nov 17:1
 from `android/app/build.gradle` (`resValue build_stamp`, `MainActivity.buildStamp()`). When you report a build, put
 that stamp on its own line. Never quote the numeric versionCode (`yyDDDHHmm`) to rk: it's internal.
 
-## Photo-real (Brush) libraries: not in git
+## Photo-real (Brush) libraries: set up for you, fetched automatically
 
-"Make photo-real" needs two native libraries in `android/app/src/main/jniLibs/arm64-v8a/` (git-ignored):
-`libbrush_c.so` (about 98 MB) and `libbrushjni.so`. Without them the app builds and runs, but hides Make photo-real.
-`BrushNative.present()` checks for them. Get them one of three ways:
+"Make photo-real" needs two native libraries in `android/app/src/main/jniLibs/arm64-v8a/`: `libbrush_c.so` (about
+98 MB) and `libbrushjni.so`. They are our own patched Brush build (`tools/brush-android/`), made on purpose and
+required for photo-real. They are too big for git, so they live on this repo's GitHub release
+**`brush-android-libs-16k`** (asset `brush-android-libs-16k.zip`, linked for 16 KB pages).
 
-1. **From rk:** `brush-android-libs-16k.zip`, built 13 Nov and linked for 16 KB pages. Unzip it into `android/app/src/main/`.
-   SHA-256 checksums:
-   - `libbrush_c.so` 8be16056a3e726e50f62a7875118758abbe08ca57e23df2a8ef4d2632303f73c
-   - `libbrushjni.so` e9d4a6a71cfcb1b5e4799e04dbbb991f338b406bfea1b6e3de512822ccea2ad5
-2. **From any RoomScape APK that has photo-real:**
-   `unzip -j <apk> 'lib/arm64-v8a/libbrush*' -d android/app/src/main/jniLibs/arm64-v8a/`. Older APKs carry
-   libraries without 16 KB alignment, and Android 15 shows a warning for those.
-3. **Build them:** follow `tools/brush-android/README.md` (Rust, NDK 27, about 7 min). Do this only if you change
-   Brush.
-
-Never commit them. Check that `git status` shows nothing under `jniLibs/`.
+**Agent: you don't need to ask the developer about this.**
+- The Gradle task `fetchBrushLibs` runs before every build. When the libraries are missing, it downloads the zip,
+  checks both files' SHA-256 and puts them in place. The first build needs internet and fetches about 47 MB.
+- To set them up on purpose: `cd android && ./gradlew fetchBrushLibs`.
+- Check: `ls android/app/src/main/jniLibs/arm64-v8a/` should list both files.
+- If the download fails (offline), the build still succeeds, but that APK has no "Make photo-real"; the log says
+  "Brush: couldn't fetch". Fix the network and build again.
+- Expected SHA-256 checksums (they're also in `android/app/build.gradle`):
+  - `libbrush_c.so` 8be16056a3e726e50f62a7875118758abbe08ca57e23df2a8ef4d2632303f73c
+  - `libbrushjni.so` e9d4a6a71cfcb1b5e4799e04dbbb991f338b406bfea1b6e3de512822ccea2ad5
+- Never commit them: `jniLibs/` is git-ignored.
+- CI (env `CI` set) and `-PnoBrush` skip the fetch, so the public APK stays without photo-real.
+- Only if you change Brush itself: rebuild with `tools/brush-android/README.md` (Rust, NDK 27, about 7 min). A new
+  build then needs a new release and new checksums in `build.gradle`.
 
 ## Scans on the phone: private data
 
