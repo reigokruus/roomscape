@@ -109,7 +109,7 @@ case "plyview":
 case "rebuildstrays":
     try RebuildStrays.run(URL(fileURLWithPath: args[1]))
 case "dotlook":
-    try DotLook.run(URL(fileURLWithPath: args[1]))
+    try DotLook.run(URL(fileURLWithPath: args[1]), at: args.count > 2 ? Double(args[2]) : nil)
 case "strays":
     try Strays.run(URL(fileURLWithPath: args[1]), around: args.count > 2 ? Float(args[2]) : nil)
 case "replay":

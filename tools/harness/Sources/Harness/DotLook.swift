@@ -1,5 +1,6 @@
 import Foundation
 import simd
+import AVFoundation
 
 /// How filled the live dots look up close (13 Nov, rk: "the background shines through"): replays a recording into
 /// live-style dots (2 cm cells, 0.8 cm under 1 m, the capture zone and cleanup rules), then renders them from the
@@ -11,7 +12,7 @@ enum DotLook {
     struct Dot { var p: SIMD3<Float>; var c: SIMD3<Float>; var seen: Int; var fine: Bool; var stamp: Int }
     struct Sizing { var name: String; var core: (Float, Float, Bool) -> Float; var halo: (Float, Float, Bool) -> Float; var shrink: Bool; var capHalf: Float }
 
-    static func run(_ capture: URL) throws {
+    static func run(_ capture: URL, at atTime: Double? = nil) throws {
         let rec = capture.appendingPathComponent("recording")
         let fd = try Data(contentsOf: rec.appendingPathComponent("frames.bin"))
         var frames: [(t: Double, pose: simd_float4x4, k: simd_float3x3, w: Int, h: Int, ok: Bool)] = []
@@ -63,7 +64,8 @@ enum DotLook {
             if ds[ds.count / 2] < bestMed { bestMed = ds[ds.count / 2]; best = i }
         }
         setvbuf(stdout, nil, _IOLBF, 0)
-        print("closest view: t = \(String(format: "%.1f", list[best].t)) s, median depth \(String(format: "%.2f", bestMed)) m")
+        if let atTime { best = list.indices.min { abs(list[$0].t - atTime) < abs(list[$1].t - atTime) } ?? best }
+        print("view: t = \(String(format: "%.1f", list[best].t)) s, median depth \(String(format: "%.2f", bestMed)) m")
         // live dots up to that frame (colour = a grey from the depth row, enough to see coverage)
         var dots: [Dot] = []
         var index: [Int64: Int] = [:]
@@ -178,6 +180,67 @@ enum DotLook {
             try? FileManager.default.createDirectory(at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
             try ppm.write(to: out)
             print("  picture: \(out.path)")
+            if sizing.name == "new" { try background(capture: capture, t: list[best].t + 0.0, W: W, H: H, zr: zr, proj: proj, owner: owner) }
+        }
+    }
+
+    /// The live screen's look at this frame: the camera picture at 30% on near-black, unscanned-area stripes inside
+    /// the capture zone (two tints), the dots (coloured from this frame's picture) on top. Writes one PNG per tint.
+    static func background(capture: URL, t: Double, W: Int, H: Int, zr: (x0: Float, x1: Float, y0: Float, y1: Float),
+                           proj: [(x: Float, y: Float, d: Float, core: Float, halo: Float, c: SIMD3<Float>)], owner: [Float]) throws {
+        let asset = AVURLAsset(url: capture.appendingPathComponent("recording/video.mov"))
+        let g = AVAssetImageGenerator(asset: asset); g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
+        guard let cg = try? g.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) else { print("no video frame"); return }
+        var cam = [UInt8](repeating: 0, count: W * H * 4)
+        let ctx = CGContext(data: &cam, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: W, height: H))
+        func camAt(_ x: Int, _ y: Int) -> SIMD3<Float> {   // CGContext rows run bottom-up
+            let o = ((H - 1 - y) * W + x) * 4
+            return SIMD3(Float(cam[o]), Float(cam[o + 1]), Float(cam[o + 2])) / 255
+        }
+        let tints: [(String, SIMD3<Float>, Float)] = [("amber", SIMD3(0xED, 0xB1, 0x4D) / 255, 0.40), ("grey", SIMD3(0.80, 0.80, 0.80), 0.32), ("none", .zero, 0)]
+        for (name, tint, alpha) in tints {
+            var img = [SIMD3<Float>](repeating: .zero, count: W * H)
+            let period: Float = 6.4   // 4 pt stripes on the phone (12 px of 1179 across), scaled to this picture
+            for y in 0..<H { for x in 0..<W {
+                var c = camAt(x, y) * 0.3 + SIMD3(0.04, 0.04, 0.05) * 0.7
+                let u = Float(x) / Float(W), v = Float(y) / Float(H)
+                if alpha > 0, u > zr.x0, u < zr.x1, v > zr.y0, v < zr.y1,
+                   Int(floor((Float(x) + Float(y)) / period)) % 2 == 0 { c = c * (1 - alpha) + tint * alpha }
+                img[y * W + x] = c
+            } }
+            // cores (depth from the earlier pass: owner) and halos, coloured from the picture under each dot
+            var zbuf = [Float](repeating: .infinity, count: W * H)
+            for q in proj {
+                let r = q.core, r2 = r * r
+                let y0 = max(0, Int(q.y - r)), y1 = min(H - 1, Int(q.y + r)), x0 = max(0, Int(q.x - r)), x1 = min(W - 1, Int(q.x + r))
+                guard y0 <= y1, x0 <= x1 else { continue }
+                let col = camAt(min(W - 1, max(0, Int(q.x))), min(H - 1, max(0, Int(q.y))))
+                for yy in y0...y1 { for xx in x0...x1 {
+                    let dx = Float(xx) + 0.5 - q.x, dy = Float(yy) + 0.5 - q.y
+                    guard dx * dx + dy * dy <= r2, q.d < zbuf[yy * W + xx] else { continue }
+                    zbuf[yy * W + xx] = q.d; img[yy * W + xx] = col
+                } }
+            }
+            for q in proj.sorted(by: { $0.d > $1.d }) {
+                let r = q.halo, r2 = r * r
+                guard r >= 0.5 else { continue }
+                let y0 = max(0, Int(q.y - r)), y1 = min(H - 1, Int(q.y + r)), x0 = max(0, Int(q.x - r)), x1 = min(W - 1, Int(q.x + r))
+                guard y0 <= y1, x0 <= x1 else { continue }
+                let col = camAt(min(W - 1, max(0, Int(q.x))), min(H - 1, max(0, Int(q.y))))
+                for yy in y0...y1 { for xx in x0...x1 {
+                    let dx = Float(xx) + 0.5 - q.x, dy = Float(yy) + 0.5 - q.y
+                    let rr = (dx * dx + dy * dy) / r2
+                    guard rr <= 1, q.d <= zbuf[yy * W + xx] + 0.001 else { continue }
+                    let a = exp(-rr * 3.5)
+                    img[yy * W + xx] = img[yy * W + xx] * (1 - a) + col * a
+                } }
+            }
+            var ppm = Data("P6\n\(W) \(H)\n255\n".utf8)
+            for p in img { ppm.append(contentsOf: [UInt8(min(255, p.x * 255)), UInt8(min(255, p.y * 255)), UInt8(min(255, p.z * 255))]) }
+            let out = URL(fileURLWithPath: "harness-out/unscanned-\(name)-\(String(format: "%.0f", t))s.ppm")
+            try ppm.write(to: out)
+            print("  background \(name): \(out.path)")
         }
     }
 }

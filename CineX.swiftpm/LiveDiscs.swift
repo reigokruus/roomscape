@@ -406,6 +406,9 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     private let pointPipeline: MTLRenderPipelineState
     private let pointDepthPipeline: MTLRenderPipelineState
     private let haloPipeline: MTLRenderPipelineState
+    /// Unscanned-area stripes (see `encodeStripes`), drawn before the dots; nil if the shader didn't build.
+    private let stripesPipeline: MTLRenderPipelineState?
+    private let noDepthState: MTLDepthStencilState?
     /// The drawable's height in pixels (for the on-screen dot size cap).
     private var drawableHeight: Float = 0
     private let depthWrite: MTLDepthStencilState
@@ -496,6 +499,19 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         self.pointPipeline = pointPipeline
         self.pointDepthPipeline = pointDepthPipeline
         self.haloPipeline = haloPipeline
+        stripesPipeline = {
+            guard let v = library.makeFunction(name: "stripesVertex"), let f = library.makeFunction(name: "stripesFragment") else { return nil }
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = v; d.fragmentFunction = f
+            d.depthAttachmentPixelFormat = .depth32Float
+            let c = d.colorAttachments[0]!
+            c.pixelFormat = .bgra8Unorm
+            c.isBlendingEnabled = true
+            c.sourceRGBBlendFactor = .sourceAlpha; c.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            c.sourceAlphaBlendFactor = .one; c.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            return try? device.makeRenderPipelineState(descriptor: d)
+        }()
+        noDepthState = depthState(.always, write: false)
         self.depthWrite = depthWrite
         self.depthEqual = depthEqual
         window = ScanOverview.enabled ? OverviewWindowRenderer(device: device) : nil
@@ -548,6 +564,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             if LivePreview.s24Look {
                 // The S24 look (rk 12 Nov): the camera picture at 30% on near-black under the dots, edge to edge.
                 meshRenderer?.encodeDim(encoder, alpha: 1 - LivePreview.cameraOpacity)
+                if overviewView == nil { encodeStripes(encoder, view: view) }
             } else if LivePreview.showCamera {
                 if overviewView != nil { window?.encodeZebra(encoder, alpha: overview.blend) }
                 // The live preview: the camera picture dimmed, so only what's been scanned (and photographed) is bright.
@@ -593,6 +610,28 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         commands.present(drawable)
         commands.commit()
     }
+
+    /// Where nothing is scanned yet inside the capture zone (rk 13 Nov: a hole behind an object "looks more like a
+    /// shadow ... maybe some kind of contrasting colour there that draws the eye"): fine diagonal stripes in the app's
+    /// amber over the dimmed camera, fixed on screen. Drawn before the dots, so the dots cover them wherever a surface
+    /// is scanned and they show only in the gaps. One full-screen pass, no depth.
+    private func encodeStripes(_ encoder: MTLRenderCommandEncoder, view: MTKView) {
+        guard let stripesPipeline, let noDepthState, view.bounds.width > 0 else { return }
+        let size = view.drawableSize, scale = Float(size.width / view.bounds.width)
+        let w = Float(size.width), h = Float(size.height)
+        let zw = DotCleanup.zoneWidth, zh = DotCleanup.zoneHeight
+        // the zone as CaptureZone draws it (corner radius 22 pt), and 4 pt stripes: a hole about 8% of the screen
+        // wide shows 3 to 4 of them
+        var u = StripeUniforms(rect: SIMD4(w * (1 - zw) / 2, h * (1 - zh) / 2, w * (1 + zw) / 2, h * (1 + zh) / 2),
+                               tint: SIMD4(0xED / 255, 0xB1 / 255, 0x4D / 255, LivePreview.unscannedStripeAlpha),
+                               radius: 22 * scale, band: 4 * scale)
+        encoder.setRenderPipelineState(stripesPipeline)
+        encoder.setDepthStencilState(noDepthState)
+        encoder.setFragmentBytes(&u, length: MemoryLayout<StripeUniforms>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
+    private struct StripeUniforms { var rect: SIMD4<Float>; var tint: SIMD4<Float>; var radius: Float; var band: Float; var pad = SIMD2<Float>(0, 0) }
 
     private func drawDiscs(_ encoder: MTLRenderCommandEncoder, count: Int, viewMatrix: simd_float4x4,
                            projection: simd_float4x4) {
@@ -736,6 +775,24 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     // the depth pass for dots: the round core only (the corners are left out, so they don't hide the dots behind)
     fragment void pointDepth(TileOut in [[stage_in]]) {
         if (dot(in.corner, in.corner) > 1.0) discard_fragment();
+    }
+    // Unscanned-area stripes: a full-screen quad; amber diagonal bands inside the capture zone's rounded rectangle.
+    struct StripeUniforms { float4 rect; float4 tint; float radius; float band; float2 pad; };
+    struct StripeOut { float4 position [[position]]; };
+    vertex StripeOut stripesVertex(uint vid [[vertex_id]]) {
+        StripeOut o;
+        o.position = float4((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0, 0.0, 1.0);
+        return o;
+    }
+    fragment float4 stripesFragment(StripeOut in [[stage_in]], constant StripeUniforms &u [[buffer(0)]]) {
+        float2 p = in.position.xy;
+        // inside the rounded rectangle (signed distance)
+        float2 c = (u.rect.xy + u.rect.zw) * 0.5, hs = (u.rect.zw - u.rect.xy) * 0.5 - u.radius;
+        float2 q = abs(p - c) - hs;
+        float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u.radius;
+        if (d > 0.0) discard_fragment();
+        if (fmod(floor((p.x + p.y) / (u.band * 1.41421)), 2.0) > 0.5) discard_fragment();
+        return u.tint;
     }
     // the soft halo around each core (Android's second pass), blended over what's there
     fragment float4 haloFragment(TileOut in [[stage_in]]) {

@@ -33,6 +33,9 @@ enum LivePreview {
     }
     /// The camera picture's opacity under the dots in the S24 look (Android: CAMERA_OPACITY 0.3).
     static let cameraOpacity: Float = 0.3
+    /// The amber unscanned-area stripes' opacity over the dimmed camera, inside the capture zone (LiveDiscs.encodeStripes;
+    /// rk 13 Nov). Picked offline on a hole behind an object: amber 0.40 beat light grey 0.32.
+    static let unscannedStripeAlpha: Float = 0.40
     /// Which LiDAR depth makes dots: 2 = high confidence only (default, about 75% of depth pixels on a 15 Pro),
     /// 1 = medium and high (about 93%), 0 = all. Below that the depth is discarded at the door, as on Android.
     nonisolated static var depthConfidence: Int {
