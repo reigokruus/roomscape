@@ -599,13 +599,13 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         do {
             var uniforms = Uniforms(viewProjection: projection * viewMatrix,
                                     cameraPosition: viewMatrix.inverse.columns.3,
-                                    halfSize: LivePreview.livePoints ? cloud.voxelSize * 0.6 : cloud.voxelSize * 0.7, cell: Self.cell,
-                                    points: LivePreview.livePoints ? 1 : 0,   // points: round 2.4 cm dots on the 2 cm grid
-                                    fineHalf: LivePreview.fineVoxel * 0.6,    // fine dots: 0.96 cm on the 0.8 cm grid
-                                    // Android: pixels per metre from the view height, dots at most 48 px across on its
-                                    // 2340 px screen; the same share of this screen's height here.
+                                    // points: the cell size itself (2 cm, more after coarsening; the shader sizes the dot)
+                                    halfSize: LivePreview.livePoints ? cloud.voxelSize : cloud.voxelSize * 0.7, cell: Self.cell,
+                                    points: LivePreview.livePoints ? 1 : 0,
+                                    fineHalf: LivePreview.livePoints ? LivePreview.fineVoxel : LivePreview.fineVoxel * 0.6,
+                                    // only a generous cap for the GPU: a dot at most 160 px across on a 2556 px screen
                                     pxPerMeter: projection.columns.1.y * drawableHeight / 2,
-                                    capHalfPx: 24 * drawableHeight / 2340)
+                                    capHalfPx: 80 * drawableHeight / 2556)
             encoder.setVertexBuffer(cloud.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(cloud.normalBuffer, offset: 0, index: 1)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
@@ -685,12 +685,15 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         if (normals[iid].w == 2 || normals[iid].w == 3) hidden = true;   // 3: erased (seen through)
         float hs = (normals[iid].w == 1) ? u.fineHalf : u.halfSize;
         if (u.points > 0.5) {
-            // As Android's live dots: the halo 3.2 / 2.0 of the core, smaller when nearer than 1.5 m (down to 30%),
-            // and never more than capHalfPx on screen.
-            if (u.halo > 0.5) hs *= 1.6;
+            // hs is the dot's cell size here. rk 13 Nov ("stuff in background layers shows through"): a surface seen
+            // solid reads filled at every distance: the opaque core is 1.3 cells across (slight overlap), so nothing
+            // behind shows between neighbours; a spot seen once keeps the small soft dot (0.5 cells across) that rk
+            // likes where the surface isn't scanned yet. The soft halo is 2 cells across. No shrink up close (one
+            // cell of real surface may get big on screen); only a cap in pixels for the GPU.
+            float solid = float(p.color.a) / 255.0;
+            hs *= (u.halo > 0.5) ? 1.0 : mix(0.25, 0.65, solid);
             float w = max((u.viewProjection * float4(c, 1.0)).w, 0.05);
-            hs *= clamp(w / 1.5, 0.3, 1.0);
-            if (u.pxPerMeter > 0.0) hs = min(hs, u.capHalfPx * w / u.pxPerMeter);
+            if (u.pxPerMeter > 0.0) hs = min(hs, u.capHalfPx * (u.halo > 0.5 ? 1.54 : 1.0) * w / u.pxPerMeter);
         }
         float3 n = float3(normals[iid].xyz) / 127.0;
         // No normal yet: a tile facing the camera.
@@ -712,15 +715,15 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         return out;
     }
 
-    // Points-only live view (rk 10 Nov, as on Android): each spot in the camera's colour. Android's core: opaque where
-    // the gaussian exp(-r2 * 3.5) is at least 0.6, i.e. r2 <= 0.146 (rk 13 Nov: "i like the small dots").
+    // Points-only live view (rk 10 Nov, as on Android): each spot in the camera's colour, an opaque round core (the
+    // quad is the core here, sized in tileVertex) that writes depth, so a filled near surface hides what's behind.
     fragment float4 pointFragment(TileOut in [[stage_in]]) {
-        if (dot(in.corner, in.corner) > 0.146) discard_fragment();
+        if (dot(in.corner, in.corner) > 1.0) discard_fragment();
         return float4(in.color, 1.0);
     }
-    // the depth pass for dots: the core only (the rest is left out, so it doesn't hide the dots behind)
+    // the depth pass for dots: the round core only (the corners are left out, so they don't hide the dots behind)
     fragment void pointDepth(TileOut in [[stage_in]]) {
-        if (dot(in.corner, in.corner) > 0.146) discard_fragment();
+        if (dot(in.corner, in.corner) > 1.0) discard_fragment();
     }
     // the soft halo around each core (Android's second pass), blended over what's there
     fragment float4 haloFragment(TileOut in [[stage_in]]) {
