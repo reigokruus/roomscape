@@ -111,6 +111,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     // known, e.g. loaded from an older scan) and the distance of its closest reading (cm). Saved as dot-confidence.bin.
     private final byte[] confBest = new byte[MAX_POINTS];
     private final short[] nearCm = new short[MAX_POINTS];
+    /** Per dot: 1 = it lives on the fine 0.8 cm grid (set when it's made), so the live view gives each dot one size. */
+    private final byte[] dotFine = new byte[MAX_POINTS];
+    private boolean curFine;   // the dot being added (depth thread), for addPoint
     /** Debug tools "Confidence greys": dots drawn in grey by their confidence (white = ARCore most sure, black = least);
      *  display only, the real colours are kept and saved as always. */
     static volatile boolean CONF_GREY = false;   // (rk 22:27: live dots in their real colour again)
@@ -171,7 +174,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     String loadNumbers() { long age = lastNewDepthMs > 0 ? System.currentTimeMillis() - lastNewDepthMs : -1;
         return String.format(java.util.Locale.US, "cpu %.1f cores, depth %d ms old, heat %d", cpuCores, age, thermal); }
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
-    static final boolean AUTO_ERASE = true;    // 13 Nov: back with the iPhone's rule inside the capture zone (rk: a dot in mid-air the sensor later sees through is removed); 12 Nov it was off
+    static final boolean AUTO_ERASE = false;   // the 2-frame eraser stays off (12 Nov); see-through erase runs with the Android-tuned rule in carve()
+    private int erasedSec, revivedSec; private long eraseLogAt;   // see-through erases and revivals, logged once a second
     // ---- Rebuild frames: picture + pose + intrinsics + raw depth with confidence, twice a second (rk 12 Nov) ----
     static volatile boolean SAVE_REBUILD = true;
     private long rebuildAt; private int rebuildN; private File rebuildTmp;
@@ -297,8 +301,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (SHOW_MERGED && mergedDot[i] != 0) { r = 40; g = 120; b = 255; }   // debug: merged flat cells in blue
             // live: the alpha byte tells the dot shader the dot's cell (128+ = 0.8 cm) and how solid it is (1..127)
             if (alpha != 0 && !viewing) {
-                boolean fineCell = FINE_NEAR && nearCm[i] > 0 && nearCm[i] < FINE_NEAR_M * 100;
-                alpha = 1 + (fineCell ? 128 : 0) + Math.min(126, a * 126 / 255);
+                alpha = 1 + (dotFine[i] != 0 ? 128 : 0) + Math.min(126, a * 126 / 255);
             }
             greyBuf.put(i * 4, (byte) r); greyBuf.put(i * 4 + 1, (byte) g); greyBuf.put(i * 4 + 2, (byte) b); greyBuf.put(i * 4 + 3, (byte) alpha);
         }
@@ -1452,6 +1455,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         obs[count - 1] = 2;
                         if (mergedFile != null) mergedDot[count - 1] = mergedFile[i];
                         if (dotConf != null) { confBest[count - 1] = dotConf[i * 3]; nearCm[count - 1] = (short) (((dotConf[i * 3 + 1] & 255) << 8) | (dotConf[i * 3 + 2] & 255)); }
+                        // a saved dot: the same rule rebuildVoxelIndex uses to put it on the fine grid
+                        dotFine[count - 1] = (byte) (FINE_NEAR && nearCm[count - 1] > 0 && nearCm[count - 1] < FINE_NEAR_M * 100 ? 1 : 0);
                         if (d.seg != null && i < d.seg.length) seg[count - 1] = d.seg[i];
                     }
                     uploaded = 0;
@@ -3192,7 +3197,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; dotFine[k] = dotFine[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
@@ -3278,7 +3283,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int j = 0; j < 4; j++) col.put(k * 4 + j, col.get(i * 4 + j));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; dotFine[k] = dotFine[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
@@ -5846,7 +5851,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     if (CLOSEST_WINS && painted(cv) && supersede(wx, wy, wz, m[12], m[13], m[14], mm, rgb, fineDot)) { curConf = 0; curMm = 0; continue; }
                     if (hit >= 0) { refine(hit, wx, wy, wz, rgb); curConf = 0; curMm = 0; continue; }
                     voxels.put(vk, count);
-                    addPoint(wx, wy, wz, rgb); curConf = 0; curMm = 0;
+                    curFine = fineDot; addPoint(wx, wy, wz, rgb); curConf = 0; curMm = 0; curFine = false;
                     if (count >= MAX_POINTS) break;
                 }
             }
@@ -6023,8 +6028,9 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // and a bar's point just beside its pixel saw the wall and was erased (rk 10 Nov: bars vanished up close).
             int rp = Math.max(1, Math.min(6, Math.round(0.6f * VOXEL * fx / dp)));
             if (u < rp + 1 || vv < rp + 1 || u >= dw - rp - 1 || vv >= dh - rp - 1) continue;
-            // clearly farther than the dot: max(8 cm, 5%) as on the iPhone (DotCleanup.margin), in the raw depth's units
-            float lim = (dp + Math.max(0.08f, 0.05f * dp)) * depthK + depthC;
+            // clearly farther than the dot: max(10 cm, 8%), the Android-tuned margin (the S24's depth is rougher than the
+            // iPhone's LiDAR: the iPhone's 8 cm / 5% erased good patches and they came back, 13 Nov 13:58), raw depth units
+            float lim = (dp + Math.max(0.10f, 0.08f * dp)) * depthK + depthC;
             int verdict = 1;   // 1 seen through, 0 the dot is seen (or something in front of it), -1 can't tell
             for (int ny = -1; ny <= 1 && verdict == 1; ny++) for (int nx = -1; nx <= 1; nx++) {
                 int r = beyondOrNot(dbuf, dRow, dPix, cbuf, cRow, cPix, u + nx * rp, vv + ny * rp, lim);
@@ -6038,18 +6044,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     || Math.abs((dbuf.get((vv - 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol || Math.abs((dbuf.get((vv + 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol) continue;
             int t = Math.min(255, (thru[i] & 0xFF) + 1);
             thru[i] = (byte) t;
-            // See-through erase (rk 13 Nov, the iPhone's rule): with only sure (95%+) depth in play, a dot the camera
-            // sees clearly past over its whole spot in 2 frames goes (3 when it was seen solid); the 3x3 footprint check
-            // above still keeps thin bars and chair legs seen against the wall.
+            // See-through erase (rk 13 Nov: a dot the sensor later sees through is removed), Android-tuned: 4 frames
+            // seeing clearly past the whole spot, 10 for a solid dot (the iPhone's 2 / 3 flickered on the S24); the 3x3
+            // footprint check above keeps thin bars and chair legs seen against the wall.
             boolean solid = (col.get(i * 4 + 3) & 0xFF) == 255;
-            boolean gone = AUTO_ERASE ? t >= (solid ? 3 : 2) : t >= 4 && t >= (solid ? 10 : Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f)));
+            boolean gone = t >= (solid ? 10 : 4);
             if (gone) {
                 obs[i] = 0; thru[i] = 0;
                 col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done; a new reading in its cell brings it back
                 removed++;
             }
         }
-        if (removed > 0) { refined = true; carvedTotal += removed; }
+        if (removed > 0) { refined = true; carvedTotal += removed; erasedSec += removed; }
+        if (System.currentTimeMillis() - eraseLogAt >= 1000) {
+            if (erasedSec > 0 || revivedSec > 0) log("see-through: erased " + erasedSec + ", revived " + revivedSec);
+            erasedSec = 0; revivedSec = 0; eraseLogAt = System.currentTimeMillis();
+        }
     }
 
     /** One depth pixel against a dot's limit: 1 clearly beyond it, 0 at or in front of it, -1 no sure reading there. */
@@ -6146,6 +6156,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         col.put(j, (byte) rgb[0]); col.put(j + 1, (byte) rgb[1]); col.put(j + 2, (byte) rgb[2]); col.put(j + 3, (byte) seenAlpha(1));
         obs[count] = 1; seenStamp[count] = stampFrame; thru[count] = 0;
         confBest[count] = (byte) curConf; nearCm[count] = (short) Math.min(32767, curMm / 10);
+        dotFine[count] = (byte) (curFine ? 1 : 0);
         if (seg == null || seg.length < pos.capacity() / 3) seg = new byte[pos.capacity() / 3];
         seg[count] = segment;
         count++;
@@ -6166,7 +6177,10 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (wasPainted && before > 0 && !sureNow) return;   // a weak reading doesn't move or recolour a painted dot
         if (curConf > before) confBest[idx] = (byte) curConf;
         if (curMm > 0) { int cm = curMm / 10; if (nearCm[idx] == 0 || cm < nearCm[idx]) nearCm[idx] = (short) Math.min(32767, cm); }
-        if (obs[idx] == 0) { // a cleared spot seen solid again: start it fresh
+        if (obs[idx] == 0) { // a cleared spot seen solid again: start it fresh, from its second reading (in another frame)
+            if (seenStamp[idx] != stampFrame) { seenStamp[idx] = stampFrame; thru[idx] = (byte) Math.min(255, (thru[idx] & 0xFF) + 1); }
+            if ((thru[idx] & 0xFF) < 2) return;
+            revivedSec++;
             pos.put(idx * 3, x); pos.put(idx * 3 + 1, y); pos.put(idx * 3 + 2, z);
             col.put(idx * 4, (byte) rgb[0]); col.put(idx * 4 + 1, (byte) rgb[1]); col.put(idx * 4 + 2, (byte) rgb[2]); col.put(idx * 4 + 3, (byte) seenAlpha(1));
             obs[idx] = 1; thru[idx] = 0; seenStamp[idx] = stampFrame; refined = true;
@@ -6260,7 +6274,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; dotFine[k] = dotFine[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
@@ -6287,7 +6301,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (k != i) {
                 pos.put(k * 3, pos.get(i * 3)); pos.put(k * 3 + 1, pos.get(i * 3 + 1)); pos.put(k * 3 + 2, pos.get(i * 3 + 2));
                 for (int c = 0; c < 4; c++) col.put(k * 4 + c, col.get(i * 4 + c));
-                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; mergedDot[k] = mergedDot[i];
+                obs[k] = obs[i]; thru[k] = thru[i]; seenStamp[k] = seenStamp[i]; if (seg != null) seg[k] = seg[i]; confBest[k] = confBest[i]; nearCm[k] = nearCm[i]; dotFine[k] = dotFine[i]; mergedDot[k] = mergedDot[i];
             }
             k++;
         }
@@ -7747,6 +7761,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform4f(GLES20.glGetUniformLocation(stripeProg, "uTint"), 0xED / 255f, 0xB1 / 255f, 0x4D / 255f, STRIPE_ALPHA);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(stripeProg, "uMode"), mode);
         int aPos = GLES20.glGetAttribLocation(stripeProg, "aPos");
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);   // the quad is a client array: no buffer may be bound
         quad.position(0);
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad);
         GLES20.glEnableVertexAttribArray(aPos);
