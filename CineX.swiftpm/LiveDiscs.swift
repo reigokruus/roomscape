@@ -405,6 +405,9 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
     /// Points-only: the spots in their camera colour (the white grid look is for the mesh-first view).
     private let pointPipeline: MTLRenderPipelineState
     private let pointDepthPipeline: MTLRenderPipelineState
+    private let haloPipeline: MTLRenderPipelineState
+    /// The drawable's height in pixels (for the on-screen dot size cap).
+    private var drawableHeight: Float = 0
     private let depthWrite: MTLDepthStencilState
     private let depthEqual: MTLDepthStencilState
     /// The wide overview (ScanOverview): the pulled-back camera and the camera-image window.
@@ -425,6 +428,13 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         var points: Float = 0
         /// Half size of a fine (0.8 cm) dot (LivePreview.fineNear).
         var fineHalf: Float = 0
+        /// Points look (rk 13 Nov, "change the iphone live view to look the same" as Android): screen pixels per metre
+        /// at 1 m, and the largest half size of a dot in pixels, so close surfaces don't turn into big discs.
+        var pxPerMeter: Float = 0
+        var capHalfPx: Float = 0
+        /// 1: the soft halo pass (bigger, blended, no depth write), 0: the opaque core.
+        var halo: Float = 0
+        var pad: Float = 0
     }
 
     init?(device: MTLDevice, cloud: LiveCloud, mesh: LiveMesh?, ghost: LiveGhost, tiles: FlatTiles? = nil) {
@@ -436,6 +446,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let vertex = library.makeFunction(name: "tileVertex"),
               let fragment = library.makeFunction(name: "tileFragment"),
               let pointFragment = library.makeFunction(name: "pointFragment"),
+              let haloFragment = library.makeFunction(name: "haloFragment"),
               let pointDepth = library.makeFunction(name: "pointDepth") else { return nil }
         func pipeline(fragment: MTLFunction?) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
@@ -470,6 +481,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         }
         guard let depthPipeline = pipeline(fragment: nil), let colorPipeline = pipeline(fragment: fragment),
               let pointPipeline = pipeline(fragment: pointFragment), let pointDepthPipeline = depthOnly(pointDepth),
+              let haloPipeline = pipeline(fragment: haloFragment),
               let depthWrite = depthState(.less, write: true),
               let depthEqual = depthState(.lessEqual, write: false) else { return nil }
         self.cloud = cloud
@@ -483,6 +495,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         self.colorPipeline = colorPipeline
         self.pointPipeline = pointPipeline
         self.pointDepthPipeline = pointDepthPipeline
+        self.haloPipeline = haloPipeline
         self.depthWrite = depthWrite
         self.depthEqual = depthEqual
         window = ScanOverview.enabled ? OverviewWindowRenderer(device: device) : nil
@@ -525,6 +538,7 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
               let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer(),
               let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
+        drawableHeight = Float(view.drawableSize.height)
         let count = cloud.count
         if let camera = session?.currentFrame?.camera, view.bounds.width > 0 {
             // Same portrait, aspect-fill camera mapping RoomCaptureView uses for its camera image.
@@ -586,7 +600,11 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
                                     cameraPosition: viewMatrix.inverse.columns.3,
                                     halfSize: LivePreview.livePoints ? cloud.voxelSize * 0.6 : cloud.voxelSize * 0.7, cell: Self.cell,
                                     points: LivePreview.livePoints ? 1 : 0,   // points: round 2.4 cm dots on the 2 cm grid
-                                    fineHalf: LivePreview.fineVoxel * 0.6)    // fine dots: 0.96 cm on the 0.8 cm grid
+                                    fineHalf: LivePreview.fineVoxel * 0.6,    // fine dots: 0.96 cm on the 0.8 cm grid
+                                    // Android: pixels per metre from the view height, dots at most 48 px across on its
+                                    // 2340 px screen; the same share of this screen's height here.
+                                    pxPerMeter: projection.columns.1.y * drawableHeight / 2,
+                                    capHalfPx: 24 * drawableHeight / 2340)
             encoder.setVertexBuffer(cloud.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(cloud.normalBuffer, offset: 0, index: 1)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
@@ -601,6 +619,13 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
             encoder.setRenderPipelineState(LivePreview.livePoints ? pointPipeline : colorPipeline)
             encoder.setDepthStencilState(depthEqual)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+            if LivePreview.livePoints {
+                // Android's splat look: a soft gaussian halo 1.6 times the core, blended on top, depth tested only.
+                uniforms.halo = 1
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
+                encoder.setRenderPipelineState(haloPipeline)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+            }
         }
     }
 
@@ -619,6 +644,10 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         float cell;
         float points;
         float fineHalf;
+        float pxPerMeter;
+        float capHalfPx;
+        float halo;
+        float pad;
     };
     struct TileOut {
         float4 position [[position, invariant]];
@@ -654,6 +683,14 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         // The normal's 4th byte: 1 = a fine (0.8 cm) dot, 2 = a 2 cm dot replaced by fine ones (not drawn).
         if (normals[iid].w == 2) hidden = true;
         float hs = (normals[iid].w == 1) ? u.fineHalf : u.halfSize;
+        if (u.points > 0.5) {
+            // As Android's live dots: the halo 3.2 / 2.0 of the core, smaller when nearer than 1.5 m (down to 30%),
+            // and never more than capHalfPx on screen.
+            if (u.halo > 0.5) hs *= 1.6;
+            float w = max((u.viewProjection * float4(c, 1.0)).w, 0.05);
+            hs *= clamp(w / 1.5, 0.3, 1.0);
+            if (u.pxPerMeter > 0.0) hs = min(hs, u.capHalfPx * w / u.pxPerMeter);
+        }
         float3 n = float3(normals[iid].xyz) / 127.0;
         // No normal yet: a tile facing the camera.
         n = dot(n, n) > 0.25 ? normalize(n) : normalize(u.cameraPosition.xyz - c);
@@ -674,14 +711,21 @@ final class LiveDiscRenderer: NSObject, MTKViewDelegate {
         return out;
     }
 
-    // Points-only live view (rk 10 Nov, as on Android): each spot in the camera's colour, round, nearly opaque.
+    // Points-only live view (rk 10 Nov, as on Android): each spot in the camera's colour. Android's core: opaque where
+    // the gaussian exp(-r2 * 3.5) is at least 0.6, i.e. r2 <= 0.146 (rk 13 Nov: "i like the small dots").
     fragment float4 pointFragment(TileOut in [[stage_in]]) {
-        if (dot(in.corner, in.corner) > 1.0) discard_fragment();
-        return float4(in.color, 1.0);   // opaque: the background's stripes only where nothing is scanned
+        if (dot(in.corner, in.corner) > 0.146) discard_fragment();
+        return float4(in.color, 1.0);
     }
-    // the depth pass for dots: round (the corners are left out, so they don't hide the dots behind)
+    // the depth pass for dots: the core only (the rest is left out, so it doesn't hide the dots behind)
     fragment void pointDepth(TileOut in [[stage_in]]) {
-        if (dot(in.corner, in.corner) > 1.0) discard_fragment();
+        if (dot(in.corner, in.corner) > 0.146) discard_fragment();
+    }
+    // the soft halo around each core (Android's second pass), blended over what's there
+    fragment float4 haloFragment(TileOut in [[stage_in]]) {
+        float r2 = dot(in.corner, in.corner);
+        if (r2 > 1.0) discard_fragment();
+        return float4(in.color, exp(-r2 * 3.5));
     }
 
     fragment float4 tileFragment(TileOut in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {

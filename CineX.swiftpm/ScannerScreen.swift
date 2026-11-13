@@ -720,6 +720,7 @@ struct ScannerScreen: View {
                         .buttonStyle(.bordered)
                         .background(.regularMaterial, in: Capsule())
                 case .scanning:
+                    ScanTips(started: controller.phaseStarted)
                     // Cancel and Done, the same as on the Android app.
                     HStack(spacing: 16) {
                         // Cancel throws the scan away (a Continue scan pass only; the saved room is kept). After a
@@ -958,4 +959,35 @@ struct ClearFlash {
     var center: CGPoint
     var radius: CGFloat
     var visible = true
+}
+
+/// Two small scanning tips just above Cancel / Done (rk 13 Nov: "a simple icon representing those things with a small
+/// label each"): move slowly, look around objects. Semi-transparent, not tappable, gone after 12 s.
+private struct ScanTips: View {
+    let started: Date
+    static let seconds: Double = 12
+
+    var body: some View {
+        TimelineView(.periodic(from: started, by: 1)) { context in
+            let shown = context.date.timeIntervalSince(started) < Self.seconds
+            HStack(spacing: 14) {
+                tip("tortoise.fill", "Move slowly")
+                tip("rotate.3d", "Look around objects")
+            }
+            .opacity(shown ? 1 : 0)
+            .animation(.easeOut(duration: 1.2), value: shown)
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func tip(_ icon: String, _ label: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.caption.weight(.semibold))
+            Text(label).font(.caption2.weight(.medium))
+        }
+        .foregroundStyle(.white.opacity(0.9))
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(Color.black.opacity(0.45), in: Capsule())
+    }
 }
