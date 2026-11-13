@@ -177,7 +177,8 @@ struct ResultView: View {
                     // Too wide for one row: the buttons keep their words and wrap, the switches go under them.
                     VStack(alignment: .leading, spacing: 8) {
                         FlowRow(spacing: 8) { modeButtons(labeled: true) }
-                        HStack(spacing: 8) { viewPickers }
+                        // never wider than the screen: the switches scroll sideways on their own if they must
+                        ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 8) { viewPickers } }
                     }
                 }
                 .padding(10)
@@ -461,7 +462,8 @@ struct ResultView: View {
                 Text("Points").tag(Style.points)
                 Text("Mesh").tag(Style.mesh)
                 if room != nil { Text("Model").tag(Style.model) } // RoomPlan's model: iPhone scans only
-                if SplatPreview.hasResult(current) { Text("Photo-real").tag(Style.photoReal) }
+                // an icon, not a word: a sixth word made the row wider than the phone (rk 13 Nov 17:44)
+                if SplatPreview.hasResult(current) { Image(systemName: "cube.transparent").accessibilityLabel("Photo-real").tag(Style.photoReal) }
             }
             .pickerStyle(.segmented)
             .fixedSize()
