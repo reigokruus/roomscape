@@ -36,7 +36,7 @@ public class MainActivity extends Activity {
     private boolean installRequested;
     private TextView status;
     private Button refineButton;
-    private Button undoButton, removePersonButton, interviewButton;
+    private Button undoButton, removePersonButton, interviewButton, photoRealButton;
     private Button outletButton;
     private Button recordButton;
 
@@ -673,6 +673,10 @@ public class MainActivity extends Activity {
         interviewButton.setVisibility(View.GONE);
         interviewButton.setOnClickListener(v -> glView.queueEvent(() -> toast(renderer.interviewToggle())));
         bar.addView(interviewButton);
+        // Make photo-real (rk 12-13 Nov, as the iPhone): by hand only, after a warning; its own screen and process.
+        photoRealButton = new Button(this);
+        photoRealButton.setVisibility(View.GONE);
+        photoRealButton.setOnClickListener(v -> openPhotoReal());
         exportButton = new Button(this);
         exportButton.setText("Share");
         exportButton.setVisibility(View.GONE);
@@ -830,11 +834,11 @@ public class MainActivity extends Activity {
             closeB.setText(ScanRenderer.CLOSEST_WINS ? "Closest sure look wins: on" : "Closest sure look wins: off");
             closeB.setOnClickListener(v -> { ScanRenderer.CLOSEST_WINS = !ScanRenderer.CLOSEST_WINS; sp.edit().putBoolean("abClosestWins", ScanRenderer.CLOSEST_WINS).apply(); closeB.setText(ScanRenderer.CLOSEST_WINS ? "Closest sure look wins: on" : "Closest sure look wins: off"); });
             Button paintB = new Button(this);
-            ScanRenderer.PAINT_MIN = sp.getInt("abPaintMin2", 242);
+            ScanRenderer.PAINT_MIN = sp.getInt("abPaintMin3", 204);
             paintB.setText("Paint from confidence: " + Math.round(ScanRenderer.PAINT_MIN * 100 / 255f) + "%");
-            paintB.setOnClickListener(v -> {   // 95% -> 100% (255 only) -> 90% -> 80% -> 50% -> all (the old 55) -> 95%
-                int[] steps = {242, 255, 230, 204, 128, 55}; int k = 0; for (int i = 0; i < steps.length; i++) if (steps[i] == ScanRenderer.PAINT_MIN) k = (i + 1) % steps.length;
-                ScanRenderer.PAINT_MIN = steps[k]; sp.edit().putInt("abPaintMin2", steps[k]).apply();
+            paintB.setOnClickListener(v -> {   // 80% -> 90% -> 95% -> 100% (255 only) -> 50% -> all (the old 55) -> 80%
+                int[] steps = {204, 230, 242, 255, 128, 55}; int k = 0; for (int i = 0; i < steps.length; i++) if (steps[i] == ScanRenderer.PAINT_MIN) k = (i + 1) % steps.length;
+                ScanRenderer.PAINT_MIN = steps[k]; sp.edit().putInt("abPaintMin3", steps[k]).apply();
                 paintB.setText("Paint from confidence: " + Math.round(ScanRenderer.PAINT_MIN * 100 / 255f) + "%");
             });
             Button stopB = new Button(this);
@@ -1241,6 +1245,9 @@ public class MainActivity extends Activity {
                 if (b.getVisibility() == View.VISIBLE || b == claudeButton || b == mainButton) menuActions.add(b);
                 b.setVisibility(View.GONE);
             }
+            java.io.File dir = renderer.currentDir;
+            if (dir != null && PhotoRealActivity.result(dir).exists()) { photoRealButton.setText("Photo-real preview"); menuActions.add(0, photoRealButton); }
+            else if (PhotoRealActivity.possible(this, dir)) { photoRealButton.setText("Make photo-real"); menuActions.add(0, photoRealButton); }
         }
     }
 
@@ -1728,6 +1735,17 @@ public class MainActivity extends Activity {
             styleTabs[i].setBackground(TAB_STYLE[i] == s ? on : null);
             styleTabs[i].setTypeface(TAB_STYLE[i] == s ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
         }
+    }
+
+    /** Opens the photo-real screen for the open scan; a new one only after the warning (rk 12 Nov 22:41). */
+    private void openPhotoReal() {
+        final java.io.File dir = renderer.currentDir;
+        if (dir == null) return;
+        Runnable go = () -> { act("Make photo-real"); startActivity(new android.content.Intent(this, PhotoRealActivity.class).putExtra(PhotoRealActivity.EXTRA_SCAN, dir.getAbsolutePath())); };
+        if (PhotoRealActivity.result(dir).exists()) { go.run(); return; }
+        new android.app.AlertDialog.Builder(this).setTitle("Make photo-real?")
+                .setMessage("This takes a while (about 5 to 15 minutes) and the phone gets hot. Keep the app open on the next screen until it's done.")
+                .setPositiveButton("Continue", (d, w) -> go.run()).setNegativeButton("Not now", null).show();
     }
 
     /** ✦: the scan's other actions, as the iPhone app groups them in its menus. */
@@ -2323,7 +2341,7 @@ public class MainActivity extends Activity {
         });
         {   // the build number above the logo, big (rk 11 Nov 21:56: "show me the version ... so I don't use the wrong one")
             TextView bl = new TextView(this);
-            bl.setText("Build " + buildCode() + (ScanRenderer.FORCED_LOW_MEMORY ? "  ·  low memory mode" : ""));
+            bl.setText("Build " + buildStamp() + (ScanRenderer.FORCED_LOW_MEMORY ? "  ·  low memory mode" : ""));
             bl.setTextColor(ScanRenderer.FORCED_LOW_MEMORY ? 0xFFE0A030 : 0xFFFFFFFF);
             bl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
             bl.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD));
@@ -2363,6 +2381,8 @@ public class MainActivity extends Activity {
         return home;
     }
 
+    /** The readable build stamp ("13 Nov 14:34:25", Tallinn time), what builds are called (rk 13 Nov 14:33). */
+    String buildStamp() { return getString(R.string.build_stamp); }
     int buildCode() { try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionCode; } catch (Exception e) { return 0; } }
 
     private void showHome() {

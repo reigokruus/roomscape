@@ -128,7 +128,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     /** Only sure readings paint a dot (rk 11 Nov 22:09: "make only points above 90% paint"): ARCore depth confidence
      *  230 of 255 or more. A spot with only weaker readings isn't drawn, doesn't count as scanned, and isn't saved as a
      *  scan point (lowconf-points.bin keeps it aside); a sure reading later paints it. Debug tools "Paint from confidence". */
-    static volatile int PAINT_MIN = 242;   // 95% (rk 11 Nov 22:27; was 90% = 230)
+    static volatile int PAINT_MIN = 204;   // 80% (rk 13 Nov 14:33; was 95% = 242 from 11 Nov 22:27, before that 90% = 230)
     /** Debug tools "Closest sure look wins" (rk 11 Nov 22:25: wrong dots on the chair legs should "retry"): a sure
      *  reading taken clearly closer than a dot's closest look replaces the dots along its line of sight within
      *  +-SUPERSEDE_ALONG (2 cells of 2 cm: the S24's 90%+ depth scatters ~1-2 cm at 1 m) instead of landing beside them.
@@ -6773,7 +6773,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                         kb(mi.getMemoryStat("summary.java-heap")), kb(mi.getMemoryStat("summary.native-heap")), kb(mi.getMemoryStat("summary.graphics")),
                         kb(mi.getMemoryStat("summary.code")), kb(mi.getMemoryStat("summary.private-other")), kb(mi.getMemoryStat("summary.total-pss")));
             } catch (Throwable e) { sys = "; Android memory info failed: " + e; }
-            log(String.format(java.util.Locale.US, "memory (%s, build %d, %d of max %d points): Java heap used %d of %d MB, free %d, limit %d MB (phone's real limit %d)%s, native heap %d MB; ours (MB): %s%s",
+            log(String.format(java.util.Locale.US, "memory (%s, build %d = Build " + activity.buildStamp() + ", %d of max %d points): Java heap used %d of %d MB, free %d, limit %d MB (phone's real limit %d)%s, native heap %d MB; ours (MB): %s%s",
                     when, activity.buildCode(), pts, MAX_POINTS, (rt.totalMemory() - rt.freeMemory()) >> 20, rt.totalMemory() >> 20, rt.freeMemory() >> 20, HEAP_LIMIT >> 20, rt.maxMemory() >> 20,
                     FORCED_LOW_MEMORY ? ", low memory mode (forced, like a 512 MB phone)" : LOW_MEMORY ? ", low memory phone" : "",
                     android.os.Debug.getNativeHeapAllocatedSize() >> 20, ours, sys));

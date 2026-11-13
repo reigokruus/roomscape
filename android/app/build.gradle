@@ -8,9 +8,15 @@ android {
         targetSdk 35
         // Without -PbuildNumber: the yyDDDHHmm code build-both.sh uses (a plain assembleDebug once fell back to 1,
         // and the phone refused it as a downgrade). Never lower than an earlier build.
-        def buildNo = (project.findProperty('buildNumber') ?: new Date().format('yyDDDHHmm')) as Integer
+        // Times in Tallinn whatever the build machine's zone (the cloud builds run in UTC). rk 13 Nov 14:33: builds are
+        // named by their readable time, as on the iPhone ("Build 13 Nov 14:34:25"); the number stays internal.
+        def builtAt = new Date()
+        def tallinn = TimeZone.getTimeZone('Europe/Tallinn')
+        def buildNo = (project.findProperty('buildNumber') ?: builtAt.format('yyDDDHHmm', tallinn)) as Integer
         versionCode buildNo
         versionName "0.1.${buildNo}"
+        def stampFmt = new java.text.SimpleDateFormat('d MMM HH:mm:ss', Locale.UK); stampFmt.setTimeZone(tallinn)
+        resValue 'string', 'build_stamp', stampFmt.format(builtAt)
         // -PguestBuild: a build for someone else's phone (rk 10 Nov: the S23+ teammate): camera recording and screen
         // video off by default (storage, heat, privacy); the switches stay in the debug tools
         resValue 'bool', 'guest_build', project.hasProperty('guestBuild') ? 'true' : 'false'

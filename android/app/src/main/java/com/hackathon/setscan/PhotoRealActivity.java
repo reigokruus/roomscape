@@ -53,8 +53,8 @@ public class PhotoRealActivity extends Activity {
     static File result(File scanDir) { return new File(new File(scanDir, "splat"), "preview.ply"); }
 
     /** Whether a scan can be made photo-real here: Brush is in this APK and the scan kept its rebuild pictures. */
-    static boolean possible(File scanDir) {
-        return scanDir != null && new File(scanDir, "rebuild-frames/frames.csv").exists() && BrushNative.available();
+    static boolean possible(android.content.Context ctx, File scanDir) {
+        return scanDir != null && new File(scanDir, "rebuild-frames/frames.csv").exists() && BrushNative.present(ctx);
     }
 
     @Override protected void onCreate(Bundle b) {
@@ -131,6 +131,7 @@ public class PhotoRealActivity extends Activity {
         long t0 = System.currentTimeMillis();
         final double[] rest = {0}, paused = {0};
         try {
+            if (!BrushNative.available()) { done(false, "Brush isn't in this build of the app."); return; }
             if (!splat.isDirectory()) splat.mkdirs();
             File dataset = new File(splat, "dataset"), out = new File(splat, "brush-out");
             deleteTree(dataset); deleteTree(out);

@@ -11,6 +11,12 @@ final class BrushNative {
 
     private static Boolean loaded;
 
+    /** Whether this APK carries Brush, without loading it (the main app process never loads it; only :photoreal does). */
+    static boolean present(android.content.Context ctx) {
+        try { return ((dalvik.system.BaseDexClassLoader) ctx.getClassLoader()).findLibrary("brush_c") != null; }
+        catch (Throwable e) { return false; }
+    }
+
     static synchronized boolean available() {
         if (loaded == null) {
             try { System.loadLibrary("brush_c"); System.loadLibrary("brushjni"); loaded = true; }
