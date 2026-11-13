@@ -1822,6 +1822,27 @@ public class MainActivity extends Activity {
         scanTip.setVisibility(View.GONE);
         chrome.addView(scanTip, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
         chrome.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeScanTip());
+
+        // A standing note just inside the zone's top edge (rk 13 Nov 14:18): circle around what you scan, as if on an
+        // invisible ball around it, rather than panning side to side or up and down; that gives the S24 the most depth.
+        orbitNote = new LinearLayout(this);
+        orbitNote.setOrientation(LinearLayout.HORIZONTAL);
+        orbitNote.setGravity(Gravity.CENTER_VERTICAL);
+        android.graphics.drawable.GradientDrawable ob2 = new android.graphics.drawable.GradientDrawable();
+        ob2.setColor(0x73000000); ob2.setCornerRadius(dp(16));
+        orbitNote.setBackground(ob2);
+        orbitNote.setPadding(dp(6), dp(3), dp(11), dp(3));
+        orbitNote.addView(new OrbitIcon(this), new LinearLayout.LayoutParams(dp(44), dp(30)));
+        TextView ot2 = new TextView(this);
+        ot2.setText("Circle around");   // minimal: the animation explains the move (rk 13 Nov 14:19)
+        ot2.setTextColor(0xE6FFFFFF); ot2.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        ot2.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        olp.leftMargin = dp(5);
+        orbitNote.addView(ot2, olp);
+        orbitNote.setVisibility(View.GONE);
+        chrome.addView(orbitNote, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+        orbitNote.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeScanTip());
         scanTip.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeScanTip());
 
         // Cancel and Done at the bottom while scanning, as on the iPhone: same size and place, above the navigation bar.
@@ -1877,6 +1898,50 @@ public class MainActivity extends Activity {
 
     private LinearLayout scanRow;
     private TextView scanTip;
+    private LinearLayout orbitNote;
+    /** The standing note's small looping animation (rk 13 Nov 14:19: "maybe that move isn't clearly apparent from a
+     *  still image"): an object in the middle, a faint tilted orbit around it (the invisible ball seen from the side),
+     *  and the phone gliding along the orbit, always turned to face the object; behind the object it goes dimmer and
+     *  is hidden by it. One lap every 3.2 s, drawn only while on screen. */
+    static final class OrbitIcon extends View {
+        private final android.graphics.Paint line = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint fill = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint phone = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.RectF r = new android.graphics.RectF(), pr = new android.graphics.RectF();
+        static final long LAP_MS = 3200;
+        OrbitIcon(android.content.Context c) {
+            super(c);
+            float d = c.getResources().getDisplayMetrics().density;
+            line.setStyle(android.graphics.Paint.Style.STROKE); line.setStrokeWidth(1.2f * d); line.setColor(0x66FFFFFF);
+            line.setPathEffect(new android.graphics.DashPathEffect(new float[]{2.5f * d, 2f * d}, 0));
+            fill.setStyle(android.graphics.Paint.Style.FILL); fill.setColor(0xE6FFFFFF);
+            phone.setStyle(android.graphics.Paint.Style.FILL); phone.setColor(0xFFEDB14D);   // the app's amber
+        }
+        @Override protected void onDraw(android.graphics.Canvas cv) {
+            float w = getWidth(), h = getHeight(), cx = w / 2, cy = h / 2, d = getResources().getDisplayMetrics().density;
+            float rx = w * 0.40f, ry = h * 0.30f;
+            r.set(cx - rx, cy - ry, cx + rx, cy + ry);
+            cv.drawOval(r, line);
+            double a = 2 * Math.PI * ((android.os.SystemClock.uptimeMillis() % LAP_MS) / (double) LAP_MS);
+            float px = cx + rx * (float) Math.cos(a), py = cy + ry * (float) Math.sin(a);
+            boolean behind = Math.sin(a) < 0;   // the far side of the orbit
+            float o = 4f * d;
+            phone.setAlpha(behind ? 120 : 255);
+            if (behind) drawPhone(cv, px, py, cx, cy, d);
+            cv.drawRoundRect(new android.graphics.RectF(cx - o, cy - o * 1.15f, cx + o, cy + o * 1.15f), 1.2f * d, 1.2f * d, fill);   // the object
+            if (!behind) drawPhone(cv, px, py, cx, cy, d);
+            if (isShown()) postInvalidateOnAnimation();
+        }
+        /** The phone at (px, py), its back turned to the orbit's outside: its long side across the line to the object. */
+        private void drawPhone(android.graphics.Canvas cv, float px, float py, float cx, float cy, float d) {
+            float deg = (float) Math.toDegrees(Math.atan2(cy - py, cx - px));
+            cv.save();
+            cv.rotate(deg, px, py);
+            pr.set(px - 1.4f * d, py - 3.4f * d, px + 1.4f * d, py + 3.4f * d);
+            cv.drawRoundRect(pr, 0.9f * d, 0.9f * d, phone);
+            cv.restore();
+        }
+    }
     private int scanTipIndex = -1;
     static final long SCAN_TIP_MS = 7000;
     static final String[] SCAN_TIPS = {"🔄  Look around", "🐢  Move slowly", "🔄  Look around", "🔍  Go closer"};
@@ -1897,10 +1962,15 @@ public class MainActivity extends Activity {
         if (h <= 0) return;
         float y = h * (1 + ScanRenderer.ZONE_H) / 2f - dp(22) - scanTip.getHeight() / 2f;
         if (Math.abs(scanTip.getTranslationY() - y) > 0.5f) scanTip.setTranslationY(y);
+        if (orbitNote != null) {   // just inside the zone's top edge
+            float oy = h * (1 - ScanRenderer.ZONE_H) / 2f + dp(10);
+            if (Math.abs(orbitNote.getTranslationY() - oy) > 0.5f) orbitNote.setTranslationY(oy);
+        }
     }
     /** Shown while scanning: starts from the first tip each scan. */
     private void showScanTip(boolean on) {
         if (scanTip == null) return;
+        if (orbitNote != null) orbitNote.setVisibility(on ? View.VISIBLE : View.GONE);
         boolean was = scanTip.getVisibility() == View.VISIBLE;
         if (on == was) return;
         scanTip.removeCallbacks(scanTipTick);
