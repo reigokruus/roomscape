@@ -112,8 +112,6 @@ enum SplatPreview {
         }
         // The baseline Brush starts from (13 Nov: a real after-scan start was about 940 MB, the test's goal).
         ProcessingQueue.logMemory("Brush start, baseline \(Int(PerfLog.footprintMB())) MB (after a real scan about 940)\(waited > 0 ? " (waited \(Int(waited)) s)" : "")")
-        BrushTrainer.setRefineGuard(test: test)
-        ProcessingQueue.logMemory("Brush refine guard: 1700 MB available for the first two refines, then 800")
         let trainer = self.trainer
         let started = Date()
         let partial = dir.appendingPathComponent("preview-training.ply")

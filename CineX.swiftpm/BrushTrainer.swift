@@ -54,7 +54,7 @@ struct BrushTrainer: SplatPreview.Trainer {
     /// The refine guard in Brush (iOS): a refine runs only with this much memory available, else it's skipped
     /// (refine-skips.txt). Measured 13 Nov (refine-marks): only the first two refines of a run burst (~1.6 GB for
     /// 0.8-3 s), later ones need ~60 MB: 1700 MB until two refines have run, then 800. The memory test uses the same.
-    static func setRefineGuard(test: Bool) {
+    static func setRefineGuard(test _: Bool) {
         setenv("BRUSH_REFINE_MIN_AVAIL_MB", "1700", 1)
         setenv("BRUSH_REFINE_MIN_AVAIL_LATER_MB", "800", 1)
     }
@@ -144,6 +144,8 @@ struct BrushTrainer: SplatPreview.Trainer {
     func train(dataset: URL, output: URL, steps: Int, maxSplats: Int, setup: String, resume: SplatPacing.Checkpoint?,
                progress: @escaping @Sendable (Int, String?) -> Void) async throws {
         _ = Self.tuneLess
+        Self.setRefineGuard(test: false)
+        ProcessingQueue.logMemory("Brush refine guard: 1700 MB available for the first two refines, then 800")
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
         let outDir = folder.appendingPathComponent("brush-out")
