@@ -35,6 +35,14 @@ State as of **Build 13 Nov 2026 13:22:13** (tested on an iPhone 15 Pro). Older b
   - memory marks are kept in `<room>/splat/memory-marks/`;
   - the "Photo-real memory test" switch on the home screen runs it without a new scan.
 
+- Photo-real tab in the room view (13 Nov), in `ResultView.swift`:
+  - an icon segment (`cube.transparent`) next to Photo / Points / Mesh / Model (`Style.photoReal`), shown only when
+    the scan has `splat/preview.ply`;
+  - it lays `SplatViewerView` over the SceneKit view, starting from the room view's orbit camera
+    (`RoomCameraLink` hands over cam, look and fov);
+  - leaving the tab hands the camera back through `SplatViewLink` and `SplatViewer/index.html`'s `window.roomCam()`;
+    the page also takes `?fov=`, the same as Android's Photo-real tab.
+
 ## Open
 - Brush's first-run GPU bursts (about +2 GB at training steps 0 and 1 and at the first refine, under a second to
   4 s): not autotune (logged); likely first-time kernel or pipeline compiles, unproven.
@@ -45,3 +53,5 @@ State as of **Build 13 Nov 2026 13:22:13** (tested on an iPhone 15 Pro). Older b
 - The room screen doesn't keep the camera angle when it reloads.
 - Android to-do: capture zone, gap stripes, rotating hints, Brush photo-real. The "This spot / Room" bars are
   hidden in code, but no APK has been built with that yet.
+- Photo-real tab: the small-screen width was checked only on rk's phone (no iPhone SE / 375-pt check yet), and
+  standing and top view hand over a look point 2 m ahead.
