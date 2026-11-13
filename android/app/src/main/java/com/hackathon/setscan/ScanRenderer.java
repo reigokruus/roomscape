@@ -5233,7 +5233,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (SHOW_OBJECTS) drawObjectHint(mvp);
             if (trackingNow) maybeAskClaudeLive(nowMs);
         }
-        if (!viewing && frame.getTimestamp() != 0 && overviewBlend <= 0.001f) drawZone(1);   // the capture zone's outline, over the dots
+        // (the zone's outline and outside dim are an Android View over the GL view, MainActivity.ZoneFrame: drawn here at
+        // the end of the frame it showed in only 127 of 325 frames on the S24, 13 Nov 14:14 scan)
         logState(ts, nowMs);
         if (!viewing && everTracked) trackPose(camera, ts);
         if (frameNo % 15 == 0) {

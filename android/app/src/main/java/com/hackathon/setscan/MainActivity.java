@@ -1809,6 +1809,11 @@ public class MainActivity extends Activity {
         hp.topMargin = dp(40); hp.leftMargin = dp(12); hp.rightMargin = dp(12);
         chrome.addView(hud, hp);
 
+        // The capture zone's outline and the slightly darker outside, over the GL view (as the iPhone's CaptureZone).
+        zoneFrame = new ZoneFrame(this);
+        zoneFrame.setVisibility(View.GONE);
+        chrome.addView(zoneFrame, 0, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
         // One small tip capsule just inside the capture zone's bottom edge, rotating for the whole scan (rk 13 Nov, as
         // on the iPhone): 7 s each with a soft fade, looping. Android has no LiDAR, so "Look around" comes first and
         // every second tip (rk 13 Nov 11:26).
@@ -1899,6 +1904,34 @@ public class MainActivity extends Activity {
     private LinearLayout scanRow;
     private TextView scanTip;
     private LinearLayout orbitNote;
+    private ZoneFrame zoneFrame;
+    /** The capture zone on screen: the outside 18% darker (even-odd fill) and a thin light outline, radius 22 dp. A View
+     *  rather than a GL pass (on the S24 the late GL pass showed in only some frames: the outline flickered). */
+    static final class ZoneFrame extends View {
+        private final android.graphics.Paint dim = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint edge = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path path = new android.graphics.Path();
+        private final android.graphics.RectF rect = new android.graphics.RectF();
+        ZoneFrame(android.content.Context c) {
+            super(c);
+            float d = c.getResources().getDisplayMetrics().density;
+            dim.setStyle(android.graphics.Paint.Style.FILL); dim.setColor(0x2E000000);
+            edge.setStyle(android.graphics.Paint.Style.STROKE); edge.setStrokeWidth(Math.max(1f, d)); edge.setColor(0x73FFFFFF);
+        }
+        @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+            float rad = ScanRenderer.ZONE_RADIUS_DP * getResources().getDisplayMetrics().density;
+            rect.set(w * (1 - ScanRenderer.ZONE_W) / 2, h * (1 - ScanRenderer.ZONE_H) / 2, w * (1 + ScanRenderer.ZONE_W) / 2, h * (1 + ScanRenderer.ZONE_H) / 2);
+            path.reset(); path.setFillType(android.graphics.Path.FillType.EVEN_ODD);
+            path.addRect(0, 0, w, h, android.graphics.Path.Direction.CW);
+            path.addRoundRect(rect, rad, rad, android.graphics.Path.Direction.CW);
+            invalidate();
+        }
+        @Override protected void onDraw(android.graphics.Canvas cv) {
+            float rad = ScanRenderer.ZONE_RADIUS_DP * getResources().getDisplayMetrics().density;
+            cv.drawPath(path, dim);
+            cv.drawRoundRect(rect, rad, rad, edge);
+        }
+    }
     /** The standing note's small looping animation (rk 13 Nov 14:19: "maybe that move isn't clearly apparent from a
      *  still image"): an object in the middle, a faint tilted orbit around it (the invisible ball seen from the side),
      *  and the phone gliding along the orbit, always turned to face the object; behind the object it goes dimmer and
@@ -1971,6 +2004,7 @@ public class MainActivity extends Activity {
     private void showScanTip(boolean on) {
         if (scanTip == null) return;
         if (orbitNote != null) orbitNote.setVisibility(on ? View.VISIBLE : View.GONE);
+        if (zoneFrame != null) zoneFrame.setVisibility(on ? View.VISIBLE : View.GONE);
         boolean was = scanTip.getVisibility() == View.VISIBLE;
         if (on == was) return;
         scanTip.removeCallbacks(scanTipTick);
