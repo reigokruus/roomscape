@@ -110,7 +110,8 @@ enum SplatPreview {
             progress(.init(stage: "Getting ready", fraction: 0.25, note: nil))
             try await Task.sleep(nanoseconds: 500_000_000); waited += 0.5
         }
-        ProcessingQueue.logMemory("Brush start\(waited > 0 ? " (waited \(Int(waited)) s)" : "")")
+        // The baseline Brush starts from (13 Nov: a real after-scan start was about 940 MB, the test's goal).
+        ProcessingQueue.logMemory("Brush start, baseline \(Int(PerfLog.footprintMB())) MB (after a real scan about 940)\(waited > 0 ? " (waited \(Int(waited)) s)" : "")")
         let trainer = self.trainer
         let started = Date()
         let partial = dir.appendingPathComponent("preview-training.ply")
