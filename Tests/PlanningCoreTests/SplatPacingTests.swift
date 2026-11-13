@@ -9,7 +9,8 @@ final class SplatPacingTests: XCTestCase {
         XCTAssertLessThanOrEqual(r[2], 1.0)        // serious: at least half speed
         XCTAssertNil(SplatPacing.restFactor(thermal: 3))
         XCTAssertNil(SplatPacing.note(thermal: 0))
-        XCTAssertNotNil(SplatPacing.note(thermal: 2))
+        XCTAssertNil(SplatPacing.note(thermal: 2))       // no "half speed" note (rk 13 Nov)
+        XCTAssertNotNil(SplatPacing.note(thermal: 3))
     }
 
     func testStageText() {

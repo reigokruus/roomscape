@@ -21,7 +21,7 @@ public enum SplatPacing {
         switch thermal {
         case ...0: return nil
         case 1: return "Running a little slower to keep the phone cool"
-        case 2: return "Running at half speed to keep the phone cool"
+        case 2: return nil   // rk 13 Nov: it's at half speed almost always, so no note (the pacing stays)
         default: return "Paused: the phone is hot, carries on when it cools"
         }
     }
