@@ -100,8 +100,15 @@ struct BrushTrainer: SplatPreview.Trainer {
         }
     }
 
+    /// cubecl (Brush's GPU layer) tunes its kernels by trying candidates with full-size scratch buffers whenever a
+    /// shape is new: at the start and after each refine. On the phone the footprint flipped between about 0.1 and
+    /// 2.2-2.4 GB in exactly those moments (13 Nov 08:39 run), on top of the about 1.1 GB the app keeps after a scan.
+    /// The least tuning is asked for here (read once, at Brush's first use).
+    private static let tuneLess: Void = { setenv("CUBECL_AUTOTUNE_LEVEL", "minimal", 1) }()
+
     func train(dataset: URL, output: URL, steps: Int, maxSplats: Int, setup: String, resume: SplatPacing.Checkpoint?,
                progress: @escaping @Sendable (Int, String?) -> Void) async throws {
+        _ = Self.tuneLess
         let fm = FileManager.default
         let folder = output.deletingLastPathComponent()
         let outDir = folder.appendingPathComponent("brush-out")
