@@ -223,11 +223,32 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private void keepRebuildFrames(File scanDir) {
         File t = rebuildTmp; rebuildTmp = null;
         if (t == null || scanDir == null) return;
+        framesMoving = true;
         rebuildExec.execute(() -> {   // after the frames still being written
-            File to = new File(scanDir, "rebuild-frames");
-            if (t.renameTo(to)) log("rebuild frames kept with the scan: rebuild-frames/ (" + (to.list() == null ? 0 : to.list().length) + " files)");
-            else log("rebuild frames: couldn't move " + t.getName() + " into the scan folder");
+            try {
+                File to = new File(scanDir, "rebuild-frames");
+                if (t.renameTo(to)) log("rebuild frames kept with the scan: rebuild-frames/ (" + (to.list() == null ? 0 : to.list().length) + " files)");
+                else log("rebuild frames: couldn't move " + t.getName() + " into the scan folder");
+            } finally { framesMoving = false; }
         });
+    }
+    private volatile boolean framesMoving;
+    /** The rebuild frames haven't reached the scan folder yet: the after-Done saving waits a minute, then they move. */
+    boolean framesNotKeptYet() {
+        synchronized (afterDoneLock) { if (afterDoneWork != null) return true; }
+        return framesMoving;
+    }
+    /** Make photo-real right after Done (rk 13 Nov 16:55 "cant find photoreal"): runs the after-Done saving now instead
+     *  of a minute later, waits (up to 30 s) for the frames to move in, then calls back on the UI thread. */
+    void keepFramesNow(Runnable then) {
+        new Thread(() -> {
+            runAfterDone();
+            long until = System.currentTimeMillis() + 30_000;
+            while ((framesMoving || rebuildPending.get() > 0) && System.currentTimeMillis() < until) {
+                try { Thread.sleep(100); } catch (InterruptedException e) { break; }
+            }
+            activity.runOnUiThread(then);
+        }, "keep-frames-now").start();
     }
     /** Debug tools "Merge flat areas" (rk 11 Nov 23:20: "smooth over some areas where the dots make a coherent shape"):
      *  settled fine (0.8 cm) dots in a 2 cm cell that lie flat (thinner than 4 mm) and evenly coloured (channel spread

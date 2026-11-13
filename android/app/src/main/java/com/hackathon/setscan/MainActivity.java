@@ -1741,6 +1741,16 @@ public class MainActivity extends Activity {
     private void openPhotoReal() {
         final java.io.File dir = renderer.currentDir;
         if (dir == null) return;
+        if (!PhotoRealActivity.result(dir).exists() && !PhotoRealActivity.possible(this, dir)) {
+            if (renderer.framesNotKeptYet()) {   // right after Done: finish saving the scan's pictures first
+                android.widget.Toast.makeText(this, "Finishing saving the scan…", android.widget.Toast.LENGTH_SHORT).show();
+                renderer.keepFramesNow(() -> {
+                    if (dir.equals(renderer.currentDir) && PhotoRealActivity.possible(this, dir)) openPhotoReal();
+                    else android.widget.Toast.makeText(this, "This scan has no pictures to make it photo-real.", android.widget.Toast.LENGTH_LONG).show();
+                });
+            } else android.widget.Toast.makeText(this, "This scan has no pictures to make it photo-real.", android.widget.Toast.LENGTH_LONG).show();
+            return;
+        }
         Runnable go = () -> { act("Make photo-real"); startActivity(new android.content.Intent(this, PhotoRealActivity.class).putExtra(PhotoRealActivity.EXTRA_SCAN, dir.getAbsolutePath())); };
         if (PhotoRealActivity.result(dir).exists()) { go.run(); return; }
         new android.app.AlertDialog.Builder(this).setTitle("Make photo-real?")
@@ -1751,6 +1761,14 @@ public class MainActivity extends Activity {
     /** ✦: the scan's other actions, as the iPhone app groups them in its menus. */
     private void showViewerMenu() {
         java.util.List<Button> items = new java.util.ArrayList<>(menuActions);
+        // Decided when the menu opens, not when the result view opened: right after Done the scan is still being saved
+        // and its rebuild-frames/ only move in at the end, so the entry was missing (rk 13 Nov 16:55 "cant find photoreal").
+        items.remove(photoRealButton);
+        java.io.File dir = renderer.currentDir;
+        if (dir != null && PhotoRealActivity.result(dir).exists()) { photoRealButton.setText("Photo-real preview"); items.add(0, photoRealButton); }
+        else if (PhotoRealActivity.possible(this, dir)) { photoRealButton.setText("Make photo-real"); items.add(0, photoRealButton); }
+        else if (dir != null && renderer.framesNotKeptYet() && BrushNative.present(this)) {
+            photoRealButton.setText("Make photo-real"); items.add(0, photoRealButton); }
         String[] labels = new String[items.size()];
         for (int i = 0; i < labels.length; i++) labels[i] = items.get(i).getText().toString();
         new android.app.AlertDialog.Builder(this).setTitle(renderer.currentName != null ? renderer.currentName : "Scan")
