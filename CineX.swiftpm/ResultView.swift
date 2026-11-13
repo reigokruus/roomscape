@@ -14,6 +14,10 @@ struct ResultView: View {
     let scan: SavedScan
     /// Starts a second pass over this scan (Improve scan); only offered when the scan saved its world map.
     var onImprove: (() -> Void)?
+    /// Opened again in place after a rebuild (RoomHost): keep the look that was selected.
+    var reloaded = false
+    /// The look last selected on each room's screen (this app run), for `reloaded`.
+    @MainActor static var lastStyle: [String: Style] = [:]
     @State private var scene: SCNScene?
     @State private var room: CapturedRoom?
     @State private var capture: CaptureMeta?
@@ -344,12 +348,19 @@ struct ResultView: View {
             if newStyle == .model, lightingOn { toggleLighting() }
             if newStyle == .model, objectsOn { toggleObjects() }
             showStyle(newStyle)
+            Self.lastStyle[scan.name] = newStyle
         }
-        .task { ProcessingQueue.logMemory("room screen opened"); await loadRoom() }
+        .task { await openRoom() }
         // The photo-real preview needs the memory the 3D room holds (12 Nov 22:08): let it go while that runs, load it
         // again when it's done
         .modifier(ReleaseDuringPreview(busy: processing.gpuJob, release: releaseRoom, reload: { await loadRoom() }))
         .modifier(ConfirmPhotoReal(isPresented: $confirmingSplat, scan: current))
+    }
+
+    /// Loads the room when the screen opens (or opens again in place after a rebuild, `reloaded`).
+    private func openRoom() async {
+        ProcessingQueue.logMemory(reloaded ? "room screen reloaded after a rebuild" : "room screen opened")
+        await loadRoom()
     }
 
     #if DEBUG
@@ -940,6 +951,7 @@ struct ResultView: View {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-stylePhoto") { style = .photo }
         #endif
+        if reloaded, let kept = Self.lastStyle[scan.name] { style = kept }
         // Shown now: the splats were added hidden, and when the style was already Points (set when the photo room
         // came in) the change handler doesn't run, so nothing showed (rk 10 Nov 19:22 scan, points-only switch on).
         showStyle(style)

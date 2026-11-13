@@ -152,7 +152,7 @@ struct HomeView: View {
                 Text(importError ?? "")
             }
             .navigationDestination(for: SavedScan.self) { scan in
-                ResultView(scan: scan, onImprove: {
+                RoomHost(scan: scan, onImprove: {
                     // Close the result first; it opens again with the merged scan when the scanner is done.
                     improving = scan
                     path = []
@@ -375,5 +375,22 @@ struct SharedBadge: View {
             .padding(4)
             .background(Color.accentColor, in: Circle())
             .accessibilityLabel("Shared")
+    }
+}
+
+/// The room screen, opened again in place when a rebuild from the recording of this scan finishes while it is shown
+/// (rk 13 Nov): a new identity drops the old screen's scene and buffers and loads the rebuilt files, keeping the look
+/// (Photo / Points / Mesh / Model) that was selected.
+struct RoomHost: View {
+    let scan: SavedScan
+    var onImprove: (() -> Void)?
+    @ObservedObject private var queue = ProcessingQueue.shared
+    @State private var openedAt: Int?
+
+    var body: some View {
+        let count = queue.rebuilt[scan.name] ?? 0
+        ResultView(scan: scan, onImprove: onImprove, reloaded: openedAt.map { count != $0 } ?? false)
+            .id(count)
+            .onAppear { if openedAt == nil { openedAt = count } }
     }
 }

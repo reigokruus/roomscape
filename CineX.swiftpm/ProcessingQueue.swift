@@ -80,6 +80,9 @@ private enum log {
     @Published private(set) var progress: RecordingProcessor.Progress?
     /// The last job that ended (shown once by the screen that cares, then cleared).
     @Published var finished: Finished?
+    /// Rebuilds from the recording that finished and were swapped in, by scan: an open room screen reloads in place
+    /// when its count changes (RoomHost; rk 13 Nov: "do i really need to go back and open the room again").
+    @Published private(set) var rebuilt: [String: Int] = [:]
 
     /// "Build scans from the recording" (test, off by default): after Done the whole scan is rebuilt from the
     /// recording, not just its text patches. Launch argument -recordThenProcess turns it on too.
@@ -320,6 +323,7 @@ private enum log {
                 try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
                 items.removeAll { $0 == item }
                 finished = Finished(scan: item.scan, job: item.job, error: nil)
+                if item.job == .rebuild { rebuilt[item.scan, default: 0] += 1 }
                 if item.job == .splat { SplatPreview.notifyReady(scan) }
                 log.info("processed \(item.scan)")
             } catch is CancellationError {
@@ -490,8 +494,9 @@ struct ProcessingOverlay: View {
                         ?? "The photo-real preview is ready: Share menu (top right) > Photo-real preview."
                     return
                 }
+                // Done: the room screen reloads itself with the rebuilt room (RoomHost), no message. Only a failure
+                // is said. The previous version stays in the scan's before-rebuild folder as before.
                 done = f.error.map { "Couldn't rebuild: \($0)" }
-                    ?? "Go back and open the room again to see it. The previous version is kept in the scan's before-rebuild folder."
             }
     }
 }
