@@ -90,3 +90,47 @@ def copySplatViewer = tasks.register('copySplatViewer', Copy) {
     into "$buildDir/generated/splatViewerAssets/SplatViewer"
 }
 preBuild.dependsOn copySplatViewer
+
+// Photo-real (Brush) libraries: our own patched Brush build (tools/brush-android), too big for git, so they live on
+// the GitHub release "brush-android-libs-16k" and are fetched here when missing (rk 13 Nov 18:14: the developer's
+// agent sets this up itself). Checked by SHA-256. Skipped on CI (its public APK stays without photo-real) and with
+// -PnoBrush; offline, the build carries on without them (no "Make photo-real" in that APK).
+def BRUSH_URL = (project.findProperty('brushUrl') ?: 'https://github.com/reigokruus/roomscape/releases/download/brush-android-libs-16k/brush-android-libs-16k.zip')
+def BRUSH_SHA = ['libbrush_c.so': '8be16056a3e726e50f62a7875118758abbe08ca57e23df2a8ef4d2632303f73c',
+                 'libbrushjni.so': 'e9d4a6a71cfcb1b5e4799e04dbbb991f338b406bfea1b6e3de512822ccea2ad5']
+def sha256 = { File f ->
+    def md = java.security.MessageDigest.getInstance('SHA-256')
+    f.withInputStream { s -> byte[] b = new byte[1 << 16]; int n; while ((n = s.read(b)) > 0) md.update(b, 0, n) }
+    md.digest().encodeHex().toString()
+}
+def fetchBrushLibs = tasks.register('fetchBrushLibs') {
+    def dir = file('src/main/jniLibs/arm64-v8a')
+    onlyIf { System.getenv('CI') == null && !project.hasProperty('noBrush') }
+    doLast {
+        if (BRUSH_SHA.every { name, sum -> new File(dir, name).exists() }) {
+            BRUSH_SHA.each { name, sum ->
+                if (sha256(new File(dir, name)) != sum) logger.warn("Brush: ${name} differs from the release (a local Brush build?); kept as it is")
+            }
+            return
+        }
+        def zip = new File(buildDir, 'brush-android-libs-16k.zip')
+        try {
+            logger.lifecycle("Brush: fetching the photo-real libraries (about 47 MB) from ${BRUSH_URL}")
+            zip.parentFile.mkdirs()
+            new URL(BRUSH_URL).withInputStream { i -> zip.withOutputStream { o -> o << i } }
+            def tmp = new File(buildDir, 'brush-libs-unzipped')
+            project.delete(tmp)
+            project.copy { from zipTree(zip); into tmp }
+            BRUSH_SHA.each { name, sum ->
+                def f = new File(tmp, "jniLibs/arm64-v8a/${name}")
+                if (!f.exists() || sha256(f) != sum) throw new GradleException("Brush: ${name} missing or wrong checksum in the download")
+            }
+            dir.mkdirs()
+            project.copy { from new File(tmp, 'jniLibs/arm64-v8a'); into dir }
+            logger.lifecycle("Brush: photo-real libraries in place (${dir})")
+        } catch (Exception e) {
+            logger.warn("Brush: couldn't fetch the photo-real libraries (${e.message}); this APK will have no Make photo-real")
+        }
+    }
+}
+preBuild.dependsOn fetchBrushLibs
