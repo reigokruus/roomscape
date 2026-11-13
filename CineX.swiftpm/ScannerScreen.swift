@@ -990,21 +990,28 @@ private struct CaptureZone: View {
     }
 }
 
-/// Two small scanning tips just inside the capture zone's bottom edge (rk 13 Nov: "a simple icon representing those things with a small
-/// label each"): move slowly, look around objects. Semi-transparent, not tappable, gone after 12 s.
+/// One small scanning tip just inside the capture zone's bottom edge, rotating for the whole scan (rk 13 Nov: "they
+/// should rotate the whole scan time. starts with "move slowly" ... maybe 7sec ... rather small in the bottom of the
+/// screen"): move slowly, go closer (closer adds detail), look around. Each shows `seconds`, cross-fading to the next.
+/// Only this capsule redraws, once per tip (a 7 s timeline), never the scan view. Not tappable.
 private struct ScanTips: View {
     let started: Date
-    static let seconds: Double = 12
+    static let seconds: Double = 7
+    static let tips: [(icon: String, label: String)] = [
+        ("tortoise.fill", "Move slowly"),
+        ("plus.magnifyingglass", "Go closer"),
+        ("rotate.3d", "Look around"),
+    ]
 
     var body: some View {
-        TimelineView(.periodic(from: started, by: 1)) { context in
-            let shown = context.date.timeIntervalSince(started) < Self.seconds
-            HStack(spacing: 14) {
-                tip("tortoise.fill", "Move slowly")
-                tip("rotate.3d", "Look around objects")
+        TimelineView(.periodic(from: started, by: Self.seconds)) { context in
+            let n = max(0, Int(context.date.timeIntervalSince(started) / Self.seconds)) % Self.tips.count
+            ZStack {
+                tip(Self.tips[n].icon, Self.tips[n].label)
+                    .id(n)
+                    .transition(.opacity)
             }
-            .opacity(shown ? 1 : 0)
-            .animation(.easeOut(duration: 1.2), value: shown)
+            .animation(.easeInOut(duration: 0.5), value: n)
         }
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
