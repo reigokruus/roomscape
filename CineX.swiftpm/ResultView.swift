@@ -9,7 +9,7 @@ import CoreMotion
 /// the scanned colours (Photo). Below it, a summary of what RoomPlan found.
 struct ResultView: View {
     /// The same set as the Android app, in the same order: Photo · Splats · Points · Mesh (and Model, RoomPlan's own).
-    enum Style: Hashable { case photo, splats, points, mesh, model }
+    enum Style: Hashable { case photo, splats, points, mesh, model, photoReal }
 
     let scan: SavedScan
     /// Starts a second pass over this scan (Improve scan); only offered when the scan saved its world map.
@@ -73,6 +73,10 @@ struct ResultView: View {
     @State private var linkMade: URL?
     @State private var sendingNearby = false
     @State private var showingSplat = false
+    /// The Photo-real tab (rk 13 Nov 17:24, as on Android): the splat over the room view, from the room view's camera.
+    @State private var cameraLink = RoomCameraLink()
+    @State private var splatLink = SplatViewLink()
+    @State private var splatStart: RoomCameraLink.Pose?
     @State private var buildingSplats = false
     /// Lighting preview (handoff section 3): shown on the splats, with its panel in place of the summary.
     @State private var lightingOn = false
@@ -142,7 +146,8 @@ struct ResultView: View {
                                   standAt: walk.standingAt, walkFloorY: walkFloorY, walkMove: walkMove, walkStrafe: walkStrafe, gyroLook: walkGyro,
                                   eyeHeight: Float(min(eyeHeight, maxEyeHeight)),
                                   measuring: measuring && walk.standingAt != nil, measureClear: measureClear,
-                                  measureFile: scan.captureURL.appendingPathComponent("measurements.json"))
+                                  measureFile: scan.captureURL.appendingPathComponent("measurements.json"),
+                                  cameraLink: cameraLink)
                     // The room is drawn below the controls, never under them.
                     .padding(.top, walk == .off ? controlsHeight : 0)
                     .clipped()
@@ -152,6 +157,12 @@ struct ResultView: View {
                     RoomPausedForPreview()
                 } else {
                     ProgressView()
+                }
+                if style == .photoReal, scene != nil, SplatPreview.hasResult(current) {
+                    SplatViewerView(splat: SplatPreview.result(current), view: splatStart.map { ($0.cam, $0.look) },
+                                    fov: splatStart?.fov, link: splatLink)
+                        .id(current.name)
+                        .padding(.top, controlsHeight)
                 }
                 if lightingOn, let scene, let lighting { shotInset(scene, lighting) }
                 // Must fit a 375-pt-wide phone: compact controls in one row, or two rows if they still don't fit
@@ -262,7 +273,7 @@ struct ResultView: View {
                 Menu {
                     // The photo-real preview (SplatPreview): open it, or make it (queued after the scan's own jobs)
                     if SplatPreview.hasResult(current) {
-                        Button { showingSplat = true } label: { Label("Photo-real preview", systemImage: "cube.transparent") }
+                        Button { if splatGroup != nil { style = .photoReal } else { showingSplat = true } } label: { Label("Photo-real preview", systemImage: "cube.transparent") }
                     } else if recordingBytes != nil, !processing.splatQueued(current) {
                         Button { confirmingSplat = true } label: { Label("Make photo-real preview", systemImage: "cube.transparent") }
                     }
@@ -343,7 +354,18 @@ struct ResultView: View {
         .onChange(of: selectedObject) { _, id in
             objectsScene?.apply(objects, selected: id)
         }
-        .onChange(of: style) { _, newStyle in
+        .onChange(of: style) { oldStyle, newStyle in
+            if newStyle == .photoReal {
+                // The splat covers the room: lighting and objects close, the room keeps its look underneath
+                if lightingOn { toggleLighting() }
+                if objectsOn { toggleObjects() }
+                splatStart = cameraLink.pose()
+                return
+            }
+            if oldStyle == .photoReal {   // back at the splat view's camera
+                let link = cameraLink
+                splatLink.camera { pose in if let pose { link.set(cam: pose.cam, look: pose.look) } }
+            }
             // The preview lights the splats and objects move splats; RoomPlan's model has neither.
             if newStyle == .model, lightingOn { toggleLighting() }
             if newStyle == .model, objectsOn { toggleObjects() }
@@ -439,6 +461,7 @@ struct ResultView: View {
                 Text("Points").tag(Style.points)
                 Text("Mesh").tag(Style.mesh)
                 if room != nil { Text("Model").tag(Style.model) } // RoomPlan's model: iPhone scans only
+                if SplatPreview.hasResult(current) { Text("Photo-real").tag(Style.photoReal) }
             }
             .pickerStyle(.segmented)
             .fixedSize()
@@ -776,7 +799,7 @@ struct ResultView: View {
     /// Beside "Enter the room": open the photo-real room, or make it (asked first), or say it's being made.
     @ViewBuilder private var photoRealButton: some View {
         if SplatPreview.hasResult(current) {
-            Button { showingSplat = true } label: { Label("Photo-real", systemImage: "cube.transparent") }
+            Button { if splatGroup != nil { style = .photoReal } else { showingSplat = true } } label: { Label("Photo-real", systemImage: "cube.transparent") }
                 .buttonStyle(.borderedProminent)
         } else if processing.splatQueued(current) {
             Label("Making photo-real…", systemImage: "hourglass")
@@ -1297,7 +1320,7 @@ struct ResultView: View {
         objectsScene?.boxes.isHidden = !objectsOn
         if objectsOn {
             // The outlines show in every style but RoomPlan's own model (moving and removing moves the splats).
-            if style == .model { style = .points }
+            if style == .model || style == .photoReal { style = .points }
             if lightingOn { toggleLighting() }
         } else {
             selectedObject = nil
@@ -1453,7 +1476,7 @@ struct ResultView: View {
             return
         }
         // Lit: the photo room (rk 9 Nov), or the splats as points when the scan has no photo room.
-        if style == .model || style == .mesh { style = photoRoom != nil ? .photo : .points }
+        if style == .model || style == .mesh || style == .photoReal { style = photoRoom != nil ? .photo : .points }
         if objectsOn { toggleObjects() }
         if lighting == nil, let shell {
             // Start in the middle of the room with the longest wall behind the person as the background.
@@ -1542,6 +1565,8 @@ struct RoomSceneView: UIViewRepresentable {
     var measureClear = 0
     /// Where the scan's measurements are kept.
     var measureFile: URL? = nil
+    /// Lets the screen read and set the orbit camera (the Photo-real tab).
+    var cameraLink: RoomCameraLink? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -2098,6 +2123,7 @@ struct RoomSceneView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> SCNView {
+        cameraLink?.coordinator = context.coordinator
         let view = SCNView()
         view.scene = scene
         view.allowsCameraControl = false // our own orbit controls (see Coordinator.orbitBy)
@@ -2807,5 +2833,35 @@ private struct ConfirmPhotoReal: ViewModifier {
         let resume = FileManager.default.fileExists(atPath: SplatPreview.folder(scan).appendingPathComponent("checkpoint.json").path)
         return "It takes about \(low)-\(high) minutes on this phone\(resume ? " (it carries on from where it stopped)" : ""). "
             + "The phone gets warm, and RoomScape needs to stay open on screen until it's done. Starting a new scan pauses it."
+    }
+}
+
+/// The room view's orbit camera for the Photo-real tab: where it looks from (handed to the splat view) and setting it
+/// back when the tab is left. Only the orbit view: top view and standing in the room are left alone.
+final class RoomCameraLink {
+    struct Pose { var cam: [Float]; var look: [Float]; var fov: Float }
+    weak var coordinator: RoomSceneView.Coordinator?
+
+    func pose() -> Pose? {
+        guard let c = coordinator, let pov = c.view?.pointOfView else { return nil }
+        let p = pov.simdWorldPosition
+        let fov = Float(pov.camera?.fieldOfView ?? 60)
+        if pov === c.orbitCamera, c.standing == nil {
+            let t = c.orbitTarget
+            return Pose(cam: [p.x, p.y, p.z], look: [t.x, t.y, t.z], fov: fov)
+        }
+        let f = pov.simdWorldFront   // top view or standing: two metres ahead
+        let t = p + 2 * f
+        return Pose(cam: [p.x, p.y, p.z], look: [t.x, t.y, t.z], fov: fov)
+    }
+
+    func set(cam: [Float], look: [Float]) {
+        guard let c = coordinator, cam.count == 3, look.count == 3, c.standing == nil,
+              c.view?.pointOfView === c.orbitCamera else { return }
+        let e = SIMD3<Float>(cam[0], cam[1], cam[2]), t = SIMD3<Float>(look[0], look[1], look[2])
+        guard simd_length(e - t) > 0.05, simd_length(e - t) < 200 else { return }
+        c.orbitTarget = t
+        c.orbitCamera.simdWorldPosition = e
+        c.orbitCamera.simdLook(at: t, up: SIMD3(0, 1, 0), localFront: SIMD3(0, 0, -1))
     }
 }
