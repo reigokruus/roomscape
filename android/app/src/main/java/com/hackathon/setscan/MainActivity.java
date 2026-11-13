@@ -1203,6 +1203,7 @@ public class MainActivity extends Activity {
         }
         if (toolBars != null) toolBars.setVisibility(debug && walkState == 0 ? View.VISIBLE : View.GONE);
         if (hud != null) hud.setVisibility(scanning ? View.VISIBLE : View.GONE);
+        showScanTip(scanning);
         if (procBox != null && scanning) procBox.setVisibility(View.GONE);
         // Viewer, laid out like the iPhone: Back / title / ✦ / Share on top, Photo | Splats | Points under it,
         // Continue scan under the 3D view; Rename, Undo, Remove person, Interview, Ask Claude and New scan in ✦.
@@ -1808,6 +1809,21 @@ public class MainActivity extends Activity {
         hp.topMargin = dp(40); hp.leftMargin = dp(12); hp.rightMargin = dp(12);
         chrome.addView(hud, hp);
 
+        // One small tip capsule just inside the capture zone's bottom edge, rotating for the whole scan (rk 13 Nov, as
+        // on the iPhone): 7 s each with a soft fade, looping. Android has no LiDAR, so "Look around" comes first and
+        // every second tip (rk 13 Nov 11:26).
+        scanTip = new TextView(this);
+        scanTip.setTextColor(0xE6FFFFFF); scanTip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        scanTip.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        android.graphics.drawable.GradientDrawable tb = new android.graphics.drawable.GradientDrawable();
+        tb.setColor(0x73000000); tb.setCornerRadius(dp(14));
+        scanTip.setBackground(tb);
+        scanTip.setPadding(dp(10), dp(5), dp(10), dp(5));
+        scanTip.setVisibility(View.GONE);
+        chrome.addView(scanTip, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+        chrome.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeScanTip());
+        scanTip.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeScanTip());
+
         // Cancel and Done at the bottom while scanning, as on the iPhone: same size and place, above the navigation bar.
         scanRow = new LinearLayout(this);
         scanRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1860,6 +1876,38 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout scanRow;
+    private TextView scanTip;
+    private int scanTipIndex = -1;
+    static final long SCAN_TIP_MS = 7000;
+    static final String[] SCAN_TIPS = {"🔄  Look around", "🐢  Move slowly", "🔄  Look around", "🔍  Go closer"};
+    private final Runnable scanTipTick = new Runnable() {
+        @Override public void run() {
+            if (scanTip == null || scanTip.getVisibility() != View.VISIBLE) return;
+            scanTipIndex = (scanTipIndex + 1) % SCAN_TIPS.length;
+            final String next = SCAN_TIPS[scanTipIndex];
+            if (scanTipIndex == 0 && scanTip.getAlpha() < 0.01f) { scanTip.setText(next); scanTip.animate().alpha(1f).setDuration(500).start(); }
+            else scanTip.animate().alpha(0f).setDuration(250).withEndAction(() -> { scanTip.setText(next); scanTip.animate().alpha(1f).setDuration(250).start(); }).start();
+            scanTip.postDelayed(this, SCAN_TIP_MS);
+        }
+    };
+    /** The tip's centre sits 22 dp above the capture zone's bottom edge (ScanRenderer.ZONE_H of the screen's height). */
+    private void placeScanTip() {
+        if (scanTip == null || !(scanTip.getParent() instanceof View)) return;
+        int h = ((View) scanTip.getParent()).getHeight();
+        if (h <= 0) return;
+        float y = h * (1 + ScanRenderer.ZONE_H) / 2f - dp(22) - scanTip.getHeight() / 2f;
+        if (Math.abs(scanTip.getTranslationY() - y) > 0.5f) scanTip.setTranslationY(y);
+    }
+    /** Shown while scanning: starts from the first tip each scan. */
+    private void showScanTip(boolean on) {
+        if (scanTip == null) return;
+        boolean was = scanTip.getVisibility() == View.VISIBLE;
+        if (on == was) return;
+        scanTip.removeCallbacks(scanTipTick);
+        scanTip.animate().cancel();
+        if (on) { scanTipIndex = -1; scanTip.setAlpha(0f); scanTip.setVisibility(View.VISIBLE); scanTipTick.run(); }
+        else scanTip.setVisibility(View.GONE);
+    }
     /** Hint colours by level: white, white, red for warnings (the same on the iPhone). */
     private static final int[] HINT_COLORS = {Color.WHITE, Color.WHITE, 0xFFFF6B5B, 0xFFFFB020};   // 3 = amber: lost track (rk 10 Nov 16:45)
 
@@ -2257,6 +2305,7 @@ public class MainActivity extends Activity {
     private void hideHome() {
         home.setVisibility(View.GONE);
         scanChrome.setVisibility(View.VISIBLE);
+        if (scanning) { showScanTip(false); showScanTip(true); }   // each scan starts from the first tip
     }
 
     private void refreshHome() {

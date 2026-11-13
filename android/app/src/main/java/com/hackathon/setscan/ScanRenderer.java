@@ -133,6 +133,22 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
      *  farther or equal one (rk 10 Nov), so repeated looks settle instead of churning. Sideways only the reading's own
      *  cell: a depth pixel covers under 1 cm at 1 m (160x90 depth, ~120 px focal length). */
     static volatile boolean CLOSEST_WINS = true;
+    /** The capture zone (rk 13 Nov, as on the iPhone, DotCleanup.swift): only depth seen inside the centred
+     *  ZONE_W x ZONE_H share of the screen makes, updates and erases dots; the edges of the picture are ignored. The
+     *  surface fusion, the rebuild frames, the recording and the photos still use the whole frame. Outlined on screen. */
+    static final float ZONE_W = 0.72f, ZONE_H = 0.70f;
+    /** Clip-space mapping from the depth camera's own coordinates to the screen (projection x display view x sensor
+     *  pose), set per depth frame (integrate) so the depth thread can tell whether a pixel / dot is on the zone. */
+    private static boolean inZoneClip(float[] z, float xc, float yc, float zc) {
+        float w = z[3] * xc + z[7] * yc + z[11] * zc + z[15];
+        if (w <= 1e-4f) return false;
+        float x = (z[0] * xc + z[4] * yc + z[8] * zc + z[12]) / w, y = (z[1] * xc + z[5] * yc + z[9] * zc + z[13]) / w;
+        return Math.abs(x) <= ZONE_W && Math.abs(y) <= ZONE_H;
+    }
+    /** Amber stripes where nothing is scanned yet inside the zone (rk 13 Nov: a hole behind an object read as a shadow;
+     *  the iPhone's #EDB14D at 40%, 4 dp bands); drawn under the dots, so the dots cover them as the surface fills in. */
+    static final float STRIPE_ALPHA = 0.40f, STRIPE_DP = 4f, ZONE_RADIUS_DP = 22f;
+    private int stripeProg;
     // ---- Phone load (rk 23:34: "free up the cpu", "a cpu reading so I know to slow down") ----
     /** ARCore's depth is late: none for over 300 ms while tracking. Our extra passes wait. */
     boolean depthLate() { return lastNewDepthMs > 0 && System.currentTimeMillis() - lastNewDepthMs > 300; }
@@ -155,7 +171,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     String loadNumbers() { long age = lastNewDepthMs > 0 ? System.currentTimeMillis() - lastNewDepthMs : -1;
         return String.format(java.util.Locale.US, "cpu %.1f cores, depth %d ms old, heat %d", cpuCores, age, thermal); }
     /** Debug tools "Automatic eraser": dots the camera's sure depth sees clearly past in 2 separate frames are removed. */
-    static final boolean AUTO_ERASE = false;   // removed 12 Nov: the slower see-through rule stays
+    static final boolean AUTO_ERASE = true;    // 13 Nov: back with the iPhone's rule inside the capture zone (rk: a dot in mid-air the sensor later sees through is removed); 12 Nov it was off
     // ---- Rebuild frames: picture + pose + intrinsics + raw depth with confidence, twice a second (rk 12 Nov) ----
     static volatile boolean SAVE_REBUILD = true;
     private long rebuildAt; private int rebuildN; private File rebuildTmp;
@@ -279,6 +295,11 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             else if (c == 0) { r = g = b = 0; }   // no rating: solid black
             else { r = g = b = c; }
             if (SHOW_MERGED && mergedDot[i] != 0) { r = 40; g = 120; b = 255; }   // debug: merged flat cells in blue
+            // live: the alpha byte tells the dot shader the dot's cell (128+ = 0.8 cm) and how solid it is (1..127)
+            if (alpha != 0 && !viewing) {
+                boolean fineCell = FINE_NEAR && nearCm[i] > 0 && nearCm[i] < FINE_NEAR_M * 100;
+                alpha = 1 + (fineCell ? 128 : 0) + Math.min(126, a * 126 / 255);
+            }
             greyBuf.put(i * 4, (byte) r); greyBuf.put(i * 4 + 1, (byte) g); greyBuf.put(i * 4 + 2, (byte) b); greyBuf.put(i * 4 + 3, (byte) alpha);
         }
     }
@@ -308,6 +329,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     private int frameNo, updateErrors;
     // diagnostics shown on screen
     private int depthFrames, depthPixels, depthRejectedRange, depthRejectedConf, depthRejectedEdge, depthNotYet;
+    private long zoneOutPx;   // sure depth pixels outside the capture zone (no dots from them; the surface still uses them)
     private String lastError = "", depthSize = "";
 
     private final float[] proj = new float[16], view = new float[16], mvp = new float[16];
@@ -2651,6 +2673,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             log("finish: " + count + " points, " + diagnostics() + ", " + carvedTotal + " cleared by see-through"
                     + (depthAllPx > 0 ? String.format(java.util.Locale.US, "; depth pixels sure enough (confidence %d+): %.0f%%", PAINT_MIN, 100.0 * depthKeptPx / depthAllPx) : "")
                     + (CLOSEST_WINS ? "; dots replaced by a closer sure look: " + supersededTotal : "")
+                    + String.format(java.util.Locale.US, "; capture zone %.0f%% x %.0f%%: %d depth pixels outside it made no dots", ZONE_W * 100, ZONE_H * 100, zoneOutPx)
                     + (MERGE_FLAT ? "; fine dots merged into flat cells: " + mergedAway : "")
                     + (zoneAll[0] > 0 ? String.format(java.util.Locale.US, "; sure depth by picture area: centre %.0f%%, middle %.0f%%, edge %.0f%%",
                         100.0 * zoneSure[0] / zoneAll[0], 100.0 * zoneSure[1] / Math.max(1, zoneAll[1]), 100.0 * zoneSure[2] / Math.max(1, zoneAll[2])) : ""));
@@ -4009,7 +4032,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         luxSamples.clear(); loadedLux = 0; lastDepth = null; photoWanted = false; photoWantedSince = 0; Lighting.ROOM_LUX = 250f;
         refined = false; refineCursor = 0; refinedTotal = 0; droppedNoise = 0;
         drainFuse();
-        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); livePreview.reset(); liveGroupTex.clear(); liveGroupPos.clear(); liveGroupUv.clear(); liveGroupVerts.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
+        tsdf.clear(); detail.clear(); zones.clear(); meshPosAll = null; meshColAll = null; meshVerts = 0; photos.clear(); livePreview.reset(); liveGroupTex.clear(); liveGroupPos.clear(); liveGroupUv.clear(); liveGroupVerts.clear(); meshTris = 0; havePrevPose = false; recs.clear(); poseLog.clear(); hideN = 0; labels.clear(); claudeObjs.clear(); synchronized (marks) { cornerList.clear(); wallList.clear(); markFloor = null; markCeiling = null; markOrder.clear(); } claudeLine = null; claudeAdvice = null; claudeLastKf = null; guideTarget = null; guideText = null; poseJumps = 0; solidCount = 0; detailHere = -1; moveSpeed = 0; carvedTotal = 0; carveCursor = 0; zoneOutPx = 0; autoStage = 0; lastAutosaveMs = System.currentTimeMillis(); lastAutosaveCount = 0; activity.updateProcess(null, -1); viewSides.clear(); hintBox = null; hintText = null; sensors.clear(); liveRoom = null; liveLastMs = 0; rescanAt = null; pendingTap = null;
         viewing = false;
         plan = null; sceneIdx = 0;
     }
@@ -4676,6 +4699,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "void main(){ gl_FragColor = texture2D(uTex, vUv); }");
         ptProg = program(
                 "uniform mat4 uMvp; uniform float uSize; attribute vec4 aPos; attribute vec4 aColor; varying vec4 vColor;" +
+                "uniform mediump float uLive; uniform mediump float uPass; uniform float uCell; uniform float uCellFine; uniform float uPxM; uniform float uCapPx;" +
                 // Dollhouse cutaway: hide the wall band facing the viewer and the ceiling.
                 "uniform float uCut; uniform vec3 uCenter; uniform vec2 uDir; uniform float uCutD; uniform vec2 uDir2; uniform float uCutD2; uniform float uFloor; uniform float uCeil;" +
                 HIDE_DECL + FlatTiles.MASK_DECL +
@@ -4685,11 +4709,21 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 "    if (((dot(r, uDir) > uCutD || dot(r, uDir2) > uCutD2) && aPos.y > uFloor + 0.15) || aPos.y > uCeil) {" +
                 "      gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vColor = aColor; return; } }" +
                 // splats shrink in world size when you get close (w < 1.5 m), so near surfaces stay detailed instead of blobby
-                "  gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05);" +
-                "  gl_PointSize = clamp(uSize / w * clamp(w / 1.5, 0.3, 1.0), 1.5, 48.0); vColor = aColor; }",
+                "  gl_Position = uMvp * aPos; float w = max(gl_Position.w, 0.05); vColor = aColor;" +
+                // Live scan (uLive, rk 13 Nov, as the iPhone's 996ffc2): each dot sized by its own cell at any distance, no
+                // shrink up close. The alpha byte carries the cell (128+ = a 0.8 cm cell) and how solid the spot is: the
+                // opaque core is 0.5 cells across for a spot seen once (the small soft dot) up to 1.3 for one seen solid,
+                // so neighbours overlap and nothing behind shows through; the soft halo 2 cells. Only a cap for the GPU.
+                "  if (uLive > 0.5) { float a = floor(aColor.a * 255.0 + 0.5); float fine = step(128.0, a);" +
+                "    float solid = clamp((a - 1.0 - fine * 128.0) / 126.0, 0.0, 1.0);" +
+                "    float cellPx = mix(uCell, uCellFine, fine) * uPxM / w;" +
+                "    gl_PointSize = (uPass > 0.5 && uPass < 1.5) ? min(cellPx * 2.0, uCapPx * 1.54) : min(cellPx * mix(0.5, 1.3, solid), uCapPx);" +
+                "    gl_PointSize = max(gl_PointSize, 1.5); vColor.a = 1.0; return; }" +
+                "  gl_PointSize = clamp(uSize / w * clamp(w / 1.5, 0.3, 1.0), 1.5, 48.0); }",
                 // uPass: 0 = splat core (opaque, writes depth), 1 = splat halo (soft gaussian, blended), 2 = plain
-                "precision mediump float; varying vec4 vColor; uniform float uPass;" +
+                "precision mediump float; varying vec4 vColor; uniform float uPass; uniform float uLive;" +
                 "void main(){" +
+                "  if (uLive > 0.5 && uPass < 0.5) { vec2 q = gl_PointCoord * 2.0 - 1.0; if (dot(q, q) > 1.0) discard; gl_FragColor = vec4(vColor.rgb, 1.0); return; }" +
                 "  if (uPass > 2.5) { vec2 q = gl_PointCoord * 2.0 - 1.0; if (dot(q, q) > 1.0) discard;" +
                 "    gl_FragColor = vec4(0.0); return; }" +
                 "  if (uPass > 1.5) { gl_FragColor = vColor; return; }" +
@@ -4936,6 +4970,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             } else {
                 drawBackground();
                 if (!viewing && CAMERA_OPACITY < 0.99f) dimCamera();   // the camera faint, so the dots stand out (rk 22:40)
+                if (!viewing) drawZone(0);   // amber stripes in the zone, under the dots (rk 13 Nov)
             }
         }
 
@@ -5168,7 +5203,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                 if (trackingNow) maybeLiveMesh(camera, nowMs);   // still built: the live doorway search uses it
                 if (LIVE_POINTS) {
                     drawFilledWall(mvp); if (trackingNow) maybeFillWall(nowMs);
-                    consumeLiveMesh(); drawPoints(mvp, 0.6f);   // smaller: close up they were big soft blobs
+                    consumeLiveMesh(); drawPoints(mvp, 0.6f, true);   // sized by their cell (rk 13 Nov), see ptProg
                     if (FLAT_TILES) { maybeTiles(frame, camera, nowMs); flatTiles.draw(mvp); }
                 }   // rk 10 Nov 15:20: "only points, no triangles no photo"
                 else drawLiveMesh(mvp);
@@ -5193,6 +5228,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             if (SHOW_OBJECTS) drawObjectHint(mvp);
             if (trackingNow) maybeAskClaudeLive(nowMs);
         }
+        if (!viewing && frame.getTimestamp() != 0 && overviewBlend <= 0.001f) drawZone(1);   // the capture zone's outline, over the dots
         logState(ts, nowMs);
         if (!viewing && everTracked) trackPose(camera, ts);
         if (frameNo % 15 == 0) {
@@ -5600,6 +5636,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             job.dw = dw; job.dh = dh; job.fx = fx; job.fy = fy; job.cx = cx; job.cy = cy;
             job.ifx = ifx; job.ify = ify; job.icx = icx; job.icy = icy; job.m = m.clone(); job.gpuOn = gpuOnNow;
             job.k = depthK; job.c = depthC; job.gain = colorGain;
+            job.zm = zoneMatrix(camera);
             job.d = new short[dw * dh];
             for (int v = 0; v < dh; v++) for (int u = 0; u < dw; u++) job.d[v * dw + u] = dbuf.get(v * dRow + u * dPix);
             if (cbuf != null) {
@@ -5620,9 +5657,25 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
 
+    /** Depth camera coordinates (the sensor's own camera: x right, y up, looking down -z) to the screen's clip space:
+     *  projection x the display-oriented view x the sensor camera's pose, all in ARCore's own (uncorrected) frame, so
+     *  a re-alignment fix doesn't matter. Null if anything is missing (then no zone: the whole frame, as before). */
+    private float[] zoneMatrix(Camera camera) {
+        try {
+            float[] pr = new float[16], vw = new float[16], ps = new float[16], t = new float[16], out = new float[16];
+            camera.getProjectionMatrix(pr, 0, 0.05f, 100f);
+            camera.getDisplayOrientedPose().inverse().toMatrix(vw, 0);
+            camera.getPose().toMatrix(ps, 0);
+            Matrix.multiplyMM(t, 0, vw, 0, ps, 0);
+            Matrix.multiplyMM(out, 0, pr, 0, t, 0);
+            return out;
+        } catch (Throwable e) { return null; }
+    }
+
     /** One depth frame, copied off ARCore's images, for the depth thread. */
     static final class DepthJob {
         int dw, dh; float fx, fy, cx, cy, ifx, ify, icx, icy, k, c, gain; float[] m; boolean gpuOn;
+        float[] zm;   // depth camera coordinates to clip space, for the capture zone (null = no zone)
         short[] d; byte[] cf; float[] gd; int[] grgb;
         byte[] iy, iu, iv; int iw, ih, yRow, yPix, uRow, uPix, vRow, vPix;
         void copyImage(Image img) {
@@ -5691,7 +5744,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         if (count >= MAX_POINTS || memoryFull) return;
         stampFrame++;
         final int dw = j.dw, dh = j.dh; final float fx = j.fx, fy = j.fy, cx = j.cx, cy = j.cy, ifx = j.ifx, ify = j.ify, icx = j.icx, icy = j.icy;
-        final float[] m = j.m;
+        final float[] m = j.m, zm = j.zm;
         ShortBuffer dbuf = ShortBuffer.wrap(j.d); final int dRow = dw, dPix = 1;
         ByteBuffer cbuf = j.cf != null ? ByteBuffer.wrap(j.cf) : null; final int cRow = dw, cPix = 1;
         int[] rgb = new int[3];
@@ -5786,6 +5839,8 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
                     fuseN++;
                     }
                     if (weak) continue;
+                    // Dots only from the capture zone (rk 13 Nov); the surface sample above still used the pixel.
+                    if (zm != null && !inZoneClip(zm, xc, yc, zc)) { zoneOutPx++; continue; }
                     if (hit < 0 || seenStamp[hit] != stampFrame) frameHits++;
                     curConf = cv; curMm = mm;
                     if (CLOSEST_WINS && painted(cv) && supersede(wx, wy, wz, m[12], m[13], m[14], mm, rgb, fineDot)) { curConf = 0; curMm = 0; continue; }
@@ -5802,7 +5857,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             // Behind (frames waiting): skip this frame's see-through check (it works round-robin, later frames catch up),
             // never the frame's points or surface.
             if (depthQueued.get() <= 2) {
-                carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m);
+                carve(dbuf, dRow, dPix, cbuf, cRow, cPix, dw, dh, fx, fy, cx, cy, m, zm, depthQueued.get() <= 1 ? 40000 : 20000);
                 perf.note("ms: carve", (System.nanoTime() - cvT0) / 1e6);
             } else perf.note("carve skipped (depth thread behind)", 1);
             if (depthPixelsFrame > 300) { float fs = (float) farPixelsFrame / depthPixelsFrame; farShare = farShare < 0 ? fs : farShare * 0.7f + fs * 0.3f; }
@@ -5943,15 +5998,15 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     }
 
     private void carve(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int dw, int dh,
-                       float fx, float fy, float cx, float cy, float[] m) {
+                       float fx, float fy, float cx, float cy, float[] m, float[] zm, int budgetMax) {
         int n = count;
         if (n == 0) return;
         float[] v = new float[16];
         Matrix.invertM(v, 0, m, 0);
-        // 60k points per depth frame, round robin (the whole cloud every few frames): 250k with the 3x3 footprint
-        // check took ~50 ms of the drawing thread (rk 10 Nov 10:31 scan: 19 fps).
+        // Round robin over the cloud (the whole cloud every few frames): 250k with the 3x3 footprint check took ~50 ms
+        // (rk 10 Nov 10:31 scan: 19 fps), 60k ~10 ms (23:29 scan); 40k while the depth thread keeps up, else 20k.
         if (depthLate()) return;   // ARCore first: no extra pass while its frames come late
-        int budget = Math.min(n, 20000), removed = 0;   // (was 60k: ~10 ms a frame on the 23:29 scan)
+        int budget = Math.min(n, budgetMax), removed = 0;
         for (int it = 0; it < budget; it++) {
             int i = carveCursor++;
             if (carveCursor >= n) carveCursor = 0;
@@ -5961,38 +6016,50 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
             float dp = -zc;
             if (dp < 0.25f || dp > 3.5f) continue;
             float xc = v[0] * x + v[4] * y + v[8] * z + v[12], yc = v[1] * x + v[5] * y + v[9] * z + v[13];
+            // only inside the capture zone (rk 13 Nov): the edges of the depth picture neither make nor erase dots
+            if (zm != null && !inZoneClip(zm, xc, yc, zc)) continue;
             int u = (int) (fx * xc / dp + cx), vv = (int) (cy - fy * yc / dp);
             // The whole spot must be seen through, not just its own pixel: close up a 2 cm point covers several pixels,
             // and a bar's point just beside its pixel saw the wall and was erased (rk 10 Nov: bars vanished up close).
             int rp = Math.max(1, Math.min(6, Math.round(0.6f * VOXEL * fx / dp)));
-            if (u < rp || vv < rp || u >= dw - rp || vv >= dh - rp) continue;
-            float lim = (dp + Math.max(0.10f, 0.08f * dp)) * depthK + depthC;   // in the raw depth's units
-            boolean through = true;
-            for (int ny = -1; ny <= 1 && through; ny++) for (int nx = -1; nx <= 1; nx++)
-                if (!beyond(dbuf, dRow, dPix, cbuf, cRow, cPix, u + nx * rp, vv + ny * rp, lim)) { through = false; break; }
-            if (!through) continue;
+            if (u < rp + 1 || vv < rp + 1 || u >= dw - rp - 1 || vv >= dh - rp - 1) continue;
+            // clearly farther than the dot: max(8 cm, 5%) as on the iPhone (DotCleanup.margin), in the raw depth's units
+            float lim = (dp + Math.max(0.08f, 0.05f * dp)) * depthK + depthC;
+            int verdict = 1;   // 1 seen through, 0 the dot is seen (or something in front of it), -1 can't tell
+            for (int ny = -1; ny <= 1 && verdict == 1; ny++) for (int nx = -1; nx <= 1; nx++) {
+                int r = beyondOrNot(dbuf, dRow, dPix, cbuf, cRow, cPix, u + nx * rp, vv + ny * rp, lim);
+                if (r != 1) { verdict = r; break; }
+            }
+            if (verdict == 0) { thru[i] = 0; continue; }   // seen solid where it is: the count starts again
+            if (verdict < 0) continue;
+            // no depth edge at the spot's own pixel (flying pixels at silhouettes aren't evidence)
+            int c0 = dbuf.get(vv * dRow + u * dPix) & 0xFFFF, tol = c0 / 25 + 20;
+            if (Math.abs((dbuf.get(vv * dRow + (u - 1) * dPix) & 0xFFFF) - c0) > tol || Math.abs((dbuf.get(vv * dRow + (u + 1) * dPix) & 0xFFFF) - c0) > tol
+                    || Math.abs((dbuf.get((vv - 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol || Math.abs((dbuf.get((vv + 1) * dRow + u * dPix) & 0xFFFF) - c0) > tol) continue;
             int t = Math.min(255, (thru[i] & 0xFF) + 1);
             thru[i] = (byte) t;
-            int seen = Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f));
-            // Automatic eraser (rk 23:16): with only sure (95%+) depth in play, two separate frames seeing clearly past
-            // the whole spot are enough (was 4, and up to 10 for a solid dot); the 3x3 footprint check above still keeps
-            // thin bars and chair legs seen against the wall.
-            boolean gone = AUTO_ERASE ? t >= 2 : t >= 4 && t >= (seen >= SOLID_SEEN ? 10 : seen);
-            if (gone) { // solid surfaces need more evidence to be erased
+            // See-through erase (rk 13 Nov, the iPhone's rule): with only sure (95%+) depth in play, a dot the camera
+            // sees clearly past over its whole spot in 2 frames goes (3 when it was seen solid); the 3x3 footprint check
+            // above still keeps thin bars and chair legs seen against the wall.
+            boolean solid = (col.get(i * 4 + 3) & 0xFF) == 255;
+            boolean gone = AUTO_ERASE ? t >= (solid ? 3 : 2) : t >= 4 && t >= (solid ? 10 : Math.max(1, Math.round((col.get(i * 4 + 3) & 0xFF) * SOLID_SEEN / 255f)));
+            if (gone) {
                 obs[i] = 0; thru[i] = 0;
-                col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done
+                col.put(i * 4 + 3, (byte) 0); // alpha 0 = cleared: hidden, skipped by saves, purged at Done; a new reading in its cell brings it back
                 removed++;
             }
         }
         if (removed > 0) { refined = true; carvedTotal += removed; }
     }
 
-    private static boolean beyond(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int u, int v, float lim) {
+    /** One depth pixel against a dot's limit: 1 clearly beyond it, 0 at or in front of it, -1 no sure reading there. */
+    private static int beyondOrNot(ShortBuffer dbuf, int dRow, int dPix, ByteBuffer cbuf, int cRow, int cPix, int u, int v, float lim) {
         int mm = dbuf.get(v * dRow + u * dPix) & 0xFFFF;
-        if (mm < 200 || mm > 4000) return false;
-        if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) return false;
-        return mm * 0.001f > lim;
+        if (mm < 200 || mm > 4000) return -1;
+        if (cbuf != null && (cbuf.get(v * cRow + u * cPix) & 0xFF) < 55) return -1;
+        return mm * 0.001f > lim ? 1 : 0;
     }
+
     // ---- Photos: the S24 gives depth only while moving, but sharp photos only while still. ----
     // So photos are taken on any 30 fps camera frame (not only the ~1.6 Hz depth frames) once the motion blur,
     // worked out from the gyro-fused pose rate and the camera's real exposure time, is under BLUR_PX.
@@ -7654,6 +7721,42 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
     static final float[] GREY_BG_LIGHT = {0.22f, 0.34f, 0.52f}, GREY_BG_DARK = {0.15f, 0.25f, 0.40f};
     private void clearBg() { if (greyNow()) GLES20.glClearColor(0.15f, 0.25f, 0.40f, 1f); else GLES20.glClearColor(0.08f, 0.08f, 0.1f, 1f); }
 
+    /** The capture zone on screen (rk 13 Nov, as the iPhone's CaptureZone and LiveDiscs.encodeStripes): mode 0 = fine
+     *  amber diagonal stripes inside the zone's rounded rectangle (drawn before the dots, so they show only where nothing
+     *  is scanned yet); mode 1 = the outside very slightly darker and a thin light outline (drawn over the dots). */
+    private void drawZone(int mode) {
+        if (stripeProg == 0) stripeProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
+                "precision highp float; uniform vec4 uRect; uniform float uR; uniform float uBand; uniform vec4 uTint; uniform float uMode; uniform float uLine;"
+                + "void main(){ vec2 p = gl_FragCoord.xy; vec2 c = (uRect.xy + uRect.zw) * 0.5; vec2 hs = (uRect.zw - uRect.xy) * 0.5 - uR;"
+                + " vec2 q = abs(p - c) - hs; float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - uR;"
+                + " if (uMode < 0.5) { if (d > 0.0) discard;"
+                + "   if (mod(floor((p.x + p.y) / (uBand * 1.41421)), 2.0) > 0.5) discard; gl_FragColor = uTint; return; }"
+                + " if (abs(d) <= uLine * 0.5) { gl_FragColor = vec4(1.0, 1.0, 1.0, 0.45); return; }"
+                + " if (d > 0.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.18); return; } discard; }");
+        float dens = activity.getResources().getDisplayMetrics().density, w = width, h = height;
+        boolean depthWasOn = GLES20.glIsEnabled(GLES20.GL_DEPTH_TEST);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDepthMask(false);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUseProgram(stripeProg);
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(stripeProg, "uRect"), w * (1 - ZONE_W) / 2, h * (1 - ZONE_H) / 2, w * (1 + ZONE_W) / 2, h * (1 + ZONE_H) / 2);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(stripeProg, "uR"), ZONE_RADIUS_DP * dens);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(stripeProg, "uBand"), STRIPE_DP * dens);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(stripeProg, "uLine"), Math.max(1f, dens));
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(stripeProg, "uTint"), 0xED / 255f, 0xB1 / 255f, 0x4D / 255f, STRIPE_ALPHA);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(stripeProg, "uMode"), mode);
+        int aPos = GLES20.glGetAttribLocation(stripeProg, "aPos");
+        quad.position(0);
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDepthMask(true);
+        if (depthWasOn) GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+    }
+
     private void drawZebra(float a) {
         if (zebraProg == 0) zebraProg = program("attribute vec4 aPos; void main(){ gl_Position = aPos; }",
                 "precision highp float; uniform float uW; uniform float uA; uniform vec3 uL; uniform vec3 uD;"
@@ -8150,9 +8253,18 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisableVertexAttribArray(lp);
     }
 
-    private void drawPoints(float[] m, float sizeScale) {
+    private void drawPoints(float[] m, float sizeScale) { drawPoints(m, sizeScale, false); }
+
+    private void drawPoints(float[] m, float sizeScale, boolean live) {
         if (count == 0) return;
         GLES20.glUseProgram(ptProg);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uLive"), live && splats ? 1f : 0f);
+        if (live) {   // cell sizes, the camera's own focal length in pixels, and a cap of 160 px on a 2556 px tall screen
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCell"), VOXEL);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCellFine"), VOXEL_FINE);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uPxM"), proj[5] * height / 2f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uCapPx"), 160f * height / 2556f);
+        }
         flatTiles.bindMask(ptProg, FLAT_TILES);   // points on and just behind painted tiles aren't drawn (rk 10 Nov 16:22)
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(ptProg, "uMvp"), 1, false, m, 0);
         float pxPerMeter = height / (2f * (float) Math.tan(Math.toRadians(30)));
@@ -8186,6 +8298,7 @@ public class ScanRenderer implements GLSurfaceView.Renderer {
         drawPointArrays();
         GLES20.glDepthMask(true);
         GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(ptProg, "uLive"), 0f);   // other users of ptProg (path, paint) draw as before
     }
 
     /** Live scan: tint everything captured so far, so the user sees which areas are done. */
