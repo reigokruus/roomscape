@@ -190,10 +190,73 @@ index 2cac2366..1dc668eb 100644
  }
  
 diff --git a/crates/brush-process/src/train_stream.rs b/crates/brush-process/src/train_stream.rs
-index abf9c0a4..e3e2e29e 100644
+index abf9c0a4..005cab09 100644
 --- a/crates/brush-process/src/train_stream.rs
 +++ b/crates/brush-process/src/train_stream.rs
-@@ -331,6 +331,7 @@ pub(crate) async fn train_stream(
+@@ -52,6 +52,7 @@ pub(crate) async fn train_stream(
+     let mut rng = rand::rngs::StdRng::seed_from_u64(process_config.seed);
+ 
+     log::info!("Loading dataset");
++    let m = brush_train::memmarks::mark("loading-marks", 0, "load_dataset (read, decode index)");
+     let load_result = load_dataset(vfs.clone(), &train_stream_config.load_config)
+         .instrument(trace_span!("Load dataset"))
+         .await?;
+@@ -65,6 +66,8 @@ pub(crate) async fn train_stream(
+             .await;
+     }
+ 
++    m.end();
++    let m = brush_train::memmarks::mark("loading-marks", 0, "init splats and bounds");
+     let dataset = load_result.dataset;
+ 
+     log::info!("Log scene to rerun");
+@@ -156,7 +159,9 @@ pub(crate) async fn train_stream(
+         })
+         .await;
+ 
++    m.end();
+     emitter.emit(ProcessMessage::DoneLoading).await;
++    let m = brush_train::memmarks::mark("loading-marks", 0, "SceneLoader + trainer setup");
+ 
+     // Start with memory cleared out.
+     device.memory_cleanup();
+@@ -187,6 +192,7 @@ pub(crate) async fn train_stream(
+     trainer.set_view_cams(view_cams.clone());
+ 
+     // Get the dataset name from the base path (if available) for interpolation.
++    m.end();
+     let dataset_name = vfs
+         .base_path()
+         .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+@@ -207,6 +213,8 @@ pub(crate) async fn train_stream(
+     let export_path = base_path.join(&export_path_str);
+     // Normalize path components
+     let export_path: PathBuf = export_path.components().collect();
++    // RoomScape change (13 Nov 2026): where the iOS memory marks go (loading-marks / refine-marks .jsonl)
++    brush_train::memmarks::set_dir(&export_path);
+     let sh_degree = init_splats.sh_degree();
+ 
+     let training_steps = train_stream_config.train_config.total_train_iters;
+@@ -301,6 +309,7 @@ pub(crate) async fn train_stream(
+ 
+         let step_time = Instant::now();
+ 
++        let mb = (iter < 30).then(|| brush_train::memmarks::mark("loading-marks", iter, "next_batch"));
+         let batch = dataloader
+             .next_batch()
+             .instrument(trace_span!("Wait for next data batch"))
+@@ -311,7 +320,10 @@ pub(crate) async fn train_stream(
+         // `step` immediately replaces `splats` with the returned value, so we
+         // can move it here instead of cloning every iteration.
+         let diff_splats = splats.train();
++        if let Some(m) = mb { m.end(); }
++        let ms = (iter < 30).then(|| brush_train::memmarks::mark("loading-marks", iter, "train step"));
+         let (new_diff_splats, stats) = trainer.step(batch, diff_splats).await;
++        if let Some(m) = ms { m.end(); }
+         splats = new_diff_splats.valid();
+ 
+         // Phase-local iteration for refine gating
+@@ -331,6 +343,7 @@ pub(crate) async fn train_stream(
          let refine = if phase_iter > 0
              && phase_iter.is_multiple_of(train_stream_config.train_config.refine_every)
              && phase_progress <= 0.95
@@ -201,36 +264,29 @@ index abf9c0a4..e3e2e29e 100644
          {
              let (new_splats, refine_stats) = trainer.refine(iter, splats).await;
              splats = new_splats;
-@@ -649,3 +650,37 @@ async fn export_checkpoint(
+@@ -649,3 +662,30 @@ async fn export_checkpoint(
          .context(format!("Failed to export ply {export_path:?}"))?;
      Ok(())
  }
 +
 +/// RoomScape change (13 Nov 2026): on iOS a refine only runs if the app has room for it. iOS stops an app that crosses
-+/// its memory limit (about 3.4 GB on an iPhone 15 Pro, everything included); a refine briefly needs extra memory on top
-+/// of training. Below 1.2 GB of headroom (os_proc_available_memory) unused memory is given back first, and if that
-+/// isn't enough this refine is skipped (training goes on with the splats it has) and noted in refine-skips.txt next to
-+/// the export, so the app can say how many were skipped. Always true elsewhere.
++/// its memory limit (about 3.4 GB on an iPhone 15 Pro, everything included), and a refine briefly needs about 2 GB on
++/// top of training (measured on the phone: 818 -> 2,847 MB at step 200, 1,411 -> 3,056 MB at step 600). So before each
++/// refine unused memory is given back, and the refine runs only with at least 2.25 GB available (the 2.0 GB spike plus
++/// 0.25 GB to spare); otherwise it is skipped (training goes on with the splats it has) and noted in refine-skips.txt
++/// next to the export ("step availableMB footprintMB"), which the app reports. Always true elsewhere.
 +#[cfg(target_os = "ios")]
 +fn refine_headroom_ok(device: &crate::ProcessDevice, iter: u32, export_path: &Path) -> bool {
-+    unsafe extern "C" {
-+        fn os_proc_available_memory() -> usize;
-+    }
-+    const NEEDED: usize = 1200 << 20;
-+    // SAFETY: a plain libSystem query without arguments (iOS 13+).
-+    if unsafe { os_proc_available_memory() } >= NEEDED {
-+        return true;
-+    }
++    const NEEDED: u64 = 2304 << 20; // 2.25 GB
 +    device.memory_cleanup();
-+    // SAFETY: as above.
-+    let after = unsafe { os_proc_available_memory() };
-+    if after >= NEEDED {
++    let avail = brush_train::memmarks::available();
++    if avail >= NEEDED {
 +        return true;
 +    }
 +    use std::io::Write;
 +    let _ = std::fs::create_dir_all(export_path);
 +    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(export_path.join("refine-skips.txt")) {
-+        let _ = writeln!(f, "{iter} {}", after >> 20);
++        let _ = writeln!(f, "{iter} {} {}", avail >> 20, brush_train::memmarks::footprint() >> 20);
 +    }
 +    false
 +}
@@ -300,8 +356,163 @@ index 032c8337..2ac65d8f 100644
  mod visualize_tools_impl {
      use std::sync::Arc;
  
+diff --git a/crates/brush-train/src/lib.rs b/crates/brush-train/src/lib.rs
+index b388faae..eddffa19 100644
+--- a/crates/brush-train/src/lib.rs
++++ b/crates/brush-train/src/lib.rs
+@@ -5,6 +5,7 @@ pub mod eval;
+ pub mod lod;
+ pub mod msg;
+ pub mod train;
++pub mod memmarks;
+ 
+ mod adam_scaled;
+ mod multinomial;
+diff --git a/crates/brush-train/src/memmarks.rs b/crates/brush-train/src/memmarks.rs
+new file mode 100644
+index 00000000..25406108
+--- /dev/null
++++ b/crates/brush-train/src/memmarks.rs
+@@ -0,0 +1,137 @@
++//! RoomScape change (13 Nov 2026): memory marks on iOS, to find what takes the phone's memory about 2 GB up at the
++//! start of training and at every refine (measured from the app, but not which part of Brush).
++//!
++//! `mark(file, step, name)` ... `.end()` writes one JSON line {step, name, before_mb, after_mb, peak_mb, avail_mb, ms}
++//! to `<dir>/<file>.jsonl`. A background thread samples the process footprint every 20 ms, so a peak that lasts well
++//! under a second between `mark` and `end` is caught. Lines are kept in memory until `set_dir` says where to write.
++//! Everywhere but iOS every call is a no-op.
++
++#[cfg(target_os = "ios")]
++mod imp {
++    use std::io::Write;
++    use std::path::PathBuf;
++    use std::sync::Mutex;
++    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++    use std::time::Instant;
++
++    static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
++    static PENDING: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
++    static PEAK: AtomicU64 = AtomicU64::new(0);
++    static SAMPLING: AtomicBool = AtomicBool::new(false);
++
++    unsafe extern "C" {
++        static mach_task_self_: u32;
++        fn task_info(target: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
++        fn os_proc_available_memory() -> usize;
++    }
++
++    /// The process footprint in bytes (task_vm_info.phys_footprint: what iOS's memory limit counts).
++    pub fn footprint() -> u64 {
++        let mut buf = [0i32; 128];
++        let mut count: u32 = 128;
++        // SAFETY: TASK_VM_INFO (22) fills at most `count` 32-bit words into `buf`; phys_footprint sits at byte 144
++        // (checked against the SDK's task_vm_info_data_t).
++        unsafe {
++            if task_info(mach_task_self_, 22, buf.as_mut_ptr(), &mut count) != 0 {
++                return 0;
++            }
++            std::ptr::read_unaligned((buf.as_ptr() as *const u8).add(144) as *const u64)
++        }
++    }
++
++    pub fn available() -> u64 {
++        // SAFETY: a plain libSystem query (iOS 13+).
++        unsafe { os_proc_available_memory() as u64 }
++    }
++
++    fn start_sampler() {
++        if SAMPLING.swap(true, Ordering::SeqCst) {
++            return;
++        }
++        std::thread::Builder::new()
++            .name("memmarks".into())
++            .spawn(|| {
++                loop {
++                    PEAK.fetch_max(footprint(), Ordering::Relaxed);
++                    std::thread::sleep(std::time::Duration::from_millis(20));
++                }
++            })
++            .ok();
++    }
++
++    pub fn set_dir(dir: &std::path::Path) {
++        let _ = std::fs::create_dir_all(dir);
++        *DIR.lock().unwrap() = Some(dir.to_path_buf());
++        let pending: Vec<_> = std::mem::take(&mut *PENDING.lock().unwrap());
++        for (file, line) in pending {
++            write(file, &line);
++        }
++    }
++
++    fn write(file: &'static str, line: &str) {
++        let dir = DIR.lock().unwrap().clone();
++        let Some(dir) = dir else {
++            PENDING.lock().unwrap().push((file, line.to_owned()));
++            return;
++        };
++        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{file}.jsonl"))) {
++            let _ = writeln!(f, "{line}");
++        }
++    }
++
++    pub struct Mark {
++        file: &'static str,
++        step: u32,
++        name: &'static str,
++        before: u64,
++        start: Instant,
++    }
++
++    pub fn mark(file: &'static str, step: u32, name: &'static str) -> Mark {
++        start_sampler();
++        let before = footprint();
++        PEAK.store(before, Ordering::Relaxed);
++        Mark { file, step, name, before, start: Instant::now() }
++    }
++
++    impl Mark {
++        pub fn end(self) {
++            let after = footprint();
++            let peak = PEAK.load(Ordering::Relaxed).max(after);
++            let mb = |b: u64| b >> 20;
++            write(
++                self.file,
++                &format!(
++                    "{{\"step\":{},\"name\":\"{}\",\"before_mb\":{},\"after_mb\":{},\"peak_mb\":{},\"avail_mb\":{},\"ms\":{}}}",
++                    self.step,
++                    self.name,
++                    mb(self.before),
++                    mb(after),
++                    mb(peak),
++                    mb(available()),
++                    self.start.elapsed().as_millis()
++                ),
++            );
++        }
++    }
++}
++
++#[cfg(not(target_os = "ios"))]
++mod imp {
++    pub struct Mark;
++    pub fn mark(_file: &'static str, _step: u32, _name: &'static str) -> Mark {
++        Mark
++    }
++    impl Mark {
++        pub fn end(self) {}
++    }
++    pub fn set_dir(_dir: &std::path::Path) {}
++    pub fn footprint() -> u64 {
++        0
++    }
++    pub fn available() -> u64 {
++        u64::MAX
++    }
++}
++
++pub use imp::{Mark, available, footprint, mark, set_dir};
 diff --git a/crates/brush-train/src/train.rs b/crates/brush-train/src/train.rs
-index b46d0807..06dc9366 100644
+index b46d0807..fb76f5a8 100644
 --- a/crates/brush-train/src/train.rs
 +++ b/crates/brush-train/src/train.rs
 @@ -99,7 +99,11 @@ fn inv_sigmoid(x: Tensor<1>) -> Tensor<1> {
@@ -354,7 +565,68 @@ index b46d0807..06dc9366 100644
  }
  
  pub async fn get_splat_bounds(splats: Splats, percentile: f32) -> BoundingBox {
-@@ -638,7 +646,7 @@ impl SplatTrainer {
+@@ -463,6 +471,8 @@ impl SplatTrainer {
+     }
+ 
+     pub async fn refine(&mut self, iter: u32, splats: Splats) -> (Splats, RefineStats) {
++        // RoomScape change (13 Nov 2026): memory marks per part of the refine (iOS only, see memmarks)
++        let mut m = crate::memmarks::mark("refine-marks", iter, "prune checks (bake floor, masks, non-finite count)");
+         let progress = iter as f32 / self.config.total_train_iters.max(1) as f32;
+         // Refine manipulates the canonical (un-floored) params, so bake the
+         // current 3D-filter floor into them first — split/clone/prune then see
+@@ -528,8 +538,12 @@ impl SplatTrainer {
+             .bool_or(bound_mask)
+             .bool_or(non_finite_mask);
+ 
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "prune_points");
+         let (mut splats, refiner, pruned_count) =
+             prune_points(splats, &mut optim, refiner, prune_mask).await;
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "resample dead (weights to CPU)");
+         let mut split_inds = HashSet::new();
+ 
+         // Always replace dead gaussians, so that the pruned budget is reused.
+@@ -548,6 +562,8 @@ impl SplatTrainer {
+             split_inds.extend(resampled_inds);
+         }
+ 
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "oversized split selection");
+         // Force-split splats that are too big on screen (every refine). Rather
+         // than killing them (the old `kill_at_screen_size`), we split them and
+         // shrink the children down to `split_at_screen_size` on screen — see
+@@ -580,6 +596,8 @@ impl SplatTrainer {
+         }
+         let num_split_oversized = (split_inds.len() - pre_oversized) as u32;
+ 
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "growth selection (weights to CPU)");
+         let pre_high_grad = split_inds.len();
+         if iter >= self.config.growth_start_iter && iter < self.config.growth_stop_iter {
+             let above_threshold = refiner.above_threshold(self.config.growth_grad_threshold);
+@@ -622,12 +640,20 @@ impl SplatTrainer {
+         let refine_count = split_inds.len();
+         // Per-splat max on-screen extent, used by `refine_splats` to cap the
+         // split shrink so oversized splats' children land at `split_at_screen_size`.
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "refine_splats (split/clone, optimizer state)");
+         let screen_sizes = refiner.max_screen_size.clone();
+         splats = self.refine_splats(&device, optim, splats, split_inds, screen_sizes, iter);
+ 
+         // Update current bounds based on the splats.
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "get_splat_bounds");
+         self.bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "memory_cleanup");
+         device.memory_cleanup();
++        m.end();
++        m = crate::memmarks::mark("refine-marks", iter, "3D-filter floor (CPU)");
+ 
+         // Recompute the per-splat 3D-filter floor against the new positions/
+         // count and attach it — the floor is part of the splat from here until
+@@ -638,13 +664,14 @@ impl SplatTrainer {
              // No-op when there are no view cameras (e.g. unit tests).
              let means = splats.means();
              if let Some(f) =
@@ -363,6 +635,13 @@ index b46d0807..06dc9366 100644
              {
                  splats = splats.with_min_scale(f);
              }
+         }
+ 
+         let splat_count = splats.num_splats();
++        m.end();
+ 
+         (
+             splats,
 diff --git a/crates/rrfd/Cargo.toml b/crates/rrfd/Cargo.toml
 index b84ff546..ae50927e 100644
 --- a/crates/rrfd/Cargo.toml
