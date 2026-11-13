@@ -190,6 +190,12 @@ struct BrushTrainer: SplatPreview.Trainer {
         }
         if fm.fileExists(atPath: output.path) { try fm.removeItem(at: output) }
         try fm.moveItem(at: last, to: output)
+        // refines Brush skipped for memory (brush-process, iOS): kept next to the preview for SplatPreview's summary
+        if let skips = try? String(contentsOf: outDir.appendingPathComponent("refine-skips.txt"), encoding: .utf8) {
+            let url = folder.appendingPathComponent("refine-skips.txt")
+            let old = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            try? (old + skips).write(to: url, atomically: true, encoding: .utf8)
+        }
         try? fm.removeItem(at: outDir)
     }
 }

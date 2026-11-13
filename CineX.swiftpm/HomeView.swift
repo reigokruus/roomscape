@@ -9,6 +9,7 @@ struct HomeView: View {
     /// gets the scan to continue: with a separate flag, SwiftUI built the scanner from the state before `improving`
     /// was set, and Continue scan started a new scan instead.
     @State private var scanRequest: ScanRequest?
+    @ObservedObject private var photoRealTest = PhotoRealTest.shared
     @State private var justSaved: SavedScan?
     /// The scan being renamed, and the name being typed.
     @State private var renaming: SavedScan?
@@ -187,6 +188,10 @@ struct HomeView: View {
                 if args.contains("-openPlanning") { debugPlanning = true }
                 #endif
             }
+            .onChange(of: photoRealTest.scannerRunFor) { _, name in
+                // the photo-real memory test: the real scanner for a little while (PhotoRealTest)
+                if name != nil { scanRequest = ScanRequest(improving: nil) }
+            }
             .fullScreenCover(item: $scanRequest, onDismiss: {
                 // Open the result only after the scanner has fully closed, so the two transitions don't collide.
                 scans = ScanStore.list()
@@ -207,10 +212,11 @@ struct HomeView: View {
                     onCancel: { scanRequest = nil }
                 )
                 // a photo-real preview pauses while scanning (stops at its last save, carries on after)
-                .onAppear { ProcessingQueue.shared.scanningStarted() }
+                .onAppear { ProcessingQueue.shared.scanningStarted(); PhotoRealTest.shared.scannerOpened() }
                 .onDisappear {
                     ProcessingQueue.shared.scanningEnded()
                     ProcessingQueue.logMemory("scanner closed")
+                    PhotoRealTest.shared.scannerClosed()
                     // and once more a little later, when the scanner's objects should have gone
                     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { ProcessingQueue.logMemory("5 s after the scanner closed") }
                 }

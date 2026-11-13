@@ -263,6 +263,7 @@ struct ResultView: View {
                         Button { confirmingSplat = true } label: { Label("Make photo-real preview", systemImage: "cube.transparent") }
                     }
                     roomLinkItems
+                    PhotoRealTestMenuItems(scan: current)
                     Button { sendingNearby = true } label: { Label("Send to nearby phone", systemImage: "iphone.radiowaves.left.and.right") }
                     Button { exportRmsc(save: true) } label: { Label("Save to Files…", systemImage: "folder") }
                     Button { exportRmsc(save: false) } label: { Label("RoomScape scan (.rmsc)", systemImage: "shippingbox") }

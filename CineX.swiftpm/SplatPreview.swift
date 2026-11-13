@@ -44,6 +44,8 @@ enum SplatPreview {
     }
 
     static func folder(_ scan: SavedScan) -> URL { scan.captureURL.appendingPathComponent("splat") }
+    /// The memory test's own folder (PhotoRealTest): the real preview and its saves are kept.
+    static func folder(_ scan: SavedScan, test: Bool) -> URL { test ? scan.captureURL.appendingPathComponent("splat-test") : folder(scan) }
     static func result(_ scan: SavedScan) -> URL { folder(scan).appendingPathComponent("preview.ply") }
     static func hasResult(_ scan: SavedScan) -> Bool { FileManager.default.fileExists(atPath: result(scan).path) }
 
@@ -70,9 +72,12 @@ enum SplatPreview {
 
     // MARK: The job
 
-    static func run(on scan: SavedScan, progress: @escaping @Sendable (RecordingProcessor.Progress) -> Void) async throws {
+    static func run(on scan: SavedScan, test: Bool = false, progress: @escaping @Sendable (RecordingProcessor.Progress) -> Void) async throws {
         let fm = FileManager.default
-        let dir = folder(scan), dataset = dir.appendingPathComponent("dataset")
+        let dir = folder(scan, test: test), dataset = dir.appendingPathComponent("dataset")
+        // a memory test always starts from step 0 (its own folder; the real preview is kept)
+        if test { SplatPacing.Checkpoint.clear(in: dir); try? fm.removeItem(at: dir.appendingPathComponent("preview.ply")) }
+        let finalResult = test ? dir.appendingPathComponent("preview.ply") : result(scan)
         try fm.createDirectory(at: dataset, withIntermediateDirectories: true)
         let note: @Sendable (String?) -> Void = { n in progress(.init(stage: "", fraction: -1, note: n)) }
         let exported = dataset.appendingPathComponent("export.done")
@@ -134,26 +139,30 @@ enum SplatPreview {
         }
         try Task.checkCancellation()
         progress(.init(stage: "Saving the preview", fraction: 0.99, note: nil))
-        if fm.fileExists(atPath: result(scan).path) { try fm.removeItem(at: result(scan)) }
-        try fm.moveItem(at: partial, to: result(scan))
+        if fm.fileExists(atPath: finalResult.path) { try fm.removeItem(at: finalResult) }
+        try fm.moveItem(at: partial, to: finalResult)
         try? fm.removeItem(at: dataset.appendingPathComponent("images"))   // made again from the recording if needed
         SplatPacing.Checkpoint.clear(in: dir)
         // Measured (rk 12 Nov 16:41: read, not estimated): training vs heat rests vs pauses, summed over this preview's
         // runs (a resume is a new run), into the processing log
         if let text = try? String(contentsOf: dir.appendingPathComponent("train-times.jsonl"), encoding: .utf8) {
             var train = 0.0, rest = 0.0, paused = 0.0, runs = 0
+            // refines Brush skipped for lack of memory (brush-process refine_headroom_ok, iOS): "iter availableMB" lines
+            let skips = ((try? String(contentsOf: dir.appendingPathComponent("refine-skips.txt"), encoding: .utf8)) ?? "")
+                .split(separator: "\n").count
+            try? fm.removeItem(at: dir.appendingPathComponent("refine-skips.txt"))
             for line in text.split(separator: "\n") {
                 guard let d = line.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
                 train += o["train"] as? Double ?? 0; rest += o["rest"] as? Double ?? 0; paused += o["paused"] as? Double ?? 0; runs += 1
             }
-            let summary = "Preview times: training \(Int(train)) s, heat rests \(Int(rest)) s, paused \(Int(paused)) s, \(runs) run(s), \(Int(Date().timeIntervalSince(started))) s this run"
+            let summary = "Preview times: training \(Int(train)) s, heat rests \(Int(rest)) s, paused \(Int(paused)) s, \(runs) run(s), \(Int(Date().timeIntervalSince(started))) s this run; refines skipped for memory: \(skips)"
             log.info("\(summary, privacy: .public)")
             note(summary); note(nil)
             try? fm.removeItem(at: dir.appendingPathComponent("train-times.jsonl"))
         }
         // Share link (switch "Share links (test)"): put the preview online at the scan's link. A failed upload
         // doesn't fail the preview; the room's Share menu can try again.
-        if RoomLink.enabled, RoomLink.Keychain.uploadKey != nil {
+        if !test, RoomLink.enabled, RoomLink.Keychain.uploadKey != nil {
             progress(.init(stage: "Putting the preview online", fraction: 0.995, note: nil))
             do { try await RoomLink.uploadPreview(scan) } catch is CancellationError { throw CancellationError() } catch {
                 log.error("share link upload failed: \(error.localizedDescription, privacy: .public)")

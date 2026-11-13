@@ -10,9 +10,9 @@ struct PhotoRealScreen: View {
     @State private var lookingAround = false
 
     private var scan: SavedScan? { ScanStore.list().first { $0.name == scanName } }
-    private var running: Bool { queue.current?.scan == scanName && queue.current?.job == .splat }
+    private var running: Bool { queue.current?.scan == scanName && queue.current?.job.isPhotoReal == true }
     private var result: ProcessingQueue.Finished? {
-        queue.finished.flatMap { $0.scan == scanName && $0.job == .splat ? $0 : nil }
+        queue.finished.flatMap { $0.scan == scanName && $0.job.isPhotoReal ? $0 : nil }
     }
 
     var body: some View {
@@ -21,7 +21,10 @@ struct PhotoRealScreen: View {
                 Spacer()
                 Image(systemName: "cube.transparent").font(.system(size: 56)).foregroundStyle(.secondary)
                 Text(scan?.displayName ?? "Photo-real room").font(.title2.weight(.semibold))
-                if let result, result.error == nil, let scan, SplatPreview.hasResult(scan) {
+                if let result, result.error == nil, result.job == .splatTest {
+                    Text("Memory test finished. The processing log has the numbers.").multilineTextAlignment(.center)
+                    Button("Back to the rooms") { leave() }.buttonStyle(.borderedProminent)
+                } else if let result, result.error == nil, let scan, SplatPreview.hasResult(scan) {
                     Text("The photo-real room is ready.").font(.headline)
                     Button { lookingAround = true } label: { Label("Look around", systemImage: "eye") }
                         .buttonStyle(.borderedProminent).controlSize(.large)

@@ -637,6 +637,8 @@ struct ScannerScreen: View {
             RoomCaptureRepresentable(controller: controller)
                 .ignoresSafeArea()
                 .onAppear { controller.start() }
+                // the photo-real memory test closes its scanner run the normal way (Cancel: nothing is saved)
+                .onReceive(PhotoRealTest.shared.$closeScanner) { if $0 { close() } }
             if controller.phase == .relocalizing, let view = controller.relocalizeView {
                 RelocalizeCamera(view: view).ignoresSafeArea()
             }

@@ -57,9 +57,9 @@ private enum log {
     /// Stops the photo-real preview for this scan at its last save and takes it out of the queue (Make photo-real
     /// later carries on from that save).
     func stopPhotoReal(_ scan: String) {
-        items.removeAll { $0.scan == scan && $0.job == .splat }
+        items.removeAll { $0.scan == scan && $0.job.isPhotoReal }
         save()
-        if current?.scan == scan, current?.job == .splat { inner?.cancel() }
+        if current?.scan == scan, current?.job.isPhotoReal == true { inner?.cancel() }
         log.info("photo-real preview stopped by the user: \(scan)")
     }
 
@@ -169,7 +169,7 @@ private enum log {
     private var scanning = false
     func scanningStarted() {
         scanning = true
-        if current?.job == .splat {
+        if current?.job.isPhotoReal == true {
             log.info("a new scan starts: the photo-real preview stops at its last save and carries on afterwards")
             inner?.cancel()
         }
@@ -178,7 +178,7 @@ private enum log {
         scanning = false
         start()
     }
-    private func runnable(_ item: Item) -> Bool { !held.contains(item.scan) && !(scanning && item.job == .splat) }
+    private func runnable(_ item: Item) -> Bool { !held.contains(item.scan) && !(scanning && item.job.isPhotoReal) }
     /// The photo-real preview waiting or running for this scan.
     func splatQueued(_ scan: SavedScan) -> Bool { items.contains { $0.scan == scan.name && $0.job == .splat } }
 
@@ -190,7 +190,7 @@ private enum log {
         // The photo-real preview (GPU) can't run in the background, so not as a continued task (rk 14:20: iOS showed
         // "Task failed" when the app was left mid-training): in the app only; it waits and resumes when the app is back.
         let next = items.first(where: runnable)
-        if next?.job != .splat, #available(iOS 26.0, *), UIApplication.shared.applicationState != .background, submitContinued() { return }
+        if next?.job.isPhotoReal != true, #available(iOS 26.0, *), UIApplication.shared.applicationState != .background, submitContinued() { return }
         runInApp()
     }
 
@@ -313,8 +313,8 @@ private enum log {
             // The photo-real preview needs most of the app's memory on the phone: screens holding big 3D scenes let
             // go of them while it runs (ResultView), and load them again after (12 Nov 22:08: a preview right
             // after a scan started with 1.2 GB still held by the room view and died while loading)
-            gpuJob = item.job == .splat
-            if item.job == .splat { photoRealScan = item.scan }
+            gpuJob = item.job.isPhotoReal
+            if item.job.isPhotoReal { photoRealScan = item.scan }
             defer { gpuJob = false }
             do {
                 try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
@@ -455,6 +455,7 @@ struct ProcessingSection: View {
             // (no "Photo-real preview after a scan" switch: it's started per room with "Make photo-real", rk 12 Nov 22:41)
             NavigationLink("Licences (photo-real preview)") { SplatLicencesView() }
             RoomLinkSettings()
+            Toggle("Photo-real memory test (test)", isOn: Binding(get: { PhotoRealTest.enabled }, set: { PhotoRealTest.enabled = $0 }))
             Toggle("Flat tiles (test)", isOn: $flatTiles)
                 .onChange(of: flatTiles) { _, on in FlatTiles.enabled = on }
             Toggle("Screen video (test)", isOn: $screenVideo)
